@@ -17,5 +17,5 @@ F7        30          1           0  BOB
 F8        28          0           0  
 
 Gate:      MIN_LISTING_AGE_DAYS = 0
-Leverage:  4.0x   Stop: -6% (unleveraged 1x per symbol)
+Leverage:  4.0x   Stop: -6.0% (unleveraged 1x per symbol)
 Session:   06:00 – 23:55 UTC  (5-min bars)

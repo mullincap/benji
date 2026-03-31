@@ -13,7 +13,7 @@ from pathlib import Path
 from celery import Celery
 
 from app.core.config import settings
-from app.services.job_store import update_job
+from app.services.job_store import get_job, update_job
 
 celery_app = Celery("pipeline_worker", broker=settings.REDIS_URL, backend=settings.REDIS_URL)
 
@@ -85,20 +85,22 @@ _FINAL_DD_RE     = re.compile(r"FINAL_DD_SERIES\([^)]+\):\s*(\[[\d.,\s\-]+\])")
 # Columns: Filter  Sharpe  CAGR%  MaxDD%  Active  WF-CV  TotRet%  Eq  Wst1D%  Wst1W%  Wst1M%  DSR%  Grd
 _FILTER_ROW_RE = re.compile(
     r"^\s*(?P<label>[A-F]\s+-\s+[^\n]+?)\s+"
-    r"(?P<sharpe>[+-]?[\d.]+)\s+"
-    r"(?P<cagr>[+-]?[\d.]+)%\s+"
-    r"(?P<maxdd>[+-]?[\d.]+)%\s+"
+    r"(?P<sharpe>(?:[+-]?[\d.]+|n/?a|nan|\?))\s+"
+    r"(?P<cagr>(?:[+-]?[\d.]+|n/?a|nan|\?))%?\s+"
+    r"(?P<maxdd>(?:[+-]?[\d.]+|n/?a|nan|\?))%?\s+"
     r"(?P<active>\d+)\s+"
-    r"(?P<wf_cv>[+-]?[\d.]+)\s+"
-    r"(?P<tot_ret>[+-]?[\d.]+)%\s+"
-    r"(?P<eq>[+-]?[\d.]+)×\s+"
-    r"(?P<wst_1d>[+-]?[\d.]+)%\s+"
-    r"(?P<wst_1w>[+-]?[\d.]+)%\s+"
-    r"(?P<wst_1m>[+-]?[\d.]+)%\s+"
-    r"(?P<dsr>[+-]?[\d.]+)%\s+"
-    r"(?P<grade>\d+)",
+    r"(?P<wf_cv>(?:[+-]?[\d.]+|n/?a|nan|\?))\s+"
+    r"(?P<tot_ret>(?:[+-]?[\d.]+|n/?a|nan|\?))%?\s+"
+    r"(?P<eq>(?:[+-]?[\d.]+|n/?a|nan|\?))×?\s+"
+    r"(?P<wst_1d>(?:[+-]?[\d.]+|n/?a|nan|\?))%?\s+"
+    r"(?P<wst_1w>(?:[+-]?[\d.]+|n/?a|nan|\?))%?\s+"
+    r"(?P<wst_1m>(?:[+-]?[\d.]+|n/?a|nan|\?))%?\s+"
+    r"(?P<dsr>(?:[+-]?[\d.]+|n/?a|nan|\?))%?\s+"
+    r"(?P<grade>(?:\d+|n/?a|nan|\?))",
     re.MULTILINE,
 )
+
+_FINAL_FILTER_VALUE_RE = re.compile(r"^FINAL_(?P<key>[A-Z_]+)\((?P<fid>[^)]+)\):\s*(?P<val>.+?)\s*$", re.MULTILINE)
 
 
 def _parse_metrics(audit_output_path: Path) -> dict:
@@ -107,6 +109,7 @@ def _parse_metrics(audit_output_path: Path) -> dict:
 
     text = audit_output_path.read_text(errors="replace")
     metrics: dict = {}
+    hints: list[str] = []
 
     # ── Canonical summary line (most reliable single source) ─────────────────
     # NetRet=+248.9%  Sharpe=2.053  MaxDD=-53.23%  WF-CV=1.205  FA-OOS Sharpe=2.417  Flat=0d  Active=398d
@@ -170,6 +173,40 @@ def _parse_metrics(audit_output_path: Path) -> dict:
         except Exception:
             pass
 
+    def _parse_opt_float(v: str | None) -> float | None:
+        if v is None:
+            return None
+        s = v.strip().lower()
+        if s in {"n/a", "na", "nan", "?", "--", ""}:
+            return None
+        try:
+            return float(s)
+        except (TypeError, ValueError):
+            return None
+
+    def _parse_opt_int(v: str | None) -> int | None:
+        f = _parse_opt_float(v)
+        return int(f) if f is not None else None
+
+    def _fmt_filter_label_from_id(fid: str) -> str:
+        label = fid.replace("_-_", " - ").replace("_", " ")
+        label = re.sub(r"\s+p\s+", " + ", label)
+        if label.endswith("(OR"):
+            label += ")"
+        if label.endswith("(AND"):
+            label += ")"
+        return label.strip()
+
+    def _norm_label(label: str) -> str:
+        return (
+            label.lower()
+            .replace("+", "p")
+            .replace("(", " ")
+            .replace(")", " ")
+            .replace("-", " ")
+            .replace("_", " ")
+        )
+
     # ── Filter comparison table ───────────────────────────────────────────────
     # Row format (actual):
     #   A - No Filter                             2.053    450.2%   -53.23%      398    1.206     248.9%   3.49×   -6.10%  -21.05%  -29.58%   91.8%    54 ◄
@@ -183,25 +220,101 @@ def _parse_metrics(audit_output_path: Path) -> dict:
         seen_labels.add(label)
         filter_rows.append({
             "filter":      label,
-            "sharpe":      float(g["sharpe"]),
-            "cagr":        float(g["cagr"]),
-            "max_dd":      float(g["maxdd"]),
+            "sharpe":      _parse_opt_float(g["sharpe"]),
+            "cagr":        _parse_opt_float(g["cagr"]),
+            "max_dd":      _parse_opt_float(g["maxdd"]),
             "active":      int(g["active"]),
-            "wf_cv":       float(g["wf_cv"]),
-            "tot_ret":     float(g["tot_ret"]),
-            "eq":          float(g["eq"]),
-            "wst_1d":      float(g["wst_1d"]),
-            "wst_1w":      float(g["wst_1w"]),
-            "wst_1m":      float(g["wst_1m"]),
-            "dsr_pct":     float(g["dsr"]),
-            "grade_score": int(g["grade"]),
+            "wf_cv":       _parse_opt_float(g["wf_cv"]),
+            "tot_ret":     _parse_opt_float(g["tot_ret"]),
+            "eq":          _parse_opt_float(g["eq"]),
+            "wst_1d":      _parse_opt_float(g["wst_1d"]),
+            "wst_1w":      _parse_opt_float(g["wst_1w"]),
+            "wst_1m":      _parse_opt_float(g["wst_1m"]),
+            "dsr_pct":     _parse_opt_float(g["dsr"]),
+            "grade_score": _parse_opt_int(g["grade"]),
         })
     if filter_rows:
         metrics["filter_comparison"] = filter_rows
-        # Derive best_filter and CAGR from the highest-scoring row
-        best = max(filter_rows, key=lambda r: r["grade_score"])
+        # Derive best_filter and CAGR from highest grade_score; fallback to Sharpe.
+        best = max(
+            filter_rows,
+            key=lambda r: (
+                r["grade_score"] is not None,
+                r["grade_score"] if r["grade_score"] is not None else float("-inf"),
+                r["sharpe"] if r["sharpe"] is not None else float("-inf"),
+            ),
+        )
         metrics.setdefault("best_filter", best["filter"])
-        metrics.setdefault("cagr", best["cagr"])
+        if best.get("cagr") is not None:
+            metrics.setdefault("cagr", best["cagr"])
+
+    # ── Per-filter FINAL_* metrics (for UI filter selection) ──────────────────
+    # Parse machine-readable FINAL_* lines so frontend can switch charts/cards
+    # to any selected filter, not only the canonical/best row.
+    per_filter: dict[str, dict] = {}
+    for fm in _FINAL_FILTER_VALUE_RE.finditer(text):
+        fkey = fm.group("key")
+        fid = fm.group("fid")
+        val = fm.group("val").strip()
+        if "_-_" not in fid:
+            continue
+        label = _fmt_filter_label_from_id(fid)
+        row = per_filter.setdefault(label, {"filter": label})
+        if fkey in {"EQUITY_SERIES", "DD_SERIES"}:
+            try:
+                parsed = _json.loads(val)
+            except Exception:
+                continue
+            if fkey == "EQUITY_SERIES":
+                row["equity_curve"] = parsed
+            else:
+                row["drawdown_curve"] = parsed
+            continue
+        if fkey == "GRADE":
+            row["grade"] = val
+            continue
+
+        num = _parse_opt_float(val)
+        if fkey == "SHARPE":
+            row["sharpe"] = num
+        elif fkey == "CAGR":
+            row["cagr"] = num
+        elif fkey == "MAX_DD":
+            row["max_dd"] = num
+        elif fkey == "ACTIVE_DAYS":
+            row["active"] = _parse_opt_int(val)
+        elif fkey == "WF_CV":
+            row["wf_cv"] = num
+            row["cv"] = num
+        elif fkey == "TOTAL_RETURN":
+            row["tot_ret"] = num
+        elif fkey == "WORST_DAY":
+            row["wst_1d"] = num
+        elif fkey == "WORST_WEEK":
+            row["wst_1w"] = num
+        elif fkey == "WORST_MONTH":
+            row["wst_1m"] = num
+        elif fkey == "DSR":
+            row["dsr_pct"] = num
+        elif fkey == "GRADE_SCORE":
+            row["grade_score"] = _parse_opt_int(val)
+
+    if per_filter:
+        # Keep list form for easy frontend iteration/lookup.
+        metrics["filters"] = list(per_filter.values())
+        # Canonicalize filter labels in summary rows where we have better names.
+        if metrics.get("filter_comparison"):
+            by_norm = { _norm_label(k): k for k in per_filter.keys() }
+            for row in metrics["filter_comparison"]:
+                raw = str(row.get("filter", "")).strip()
+                canon = by_norm.get(_norm_label(raw))
+                if canon:
+                    row["filter"] = canon
+
+    if "All fetches failed - dispersion filter unavailable" in text:
+        hints.append("Dispersion filters could not run because Binance data fetch failed. If you are behind geo restrictions, turn on VPN and re-run.")
+    if hints:
+        metrics["hints"] = hints
 
     return metrics
 
@@ -249,6 +362,17 @@ def _build_cli_args(params: dict) -> list[str]:
             args.append(flag)
 
     return args
+
+
+class JobCancelled(Exception):
+    pass
+
+
+def _is_cancelled(job_id: str) -> bool:
+    job = get_job(job_id)
+    if not job:
+        return False
+    return str(job.get("status", "")).lower() in {"cancelled", "canceled"}
 
 
 @celery_app.task(bind=True, name="pipeline_worker.run_pipeline")
@@ -304,7 +428,7 @@ def run_pipeline(self, job_id: str, params: dict) -> dict:
         "MIN_MCAP":                   str(params.get("min_mcap", 0.0)),
         "MAX_MCAP":                   str(params.get("max_mcap", 0.0)),
         "MIN_LISTING_AGE":            str(params.get("min_listing_age", 0)),
-        "MAX_PORT":                   str(params.get("max_port", "")),
+        "MAX_PORT":                   "" if params.get("max_port") is None else str(params.get("max_port")),
         "DROP_UNVERIFIED":            _boolenv(params.get("drop_unverified", False)),
         "LEVERAGE":                   str(params.get("leverage", 4.0)),
         "STOP_RAW_PCT":               str(params.get("stop_raw_pct", -6.0)),
@@ -461,6 +585,13 @@ def run_pipeline(self, job_id: str, params: dict) -> dict:
             # Stream output line-by-line to audit_output.txt in real time
             progress = 5
             for line in proc.stdout:  # type: ignore[union-attr]
+                if _is_cancelled(job_id):
+                    proc.terminate()
+                    try:
+                        proc.wait(timeout=5)
+                    except Exception:
+                        proc.kill()
+                    raise JobCancelled("Cancelled by user.")
                 out_fh.write(line)
                 out_fh.flush()
                 # Pulse progress slowly while the pipeline runs (cap at 75)
@@ -476,9 +607,16 @@ def run_pipeline(self, job_id: str, params: dict) -> dict:
                 f"overlap_analysis.py exited with code {proc.returncode}. "
                 f"See audit_output.txt for details."
             )
+    except JobCancelled as exc:
+        update_job(job_id, status="cancelled", stage="done", error=str(exc))
+        return {}
     except Exception as exc:
         update_job(job_id, status="failed", stage="overlap", error=str(exc))
         raise
+
+    if _is_cancelled(job_id):
+        update_job(job_id, status="cancelled", stage="done", error="Cancelled by user.")
+        return {}
 
     update_job(job_id, stage="overlap", progress=90)
 
@@ -489,10 +627,17 @@ def run_pipeline(self, job_id: str, params: dict) -> dict:
 
     metrics = _parse_metrics(audit_output_path)
 
+    if _is_cancelled(job_id):
+        update_job(job_id, status="cancelled", stage="done", error="Cancelled by user.")
+        return {}
+
     results = {
         "metrics":            metrics,
         "audit_output_path":  str(audit_output_path),
+        "starting_capital":   params.get("starting_capital", 100000.0),
     }
 
     update_job(job_id, status="complete", stage="done", progress=100, results=results)
     return results
+    if _is_cancelled(job_id):
+        return {}

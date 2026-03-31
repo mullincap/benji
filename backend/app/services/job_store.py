@@ -1,4 +1,5 @@
 import json
+import shutil
 import time
 from pathlib import Path
 from typing import Any
@@ -58,3 +59,11 @@ def list_jobs() -> list[dict[str, Any]]:
         except (json.JSONDecodeError, OSError):
             continue
     return jobs
+
+
+def delete_job(job_id: str) -> bool:
+    job_dir = _job_dir(job_id)
+    if not job_dir.exists():
+        return False
+    shutil.rmtree(job_dir)
+    return True

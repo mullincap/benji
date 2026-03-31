@@ -7,7 +7,7 @@ const API_BASE = 'http://localhost:8000';
 interface TopbarProps {
   jobId: string | null;
   appState: 'idle' | 'running' | 'results' | 'failed';
-  results: unknown;
+  results: Record<string, unknown> | null;
 }
 
 export default function Topbar({ jobId, appState, results }: TopbarProps) {
@@ -56,7 +56,7 @@ export default function Topbar({ jobId, appState, results }: TopbarProps) {
         </span>
       </div>
 
-      {appState === 'results' && results && (
+      {appState === 'results' && Boolean(results) && (
         <button
           onClick={handleExportReport}
           disabled={exportState === 'generating'}

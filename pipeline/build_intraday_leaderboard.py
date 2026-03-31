@@ -25,14 +25,14 @@ OUTPUT_DIR = Path(
 
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
-TOP_N = 333
+TOP_N = int(os.environ.get("LEADERBOARD_TOP_N", "333"))
 
 # ============================================================
 # OUTPUT SETTINGS
 # ============================================================
 
-SAVE_DAILY_FILES = False     # True = write per-day CSVs
-BUILD_MASTER_FILE = True    # True = build merged master
+SAVE_DAILY_FILES = os.environ.get("SAVE_DAILY_FILES", "0") == "1"     # True = write per-day CSVs
+BUILD_MASTER_FILE = os.environ.get("BUILD_MASTER_FILE", "1") == "1"    # True = build merged master
 MASTER_FILE_CSV = False
 master_frames = []
 

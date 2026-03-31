@@ -8,8 +8,8 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
 from app.core.config import settings
-from app.services.job_store import create_job, get_job, list_jobs, update_job
-from app.workers.pipeline_worker import run_pipeline
+from app.services.job_store import create_job, delete_job, get_job, list_jobs, update_job
+from app.workers.pipeline_worker import _parse_metrics, run_pipeline
 
 router = APIRouter(prefix="/api/jobs", tags=["jobs"])
 
@@ -29,7 +29,7 @@ class JobRequest(BaseModel):
     # ── Deployment window ─────────────────────────────────────────────────────
     deployment_start_hour:      int   = 6
     index_lookback:             int   = 6
-    sort_lookback:              str   = "6"
+    sort_lookback:              int | str = 6
     deployment_runtime_hours:   str   = "daily"
     end_cross_midnight:         bool  = True
 
@@ -219,7 +219,8 @@ class JobResponse(BaseModel):
 def create_job_endpoint(req: JobRequest) -> JobCreateResponse:
     job_id = str(uuid.uuid4())
     create_job(job_id, req.model_dump())
-    run_pipeline.delay(job_id, req.model_dump())
+    task = run_pipeline.delay(job_id, req.model_dump())
+    update_job(job_id, task_id=task.id)
     return JobCreateResponse(job_id=job_id, status="queued")
 
 
@@ -236,6 +237,31 @@ def get_job_endpoint(job_id: str) -> JobResponse:
     return job
 
 
+@router.delete("/{job_id}")
+def delete_job_endpoint(job_id: str) -> dict[str, str]:
+    if not delete_job(job_id):
+        raise HTTPException(status_code=404, detail="Job not found")
+    return {"status": "deleted", "job_id": job_id}
+
+
+@router.post("/{job_id}/cancel")
+def cancel_job_endpoint(job_id: str) -> dict[str, str]:
+    job = get_job(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    status = str(job.get("status", "")).lower()
+    if status in {"complete", "completed", "done", "failed", "error", "cancelled", "canceled"}:
+        return {"status": status, "job_id": job_id}
+
+    task_id = job.get("task_id")
+    if task_id:
+        run_pipeline.AsyncResult(task_id).revoke(terminate=True, signal="SIGTERM")
+
+    update_job(job_id, status="cancelled", stage="done", error="Cancelled by user.")
+    return {"status": "cancelled", "job_id": job_id}
+
+
 @router.get("/{job_id}/results")
 def get_job_results(job_id: str) -> dict[str, Any]:
     job = get_job(job_id)
@@ -243,7 +269,23 @@ def get_job_results(job_id: str) -> dict[str, Any]:
         raise HTTPException(status_code=404, detail="Job not found")
     if job["status"] != "complete":
         raise HTTPException(status_code=409, detail=f"Job status is '{job['status']}', not 'complete'")
-    return job.get("results") or {}
+    results = (job.get("results") or {}) if isinstance(job.get("results"), dict) else {}
+    metrics = results.get("metrics") if isinstance(results.get("metrics"), dict) else {}
+
+    # Backfill richer parsed metrics for older completed jobs that were stored
+    # before per-filter FINAL_* parsing (charts need metrics.filters series).
+    if not metrics.get("filters"):
+        job_dir = Path(settings.JOBS_DIR) / job_id
+        output_path = job_dir / "audit_output.txt"
+        if output_path.exists():
+            parsed_metrics = _parse_metrics(output_path)
+            if parsed_metrics:
+                merged_metrics = {**metrics, **parsed_metrics}
+                merged_results = {**results, "metrics": merged_metrics}
+                update_job(job_id, results=merged_results)
+                return merged_results
+
+    return results
 
 
 @router.get("/{job_id}/output")

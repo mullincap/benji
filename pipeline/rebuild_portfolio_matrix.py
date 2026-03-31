@@ -94,7 +94,7 @@ def _resolve_runtime_hours() -> int:
 #   False           — cap the session at 23:55 UTC on the same calendar day,
 #                     truncating N_BARS to whatever fits. Use this if your data
 #                     source does not carry bars across the UTC day boundary.
-END_CROSS_MIDNIGHT     = False
+END_CROSS_MIDNIGHT     = os.environ.get("END_CROSS_MIDNIGHT", "0") == "1"
 
 # Session — must match existing pivot table exactly
 BAR_MINUTES        = 5       # bar resolution (minutes)
@@ -112,17 +112,18 @@ DEPLOYMENT_END_MINUTE = _SESSION_END_MINUTES % 60
 # Per-symbol: raw unleveraged cum pct with -8.5% stop per symbol
 #   raw[t] = (price[t] / price[0] - 1) * 100   (clamped at -8.5% once hit)
 # Portfolio: equal-weight mean across symbols, THEN multiply by LEVERAGE
-LEVERAGE           = 4.0     # 4x per symbol
-STOP_RAW_PCT       = -6    # per-symbol stop on unleveraged return (%)
+LEVERAGE           = float(os.environ.get("LEVERAGE", "4.0"))     # 4x per symbol
+STOP_RAW_PCT       = float(os.environ.get("STOP_RAW_PCT", "-6"))    # per-symbol stop on unleveraged return (%)
 
 # Eligibility gate
-MIN_LISTING_AGE_DAYS = 0
+MIN_LISTING_AGE_DAYS = int(os.environ.get("MIN_LISTING_AGE", "0"))
 
 # Max symbols per day (applied AFTER eligibility gate). None = no cap.
-MAX_PORT           = None
+_max_port_env = os.environ.get("MAX_PORT", "").strip()
+MAX_PORT = None if _max_port_env in ("", "None", "none", "null", "NULL") else int(_max_port_env)
 
 # Price source: 'binance' (candle closes, matches Sheets) or 'parquet' (fast, local)
-PRICE_SOURCE       = "parquet"
+PRICE_SOURCE       = os.environ.get("PRICE_SOURCE", "parquet")
 
 # Parquet symbol suffix
 SYMBOL_SUFFIX      = "USDT"  # "SONIC" → "SONICUSDT"

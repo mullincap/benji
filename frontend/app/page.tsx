@@ -9,6 +9,7 @@ import ResultsSummary from './components/LeftPanel/ResultsSummary';
 import EmptyState from './components/RightPanel/EmptyState';
 import RunningView from './components/RightPanel/RunningView';
 import ResultsView from './components/RightPanel/ResultsView';
+import AuditHistory from './components/RightSidebar/AuditHistory';
 
 const API_BASE = 'http://localhost:8000';
 
@@ -26,7 +27,7 @@ const DEFAULT_PARAMS: Record<string, unknown> = {
   // Deployment window
   deployment_start_hour: 6,
   index_lookback: 6,
-  sort_lookback: '6',
+  sort_lookback: 6,
   deployment_runtime_hours: 'daily',
   end_cross_midnight: true,
   // Universe + Risk
@@ -184,6 +185,17 @@ const STAGE_LABELS: Record<string, string> = {
   report: 'report generation',
 };
 
+interface AuditHistoryItem {
+  id: string;
+  status: string;
+  stage?: string | null;
+  progress?: number;
+  params?: Record<string, unknown>;
+  error?: string | null;
+  created_at?: number;
+  updated_at?: number;
+}
+
 export default function Home() {
   const [appState, setAppState] = useState<'idle' | 'running' | 'results' | 'failed'>('idle');
   const [jobId, setJobId] = useState<string | null>(null);
@@ -193,6 +205,13 @@ export default function Home() {
   const [logLines, setLogLines] = useState<string[]>([]);
   const [errorInfo, setErrorInfo] = useState<{ message: string; jobId: string | null } | null>(null);
   const [params, setParams] = useState<Record<string, unknown>>(DEFAULT_PARAMS);
+  const [historyCollapsed, setHistoryCollapsed] = useState(false);
+  const [auditHistory, setAuditHistory] = useState<AuditHistoryItem[]>([]);
+  const [historyLoading, setHistoryLoading] = useState(false);
+  const [historyError, setHistoryError] = useState<string | null>(null);
+  const [deletingJobId, setDeletingJobId] = useState<string | null>(null);
+  const [cancellingAudit, setCancellingAudit] = useState(false);
+  const [editingFromResults, setEditingFromResults] = useState(false);
 
   const pollingRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const elapsedRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -205,6 +224,106 @@ export default function Home() {
       if (elapsedRef.current) clearInterval(elapsedRef.current);
     };
   }, []);
+
+  async function loadAuditHistory(background = false) {
+    if (!background) setHistoryLoading(true);
+    try {
+      const res = await fetch(`${API_BASE}/api/jobs`);
+      if (!res.ok) throw new Error(`GET /api/jobs failed: ${res.status}`);
+      const data = (await res.json()) as AuditHistoryItem[];
+      setAuditHistory(data);
+      setHistoryError(null);
+    } catch (err) {
+      setHistoryError(String(err));
+    } finally {
+      if (!background) setHistoryLoading(false);
+    }
+  }
+
+  useEffect(() => {
+    loadAuditHistory(false);
+    const interval = setInterval(() => {
+      loadAuditHistory(true);
+    }, 10000);
+    return () => clearInterval(interval);
+  }, []);
+
+  async function handleDeleteAudit(job: AuditHistoryItem) {
+    const ok = window.confirm(`Delete audit ${job.id.slice(0, 8)}? This cannot be undone.`);
+    if (!ok) return;
+    setDeletingJobId(job.id);
+    try {
+      const res = await fetch(`${API_BASE}/api/jobs/${job.id}`, { method: 'DELETE' });
+      if (!res.ok) throw new Error(`DELETE /api/jobs/${job.id} failed: ${res.status}`);
+      setAuditHistory((prev) => prev.filter((j) => j.id !== job.id));
+      if (jobId === job.id) {
+        handleResetToIdle();
+      }
+    } catch (err) {
+      setHistoryError(String(err));
+    } finally {
+      setDeletingJobId(null);
+    }
+  }
+
+  async function handleCancelAudit() {
+    if (!jobId || cancellingAudit) return;
+    const ok = window.confirm('Cancel the currently running audit?');
+    if (!ok) return;
+    setCancellingAudit(true);
+    try {
+      const res = await fetch(`${API_BASE}/api/jobs/${jobId}/cancel`, { method: 'POST' });
+      if (!res.ok) throw new Error(`POST /api/jobs/${jobId}/cancel failed: ${res.status}`);
+      stopPolling();
+      appendLog(`[${nowHHMMSS()}] audit cancelled by user`);
+      setErrorInfo({ message: 'Cancelled by user.', jobId });
+      setAppState('failed');
+      loadAuditHistory(true);
+    } catch (err) {
+      appendLog(`[${nowHHMMSS()}] cancel error: ${String(err)}`);
+      setErrorInfo({ message: String(err), jobId });
+      setAppState('failed');
+    } finally {
+      setCancellingAudit(false);
+    }
+  }
+
+  async function handleSelectAudit(job: AuditHistoryItem) {
+    stopPolling();
+    setEditingFromResults(false);
+    setJobId(job.id);
+    setJobData(job as unknown as Record<string, unknown>);
+    setErrorInfo(null);
+    setParams((job.params as Record<string, unknown>) ?? DEFAULT_PARAMS);
+
+    const status = String(job.status || '').toLowerCase();
+    if (status === 'complete' || status === 'completed' || status === 'done') {
+      try {
+        const rRes = await fetch(`${API_BASE}/api/jobs/${job.id}/results`);
+        if (!rRes.ok) throw new Error(`GET /api/jobs/${job.id}/results failed: ${rRes.status}`);
+        const rData = await rRes.json();
+        setResults(rData);
+        setAppState('results');
+        if (job.created_at && job.updated_at) {
+          setElapsedSeconds(Math.max(0, Math.round(job.updated_at - job.created_at)));
+        }
+      } catch (err) {
+        setErrorInfo({ message: String(err), jobId: job.id });
+        setAppState('failed');
+      }
+      return;
+    }
+
+    if (status === 'failed' || status === 'error') {
+      setResults(null);
+      setErrorInfo({ message: String(job.error ?? 'Job failed'), jobId: job.id });
+      setAppState('failed');
+      return;
+    }
+
+    setResults(null);
+    setAppState('running');
+  }
 
   function stopPolling() {
     if (pollingRef.current) {
@@ -222,6 +341,7 @@ export default function Home() {
   }
 
   async function handleSubmit(submittedParams: Record<string, unknown>) {
+    setEditingFromResults(false);
     setAppState('running');
     setLogLines([]);
     setElapsedSeconds(0);
@@ -272,10 +392,17 @@ export default function Home() {
               appendLog(`[${nowHHMMSS()}] results loaded`);
             }
             setAppState('results');
+            loadAuditHistory(true);
           } else if (status === 'failed' || status === 'error') {
             stopPolling();
             const errMsg = jobJson.error ? String(jobJson.error) : 'Unknown error';
             appendLog(`[${nowHHMMSS()}] job failed: ${errMsg}`);
+            setErrorInfo({ message: errMsg, jobId: id });
+            setAppState('failed');
+          } else if (status === 'cancelled' || status === 'canceled') {
+            stopPolling();
+            const errMsg = jobJson.error ? String(jobJson.error) : 'Cancelled by user.';
+            appendLog(`[${nowHHMMSS()}] job cancelled: ${errMsg}`);
             setErrorInfo({ message: errMsg, jobId: id });
             setAppState('failed');
           }
@@ -291,7 +418,13 @@ export default function Home() {
     }
   }
 
-  function handleRerun() {
+  function handleEditFromResults() {
+    setEditingFromResults(true);
+    setErrorInfo(null);
+    setAppState('results');
+  }
+
+  function handleResetToIdle() {
     stopPolling();
     setAppState('idle');
     setJobId(null);
@@ -301,6 +434,7 @@ export default function Home() {
     setLogLines([]);
     setElapsedSeconds(0);
     lastStageRef.current = null;
+    setEditingFromResults(false);
   }
 
   return (
@@ -326,7 +460,9 @@ export default function Home() {
             )}
             {appState === 'running' && <RunningParams params={params} />}
             {appState === 'results' && (
-              <ResultsSummary results={results} params={params} onRerun={handleRerun} />
+              editingFromResults
+                ? <ParamForm params={params} onChange={setParams} onSubmit={handleSubmit} />
+                : <ResultsSummary results={results} params={params} onRerun={handleEditFromResults} />
             )}
             {appState === 'failed' && (
               <div style={{ padding: 16 }}>
@@ -340,7 +476,7 @@ export default function Home() {
                   </div>
                 )}
                 <button
-                  onClick={handleRerun}
+                  onClick={handleResetToIdle}
                   style={{ width: '100%', height: 32, background: 'transparent', border: '1px solid var(--line2)', borderRadius: 3, color: 'var(--t1)', fontFamily: 'Space Mono, monospace', fontSize: 10, cursor: 'pointer' }}
                 >
                   EDIT &amp; RETRY
@@ -352,10 +488,48 @@ export default function Home() {
           {/* Right panel */}
           <div style={{ flex: 1, overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
             {appState === 'idle' && <EmptyState />}
-            {appState === 'running' && <RunningView jobId={jobId} jobData={jobData} logLines={logLines} elapsedSeconds={elapsedSeconds} />}
-            {appState === 'results' && <div style={{ flex: 1, overflowY: 'auto' }}><ResultsView results={results} /></div>}
-            {appState === 'failed' && <RunningView jobId={jobId} jobData={jobData} logLines={logLines} elapsedSeconds={elapsedSeconds} />}
+            {appState === 'running' && (
+              <RunningView
+                jobId={jobId}
+                jobData={jobData}
+                logLines={logLines}
+                elapsedSeconds={elapsedSeconds}
+                onCancel={handleCancelAudit}
+                cancelling={cancellingAudit}
+              />
+            )}
+            {appState === 'results' && (
+              <div style={{ flex: 1, overflowY: 'auto' }}>
+                <ResultsView
+                  results={results}
+                  startingCapital={typeof params.starting_capital === 'number' ? params.starting_capital : Number(params.starting_capital ?? 100000)}
+                  params={params}
+                />
+              </div>
+            )}
+            {appState === 'failed' && (
+              <RunningView
+                jobId={jobId}
+                jobData={jobData}
+                logLines={logLines}
+                elapsedSeconds={elapsedSeconds}
+                onCancel={handleCancelAudit}
+                cancelling={cancellingAudit}
+              />
+            )}
           </div>
+
+          <AuditHistory
+            collapsed={historyCollapsed}
+            jobs={auditHistory}
+            selectedJobId={jobId}
+            loading={historyLoading}
+            error={historyError}
+            deletingJobId={deletingJobId}
+            onToggle={() => setHistoryCollapsed((v) => !v)}
+            onSelect={handleSelectAudit}
+            onDelete={handleDeleteAudit}
+          />
         </div>
       </div>
 

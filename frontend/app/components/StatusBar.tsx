@@ -1,7 +1,7 @@
 'use client';
 
 interface StatusBarProps {
-  appState: 'idle' | 'running' | 'results';
+  appState: 'idle' | 'running' | 'results' | 'failed';
   jobData: Record<string, unknown> | null;
   elapsedSeconds: number;
 }
@@ -36,7 +36,9 @@ export default function StatusBar({ appState, jobData, elapsedSeconds }: StatusB
       ? 'IDLE'
       : appState === 'running'
       ? 'RUNNING'
-      : 'COMPLETE';
+      : appState === 'results'
+      ? 'COMPLETE'
+      : 'FAILED';
 
   const stage = jobData ? (jobData.stage as string | null) : null;
 

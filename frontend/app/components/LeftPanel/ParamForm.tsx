@@ -1,5 +1,7 @@
 'use client';
 
+import { useState } from 'react';
+
 import Toggle from '../ui/Toggle';
 import TierSection from '../ui/TierSection';
 import ConditionalParams from '../ui/ConditionalParams';
@@ -149,6 +151,66 @@ function SelInput({
   );
 }
 
+function CollapsibleSection({
+  title,
+  open,
+  onToggle,
+  children,
+}: {
+  title: string;
+  open: boolean;
+  onToggle: () => void;
+  children: React.ReactNode;
+}) {
+  return (
+    <div style={{ marginBottom: 12 }}>
+      <button
+        type="button"
+        onClick={onToggle}
+        style={{
+          width: '100%',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'space-between',
+          padding: '8px 10px',
+          background: 'var(--bg1)',
+          border: '1px solid var(--line)',
+          borderRadius: 3,
+          cursor: 'pointer',
+          userSelect: 'none',
+          textAlign: 'left',
+        }}
+      >
+        <span style={{ ...sectionLabel, marginBottom: 0 }}>{title}</span>
+        <svg
+          width="8"
+          height="8"
+          viewBox="0 0 8 8"
+          fill="none"
+          style={{
+            transform: open ? 'rotate(90deg)' : 'rotate(0deg)',
+            transition: 'transform 0.2s',
+            flexShrink: 0,
+          }}
+        >
+          <path d="M2 1.5L6 4L2 6.5" stroke="var(--t2)" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" />
+        </svg>
+      </button>
+      <div
+        style={{
+          overflow: 'hidden',
+          maxHeight: open ? '2200px' : '0',
+          transition: 'max-height 0.25s ease',
+        }}
+      >
+        <div style={{ padding: open ? '8px 2px 0 2px' : '0 2px' }}>
+          {children}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ─────────────────────────────────────────────
 // Main component
 // ─────────────────────────────────────────────
@@ -164,12 +226,16 @@ export default function ParamForm({ params, onChange, onSubmit }: ParamFormProps
   }
 
   const p = params;
+  const [openSections, setOpenSections] = useState<Record<string, boolean>>({});
+  const isOpen = (key: string) => !!openSections[key];
+  const toggleSection = (key: string) => {
+    setOpenSections((prev) => ({ ...prev, [key]: !prev[key] }));
+  };
 
   return (
     <div style={{ padding: 12 }}>
       {/* ── STRATEGY ── */}
-      <div style={{ marginBottom: 12 }}>
-        <div style={sectionLabel}>STRATEGY</div>
+      <CollapsibleSection title="STRATEGY" open={isOpen('strategy')} onToggle={() => toggleSection('strategy')}>
         <Row label="leaderboard_index">
           <NumInput value={p.leaderboard_index} onChange={(v) => set('leaderboard_index', v)} />
         </Row>
@@ -205,11 +271,10 @@ export default function ParamForm({ params, onChange, onSubmit }: ParamFormProps
         <Row label="sample_interval">
           <NumInput value={p.sample_interval} onChange={(v) => set('sample_interval', v)} />
         </Row>
-      </div>
+      </CollapsibleSection>
 
       {/* ── DEPLOYMENT WINDOW ── */}
-      <div style={{ marginBottom: 12 }}>
-        <div style={sectionLabel}>DEPLOYMENT WINDOW</div>
+      <CollapsibleSection title="DEPLOYMENT WINDOW" open={isOpen('deployment')} onToggle={() => toggleSection('deployment')}>
         <Row label="deployment_start_hour">
           <NumInput value={p.deployment_start_hour} onChange={(v) => set('deployment_start_hour', v)} min={0} max={23} />
         </Row>
@@ -217,16 +282,15 @@ export default function ParamForm({ params, onChange, onSubmit }: ParamFormProps
           <NumInput value={p.index_lookback} onChange={(v) => set('index_lookback', v)} />
         </Row>
         <Row label="sort_lookback">
-          <TextInput value={p.sort_lookback} onChange={(v) => set('sort_lookback', v)} />
+          <NumInput value={p.sort_lookback} onChange={(v) => set('sort_lookback', v)} />
         </Row>
         <Row label="deployment_runtime_hours">
           <TextInput value={p.deployment_runtime_hours} onChange={(v) => set('deployment_runtime_hours', v)} />
         </Row>
-      </div>
+      </CollapsibleSection>
 
       {/* ── UNIVERSE + RISK ── */}
-      <div style={{ marginBottom: 12 }}>
-        <div style={sectionLabel}>UNIVERSE + RISK</div>
+      <CollapsibleSection title="UNIVERSE + RISK" open={isOpen('universe')} onToggle={() => toggleSection('universe')}>
         <Row label="starting_capital">
           <NumInput value={p.starting_capital} onChange={(v) => set('starting_capital', v)} />
         </Row>
@@ -307,16 +371,17 @@ export default function ParamForm({ params, onChange, onSubmit }: ParamFormProps
         <div style={{ fontSize: 8, color: 'var(--t3)', marginTop: 2, marginBottom: 4 }}>
           Round-trip cost per symbol applied to all filter modes
         </div>
-      </div>
+      </CollapsibleSection>
 
       {/* ── EXECUTION CONFIG ── */}
+      <CollapsibleSection title="EXECUTION CONFIG" open={isOpen('execution')} onToggle={() => toggleSection('execution')}>
       <div
         style={{
           background: 'var(--bg0)',
           border: '1px solid var(--line)',
           borderRadius: 3,
           padding: 8,
-          margin: '8px 0',
+          margin: '2px 0',
         }}
       >
         <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 8 }}>
@@ -368,11 +433,12 @@ export default function ParamForm({ params, onChange, onSubmit }: ParamFormProps
           <NumInput value={p.early_fill_x} onChange={(v) => set('early_fill_x', v)} />
         </Row>
       </div>
+      </CollapsibleSection>
 
       {/* ── FILTERS ── */}
-      <div style={{ marginBottom: 12 }}>
+      <CollapsibleSection title="FILTERS" open={isOpen('filters')} onToggle={() => toggleSection('filters')}>
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6 }}>
-          <span style={sectionLabel}>FILTERS</span>
+          <span style={{ ...fieldLabel, opacity: 0.8 }}>Mode</span>
           <div style={{ display: 'flex', gap: 14 }}>
             <span style={{ fontSize: 9, color: 'var(--t3)', width: 26, textAlign: 'center' }}>ENABLE</span>
             <span style={{ fontSize: 9, color: 'var(--t3)', width: 26, textAlign: 'center' }}>RUN</span>
@@ -421,64 +487,76 @@ export default function ParamForm({ params, onChange, onSubmit }: ParamFormProps
             <Toggle checked={!!p.run_filter_calendar} onChange={(v) => set('run_filter_calendar', v)} />
           </Row>
         </div>
-      </div>
+      </CollapsibleSection>
 
       {/* ── ADVANCED TIER ── */}
-      <TierSection title="ADVANCED" color="#378ADD" subtitle="strategy tuning + audit modules">
+      <TierSection title="ADVANCED" color="#378ADD" subtitle="strategy tuning + audit modules" defaultExpanded={false}>
         <div style={{ padding: '8px 12px' }}>
           {/* Strategy Tuning */}
           <div style={subSectionLabel}>STRATEGY TUNING</div>
-          <Row label="dispersion_threshold">
-            <NumInput value={p.dispersion_threshold} onChange={(v) => set('dispersion_threshold', v)} />
-          </Row>
-          <Row label="dispersion_baseline_win">
-            <NumInput value={p.dispersion_baseline_win} onChange={(v) => set('dispersion_baseline_win', v)} />
-          </Row>
-          <Row label="dispersion_n">
-            <NumInput value={p.dispersion_n} onChange={(v) => set('dispersion_n', v)} />
-          </Row>
-          <Row label="dispersion_dynamic_universe">
-            <Toggle checked={!!p.dispersion_dynamic_universe} onChange={(v) => set('dispersion_dynamic_universe', v)} />
-          </Row>
-          <Row label="vol_lookback">
-            <NumInput value={p.vol_lookback} onChange={(v) => set('vol_lookback', v)} />
-          </Row>
-          <Row label="vol_percentile">
-            <NumInput value={p.vol_percentile} onChange={(v) => set('vol_percentile', v)} />
-          </Row>
-          <Row label="vol_baseline_win">
-            <NumInput value={p.vol_baseline_win} onChange={(v) => set('vol_baseline_win', v)} />
-          </Row>
-          <Row label="tail_drop_pct">
-            <NumInput value={p.tail_drop_pct} onChange={(v) => set('tail_drop_pct', v)} />
-          </Row>
-          <Row label="tail_vol_mult">
-            <NumInput value={p.tail_vol_mult} onChange={(v) => set('tail_vol_mult', v)} />
-          </Row>
-          <Row label="ic_signal">
-            <SelInput
-              value={p.ic_signal}
-              onChange={(v) => set('ic_signal', v)}
-              options={[
-                { value: 'mom1d', label: 'mom1d' },
-                { value: 'mom5d', label: 'mom5d' },
-                { value: 'skew20d', label: 'skew20d' },
-                { value: 'vol20d_inv', label: 'vol20d_inv' },
-              ]}
-            />
-          </Row>
-          <Row label="ic_window">
-            <NumInput value={p.ic_window} onChange={(v) => set('ic_window', v)} />
-          </Row>
-          <Row label="ic_threshold">
-            <NumInput value={p.ic_threshold} onChange={(v) => set('ic_threshold', v)} />
-          </Row>
-          <Row label="btc_ma_days">
-            <NumInput value={p.btc_ma_days} onChange={(v) => set('btc_ma_days', v)} />
-          </Row>
-          <Row label="blofin_min_symbols">
-            <NumInput value={p.blofin_min_symbols} onChange={(v) => set('blofin_min_symbols', v)} />
-          </Row>
+          <ConditionalParams show={!!p.enable_dispersion_filter}>
+            <Row label="dispersion_threshold">
+              <NumInput value={p.dispersion_threshold} onChange={(v) => set('dispersion_threshold', v)} />
+            </Row>
+            <Row label="dispersion_baseline_win">
+              <NumInput value={p.dispersion_baseline_win} onChange={(v) => set('dispersion_baseline_win', v)} />
+            </Row>
+            <Row label="dispersion_n">
+              <NumInput value={p.dispersion_n} onChange={(v) => set('dispersion_n', v)} />
+            </Row>
+            <Row label="dispersion_dynamic_universe">
+              <Toggle checked={!!p.dispersion_dynamic_universe} onChange={(v) => set('dispersion_dynamic_universe', v)} />
+            </Row>
+          </ConditionalParams>
+          <ConditionalParams show={!!p.enable_vol_filter}>
+            <Row label="vol_lookback">
+              <NumInput value={p.vol_lookback} onChange={(v) => set('vol_lookback', v)} />
+            </Row>
+            <Row label="vol_percentile">
+              <NumInput value={p.vol_percentile} onChange={(v) => set('vol_percentile', v)} />
+            </Row>
+            <Row label="vol_baseline_win">
+              <NumInput value={p.vol_baseline_win} onChange={(v) => set('vol_baseline_win', v)} />
+            </Row>
+          </ConditionalParams>
+          <ConditionalParams show={!!p.enable_tail_guardrail}>
+            <Row label="tail_drop_pct">
+              <NumInput value={p.tail_drop_pct} onChange={(v) => set('tail_drop_pct', v)} />
+            </Row>
+            <Row label="tail_vol_mult">
+              <NumInput value={p.tail_vol_mult} onChange={(v) => set('tail_vol_mult', v)} />
+            </Row>
+          </ConditionalParams>
+          <ConditionalParams show={!!p.enable_ic_diagnostic || !!p.enable_ic_filter}>
+            <Row label="ic_signal">
+              <SelInput
+                value={p.ic_signal}
+                onChange={(v) => set('ic_signal', v)}
+                options={[
+                  { value: 'mom1d', label: 'mom1d' },
+                  { value: 'mom5d', label: 'mom5d' },
+                  { value: 'skew20d', label: 'skew20d' },
+                  { value: 'vol20d_inv', label: 'vol20d_inv' },
+                ]}
+              />
+            </Row>
+            <Row label="ic_window">
+              <NumInput value={p.ic_window} onChange={(v) => set('ic_window', v)} />
+            </Row>
+            <Row label="ic_threshold">
+              <NumInput value={p.ic_threshold} onChange={(v) => set('ic_threshold', v)} />
+            </Row>
+          </ConditionalParams>
+          <ConditionalParams show={!!p.enable_btc_ma_filter}>
+            <Row label="btc_ma_days">
+              <NumInput value={p.btc_ma_days} onChange={(v) => set('btc_ma_days', v)} />
+            </Row>
+          </ConditionalParams>
+          <ConditionalParams show={!!p.enable_blofin_filter}>
+            <Row label="blofin_min_symbols">
+              <NumInput value={p.blofin_min_symbols} onChange={(v) => set('blofin_min_symbols', v)} />
+            </Row>
+          </ConditionalParams>
           <Row label="leaderboard_top_n">
             <NumInput value={p.leaderboard_top_n} onChange={(v) => set('leaderboard_top_n', v)} />
           </Row>
@@ -564,7 +642,11 @@ export default function ParamForm({ params, onChange, onSubmit }: ParamFormProps
             </Row>
           </ConditionalParams>
           <Row label="pph_sweep_enabled">
-            <Toggle checked={!!p.pph_sweep_enabled} onChange={(v) => set('pph_sweep_enabled', v)} />
+            <Toggle
+              checked={!!p.pph_sweep_enabled}
+              onChange={(v) => set('pph_sweep_enabled', v)}
+              disabled={!p.enable_pph}
+            />
           </Row>
 
           <Row label="enable_ratchet">
@@ -593,7 +675,11 @@ export default function ParamForm({ params, onChange, onSubmit }: ParamFormProps
             </Row>
           </ConditionalParams>
           <Row label="ratchet_sweep_enabled">
-            <Toggle checked={!!p.ratchet_sweep_enabled} onChange={(v) => set('ratchet_sweep_enabled', v)} />
+            <Toggle
+              checked={!!p.ratchet_sweep_enabled}
+              onChange={(v) => set('ratchet_sweep_enabled', v)}
+              disabled={!p.enable_ratchet}
+            />
           </Row>
 
           <Row label="enable_adaptive_ratchet">
@@ -628,7 +714,11 @@ export default function ParamForm({ params, onChange, onSubmit }: ParamFormProps
             </Row>
           </ConditionalParams>
           <Row label="adaptive_ratchet_sweep_enabled">
-            <Toggle checked={!!p.adaptive_ratchet_sweep_enabled} onChange={(v) => set('adaptive_ratchet_sweep_enabled', v)} />
+            <Toggle
+              checked={!!p.adaptive_ratchet_sweep_enabled}
+              onChange={(v) => set('adaptive_ratchet_sweep_enabled', v)}
+              disabled={!p.enable_adaptive_ratchet}
+            />
           </Row>
 
           {/* Parameter Sweeps */}
@@ -699,7 +789,7 @@ export default function ParamForm({ params, onChange, onSubmit }: ParamFormProps
       </TierSection>
 
       {/* ── EXPERT TIER ── */}
-      <TierSection title="EXPERT" color="var(--amber)" subtitle="simulation mechanics ⚠">
+      <TierSection title="EXPERT" color="var(--amber)" subtitle="simulation mechanics ⚠" defaultExpanded={false}>
         <div style={{ padding: '8px 12px' }}>
           {(
             [

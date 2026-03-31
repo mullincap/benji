@@ -9,6 +9,8 @@ interface RunningViewProps {
   jobData: Record<string, unknown> | null;
   logLines: string[];
   elapsedSeconds: number;
+  onCancel: () => void;
+  cancelling?: boolean;
 }
 
 type StageStatus = 'done' | 'active' | 'pending';
@@ -38,10 +40,20 @@ function fmtDuration(secs: number): string {
   return `${m}m ${s.toString().padStart(2, '0')}s`;
 }
 
-export default function RunningView({ jobId, jobData, logLines, elapsedSeconds }: RunningViewProps) {
+export default function RunningView({
+  jobId,
+  jobData,
+  logLines,
+  elapsedSeconds,
+  onCancel,
+  cancelling = false,
+}: RunningViewProps) {
   const currentStage = (jobData?.stage as string | null) ?? null;
   const progress = typeof jobData?.progress === 'number' ? jobData.progress : 0;
   const filterProgress = jobData?.filter_progress as string | undefined;
+  const visibleStages = STAGES
+    .map(({ key, label }) => ({ key, label, status: getStageStatus(key, currentStage, progress) }))
+    .filter(({ status }) => status !== 'pending');
 
   const [verbose, setVerbose] = useState(true);
   const [logCollapsed, setLogCollapsed] = useState(false);
@@ -87,8 +99,7 @@ export default function RunningView({ jobId, jobData, logLines, elapsedSeconds }
           PIPELINE PROGRESS
         </div>
 
-        {STAGES.map(({ key, label }) => {
-          const status = getStageStatus(key, currentStage, progress);
+        {visibleStages.map(({ key, label, status }) => {
           const isActive = status === 'active';
           const isDone = status === 'done';
           return (
@@ -138,6 +149,33 @@ export default function RunningView({ jobId, jobData, logLines, elapsedSeconds }
               <div style={{ fontSize: 11, fontWeight: 700, color: 'var(--amber)', fontFamily: 'Space Mono, monospace' }}>~{fmtDuration(etaSecs)}</div>
             </div>
           )}
+        </div>
+
+        <div style={{ marginTop: 12 }}>
+          <button
+            onClick={onCancel}
+            disabled={!jobId || cancelling}
+            style={{
+              width: '100%',
+              height: 28,
+              border: '1px solid var(--line2)',
+              borderRadius: 3,
+              background: 'var(--bg1)',
+              color: cancelling ? 'var(--t2)' : 'var(--t1)',
+              fontFamily: 'Space Mono, monospace',
+              fontSize: 10,
+              cursor: !jobId || cancelling ? 'not-allowed' : 'pointer',
+              letterSpacing: '0.06em',
+            }}
+            onMouseEnter={(e) => {
+              if (!cancelling && jobId) (e.currentTarget.style.color = 'var(--red)');
+            }}
+            onMouseLeave={(e) => {
+              if (!cancelling && jobId) (e.currentTarget.style.color = 'var(--t1)');
+            }}
+          >
+            {cancelling ? 'CANCELLING...' : 'CANCEL AUDIT'}
+          </button>
         </div>
       </div>
 

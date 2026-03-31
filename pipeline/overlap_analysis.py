@@ -77,7 +77,7 @@ import os as _os
 BASE_DIR = Path(_os.environ.get("BASE_DATA_DIR", "/Users/johnmullin/Desktop/desk/benji3m"))
 
 # Index size for both leaderboards: 100, 300, or 1000
-LEADERBOARD_INDEX = 100
+LEADERBOARD_INDEX = int(_os.environ.get("LEADERBOARD_INDEX", "100"))
 
 PRICE_INPUT = BASE_DIR / f"intraday_pct_leaderboard_price_top{LEADERBOARD_INDEX}_ALL.parquet"
 OI_INPUT    = BASE_DIR / f"intraday_pct_leaderboard_open_interest_top{LEADERBOARD_INDEX}_ALL.parquet"
@@ -91,8 +91,9 @@ OI_INPUT    = BASE_DIR / f"intraday_pct_leaderboard_open_interest_top{LEADERBOAR
 #   Default 6 = 06:00 UTC.  Grid search in audit.py varies this across 0–23.
 #   The electoral (frequency-measurement) window always ends at this hour.
 #   Override via --deployment-start-hour CLI arg.
-DEPLOYMENT_START_HOUR    = 6    # 06:00 UTC — independent variable for grid search
-SORT_LOOKBACK            = 6           # electoral window length: int hours back from
+DEPLOYMENT_START_HOUR    = int(_os.environ.get("DEPLOYMENT_START_HOUR", "6"))    # 06:00 UTC — independent variable for grid search
+_sort_lookback_env       = _os.environ.get("SORT_LOOKBACK", "6")
+SORT_LOOKBACK            = "daily" if _sort_lookback_env == "daily" else int(_sort_lookback_env)  # electoral window length: int hours back from
                                         # deployment_start_hour, or "daily" to always
                                         # scan from 00:05 to deployment_start_hour
 
@@ -137,7 +138,7 @@ def _resolve_sort_lookback() -> int:
     raw = DEPLOYMENT_START_HOUR if SORT_LOOKBACK == "daily" else int(SORT_LOOKBACK)
     return min(raw, DEPLOYMENT_START_HOUR)
 
-INDEX_LOOKBACK            = 6         # hours before deployment_start_hour used as
+INDEX_LOOKBACK            = int(_os.environ.get("INDEX_LOOKBACK", "6"))         # hours before deployment_start_hour used as
                                       # the % change anchor in the leaderboard index.
                                       # 6 = midnight when start_hour=6 (default behaviour).
                                       # anchor = deployment_start_hour - index_lookback
@@ -145,27 +146,28 @@ INDEX_LOOKBACK            = 6         # hours before deployment_start_hour used 
 LEADERBOARD_BUILDER       = "build_intraday_leaderboard.py"  # path to builder script
 LEADERBOARD_PARQUET_PATH  = "/Users/johnmullin/Desktop/desk/import/oi_logger/backfills/1raws/oi_raw/master_oi_training_table.parquet"  # raw data for builder
 LEADERBOARD_PARQUET_PATH  = _os.environ.get("PARQUET_PATH", "/Users/johnmullin/Desktop/desk/import/oi_logger/backfills/1raws/oi_raw/master_data_table.parquet")
-LEADERBOARD_TOP_N         = 333  # TOP_N used by build_intraday_leaderboard.py
+LEADERBOARD_TOP_N         = int(_os.environ.get("LEADERBOARD_TOP_N", "333"))  # TOP_N used by build_intraday_leaderboard.py
                                   # (independent of LEADERBOARD_INDEX which controls
                                   #  how many symbols are considered in the overlap)
 
-DEPLOYMENT_RUNTIME_HOURS  = 18  # deployment period length (hours) — fixed
+_deployment_runtime_env   = _os.environ.get("DEPLOYMENT_RUNTIME_HOURS", "daily")
+DEPLOYMENT_RUNTIME_HOURS  = "daily" if str(_deployment_runtime_env).lower() == "daily" else int(_deployment_runtime_env)
 
 # After computing frequency across 00:00-06:00, keep only the top N most
 # frequent symbols from each leaderboard before taking the intersection.
 # e.g. 30 → intersect top-30 price symbols with top-30 OI symbols → max 30 overlap
-FREQ_TOP_N = 20
+FREQ_TOP_N = int(_os.environ.get("FREQ_CUTOFF", "20"))
 
 # How to sort the overlap symbols for the deploys CSV.
 # "price"         → sort by price leaderboard frequency rank
 # "open_interest" → sort by OI leaderboard frequency rank
 # "combined"      → sort by sum of both frequency counts
-OVERLAP_SORT_BY = "price"
+OVERLAP_SORT_BY = _os.environ.get("SORT_BY", "price")
 
 # Downsample the 00:00-06:00 window to every N minutes before building frequency tables.
 # e.g. 14 → use bars at 00:00, 00:14, 00:28 ... reducing noise from dense 1-min data.
 # Must be a multiple of the underlying bar frequency (1-min bars → any integer >= 1).
-SAMPLE_INTERVAL_MINUTES = 5
+SAMPLE_INTERVAL_MINUTES = int(_os.environ.get("SAMPLE_INTERVAL", "5"))
 
 # ─────────────────────────────────────────────
 # Google Sheets config
@@ -1157,8 +1159,8 @@ def run(min_mcap: float, freq_width: int, marketcap_dir: Path,
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--min-mcap",      type=float, default=0)
-    parser.add_argument("--freq-width",    type=int,   default=20,
+    parser.add_argument("--min-mcap",      type=float, default=float(_os.environ.get("MIN_MCAP", "0")))
+    parser.add_argument("--freq-width",    type=int,   default=int(_os.environ.get("FREQ_WIDTH", "20")),
                         help="Number of rank columns R1-RN to scan for frequency (default: 60)")
     parser.add_argument("--leaderboard-index", type=int, default=LEADERBOARD_INDEX,
                         choices=[100, 300, 333, 1000],
@@ -1184,7 +1186,7 @@ if __name__ == "__main__":
                         help=f"After computing frequency, keep only top-N symbols from each "
                              f"Top-N cutoff after frequency sort, before intersecting (default: {FREQ_TOP_N})")
     parser.add_argument("--marketcap-dir", type=str,   default=str(BASE_DIR / "binetl/data/marketcap"))
-    parser.add_argument("--mode",           type=str, default="snapshot",
+    parser.add_argument("--mode",           type=str, default=_os.environ.get("MODE", "snapshot"),
                         choices=["frequency", "snapshot"],
                         help="frequency: count symbols in R1-RN across 00:00-06:00 | "
                              "snapshot: take the 06:00 bar only (default: frequency)")
@@ -1197,9 +1199,9 @@ if __name__ == "__main__":
     parser.add_argument("--audit-source",   type=str, default=None,
                         choices=["binance", "parquet"],
                         help="Price source for audit rebuild (passed to audit.py)")
-    parser.add_argument("--max-mcap",        type=float, default=0.0,
+    parser.add_argument("--max-mcap",        type=float, default=float(_os.environ.get("MAX_MCAP", "0.0")),
                         help="Maximum market cap in USD (e.g. 500000000 for $500M). Symbols above this are excluded. Default: no ceiling.")
-    parser.add_argument("--drop-unverified", action="store_true", default=False,
+    parser.add_argument("--drop-unverified", action="store_true", default=_os.environ.get("DROP_UNVERIFIED", "0") == "1",
                         help="Drop symbols with no mcap data (fail closed). Default: pass through (fail open).")
     parser.add_argument("--confluence",     type=str, default=None,
                         help="Path to confluence CSV (e.g. CTABLE_30_*.csv) — exports "

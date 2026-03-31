@@ -7,6 +7,8 @@ import FilterTable from '../ui/FilterTable';
 
 interface ResultsViewProps {
   results: Record<string, unknown> | null;
+  startingCapital?: number | null;
+  params?: Record<string, unknown> | null;
 }
 
 function fmtMetric(v: unknown, isInt = false): string {
@@ -15,9 +17,22 @@ function fmtMetric(v: unknown, isInt = false): string {
   return String(v);
 }
 
+function fmtCurrency(v: number): string {
+  return new Intl.NumberFormat(undefined, {
+    style: 'currency',
+    currency: 'USD',
+    maximumFractionDigits: 0,
+  }).format(v);
+}
+
 function metricColor(key: string, value: unknown): string {
   if (typeof value !== 'number') return 'var(--t2)';
   const heuristics: Record<string, (v: number) => string> = {
+    sharpe: (v) => (v > 1 ? 'var(--green)' : v > 0.5 ? 'var(--amber)' : 'var(--red)'),
+    cagr: (v) => (v > 0 ? 'var(--green)' : v > -5 ? 'var(--amber)' : 'var(--red)'),
+    max_dd: (v) => (v > -15 ? 'var(--green)' : v > -30 ? 'var(--amber)' : 'var(--red)'),
+    active: (v) => (v > 90 ? 'var(--green)' : v > 30 ? 'var(--amber)' : 'var(--red)'),
+    tot_ret: (v) => (v > 0 ? 'var(--green)' : v > -10 ? 'var(--amber)' : 'var(--red)'),
     sortino: (v) => (v > 1 ? 'var(--green)' : v > 0.5 ? 'var(--amber)' : 'var(--red)'),
     calmar: (v) => (v > 1 ? 'var(--green)' : v > 0.5 ? 'var(--amber)' : 'var(--red)'),
     calmar_ratio: (v) => (v > 1 ? 'var(--green)' : v > 0.5 ? 'var(--amber)' : 'var(--red)'),
@@ -54,6 +69,14 @@ function parseDateLike(v: XValue | undefined): Date | null {
 
 function fmtDateLabel(d: Date): string {
   return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+}
+
+function normalizeFilterLabel(s: string): string {
+  return s
+    .toLowerCase()
+    .replace(/\+/g, 'p')
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim();
 }
 
 function syntheticDateAt(index: number, total: number): Date {
@@ -98,6 +121,7 @@ function CurveCard({
   gradientId,
   height = 160,
   fillAbove = false,
+  valueFormatter,
 }: {
   title: string;
   data: Point[] | null | undefined;
@@ -105,15 +129,15 @@ function CurveCard({
   gradientId: string;
   height?: number;
   fillAbove?: boolean;
+  valueFormatter?: (v: number) => string;
 }) {
   const W = 480;
   const H = height;
   const svgRef = useRef<SVGSVGElement | null>(null);
   const [hoverIdx, setHoverIdx] = useState<number | null>(null);
-  const points = useMemo(() => (data && data.length > 1 ? buildChartPoints(data, W, H) : []), [data]);
+  const points = useMemo(() => (data && data.length > 1 ? buildChartPoints(data, W, H) : []), [data, H]);
   const polyline = points.length > 1 ? pointsToPolyline(points) : null;
   const hoverPoint = hoverIdx !== null ? points[hoverIdx] : null;
-  const xHasRealDates = useMemo(() => points.some((p) => parseDateLike(p.x) !== null), [points]);
   const tickIndices = useMemo(() => makeTickIndices(points.length), [points.length]);
 
   // Build area path from polyline
@@ -236,7 +260,7 @@ function CurveCard({
             whiteSpace: 'nowrap',
           }}
         >
-          x: {fmtDateLabel(parseDateLike(hoverPoint.x) ?? syntheticDateAt(hoverIdx ?? 0, points.length || 1))}  y: {hoverPoint.y.toFixed(3)}
+          x: {fmtDateLabel(parseDateLike(hoverPoint.x) ?? syntheticDateAt(hoverIdx ?? 0, points.length || 1))}  y: {(valueFormatter ?? ((v) => v.toFixed(3)))(hoverPoint.y)}
         </div>
       )}
       {points.length > 1 && (
@@ -257,16 +281,145 @@ function CurveCard({
           })}
         </div>
       )}
-      {!xHasRealDates && points.length > 1 && (
-        <div style={{ marginTop: 4, color: 'var(--t3)', fontSize: 8 }}>
-          Date axis inferred from series length.
-        </div>
-      )}
     </div>
   );
 }
 
-export default function ResultsView({ results }: ResultsViewProps) {
+type FilterRow = Record<string, unknown> & {
+  filter?: string;
+  not_run?: boolean;
+  sharpe?: number | null;
+  cagr?: number | null;
+  max_dd?: number | null;
+  active?: number | null;
+  wf_cv?: number | null;
+  cv?: number | null;
+  dsr_pct?: number | null;
+  tot_ret?: number | null;
+  grade?: string | null;
+  grade_score?: number | null;
+  equity_curve?: Point[];
+  drawdown_curve?: Point[];
+};
+
+function asNum(v: unknown): number | null {
+  if (typeof v === 'number' && Number.isFinite(v)) return v;
+  if (typeof v === 'string') {
+    const n = Number(v);
+    if (Number.isFinite(n)) return n;
+  }
+  return null;
+}
+
+export default function ResultsView({ results, startingCapital, params }: ResultsViewProps) {
+  const m = (results?.metrics ?? {}) as Record<string, unknown>;
+  const equityCurve = (m.equity_curve ?? results?.equity_curve) as Point[] | null | undefined;
+  const drawdownCurve = (m.drawdown_curve ?? results?.drawdown_curve) as Point[] | null | undefined;
+  const filterComparison = (m.filter_comparison ?? results?.filter_comparison) as FilterRow[] | null | undefined;
+  const perFilterMetrics = (m.filters ?? []) as FilterRow[];
+  const hints = (m.hints ?? results?.hints) as string[] | null | undefined;
+  const filterComparisonWithExpected: FilterRow[] = [...(filterComparison ?? [])];
+  if (params) {
+    const expected: Array<{ key: string; label: string; aliases: string[] }> = [
+      { key: 'run_filter_none', label: 'A - No Filter', aliases: ['A - No Filter'] },
+      { key: 'run_filter_calendar', label: 'A - Calendar Filter', aliases: ['A - Calendar Filter'] },
+      { key: 'run_filter_tail', label: 'A - Tail Guardrail', aliases: ['A - Tail Guardrail'] },
+      { key: 'run_filter_dispersion', label: 'A - Dispersion', aliases: ['A - Dispersion'] },
+      { key: 'run_filter_tail_disp', label: 'A - Tail + Dispersion', aliases: ['A - Tail + Dispersion', 'A - Tail p Dispersion'] },
+      { key: 'run_filter_vol', label: 'A - Volatility', aliases: ['A - Volatility'] },
+      { key: 'run_filter_tail_disp_vol', label: 'A - Tail + Disp + Vol', aliases: ['A - Tail + Disp + Vol', 'A - Tail p Disp p Vol'] },
+      { key: 'run_filter_tail_or_vol', label: 'A - Tail + Vol (OR)', aliases: ['A - Tail + Vol (OR)', 'A - Tail p Vol (OR'] },
+      { key: 'run_filter_tail_and_vol', label: 'A - Tail + Vol (AND)', aliases: ['A - Tail + Vol (AND)', 'A - Tail p Vol (AND'] },
+      { key: 'run_filter_tail_blofin', label: 'A - Tail + Blofin', aliases: ['A - Tail + Blofin', 'A - Tail p Blofin'] },
+    ];
+    const existing = new Set(
+      filterComparisonWithExpected.map((r) => normalizeFilterLabel(String(r.filter ?? '').trim())),
+    );
+    for (const entry of expected) {
+      if (!params[entry.key]) continue;
+      const hasAlias = entry.aliases.some((alias) => existing.has(normalizeFilterLabel(alias)));
+      if (!hasAlias) {
+        filterComparisonWithExpected.push({ filter: entry.label, not_run: true });
+      }
+    }
+  }
+  const dispersionRequested = !!params?.run_filter_dispersion || !!params?.run_filter_tail_disp || !!params?.run_filter_tail_disp_vol;
+  const dispersionMissing =
+    filterComparisonWithExpected.some((r) => r.filter === 'A - Dispersion' && r.not_run)
+    || filterComparisonWithExpected.some((r) => r.filter === 'A - Tail + Dispersion' && r.not_run)
+    || filterComparisonWithExpected.some((r) => r.filter === 'A - Tail + Disp + Vol' && r.not_run);
+  const showDispersionVpnHint = dispersionRequested && dispersionMissing;
+  const runStartingCapital =
+    typeof results?.starting_capital === 'number'
+      ? results.starting_capital
+      : typeof startingCapital === 'number'
+        ? startingCapital
+        : 100000;
+
+  const mergedFilters: FilterRow[] = (() => {
+    const byLabel = new Map<string, FilterRow>();
+    for (const pf of perFilterMetrics) {
+      const key = normalizeFilterLabel(String(pf.filter ?? ''));
+      if (key) byLabel.set(key, pf);
+    }
+    return filterComparisonWithExpected.map((row) => {
+      const key = normalizeFilterLabel(String(row.filter ?? ''));
+      const pf = byLabel.get(key);
+      if (!pf) return row;
+      return { ...row, ...pf, filter: String(pf.filter ?? row.filter ?? '') };
+    });
+  })();
+
+  const [manualSelectedFilter, setManualSelectedFilter] = useState<string | null>(null);
+  const defaultSelectedFilter = (() => {
+    if (mergedFilters.length === 0) return null;
+    const candidates = mergedFilters.filter((r) => !r.not_run);
+    const ranked = [...(candidates.length > 0 ? candidates : mergedFilters)].sort(
+      (a, b) => (asNum(b.sharpe) ?? Number.NEGATIVE_INFINITY) - (asNum(a.sharpe) ?? Number.NEGATIVE_INFINITY),
+    );
+    return String(ranked[0]?.filter ?? mergedFilters[0]?.filter ?? '');
+  })();
+
+  const selectedFilter =
+    manualSelectedFilter
+      && mergedFilters.some((r) => normalizeFilterLabel(String(r.filter ?? '')) === normalizeFilterLabel(manualSelectedFilter))
+      ? manualSelectedFilter
+      : defaultSelectedFilter;
+  const selectedRow =
+    selectedFilter
+      ? mergedFilters.find((r) => normalizeFilterLabel(String(r.filter ?? '')) === normalizeFilterLabel(selectedFilter)) ?? null
+      : null;
+
+  const selectedEquityCurve = ((selectedRow?.equity_curve as Point[] | undefined) ?? equityCurve) as Point[] | null | undefined;
+  const selectedDrawdownCurve = ((selectedRow?.drawdown_curve as Point[] | undefined) ?? drawdownCurve) as Point[] | null | undefined;
+  const equityCurveDollars = selectedEquityCurve?.map((p) => (
+    typeof p === 'number'
+      ? p * runStartingCapital
+      : { ...p, y: p.y * runStartingCapital }
+  ));
+
+  const metricCards = selectedRow
+    ? [
+      { label: 'Sharpe', key: 'sharpe', value: fmtMetric(selectedRow.sharpe), colorValue: selectedRow.sharpe },
+      { label: 'CAGR %', key: 'cagr', value: fmtMetric(selectedRow.cagr), colorValue: selectedRow.cagr },
+      { label: 'Max DD %', key: 'max_dd', value: fmtMetric(selectedRow.max_dd), colorValue: selectedRow.max_dd },
+      { label: 'Active Days', key: 'active', value: fmtMetric(selectedRow.active, true), colorValue: selectedRow.active },
+      { label: 'WF-CV', key: 'cv', value: fmtMetric((selectedRow.wf_cv ?? selectedRow.cv) as unknown), colorValue: (selectedRow.wf_cv ?? selectedRow.cv) },
+      { label: 'DSR %', key: 'dsr_pct', value: fmtMetric(selectedRow.dsr_pct), colorValue: selectedRow.dsr_pct },
+      { label: 'Total Return %', key: 'tot_ret', value: fmtMetric(selectedRow.tot_ret), colorValue: selectedRow.tot_ret },
+      { label: 'Grade', key: 'grade', value: selectedRow.grade_score != null ? String(selectedRow.grade_score) : String(selectedRow.grade ?? 'N/A'), colorValue: selectedRow.grade_score },
+    ]
+    : [
+      { label: 'Sortino', key: 'sortino', value: fmtMetric(m.sortino), colorValue: m.sortino },
+      { label: 'Calmar', key: 'calmar', value: fmtMetric(m.calmar ?? m.calmar_ratio), colorValue: m.calmar ?? m.calmar_ratio },
+      { label: 'Omega', key: 'omega', value: fmtMetric(m.omega), colorValue: m.omega },
+      { label: 'Ulcer Index', key: 'ulcer_index', value: fmtMetric(m.ulcer_index), colorValue: m.ulcer_index },
+      { label: 'FA-OOS Sharpe', key: 'fa_oos_sharpe', value: fmtMetric(m.fa_oos_sharpe), colorValue: m.fa_oos_sharpe },
+      { label: 'DSR %', key: 'dsr_pct', value: fmtMetric(m.dsr_pct, false), colorValue: m.dsr_pct },
+      { label: 'WF-CV', key: 'cv', value: fmtMetric(m.cv), colorValue: m.cv },
+      { label: 'Flat Days', key: 'flat_days', value: fmtMetric(m.flat_days, true), colorValue: m.flat_days },
+    ];
+
   if (!results) {
     return (
       <div style={{ padding: 16, color: 'var(--t3)', fontSize: 10 }}>
@@ -274,23 +427,6 @@ export default function ResultsView({ results }: ResultsViewProps) {
       </div>
     );
   }
-
-  const m = (results.metrics ?? {}) as Record<string, unknown>;
-
-  const metricCards = [
-    { label: 'Sortino', key: 'sortino', value: fmtMetric(m.sortino) },
-    { label: 'Calmar', key: 'calmar', value: fmtMetric(m.calmar ?? m.calmar_ratio) },
-    { label: 'Omega', key: 'omega', value: fmtMetric(m.omega) },
-    { label: 'Ulcer Index', key: 'ulcer_index', value: fmtMetric(m.ulcer_index) },
-    { label: 'FA-OOS Sharpe', key: 'fa_oos_sharpe', value: fmtMetric(m.fa_oos_sharpe) },
-    { label: 'DSR %', key: 'dsr_pct', value: fmtMetric(m.dsr_pct, false) },
-    { label: 'WF-CV', key: 'cv', value: fmtMetric(m.cv) },
-    { label: 'Flat Days', key: 'flat_days', value: fmtMetric(m.flat_days, true) },
-  ];
-
-  const equityCurve = (m.equity_curve ?? results.equity_curve) as Point[] | null | undefined;
-  const drawdownCurve = (m.drawdown_curve ?? results.drawdown_curve) as Point[] | null | undefined;
-  const filterComparison = (m.filter_comparison ?? results.filter_comparison) as Record<string, unknown>[] | null | undefined;
 
   return (
     <div style={{ padding: 16, display: 'flex', flexDirection: 'column', gap: 16 }}>
@@ -302,12 +438,12 @@ export default function ResultsView({ results }: ResultsViewProps) {
           gap: 8,
         }}
       >
-        {metricCards.map(({ label, key, value }) => (
+        {metricCards.map(({ label, key, value, colorValue }) => (
           <MetricCard
             key={key}
             label={label}
             value={value}
-            color={metricColor(key, m[key === 'calmar' ? (m.calmar !== undefined ? 'calmar' : 'calmar_ratio') : key])}
+            color={metricColor(key, colorValue)}
           />
         ))}
       </div>
@@ -315,15 +451,16 @@ export default function ResultsView({ results }: ResultsViewProps) {
       {/* Full-width stacked charts */}
       <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
         <CurveCard
-          title="Equity Curve"
-          data={equityCurve}
+          title="Equity Curve ($)"
+          data={equityCurveDollars}
           color="#00c896"
           gradientId="equity-gradient"
           height={480}
+          valueFormatter={fmtCurrency}
         />
         <CurveCard
           title="Drawdown Curve"
-          data={drawdownCurve}
+          data={selectedDrawdownCurve}
           color="#ff4d4d"
           gradientId="drawdown-gradient"
           fillAbove
@@ -351,8 +488,43 @@ export default function ResultsView({ results }: ResultsViewProps) {
         >
           FILTER COMPARISON
         </div>
-        {/* eslint-disable-next-line @typescript-eslint/no-explicit-any */}
-        <FilterTable rows={filterComparison as any} />
+        {(hints && hints.length > 0) && (
+          <div
+            style={{
+              marginBottom: 10,
+              fontSize: 10,
+              color: 'var(--amber)',
+              background: 'rgba(255, 186, 77, 0.09)',
+              border: '1px solid rgba(255, 186, 77, 0.35)',
+              borderRadius: 3,
+              padding: '7px 9px',
+              lineHeight: 1.45,
+            }}
+          >
+            {hints.map((h, i) => <div key={i}>{h}</div>)}
+          </div>
+        )}
+        {showDispersionVpnHint && (!hints || hints.length === 0) && (
+          <div
+            style={{
+              marginBottom: 10,
+              fontSize: 10,
+              color: 'var(--amber)',
+              background: 'rgba(255, 186, 77, 0.09)',
+              border: '1px solid rgba(255, 186, 77, 0.35)',
+              borderRadius: 3,
+              padding: '7px 9px',
+              lineHeight: 1.45,
+            }}
+          >
+            Dispersion filters were requested but did not run. If Binance API access is geo-blocked, turn on VPN and re-run.
+          </div>
+        )}
+        <FilterTable
+          rows={mergedFilters}
+          selectedFilter={selectedFilter}
+          onSelectFilter={(filter) => setManualSelectedFilter(filter)}
+        />
       </div>
     </div>
   );

@@ -8,11 +8,14 @@ interface FilterRow {
   cv?: number | null;
   dsr_pct?: number | null;
   grade?: string | null;
+  not_run?: boolean;
   [key: string]: unknown;
 }
 
 interface FilterTableProps {
   rows: FilterRow[] | null | undefined;
+  selectedFilter?: string | null;
+  onSelectFilter?: (filter: string) => void;
 }
 
 function fmt(v: number | null | undefined, decimals = 3): string {
@@ -20,7 +23,15 @@ function fmt(v: number | null | undefined, decimals = 3): string {
   return v.toFixed(decimals);
 }
 
-export default function FilterTable({ rows }: FilterTableProps) {
+function normalizeFilterLabel(s: string): string {
+  return s
+    .toLowerCase()
+    .replace(/\+/g, 'p')
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim();
+}
+
+export default function FilterTable({ rows, selectedFilter, onSelectFilter }: FilterTableProps) {
   if (!rows || rows.length === 0) {
     return (
       <div style={{ fontSize: 9, color: 'var(--t3)', padding: '12px 0' }}>
@@ -32,6 +43,7 @@ export default function FilterTable({ rows }: FilterTableProps) {
   const sorted = [...rows].sort((a, b) => (b.sharpe ?? -Infinity) - (a.sharpe ?? -Infinity));
   const maxSharpe = Math.max(...sorted.map((r) => r.sharpe ?? 0));
   const bestIdx = 0;
+  const selectedNorm = normalizeFilterLabel(selectedFilter ?? '');
 
   return (
     <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 9 }}>
@@ -57,22 +69,35 @@ export default function FilterTable({ rows }: FilterTableProps) {
       <tbody>
         {sorted.map((row, i) => {
           const isBest = i === bestIdx;
+          const isMissing = !!row.not_run;
+          const rowFilter = String(row.filter ?? '—');
+          const isSelected = selectedNorm !== '' && selectedNorm === normalizeFilterLabel(rowFilter);
           return (
             <tr
-              key={row.filter ?? i}
+              key={rowFilter || i}
+              onClick={() => {
+                if (!isMissing) onSelectFilter?.(rowFilter);
+              }}
               style={{
                 borderBottom: '1px solid var(--line)',
-                background: isBest ? 'var(--green-dim)' : 'transparent',
+                background: isSelected
+                  ? 'rgba(255, 255, 255, 0.08)'
+                  : isBest
+                    ? 'var(--green-dim)'
+                    : isMissing
+                      ? 'rgba(255,255,255,0.03)'
+                      : 'transparent',
+                cursor: isMissing ? 'default' : 'pointer',
               }}
             >
               <td
                 style={{
                   padding: '6px 4px',
-                  color: isBest ? 'var(--green)' : 'var(--t1)',
+                  color: isSelected ? '#e8e8e8' : isBest ? 'var(--green)' : isMissing ? 'var(--t3)' : 'var(--t1)',
                   whiteSpace: 'nowrap',
                 }}
               >
-                {row.filter ?? '—'}{isBest ? ' ★' : ''}
+                {row.filter ?? '—'}{isBest ? ' ★' : ''}{isMissing ? ' (not run)' : ''}
               </td>
               <td style={{ padding: '6px 4px', textAlign: 'right', color: isBest ? 'var(--green)' : 'var(--t0)' }}>
                 <div>{fmt(row.sharpe)}</div>

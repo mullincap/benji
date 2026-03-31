@@ -32,14 +32,79 @@ function kpiColor(key: string, value: unknown): string {
   return value >= 0 ? 'var(--green)' : 'var(--red)';
 }
 
-const KEY_PARAMS: string[] = [
-  'leaderboard_index',
-  'sort_by',
-  'mode',
-  'leverage',
-  'stop_raw_pct',
-  'starting_capital',
-];
+function isActiveConfigValue(v: unknown): boolean {
+  if (v === null || v === undefined) return false;
+  if (typeof v === 'boolean') return v;
+  if (typeof v === 'string') return v.trim().length > 0;
+  return true;
+}
+
+function getInactiveChildKeys(params: Record<string, unknown>): Set<string> {
+  const hidden = new Set<string>();
+  const hide = (keys: string[]) => keys.forEach((k) => hidden.add(k));
+
+  if (params.capital_mode !== 'fixed') {
+    hide(['fixed_notional_cap']);
+  }
+  if (!params.enable_dispersion_filter) {
+    hide(['dispersion_threshold', 'dispersion_baseline_win', 'dispersion_n', 'dispersion_dynamic_universe', 'run_filter_dispersion']);
+  }
+  if (!params.enable_vol_filter) {
+    hide(['vol_lookback', 'vol_percentile', 'vol_baseline_win', 'run_filter_vol']);
+  }
+  if (!params.enable_tail_guardrail) {
+    hide(['tail_drop_pct', 'tail_vol_mult', 'run_filter_tail']);
+  }
+  if (!params.enable_tail_plus_disp) {
+    hide(['run_filter_tail_disp']);
+  }
+  if (!params.enable_tail_disp_vol) {
+    hide(['run_filter_tail_disp_vol']);
+  }
+  if (!params.enable_tail_or_vol) {
+    hide(['run_filter_tail_or_vol']);
+  }
+  if (!params.enable_tail_and_vol) {
+    hide(['run_filter_tail_and_vol']);
+  }
+  if (!params.enable_blofin_filter) {
+    hide(['blofin_min_symbols', 'run_filter_tail_blofin']);
+  }
+  if (!params.enable_btc_ma_filter) {
+    hide(['btc_ma_days']);
+  }
+  if (!params.enable_ic_diagnostic && !params.enable_ic_filter) {
+    hide(['ic_signal', 'ic_window', 'ic_threshold']);
+  }
+  if (!params.enable_perf_lev_scaling) {
+    hide(['perf_lev_window', 'perf_lev_sortino_target', 'perf_lev_max_boost']);
+  }
+  if (!params.enable_vol_lev_scaling) {
+    hide(['vol_lev_window', 'vol_lev_target_vol', 'vol_lev_max_boost', 'vol_lev_dd_threshold']);
+  }
+  if (!params.enable_contra_lev_scaling) {
+    hide(['contra_lev_window', 'contra_lev_max_boost', 'contra_lev_dd_threshold']);
+  }
+  if (!params.enable_pph) {
+    hide(['pph_frequency', 'pph_threshold', 'pph_harvest_frac', 'pph_sweep_enabled']);
+  }
+  if (!params.enable_ratchet) {
+    hide(['ratchet_frequency', 'ratchet_trigger', 'ratchet_lock_pct', 'ratchet_risk_off_lev_scale', 'ratchet_sweep_enabled']);
+  }
+  if (!params.enable_adaptive_ratchet) {
+    hide([
+      'adaptive_ratchet_frequency',
+      'adaptive_ratchet_vol_window',
+      'adaptive_ratchet_vol_low',
+      'adaptive_ratchet_vol_high',
+      'adaptive_ratchet_risk_off_scale',
+      'adaptive_ratchet_floor_decay',
+      'adaptive_ratchet_sweep_enabled',
+    ]);
+  }
+
+  return hidden;
+}
 
 export default function ResultsSummary({ results, params, onRerun }: ResultsSummaryProps) {
   const metrics = (results?.metrics ?? {}) as Record<string, unknown>;
@@ -51,8 +116,13 @@ export default function ResultsSummary({ results, params, onRerun }: ResultsSumm
   const maxDd = metrics?.max_drawdown as number | undefined;
   const cagr = metrics?.cagr as number | undefined;
 
+  const hiddenKeys = getInactiveChildKeys(params);
+  const activeConfigs = Object.entries(params)
+    .filter(([k, v]) => !hiddenKeys.has(k) && isActiveConfigValue(v))
+    .sort(([a], [b]) => a.localeCompare(b));
+
   return (
-    <div style={{ padding: 12, paddingBottom: 60 }}>
+    <div style={{ padding: 12, paddingBottom: 12 }}>
       {/* Grade Hero Block */}
       <div
         style={{
@@ -125,20 +195,24 @@ export default function ResultsSummary({ results, params, onRerun }: ResultsSumm
             marginBottom: 6,
           }}
         >
-          PARAMETERS
+          ACTIVE CONFIGS
         </div>
-        {KEY_PARAMS.map((k) => (
+        {activeConfigs.length === 0 && (
+          <div style={{ fontSize: 10, color: 'var(--t2)' }}>No active configs.</div>
+        )}
+        {activeConfigs.map(([k, v]) => (
           <div
             key={k}
             style={{
               display: 'flex',
               justifyContent: 'space-between',
               marginBottom: 3,
+              gap: 8,
             }}
           >
             <span style={{ fontSize: 10, color: 'var(--t2)' }}>{k}</span>
             <span style={{ fontSize: 10, color: 'var(--t1)', fontFamily: 'Space Mono, monospace' }}>
-              {params[k] !== undefined ? String(params[k]) : '—'}
+              {String(v)}
             </span>
           </div>
         ))}
@@ -187,26 +261,35 @@ export default function ResultsSummary({ results, params, onRerun }: ResultsSumm
         </div>
       )}
 
-      {/* Re-run button */}
-      <button
-        onClick={onRerun}
+      {/* Re-run button (sticky so it's always reachable) */}
+      <div
         style={{
-          width: '100%',
-          height: 32,
-          border: '1px solid var(--line2)',
-          background: 'transparent',
-          color: 'var(--t1)',
-          fontFamily: 'Space Mono, monospace',
-          fontSize: 10,
-          borderRadius: 3,
-          cursor: 'pointer',
-          letterSpacing: '0.06em',
+          position: 'sticky',
+          bottom: 0,
+          paddingTop: 8,
+          background: 'linear-gradient(to bottom, transparent, var(--bg0) 35%)',
         }}
-        onMouseEnter={(e) => ((e.target as HTMLButtonElement).style.background = 'var(--bg4)')}
-        onMouseLeave={(e) => ((e.target as HTMLButtonElement).style.background = 'transparent')}
       >
-        EDIT &amp; RE-RUN
-      </button>
+        <button
+          onClick={onRerun}
+          style={{
+            width: '100%',
+            height: 32,
+            border: '1px solid var(--line2)',
+            background: 'var(--bg1)',
+            color: 'var(--t1)',
+            fontFamily: 'Space Mono, monospace',
+            fontSize: 10,
+            borderRadius: 3,
+            cursor: 'pointer',
+            letterSpacing: '0.06em',
+          }}
+          onMouseEnter={(e) => ((e.target as HTMLButtonElement).style.background = 'var(--bg4)')}
+          onMouseLeave={(e) => ((e.target as HTMLButtonElement).style.background = 'var(--bg1)')}
+        >
+          EDIT &amp; RE-RUN
+        </button>
+      </div>
     </div>
   );
 }

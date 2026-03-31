@@ -213,11 +213,11 @@ def _resolve_runtime_hours() -> int:
         if SORT_LOOKBACK == "daily" else int(SORT_LOOKBACK)
     return 24 - effective_lookback
 
-BAR_MINUTES    = 5
+BAR_MINUTES    = int(os.environ.get("BAR_MINUTES", "5"))
 N_ROWS         = int(_resolve_runtime_hours() * 60 // BAR_MINUTES)  # derived from runtime
 START_ROW      = 2
 START_COL      = 2
-PIVOT_LEVERAGE = 4.0
+PIVOT_LEVERAGE = float(os.environ.get("PIVOT_LEVERAGE", "4.0"))
 
 # ── Transaction cost & funding rate adjustments ───────────────────────────────
 # Applied inside simulate() to each active (non-flat) day.
@@ -234,8 +234,8 @@ PIVOT_LEVERAGE = 4.0
 #   Use 0.02% as the base per-symbol daily funding drag.
 #   The actual rate is fetched live from Binance for the V3 filter; here we use
 #   a conservative flat estimate. Set to 0.0 to disable.
-TAKER_FEE_PCT         = 0.0008   # 0.04% per side × 2 = 0.08% round-trip per symbol
-FUNDING_RATE_DAILY_PCT = 0.0002   # ~0.02% per symbol per day (2 windows at ~0.01% each)
+TAKER_FEE_PCT         = float(os.environ.get("TAKER_FEE_PCT", "0.0008"))   # 0.04% per side × 2 = 0.08% round-trip per symbol
+FUNDING_RATE_DAILY_PCT = float(os.environ.get("FUNDING_RATE_DAILY_PCT", "0.0002"))   # ~0.02% per symbol per day (2 windows at ~0.01% each)
 
 # ██████████████████████████████████████████████████████████████████████
 # ██                                                                  ██
@@ -250,40 +250,45 @@ FUNDING_RATE_DAILY_PCT = 0.0002   # ~0.02% per symbol per day (2 windows at ~0.0
 # ┌─────────────────────────────────────────────────────────────────────┐
 # │  GENERAL RUN BEHAVIOUR                                              │
 # └─────────────────────────────────────────────────────────────────────┘
-QUICK_MODE       = False   # skip all heavy audits, charts, sweeps — simulate only
-SAVE_CHARTS      = True    # save all chart PNGs to the run output directory
+def _env_bool(name: str, default: bool) -> bool:
+    return os.environ.get(name, "1" if default else "0") == "1"
+
+
+QUICK_MODE       = _env_bool("QUICK", False)   # skip all heavy audits, charts, sweeps — simulate only
+SAVE_CHARTS      = _env_bool("SAVE_CHARTS", True)    # save all chart PNGs to the run output directory
 PRINT_FEES_PANEL = True    # print per-day fee breakdown table to terminal
-TRIAL_PURCHASES  = False   # legacy testing flag
+TRIAL_PURCHASES  = _env_bool("TRIAL_PURCHASES", False)   # legacy testing flag
 
 # ┌─────────────────────────────────────────────────────────────────────┐
 # │  FILTER MODES — what gets BUILT                                     │
 # │  (building a filter does not add it to the comparison run;          │
 # │   use the RUN_FILTER_* switches below for that)                     │
 # └─────────────────────────────────────────────────────────────────────┘
-ENABLE_TAIL_GUARDRAIL    = True    # tail guardrail (BTC crash + vol spike)
-ENABLE_DISPERSION_FILTER = True   # cross-sectional dispersion gate
-ENABLE_TAIL_PLUS_DISP    = True   # Tail OR Dispersion combo
-ENABLE_VOL_FILTER        = True   # realised volatility compression gate
-ENABLE_TAIL_OR_VOL       = False   # Tail OR Vol: sit flat when either fires
-ENABLE_TAIL_AND_VOL      = False   # Tail AND Vol: sit flat only when both fire simultaneously
-ENABLE_TAIL_DISP_VOL     = False   # Tail + Disp + Vol triple combo
-ENABLE_IC_DIAGNOSTIC     = False   # IC decay diagnostics per fold (always prints)
-ENABLE_IC_FILTER         = False   # IC-gated filter mode
-ENABLE_BTC_MA_FILTER     = False   # BTC moving-average trend filter
-ENABLE_BLOFIN_FILTER     = False    # Tail + Blofin exchange availability filter
+ENABLE_TAIL_GUARDRAIL    = _env_bool("ENABLE_TAIL_GUARDRAIL", True)    # tail guardrail (BTC crash + vol spike)
+ENABLE_DISPERSION_FILTER = _env_bool("ENABLE_DISPERSION_FILTER", True)   # cross-sectional dispersion gate
+ENABLE_TAIL_PLUS_DISP    = _env_bool("ENABLE_TAIL_PLUS_DISP", True)   # Tail OR Dispersion combo
+ENABLE_VOL_FILTER        = _env_bool("ENABLE_VOL_FILTER", True)   # realised volatility compression gate
+ENABLE_TAIL_OR_VOL       = _env_bool("ENABLE_TAIL_OR_VOL", False)   # Tail OR Vol: sit flat when either fires
+ENABLE_TAIL_AND_VOL      = _env_bool("ENABLE_TAIL_AND_VOL", False)   # Tail AND Vol: sit flat only when both fire simultaneously
+ENABLE_TAIL_DISP_VOL     = _env_bool("ENABLE_TAIL_DISP_VOL", False)   # Tail + Disp + Vol triple combo
+ENABLE_IC_DIAGNOSTIC     = _env_bool("ENABLE_IC_DIAGNOSTIC", False)   # IC decay diagnostics per fold (always prints)
+ENABLE_IC_FILTER         = _env_bool("ENABLE_IC_FILTER", False)   # IC-gated filter mode
+ENABLE_BTC_MA_FILTER     = _env_bool("ENABLE_BTC_MA_FILTER", False)   # BTC moving-average trend filter
+ENABLE_BLOFIN_FILTER     = _env_bool("ENABLE_BLOFIN_FILTER", False)    # Tail + Blofin exchange availability filter
 
 # ┌─────────────────────────────────────────────────────────────────────┐
 # │  FILTER MODES — what gets added to the COMPARISON RUN              │
 # └─────────────────────────────────────────────────────────────────────┘
-RUN_FILTER_NONE          = True    # 3 - baseline: no regime filter applied
-RUN_FILTER_CALENDAR      = False   #     calendar windows (manually defined bad periods)
-RUN_FILTER_TAIL          = False    # 2 - tail guardrail
-RUN_FILTER_DISPERSION    = False   #      dispersion gate (requires ENABLE_DISPERSION_FILTER)
-RUN_FILTER_TAIL_DISP     = False    # 1 -  Tail + Dispersion (requires ENABLE_TAIL_PLUS_DISP)
-RUN_FILTER_TAIL_OR_VOL   = False   #      Tail OR Vol  (requires ENABLE_TAIL_OR_VOL)
-RUN_FILTER_TAIL_AND_VOL  = False   #      Tail AND Vol (requires ENABLE_TAIL_AND_VOL)
-RUN_FILTER_TAIL_DISP_VOL = False   #      Tail + Disp + Vol (requires ENABLE_TAIL_DISP_VOL)
-RUN_FILTER_TAIL_BLOFIN   = False   #      Tail + Blofin (requires ENABLE_BLOFIN_FILTER)
+RUN_FILTER_NONE          = _env_bool("RUN_FILTER_NONE", True)    # 3 - baseline: no regime filter applied
+RUN_FILTER_CALENDAR      = _env_bool("RUN_FILTER_CALENDAR", False)   #     calendar windows (manually defined bad periods)
+RUN_FILTER_TAIL          = _env_bool("RUN_FILTER_TAIL", False)    # 2 - tail guardrail
+RUN_FILTER_DISPERSION    = _env_bool("RUN_FILTER_DISPERSION", False)   #      dispersion gate (requires ENABLE_DISPERSION_FILTER)
+RUN_FILTER_TAIL_DISP     = _env_bool("RUN_FILTER_TAIL_DISP", False)    # 1 -  Tail + Dispersion (requires ENABLE_TAIL_PLUS_DISP)
+RUN_FILTER_VOL           = _env_bool("RUN_FILTER_VOL", False)   #      standalone vol gate (requires ENABLE_VOL_FILTER)
+RUN_FILTER_TAIL_OR_VOL   = _env_bool("RUN_FILTER_TAIL_OR_VOL", False)   #      Tail OR Vol  (requires ENABLE_TAIL_OR_VOL)
+RUN_FILTER_TAIL_AND_VOL  = _env_bool("RUN_FILTER_TAIL_AND_VOL", False)   #      Tail AND Vol (requires ENABLE_TAIL_AND_VOL)
+RUN_FILTER_TAIL_DISP_VOL = _env_bool("RUN_FILTER_TAIL_DISP_VOL", False)   #      Tail + Disp + Vol (requires ENABLE_TAIL_DISP_VOL)
+RUN_FILTER_TAIL_BLOFIN   = _env_bool("RUN_FILTER_TAIL_BLOFIN", False)   #      Tail + Blofin (requires ENABLE_BLOFIN_FILTER)
 
 # ┌─────────────────────────────────────────────────────────────────────┐
 # │  LEVERAGE SCALING MODELS                                            │
@@ -370,7 +375,7 @@ DIAGNOSTIC_PATH_ALL_DATES = False  # True = export a DiagPath tab for every acti
 # AUDIT SETTINGS
 # ══════════════════════════════════════════════════════════════════════
 
-STARTING_CAPITAL = 100_000
+STARTING_CAPITAL = float(os.environ.get("STARTING_CAPITAL", "100000"))
 
 # ── Capital allocation mode ───────────────────────────────────────────
 # "compounding" : position size = current equity × leverage  (default)
@@ -378,7 +383,7 @@ STARTING_CAPITAL = 100_000
 # "fixed"       : position size fixed at STARTING_CAPITAL × leverage every day.
 #                 Behaviour when account dips below STARTING_CAPITAL is
 #                 controlled by FIXED_NOTIONAL_CAP (see below).
-CAPITAL_MODE = "fixed"   # "compounding" | "fixed"
+CAPITAL_MODE = os.environ.get("CAPITAL_MODE", "fixed")   # "compounding" | "fixed"
 
 # ── Fixed-notional cap (only used when CAPITAL_MODE = "fixed") ───────────
 # "external" : always trade STARTING_CAPITAL notional regardless of balance.
@@ -387,7 +392,7 @@ CAPITAL_MODE = "fixed"   # "compounding" | "fixed"
 # "internal"   : trade min(STARTING_CAPITAL, current_equity) — position scales
 #              down if account drops below STARTING_CAPITAL, preventing deficit.
 #              More conservative; represents a self-funded account.
-FIXED_NOTIONAL_CAP = "internal"   # "external" | "internal"
+FIXED_NOTIONAL_CAP = os.environ.get("FIXED_NOTIONAL_CAP", "internal")   # "external" | "internal"
 
 TRADING_DAYS     = 365
 N_TRIALS         = int(os.environ.get("N_TRIALS", "3"))
@@ -417,7 +422,7 @@ DISPERSION_BASELINE_WIN  = int(os.environ.get("DISPERSION_BASELINE_WIN", "33")) 
 # cap each day using daily mcap history fetched from CoinGecko, lagged
 # by 1 day to prevent lookahead.  See fetch_mcap_history() and
 # build_dynamic_symbol_mask() for implementation details.
-DISPERSION_DYNAMIC_UNIVERSE = True   # True  = top-N by market cap per day (lagged)
+DISPERSION_DYNAMIC_UNIVERSE = _env_bool("DISPERSION_DYNAMIC_UNIVERSE", True)   # True  = top-N by market cap per day (lagged)
                                       # False = use DISPERSION_SYMBOLS list (default)
 DISPERSION_N                = int(os.environ.get("DISPERSION_N", "40"))      # top-N symbols to select per day (dynamic mode)
                                       # must be <= len(COINGECKO_TO_BINANCE)
@@ -465,9 +470,9 @@ VOL_BASELINE_WIN         = int(os.environ.get("VOL_BASELINE_WIN", "90"))     # w
 # IC_SIGNAL   : signal to use: 'mom1d' | 'mom5d' | 'skew20d' | 'vol20d_inv'
 # IC_WINDOW   : rolling window (days) to compute mean IC
 # IC_THRESHOLD: sit out when rolling mean IC < this value
-IC_SIGNAL             = "mom1d"
-IC_WINDOW             = 30
-IC_THRESHOLD          = 0.02
+IC_SIGNAL             = os.environ.get("IC_SIGNAL", "mom1d")
+IC_WINDOW             = int(os.environ.get("IC_WINDOW", "30"))
+IC_THRESHOLD          = float(os.environ.get("IC_THRESHOLD", "0.02"))
 
 # ── BTC Trend (Moving Average) Filter ────────────────────────────────
 # Sits out when BTC closed BELOW its N-day SMA on the previous day.
@@ -489,7 +494,7 @@ BTC_MA_DAYS           = int(os.environ.get("BTC_MA_DAYS", "20"))    # SMA window
 # BLOFIN_PORTFOLIO_SYMBOLS: set of symbols your strategy trades. Required
 #   when no deploys CSV is provided — without it the gate cannot evaluate
 #   symbol availability and will silently add zero filter days.
-BLOFIN_MIN_SYMBOLS       = 1     # sit flat if fewer than N portfolio symbols are on Blofin
+BLOFIN_MIN_SYMBOLS       = int(os.environ.get("BLOFIN_MIN_SYMBOLS", "1"))     # sit flat if fewer than N portfolio symbols are on Blofin
 BLOFIN_CSV_PATH          = ""    # path to blofin_instruments.csv (run fetch_blofin_snapshot.py)
                                   # leave empty to attempt live API fetch
 BLOFIN_PORTFOLIO_SYMBOLS = set() # e.g. {"BTC","ETH","SOL","XRP","DOGE","ADA","AVAX","LINK","DOT","MATIC"}
@@ -500,10 +505,10 @@ BLOFIN_PORTFOLIO_SYMBOLS = set() # e.g. {"BTC","ETH","SOL","XRP","DOGE","ADA","A
 # PERF_LEV_SORTINO_TARGET Sortino at which boost reaches zero
 # PERF_LEV_DR_FLOOR       avg daily return ceiling — above this, suppress boost
 # PERF_LEV_MAX_BOOST      max multiplier when Sortino near zero (1.5 = +50%)
-PERF_LEV_WINDOW           = 10      # rolling window (days)
-PERF_LEV_SORTINO_TARGET   = 3.0     # max boost when rolling Sortino >= this
+PERF_LEV_WINDOW           = int(os.environ.get("PERF_LEV_WINDOW", "10"))      # rolling window (days)
+PERF_LEV_SORTINO_TARGET   = float(os.environ.get("PERF_LEV_SORTINO_TARGET", "3.0"))     # max boost when rolling Sortino >= this
 PERF_LEV_DR_FLOOR         = 0.0     # boost suppressed when avg daily ret < this
-PERF_LEV_MAX_BOOST        = 1.5     # max leverage multiplier (1.5 = up to 1.5x static)
+PERF_LEV_MAX_BOOST        = float(os.environ.get("PERF_LEV_MAX_BOOST", "1.5"))     # max leverage multiplier (1.5 = up to 1.5x static)
 
 # ── Volatility-Targeted Leverage ─────────────────────────────────────
 # VOL_LEV_TARGET_VOL    vol level at which boost starts
@@ -512,15 +517,15 @@ PERF_LEV_MAX_BOOST        = 1.5     # max leverage multiplier (1.5 = up to 1.5x 
 # VOL_LEV_DD_THRESHOLD  drawdown level that suppresses all boost
 # VOL_LEV_DD_SCALE      multiplier during DD guard (1.0 = no boost)
 # VOL_LEV_MAX_BOOST     ceiling on the boost scalar
-VOL_LEV_WINDOW            = 30      # rolling window (days)
-VOL_LEV_TARGET_VOL        = 0.02    # target daily vol (2% — boost when vol < this)
+VOL_LEV_WINDOW            = int(os.environ.get("VOL_LEV_WINDOW", "30"))      # rolling window (days)
+VOL_LEV_TARGET_VOL        = float(os.environ.get("VOL_LEV_TARGET_VOL", "0.02"))    # target daily vol (2% — boost when vol < this)
 VOL_LEV_SHARPE_REF        = 3.0     # Sharpe at which Sharpe scalar = 1.0
 
-VOL_LEV_MAX_BOOST         = 2.0     # max boost multiplier on static leverage
+VOL_LEV_MAX_BOOST         = float(os.environ.get("VOL_LEV_MAX_BOOST", "2.0"))     # max boost multiplier on static leverage
 
 
 
-VOL_LEV_DD_THRESHOLD      = -0.06   # running DD below this → suppress boost
+VOL_LEV_DD_THRESHOLD      = float(os.environ.get("VOL_LEV_DD_THRESHOLD", "-0.06"))   # running DD below this → suppress boost
 VOL_LEV_DD_SCALE          = 1.0     # during DD guard: 1.0 = flat, <1.0 = de-lever
 
 # ── Vol-Lev DD Grid Search ─────────────────────────────────────────────────
@@ -538,17 +543,17 @@ GRID_SEARCH_VOL_LEV_DD    = False
 # CONTRA_LEV_MAX_BOOST    max leverage multiplier at rank=0
 # CONTRA_LEV_DD_THRESHOLD running DD below this suppresses all boost
 CONTRA_LEV_SIGNALS         = ["Sharpe", "AvgDailyRet%"]  # signals to combine
-CONTRA_LEV_WINDOW          = 30      # trailing window for percentile rank (days)
-CONTRA_LEV_MAX_BOOST       = 2.0     # max boost at rank=0 (fully recovered/cheap)
-CONTRA_LEV_DD_THRESHOLD    = -0.15   # suppress boost when drawdown below this
+CONTRA_LEV_WINDOW          = int(os.environ.get("CONTRA_LEV_WINDOW", "30"))      # trailing window for percentile rank (days)
+CONTRA_LEV_MAX_BOOST       = float(os.environ.get("CONTRA_LEV_MAX_BOOST", "2.0"))     # max boost at rank=0 (fully recovered/cheap)
+CONTRA_LEV_DD_THRESHOLD    = float(os.environ.get("CONTRA_LEV_DD_THRESHOLD", "-0.15"))   # suppress boost when drawdown below this
 
 # ── Periodic Profit Harvest (PPH) ────────────────────────────────────
 # PPH_FREQUENCY     "daily" | "weekly" | "monthly"
 # PPH_THRESHOLD     harvest when profit >= watermark × this fraction
 # PPH_HARVEST_FRAC  fraction of excess profit to harvest
-PPH_FREQUENCY           = "weekly"      # "daily" | "weekly" | "monthly"
-PPH_THRESHOLD           = 0.20          # harvest when profit >= watermark × this
-PPH_HARVEST_FRAC        = 0.50          # fraction of excess profit to harvest
+PPH_FREQUENCY           = os.environ.get("PPH_FREQUENCY", "weekly")      # "daily" | "weekly" | "monthly"
+PPH_THRESHOLD           = float(os.environ.get("PPH_THRESHOLD", "0.20"))          # harvest when profit >= watermark × this
+PPH_HARVEST_FRAC        = float(os.environ.get("PPH_HARVEST_FRAC", "0.50"))          # fraction of excess profit to harvest
 
 PPH_SWEEP_FREQUENCIES   = ["daily", "weekly", "monthly"]
 PPH_SWEEP_THRESHOLDS    = [0.10, 0.20, 0.30, 0.40]
@@ -559,10 +564,10 @@ PPH_SWEEP_FRACTIONS     = [0.25, 0.50, 0.75, 1.00]
 # RATCHET_TRIGGER          min equity growth before floor ratchets up
 # RATCHET_LOCK_PCT         floor set this far below new high
 # RATCHET_RISK_OFF_LEV_SCALE  leverage when in risk-off (0.0 = flat)
-RATCHET_FREQUENCY           = "weekly"      # "daily" | "weekly" | "monthly"
-RATCHET_TRIGGER             = 0.20          # ratchet when growth >= this fraction
-RATCHET_LOCK_PCT            = 0.15          # floor = new_high * (1 - lock_pct)
-RATCHET_RISK_OFF_LEV_SCALE  = 0.0          # 0.0 = sit flat, 0.5 = half leverage
+RATCHET_FREQUENCY           = os.environ.get("RATCHET_FREQUENCY", "weekly")      # "daily" | "weekly" | "monthly"
+RATCHET_TRIGGER             = float(os.environ.get("RATCHET_TRIGGER", "0.20"))          # ratchet when growth >= this fraction
+RATCHET_LOCK_PCT            = float(os.environ.get("RATCHET_LOCK_PCT", "0.15"))          # floor = new_high * (1 - lock_pct)
+RATCHET_RISK_OFF_LEV_SCALE  = float(os.environ.get("RATCHET_RISK_OFF_LEV_SCALE", "0.0"))          # 0.0 = sit flat, 0.5 = half leverage
 
 RATCHET_SWEEP_FREQUENCIES   = ["daily", "weekly", "monthly"]
 RATCHET_SWEEP_TRIGGERS      = [0.10, 0.20, 0.30]
@@ -575,12 +580,12 @@ RATCHET_SWEEP_LOCK_PCTS     = [0.10, 0.15, 0.20]
 # ADAPTIVE_RATCHET_VOL_HIGH       daily vol above this → "high" regime
 # ADAPTIVE_RATCHET_RISK_OFF_SCALE leverage when below floor (0.0 = flat)
 # ADAPTIVE_RATCHET_FLOOR_DECAY    floor multiplier per flat/risk-off day
-ADAPTIVE_RATCHET_FREQUENCY         = "weekly"
-ADAPTIVE_RATCHET_VOL_WINDOW        = 20           # rolling window for vol regime (days)
-ADAPTIVE_RATCHET_VOL_LOW           = 0.03         # daily vol < 3% → low regime
-ADAPTIVE_RATCHET_VOL_HIGH          = 0.07         # daily vol > 7% → high regime
-ADAPTIVE_RATCHET_RISK_OFF_SCALE    = 0.0          # 0.0 = flat, 0.5 = half leverage
-ADAPTIVE_RATCHET_FLOOR_DECAY       = 0.995        # floor multiplier per flat day
+ADAPTIVE_RATCHET_FREQUENCY         = os.environ.get("ADAPTIVE_RATCHET_FREQUENCY", "weekly")
+ADAPTIVE_RATCHET_VOL_WINDOW        = int(os.environ.get("ADAPTIVE_RATCHET_VOL_WINDOW", "20"))           # rolling window for vol regime (days)
+ADAPTIVE_RATCHET_VOL_LOW           = float(os.environ.get("ADAPTIVE_RATCHET_VOL_LOW", "0.03"))         # daily vol < 3% → low regime
+ADAPTIVE_RATCHET_VOL_HIGH          = float(os.environ.get("ADAPTIVE_RATCHET_VOL_HIGH", "0.07"))         # daily vol > 7% → high regime
+ADAPTIVE_RATCHET_RISK_OFF_SCALE    = float(os.environ.get("ADAPTIVE_RATCHET_RISK_OFF_SCALE", "0.0"))          # 0.0 = flat, 0.5 = half leverage
+ADAPTIVE_RATCHET_FLOOR_DECAY       = float(os.environ.get("ADAPTIVE_RATCHET_FLOOR_DECAY", "0.995"))        # floor multiplier per flat day
 ADAPTIVE_RATCHET_TABLE             = {
     "low":    {"trigger": 0.10, "lock_pct": 0.10},  # quiet → protect quickly
     "normal": {"trigger": 0.20, "lock_pct": 0.15},  # balanced
@@ -859,17 +864,17 @@ CANDIDATE_CONFIGS = [
     (
         "A",
         {
-            "EARLY_KILL_X":    5,
-            "EARLY_KILL_Y":    -999,
-            "EARLY_INSTILL_Y": -999,
-            "L_BASE":          0,
-            "L_HIGH":          1.0,
+            "EARLY_KILL_X":    int(os.environ.get("EARLY_KILL_X", "5")),
+            "EARLY_KILL_Y":    float(os.environ.get("EARLY_KILL_Y", "-999")),
+            "EARLY_INSTILL_Y": float(os.environ.get("EARLY_INSTILL_Y", "-999")),
+            "L_BASE":          float(os.environ.get("L_BASE", "0")),
+            "L_HIGH":          float(os.environ.get("L_HIGH", "1.0")),
 
-            "PORT_TSL":        0.99,
-            "PORT_SL":         -0.99,
+            "PORT_TSL":        float(os.environ.get("PORT_TSL", "0.99")),
+            "PORT_SL":         float(os.environ.get("PORT_SL", "-0.99")),
 
-            "EARLY_FILL_Y":    0.99,
-            "EARLY_FILL_X":    5,
+            "EARLY_FILL_Y":    float(os.environ.get("EARLY_FILL_Y", "0.99")),
+            "EARLY_FILL_X":    int(os.environ.get("EARLY_FILL_X", "5")),
         },
     ),
 ]
@@ -16640,6 +16645,7 @@ def main():
         ("Tail",             RUN_FILTER_TAIL),
         ("Dispersion",       RUN_FILTER_DISPERSION),
         ("Tail+Disp",        RUN_FILTER_TAIL_DISP),
+        ("Vol",              RUN_FILTER_VOL),
         ("Tail+Vol (OR)",     RUN_FILTER_TAIL_OR_VOL),
         ("Tail+Vol (AND)",    RUN_FILTER_TAIL_AND_VOL),
         ("Tail+Disp+Vol",    RUN_FILTER_TAIL_DISP_VOL),
@@ -16841,6 +16847,7 @@ def main():
 
     # ── Cross-sectional dispersion filter ─────────────────────────────
     disp_filter = None
+    combo_filter = None
     if ENABLE_DISPERSION_FILTER:
         _mode_str = (f"dynamic top-{DISPERSION_N}" if DISPERSION_DYNAMIC_UNIVERSE
                      else f"static {len(DISPERSION_SYMBOLS)} symbols")
@@ -16884,6 +16891,8 @@ def main():
                 percentile   = VOL_PERCENTILE,
                 baseline_win = VOL_BASELINE_WIN,
             )
+            if RUN_FILTER_VOL:
+                FILTER_MODES.append(("Volatility", "vol", vol_filter))
 
             # Triple combo: tail always enforced; normal days sit out only if
             # BOTH dispersion weak AND vol compressed (prevents over-filtering)
