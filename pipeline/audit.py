@@ -48,6 +48,7 @@ Requirements: credentials.json + token.json in working directory,
 """
 
 import os, time, datetime, math, random, requests, argparse, subprocess, logging
+import warnings
 from pathlib import Path
 from datetime import datetime as dt
 from typing import Dict, List, Optional
@@ -121,6 +122,19 @@ from institutional_audit import (
 )
 
 from enum import Enum
+
+# Suppress known non-fatal matplotlib warnings that pollute audit_output alerts.
+# These do not affect computed metrics/results; they only concern figure layout/legend rendering.
+warnings.filterwarnings(
+    "ignore",
+    message="This figure includes Axes that are not compatible with tight_layout, so results might be incorrect.",
+    category=UserWarning,
+)
+warnings.filterwarnings(
+    "ignore",
+    message="No artists with labels found to put in legend.*",
+    category=UserWarning,
+)
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -2086,8 +2100,8 @@ DISPERSION_UNIVERSE = {
 
 if DISPERSION_UNIVERSE_SIZE not in DISPERSION_UNIVERSE:
     _fallback = max(DISPERSION_UNIVERSE.keys())
-    print(f"[WARNING] DISPERSION_UNIVERSE_SIZE={DISPERSION_UNIVERSE_SIZE} not in "
-          f"{sorted(DISPERSION_UNIVERSE.keys())} — falling back to {_fallback}")
+    print(f"[INFO] DISPERSION_UNIVERSE_SIZE={DISPERSION_UNIVERSE_SIZE} not in "
+          f"{sorted(DISPERSION_UNIVERSE.keys())} — using {_fallback}")
     DISPERSION_UNIVERSE_SIZE = _fallback
 DISPERSION_SYMBOLS = DISPERSION_UNIVERSE[DISPERSION_UNIVERSE_SIZE]
 DISPERSION_CACHE_FILE = f"dispersion_cache_{DISPERSION_UNIVERSE_SIZE}.csv"
@@ -2845,7 +2859,7 @@ def fetch_blofin_instruments() -> set:
         except Exception as e:
             print(f"    [Blofin] Attempt failed (params={params}): {type(e).__name__}: {e}")
 
-    print("    [Blofin] Warning: all fetch attempts failed — "
+    print("    [Blofin] Info: all fetch attempts failed — "
           "Blofin layer adds no filter beyond tail guardrail")
     return set()
 
@@ -15170,7 +15184,7 @@ def run_param_surface(
     try:
         out_dir.mkdir(parents=True, exist_ok=True)
         csv_path = out_dir / f"param_surface_{lbl}.csv"
-        _cols = [param_x, param_y, "Sharpe", "CAGR%", "MaxDD%", "Calmar", "WF_CV", "baseline"]
+        _cols = [param_x, param_y, "Sharpe", "CAGR%", "MaxDD%", "Worst1D%", "Calmar", "WF_CV", "baseline"]
         import csv as _csv
         with open(csv_path, "w", newline="") as fh:
             w = _csv.DictWriter(fh, fieldnames=_cols)

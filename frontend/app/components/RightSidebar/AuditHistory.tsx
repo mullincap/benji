@@ -12,6 +12,14 @@ interface AuditHistoryItem {
   results?: Record<string, unknown> | null;
 }
 
+type FilterMetricRow = {
+  filter?: string;
+  sharpe?: number | null;
+  grade_score?: number | null;
+  not_run?: boolean;
+  [key: string]: unknown;
+};
+
 interface AuditHistoryProps {
   collapsed: boolean;
   jobs: AuditHistoryItem[];
@@ -48,6 +56,56 @@ function statusColor(status: string): string {
   if (s === 'failed') return 'var(--red)';
   if (s === 'running') return 'var(--amber)';
   return 'var(--t2)';
+}
+
+function normalizeFilterLabel(s: string): string {
+  return s
+    .toLowerCase()
+    .replace(/\+/g, 'p')
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim();
+}
+
+function asNum(v: unknown): number | null {
+  if (typeof v === 'number' && Number.isFinite(v)) return v;
+  if (typeof v === 'string') {
+    const n = Number(v);
+    if (Number.isFinite(n)) return n;
+  }
+  return null;
+}
+
+function pickBestSharpe(results: Record<string, unknown> | null | undefined): number | null {
+  const metrics = (results?.metrics ?? {}) as Record<string, unknown>;
+  const rows = [
+    ...(((metrics.filters as FilterMetricRow[] | undefined) ?? [])),
+    ...(((metrics.filter_comparison as FilterMetricRow[] | undefined) ?? [])),
+  ].filter((r) => r && r.filter && !r.not_run);
+  if (rows.length > 0) {
+    const bestFilter = String(metrics.best_filter ?? '').trim();
+    if (bestFilter) {
+      const target = normalizeFilterLabel(bestFilter);
+      const exact = rows.find((r) => normalizeFilterLabel(String(r.filter ?? '')) === target);
+      if (exact && typeof exact.sharpe === 'number') return exact.sharpe;
+    }
+    const ranked = [...rows].sort((a, b) => {
+      const ag = asNum(a.grade_score);
+      const bg = asNum(b.grade_score);
+      if (ag !== null || bg !== null) {
+        if (ag === null) return 1;
+        if (bg === null) return -1;
+        if (bg !== ag) return bg - ag;
+      }
+      const as = asNum(a.sharpe) ?? Number.NEGATIVE_INFINITY;
+      const bs = asNum(b.sharpe) ?? Number.NEGATIVE_INFINITY;
+      return bs - as;
+    });
+    const top = ranked[0];
+    if (top && typeof top.sharpe === 'number') return top.sharpe;
+  }
+
+  const legacy = asNum(metrics.sharpe);
+  return legacy;
 }
 
 export default function AuditHistory({
@@ -133,8 +191,8 @@ export default function AuditHistory({
               const selected = selectedJobId === job.id;
               const mode = String(job.params?.mode ?? '—');
               const sortBy = String(job.params?.sort_by ?? '—');
-              const sharpeRaw = (job.results as Record<string, unknown> | null | undefined)?.metrics as Record<string, unknown> | undefined;
-              const sharpeVal = typeof sharpeRaw?.sharpe === 'number' ? sharpeRaw.sharpe.toFixed(3) : '—';
+              const bestSharpe = pickBestSharpe(job.results as Record<string, unknown> | null | undefined);
+              const sharpeVal = bestSharpe !== null ? bestSharpe.toFixed(3) : '—';
               const deleting = deletingJobId === job.id;
               return (
                 <div

@@ -7,6 +7,7 @@ import FilterTable from '../ui/FilterTable';
 
 interface ResultsViewProps {
   results: Record<string, unknown> | null;
+  jobId?: string | null;
   startingCapital?: number | null;
   params?: Record<string, unknown> | null;
 }
@@ -25,14 +26,23 @@ function fmtCurrency(v: number): string {
   }).format(v);
 }
 
+function fmtPercent2(v: unknown): string {
+  if (v === null || v === undefined) return 'N/A';
+  if (typeof v === 'number') return `${v.toFixed(2)}%`;
+  const n = Number(v);
+  if (Number.isFinite(n)) return `${n.toFixed(2)}%`;
+  return String(v);
+}
+
 function metricColor(key: string, value: unknown): string {
   if (typeof value !== 'number') return 'var(--t2)';
   const heuristics: Record<string, (v: number) => string> = {
     sharpe: (v) => (v > 1 ? 'var(--green)' : v > 0.5 ? 'var(--amber)' : 'var(--red)'),
     cagr: (v) => (v > 0 ? 'var(--green)' : v > -5 ? 'var(--amber)' : 'var(--red)'),
-    max_dd: (v) => (v > -15 ? 'var(--green)' : v > -30 ? 'var(--amber)' : 'var(--red)'),
+    max_dd: (v) => (v > -20 ? 'var(--green)' : v > -30 ? 'var(--amber)' : 'var(--red)'),
     active: (v) => (v > 90 ? 'var(--green)' : v > 30 ? 'var(--amber)' : 'var(--red)'),
     tot_ret: (v) => (v > 0 ? 'var(--green)' : v > -10 ? 'var(--amber)' : 'var(--red)'),
+    grade: (v) => (v >= 80 ? 'var(--green)' : v >= 65 ? 'var(--amber)' : 'var(--red)'),
     sortino: (v) => (v > 1 ? 'var(--green)' : v > 0.5 ? 'var(--amber)' : 'var(--red)'),
     calmar: (v) => (v > 1 ? 'var(--green)' : v > 0.5 ? 'var(--amber)' : 'var(--red)'),
     calmar_ratio: (v) => (v > 1 ? 'var(--green)' : v > 0.5 ? 'var(--amber)' : 'var(--red)'),
@@ -79,6 +89,93 @@ function normalizeFilterLabel(s: string): string {
     .trim();
 }
 
+function extractAlerts(text: string): string[] {
+  return text
+    .split('\n')
+    .filter((line) => /warning|error|failed|unavailable|exception/i.test(line))
+    .filter((line) => line.trim().length > 0)
+    .slice(-24);
+}
+
+function normalizeLoose(s: string): string {
+  return s.toLowerCase().replace(/[^a-z0-9]+/g, '');
+}
+
+function parseHeadingLine(line: string): string | null {
+  if (/^FEES PANEL\b/i.test(line)) {
+    return 'FEES PANEL';
+  }
+  if (!line.startsWith('┌─')) return null;
+  return line.replace(/^┌─\s*/, '').replace(/\s*─+$/, '').trim();
+}
+
+type ParsedSection = { title: string; body: string };
+
+function extractSelectedFilterAdvancedSections(text: string, selectedFilter: string | null): ParsedSection[] {
+  if (!text || !selectedFilter) return [];
+  const lines = text.split('\n');
+  const headings: Array<{ idx: number; title: string }> = [];
+  for (let i = 0; i < lines.length; i += 1) {
+    const title = parseHeadingLine(lines[i].trim());
+    if (title) headings.push({ idx: i, title });
+  }
+  if (headings.length === 0) return [];
+
+  const filterVariants = [
+    selectedFilter,
+    selectedFilter.replace(/\+/g, 'p'),
+    selectedFilter.replace(/\+/g, ''),
+    selectedFilter.replace(/\bp\b/gi, ''),
+    selectedFilter.replace(/\s+/g, '_'),
+  ].map(normalizeLoose);
+
+  const stressCandidates = headings.filter((h) => h.title.includes('STRESS TEST SUMMARY'));
+  const matchingStress = stressCandidates.find((h) => filterVariants.some((fv) => fv.length > 0 && normalizeLoose(h.title).includes(fv)));
+  const stressRef = matchingStress ?? stressCandidates[stressCandidates.length - 1];
+  if (!stressRef) return [];
+
+  const blockStart = [...headings]
+    .reverse()
+    .find((h) => h.idx < stressRef.idx && (h.title.includes('FEES PANEL') || h.title.includes('DAILY SERIES AUDIT')))?.idx ?? 0;
+  const nextFeesIdx = headings.find((h) => h.idx > stressRef.idx && h.title.includes('FEES PANEL'))?.idx;
+  const nextDailyAuditIdx = headings.find((h) => h.idx > stressRef.idx && h.title.includes('DAILY SERIES AUDIT'))?.idx;
+  const runSummaryIdx = lines.findIndex((l, i) => i > blockStart && l.includes('RUN SUMMARY'));
+  const endCandidates = [nextFeesIdx, nextDailyAuditIdx, runSummaryIdx >= 0 ? runSummaryIdx : undefined]
+    .filter((v): v is number => typeof v === 'number' && v > blockStart)
+    .sort((a, b) => a - b);
+  const blockEnd = endCandidates[0] ?? lines.length;
+
+  const blockHeadings = headings.filter((h) => h.idx >= blockStart && h.idx < blockEnd);
+  const sections: ParsedSection[] = [];
+  for (let i = 0; i < blockHeadings.length; i += 1) {
+    const cur = blockHeadings[i];
+    const next = blockHeadings[i + 1];
+    const start = cur.idx + 1;
+    const end = next ? next.idx : blockEnd;
+    let sectionLines = lines.slice(start, end);
+    if (cur.title.includes('BOTTOM LINE')) {
+      const cutoff = sectionLines.findIndex((line) => {
+        const t = line.trim();
+        return (
+          t.startsWith('════════')
+          || t.startsWith('[equity overwrite]')
+          || t.startsWith('SIGNAL PREDICTIVENESS')
+          || t.startsWith('RUN INPUTS SUMMARY')
+          || t.startsWith('OUTPUT FILES')
+          || /^\d{4}-\d{2}-\d{2}/.test(t)
+        );
+      });
+      if (cutoff >= 0) {
+        sectionLines = sectionLines.slice(0, cutoff);
+      }
+    }
+    const body = sectionLines.join('\n').trim();
+    if (!body) continue;
+    sections.push({ title: cur.title, body });
+  }
+  return sections;
+}
+
 function syntheticDateAt(index: number, total: number): Date {
   const d = new Date();
   d.setHours(0, 0, 0, 0);
@@ -122,6 +219,7 @@ function CurveCard({
   height = 160,
   fillAbove = false,
   valueFormatter,
+  showTitle = true,
 }: {
   title: string;
   data: Point[] | null | undefined;
@@ -130,6 +228,7 @@ function CurveCard({
   height?: number;
   fillAbove?: boolean;
   valueFormatter?: (v: number) => string;
+  showTitle?: boolean;
 }) {
   const W = 480;
   const H = height;
@@ -167,18 +266,20 @@ function CurveCard({
         position: 'relative',
       }}
     >
-      <div
-        style={{
-          fontSize: 9,
-          textTransform: 'uppercase',
-          letterSpacing: '0.12em',
-          color: 'var(--t3)',
-          fontWeight: 700,
-          marginBottom: 8,
-        }}
-      >
-        {title}
-      </div>
+      {showTitle && (
+        <div
+          style={{
+            fontSize: 9,
+            textTransform: 'uppercase',
+            letterSpacing: '0.12em',
+            color: 'var(--t3)',
+            fontWeight: 700,
+            marginBottom: 8,
+          }}
+        >
+          {title}
+        </div>
+      )}
       {polyline ? (
         <svg
           ref={svgRef}
@@ -301,6 +402,7 @@ type FilterRow = Record<string, unknown> & {
   equity_curve?: Point[];
   drawdown_curve?: Point[];
 };
+type ReportTab = 'summary' | 'stress_tests' | 'raw_output' | 'tear_sheet' | 'full_report';
 
 function asNum(v: unknown): number | null {
   if (typeof v === 'number' && Number.isFinite(v)) return v;
@@ -311,7 +413,7 @@ function asNum(v: unknown): number | null {
   return null;
 }
 
-export default function ResultsView({ results, startingCapital, params }: ResultsViewProps) {
+export default function ResultsView({ results, jobId, startingCapital, params }: ResultsViewProps) {
   const m = (results?.metrics ?? {}) as Record<string, unknown>;
   const equityCurve = (m.equity_curve ?? results?.equity_curve) as Point[] | null | undefined;
   const drawdownCurve = (m.drawdown_curve ?? results?.drawdown_curve) as Point[] | null | undefined;
@@ -371,6 +473,11 @@ export default function ResultsView({ results, startingCapital, params }: Result
   })();
 
   const [manualSelectedFilter, setManualSelectedFilter] = useState<string | null>(null);
+  const [activeTab, setActiveTab] = useState<ReportTab>('summary');
+  const [auditOutput, setAuditOutput] = useState<string>('');
+  const [outputLoading, setOutputLoading] = useState(false);
+  const [outputError, setOutputError] = useState<string | null>(null);
+  const [copyState, setCopyState] = useState<'idle' | 'copied' | 'error'>('idle');
   const defaultSelectedFilter = (() => {
     if (mergedFilters.length === 0) return null;
     const candidates = mergedFilters.filter((r) => !r.not_run);
@@ -389,9 +496,29 @@ export default function ResultsView({ results, startingCapital, params }: Result
     selectedFilter
       ? mergedFilters.find((r) => normalizeFilterLabel(String(r.filter ?? '')) === normalizeFilterLabel(selectedFilter)) ?? null
       : null;
+  const alertLines = useMemo(() => extractAlerts(auditOutput), [auditOutput]);
+  const advancedSections = useMemo(
+    () => extractSelectedFilterAdvancedSections(auditOutput, selectedFilter),
+    [auditOutput, selectedFilter],
+  );
 
   const selectedEquityCurve = ((selectedRow?.equity_curve as Point[] | undefined) ?? equityCurve) as Point[] | null | undefined;
   const selectedDrawdownCurve = ((selectedRow?.drawdown_curve as Point[] | undefined) ?? drawdownCurve) as Point[] | null | undefined;
+  const selectedTotalDays = selectedEquityCurve?.length ?? 0;
+  const selectedActiveDays = asNum(selectedRow?.active);
+  const activeDaysMain = (
+    selectedActiveDays !== null && Number.isFinite(selectedActiveDays)
+  ) ? String(Math.round(selectedActiveDays)) : fmtMetric(selectedRow?.active, true);
+  const activeDaysSuffix = (
+    selectedActiveDays !== null
+    && Number.isFinite(selectedActiveDays)
+    && selectedTotalDays > 0
+  ) ? `/${selectedTotalDays} days` : undefined;
+  const selectedActivePct = (
+    selectedActiveDays !== null
+    && Number.isFinite(selectedActiveDays)
+    && selectedTotalDays > 0
+  ) ? (selectedActiveDays / selectedTotalDays) * 100 : null;
   const equityCurveDollars = selectedEquityCurve?.map((p) => (
     typeof p === 'number'
       ? p * runStartingCapital
@@ -401,12 +528,20 @@ export default function ResultsView({ results, startingCapital, params }: Result
   const metricCards = selectedRow
     ? [
       { label: 'Sharpe', key: 'sharpe', value: fmtMetric(selectedRow.sharpe), colorValue: selectedRow.sharpe },
-      { label: 'CAGR %', key: 'cagr', value: fmtMetric(selectedRow.cagr), colorValue: selectedRow.cagr },
-      { label: 'Max DD %', key: 'max_dd', value: fmtMetric(selectedRow.max_dd), colorValue: selectedRow.max_dd },
-      { label: 'Active Days', key: 'active', value: fmtMetric(selectedRow.active, true), colorValue: selectedRow.active },
+      { label: 'CAGR %', key: 'cagr', value: fmtPercent2(selectedRow.cagr), colorValue: selectedRow.cagr },
+      { label: 'Max DD %', key: 'max_dd', value: fmtPercent2(selectedRow.max_dd), colorValue: selectedRow.max_dd },
+      {
+        label: 'Active Days',
+        key: 'active',
+        value: activeDaysMain,
+        unit: activeDaysSuffix,
+        unitColor: 'var(--t1)',
+        secondary: selectedActivePct !== null ? `(${selectedActivePct.toFixed(2)}%)` : undefined,
+        colorValue: selectedRow.active,
+      },
       { label: 'WF-CV', key: 'cv', value: fmtMetric((selectedRow.wf_cv ?? selectedRow.cv) as unknown), colorValue: (selectedRow.wf_cv ?? selectedRow.cv) },
-      { label: 'DSR %', key: 'dsr_pct', value: fmtMetric(selectedRow.dsr_pct), colorValue: selectedRow.dsr_pct },
-      { label: 'Total Return %', key: 'tot_ret', value: fmtMetric(selectedRow.tot_ret), colorValue: selectedRow.tot_ret },
+      { label: 'DSR %', key: 'dsr_pct', value: fmtPercent2(selectedRow.dsr_pct), colorValue: selectedRow.dsr_pct },
+      { label: 'Sum of Daily Return %', key: 'tot_ret', value: fmtPercent2(selectedRow.tot_ret), colorValue: selectedRow.tot_ret },
       { label: 'Grade', key: 'grade', value: selectedRow.grade_score != null ? String(selectedRow.grade_score) : String(selectedRow.grade ?? 'N/A'), colorValue: selectedRow.grade_score },
     ]
     : [
@@ -415,7 +550,7 @@ export default function ResultsView({ results, startingCapital, params }: Result
       { label: 'Omega', key: 'omega', value: fmtMetric(m.omega), colorValue: m.omega },
       { label: 'Ulcer Index', key: 'ulcer_index', value: fmtMetric(m.ulcer_index), colorValue: m.ulcer_index },
       { label: 'FA-OOS Sharpe', key: 'fa_oos_sharpe', value: fmtMetric(m.fa_oos_sharpe), colorValue: m.fa_oos_sharpe },
-      { label: 'DSR %', key: 'dsr_pct', value: fmtMetric(m.dsr_pct, false), colorValue: m.dsr_pct },
+      { label: 'DSR %', key: 'dsr_pct', value: fmtPercent2(m.dsr_pct), colorValue: m.dsr_pct },
       { label: 'WF-CV', key: 'cv', value: fmtMetric(m.cv), colorValue: m.cv },
       { label: 'Flat Days', key: 'flat_days', value: fmtMetric(m.flat_days, true), colorValue: m.flat_days },
     ];
@@ -428,104 +563,339 @@ export default function ResultsView({ results, startingCapital, params }: Result
     );
   }
 
+  async function ensureAuditOutputLoaded() {
+    if (!jobId || auditOutput || outputLoading) return;
+    setOutputLoading(true);
+    setOutputError(null);
+    try {
+      const res = await fetch(`http://localhost:8000/api/jobs/${jobId}/output`);
+      if (!res.ok) throw new Error(`GET /api/jobs/${jobId}/output failed: ${res.status}`);
+      const data = (await res.json()) as { text?: string };
+      setAuditOutput(typeof data.text === 'string' ? data.text : '');
+    } catch (err) {
+      setOutputError(String(err));
+    } finally {
+      setOutputLoading(false);
+    }
+  }
+
+  async function copyRawOutput() {
+    try {
+      await navigator.clipboard.writeText(auditOutput || '');
+      setCopyState('copied');
+      setTimeout(() => setCopyState('idle'), 1400);
+    } catch {
+      setCopyState('error');
+      setTimeout(() => setCopyState('idle'), 1800);
+    }
+  }
+
   return (
     <div style={{ padding: 16, display: 'flex', flexDirection: 'column', gap: 16 }}>
-      {/* Metric cards 4×2 grid */}
       <div
         style={{
-          display: 'grid',
-          gridTemplateColumns: 'repeat(4, 1fr)',
-          gap: 8,
-        }}
-      >
-        {metricCards.map(({ label, key, value, colorValue }) => (
-          <MetricCard
-            key={key}
-            label={label}
-            value={value}
-            color={metricColor(key, colorValue)}
-          />
-        ))}
-      </div>
-
-      {/* Full-width stacked charts */}
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-        <CurveCard
-          title="Equity Curve ($)"
-          data={equityCurveDollars}
-          color="#00c896"
-          gradientId="equity-gradient"
-          height={480}
-          valueFormatter={fmtCurrency}
-        />
-        <CurveCard
-          title="Drawdown Curve"
-          data={selectedDrawdownCurve}
-          color="#ff4d4d"
-          gradientId="drawdown-gradient"
-          fillAbove
-        />
-      </div>
-
-      {/* Filter comparison table */}
-      <div
-        style={{
-          background: 'var(--bg2)',
-          border: '1px solid var(--line)',
-          borderRadius: 3,
-          padding: 12,
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'space-between',
+          position: 'sticky',
+          top: 0,
+          zIndex: 20,
+          background: 'var(--bg0)',
+          paddingTop: 8,
+          paddingBottom: 8,
+          borderBottom: '1px solid var(--line)',
         }}
       >
         <div
           style={{
-            fontSize: 9,
+            fontSize: 10,
+            letterSpacing: '0.08em',
             textTransform: 'uppercase',
-            letterSpacing: '0.12em',
-            color: 'var(--t3)',
+            color: 'var(--t2)',
             fontWeight: 700,
-            marginBottom: 10,
+            whiteSpace: 'nowrap',
           }}
         >
-          FILTER COMPARISON
+          Audit id: {jobId ?? 'N/A'}
         </div>
-        {(hints && hints.length > 0) && (
-          <div
-            style={{
-              marginBottom: 10,
-              fontSize: 10,
-              color: 'var(--amber)',
-              background: 'rgba(255, 186, 77, 0.09)',
-              border: '1px solid rgba(255, 186, 77, 0.35)',
-              borderRadius: 3,
-              padding: '7px 9px',
-              lineHeight: 1.45,
-            }}
-          >
-            {hints.map((h, i) => <div key={i}>{h}</div>)}
-          </div>
-        )}
-        {showDispersionVpnHint && (!hints || hints.length === 0) && (
-          <div
-            style={{
-              marginBottom: 10,
-              fontSize: 10,
-              color: 'var(--amber)',
-              background: 'rgba(255, 186, 77, 0.09)',
-              border: '1px solid rgba(255, 186, 77, 0.35)',
-              borderRadius: 3,
-              padding: '7px 9px',
-              lineHeight: 1.45,
-            }}
-          >
-            Dispersion filters were requested but did not run. If Binance API access is geo-blocked, turn on VPN and re-run.
-          </div>
-        )}
-        <FilterTable
-          rows={mergedFilters}
-          selectedFilter={selectedFilter}
-          onSelectFilter={(filter) => setManualSelectedFilter(filter)}
-        />
+        <div style={{ display: 'flex', gap: 6, justifyContent: 'flex-end' }}>
+          {([
+            ['summary', 'SUMMARY'],
+            ['stress_tests', 'Stress Tests'],
+            ['raw_output', 'Raw Output'],
+            ['tear_sheet', 'Tear Sheet'],
+            ['full_report', 'Full Report'],
+          ] as Array<[ReportTab, string]>).map(([tab, label]) => (
+            <button
+              key={tab}
+              onClick={async () => {
+                setActiveTab(tab);
+                if (tab !== 'summary') await ensureAuditOutputLoaded();
+              }}
+              style={{
+                height: 28,
+                padding: '0 10px',
+                borderRadius: 3,
+                border: `1px solid ${activeTab === tab ? 'var(--green)' : 'var(--line2)'}`,
+                background: activeTab === tab ? 'var(--green-dim)' : 'var(--bg1)',
+                color: activeTab === tab ? 'var(--green)' : 'var(--t2)',
+                fontSize: 9,
+                letterSpacing: '0.1em',
+                fontWeight: 700,
+                cursor: 'pointer',
+              }}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
       </div>
+
+      {activeTab === 'summary' && (
+        <>
+          {/* Metric cards 4×2 grid */}
+          <div
+            style={{
+              display: 'grid',
+              gridTemplateColumns: 'repeat(4, 1fr)',
+              gap: 8,
+            }}
+          >
+            {metricCards.map(({ label, key, value, colorValue, secondary, unit, unitColor }) => (
+              <MetricCard
+                key={key}
+                label={label}
+                value={value}
+                unit={unit}
+                unitColor={unitColor}
+                secondary={secondary}
+                color={metricColor(key, colorValue)}
+              />
+            ))}
+          </div>
+
+          {/* Full-width stacked charts */}
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+            <details open style={{ background: 'var(--bg2)', border: '1px solid var(--line)', borderRadius: 3, padding: '8px 10px' }}>
+              <summary style={{ cursor: 'pointer', fontSize: 9, color: 'var(--t3)', textTransform: 'uppercase', letterSpacing: '0.12em', fontWeight: 700 }}>
+                Equity Curve ($)
+              </summary>
+              <div style={{ marginTop: 8 }}>
+                <CurveCard
+                  title="Equity Curve ($)"
+                  data={equityCurveDollars}
+                  color="#00c896"
+                  gradientId="equity-gradient"
+                  height={480}
+                  valueFormatter={fmtCurrency}
+                  showTitle={false}
+                />
+              </div>
+            </details>
+
+            <details open style={{ background: 'var(--bg2)', border: '1px solid var(--line)', borderRadius: 3, padding: '8px 10px' }}>
+              <summary style={{ cursor: 'pointer', fontSize: 9, color: 'var(--t3)', textTransform: 'uppercase', letterSpacing: '0.12em', fontWeight: 700 }}>
+                Drawdown Curve
+              </summary>
+              <div style={{ marginTop: 8 }}>
+                <CurveCard
+                  title="Drawdown Curve"
+                  data={selectedDrawdownCurve}
+                  color="#ff4d4d"
+                  gradientId="drawdown-gradient"
+                  fillAbove
+                  showTitle={false}
+                />
+              </div>
+            </details>
+          </div>
+
+          <details open style={{ background: 'var(--bg2)', border: '1px solid var(--line)', borderRadius: 3, padding: '8px 10px' }}>
+            <summary style={{ cursor: 'pointer', fontSize: 9, color: 'var(--t3)', textTransform: 'uppercase', letterSpacing: '0.12em', fontWeight: 700 }}>
+              Filter Comparison
+            </summary>
+            <div style={{ marginTop: 8 }}>
+              {(hints && hints.length > 0) && (
+                <div
+                  style={{
+                    marginBottom: 10,
+                    fontSize: 10,
+                    color: 'var(--amber)',
+                    background: 'rgba(255, 186, 77, 0.09)',
+                    border: '1px solid rgba(255, 186, 77, 0.35)',
+                    borderRadius: 3,
+                    padding: '7px 9px',
+                    lineHeight: 1.45,
+                  }}
+                >
+                  {hints.map((h, i) => <div key={i}>{h}</div>)}
+                </div>
+              )}
+              {showDispersionVpnHint && (!hints || hints.length === 0) && (
+                <div
+                  style={{
+                    marginBottom: 10,
+                    fontSize: 10,
+                    color: 'var(--amber)',
+                    background: 'rgba(255, 186, 77, 0.09)',
+                    border: '1px solid rgba(255, 186, 77, 0.35)',
+                    borderRadius: 3,
+                    padding: '7px 9px',
+                    lineHeight: 1.45,
+                  }}
+                >
+                  Dispersion filters were requested but did not run. If Binance API access is geo-blocked, turn on VPN and re-run.
+                </div>
+              )}
+              <FilterTable
+                rows={mergedFilters}
+                selectedFilter={selectedFilter}
+                onSelectFilter={(filter) => setManualSelectedFilter(filter)}
+              />
+            </div>
+          </details>
+        </>
+      )}
+
+      {activeTab === 'stress_tests' && (
+        <div style={{ background: 'var(--bg2)', border: '1px solid var(--line)', borderRadius: 3, padding: 12, display: 'flex', flexDirection: 'column', gap: 10 }}>
+          {outputLoading && <div style={{ fontSize: 10, color: 'var(--t3)' }}>Loading audit output...</div>}
+          {outputError && <div style={{ fontSize: 10, color: 'var(--red)' }}>{outputError}</div>}
+          {!outputLoading && !outputError && advancedSections.length > 0 && (
+            <div style={{ border: '1px solid var(--line)', borderRadius: 3, padding: 10 }}>
+              <div style={{ fontSize: 9, color: 'var(--t3)', textTransform: 'uppercase', letterSpacing: '0.1em', marginBottom: 8 }}>
+                Risk Audit Tests • {selectedFilter ?? 'Selected Filter'}
+              </div>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                {advancedSections.map((section) => (
+                  <details key={section.title} style={{ border: '1px solid var(--line)', borderRadius: 3, padding: '6px 8px', background: 'var(--bg1)' }}>
+                    <summary style={{ cursor: 'pointer', fontSize: 10, color: 'var(--t1)', fontWeight: 600 }}>
+                      {section.title}
+                    </summary>
+                    <pre
+                      style={{
+                        margin: '8px 0 0 0',
+                        whiteSpace: 'pre-wrap',
+                        fontSize: 10,
+                        lineHeight: 1.45,
+                        color: 'var(--t2)',
+                        fontFamily: 'var(--font-space-mono), Space Mono, monospace',
+                      }}
+                    >
+                      {section.body}
+                    </pre>
+                  </details>
+                ))}
+              </div>
+            </div>
+          )}
+          {!outputLoading && !outputError && advancedSections.length === 0 && (
+            <div style={{ fontSize: 10, color: 'var(--t3)' }}>No tear sheet sections detected for the selected filter.</div>
+          )}
+          {!outputLoading && !outputError && alertLines.length > 0 && (
+            <div style={{ border: '1px solid rgba(255, 186, 77, 0.35)', borderRadius: 3, padding: 10, background: 'rgba(255, 186, 77, 0.06)' }}>
+              <div style={{ fontSize: 9, color: 'var(--amber)', textTransform: 'uppercase', letterSpacing: '0.1em', marginBottom: 8 }}>
+                Alerts & Warnings
+              </div>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 4, fontSize: 10, color: 'var(--amber)' }}>
+                {alertLines.map((line, idx) => <div key={`${idx}-${line}`}>{line}</div>)}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
+      {activeTab === 'raw_output' && (
+        <div
+          style={{
+            background: 'var(--bg2)',
+            border: '1px solid var(--line)',
+            borderRadius: 3,
+            padding: 12,
+            height: 'calc(100vh - 170px)',
+            display: 'flex',
+            flexDirection: 'column',
+            overflowY: 'auto',
+          }}
+        >
+          {outputLoading && <div style={{ fontSize: 10, color: 'var(--t3)' }}>Loading full report...</div>}
+          {outputError && <div style={{ fontSize: 10, color: 'var(--red)' }}>{outputError}</div>}
+          {!outputLoading && !outputError && (
+            <>
+              <div
+                style={{
+                  display: 'flex',
+                  justifyContent: 'space-between',
+                  alignItems: 'center',
+                  marginBottom: 8,
+                  position: 'sticky',
+                  top: 0,
+                  zIndex: 2,
+                  background: 'var(--bg2)',
+                  paddingBottom: 8,
+                  borderBottom: '1px solid var(--line)',
+                }}
+              >
+                <div
+                  style={{
+                    fontSize: 9,
+                    color: 'var(--t3)',
+                    textTransform: 'uppercase',
+                    letterSpacing: '0.1em',
+                    fontWeight: 700,
+                  }}
+                >
+                  Raw Output
+                </div>
+                <button
+                  onClick={copyRawOutput}
+                  style={{
+                    height: 26,
+                    padding: '0 10px',
+                    borderRadius: 3,
+                    border: '1px solid var(--line2)',
+                    background: 'var(--bg1)',
+                    color: copyState === 'copied' ? 'var(--green)' : copyState === 'error' ? 'var(--red)' : 'var(--t1)',
+                    fontSize: 9,
+                    letterSpacing: '0.08em',
+                    fontWeight: 700,
+                    cursor: 'pointer',
+                  }}
+                >
+                  {copyState === 'copied' ? 'COPIED' : copyState === 'error' ? 'COPY FAILED' : 'COPY ALL'}
+                </button>
+              </div>
+              <pre
+                style={{
+                  margin: 0,
+                  whiteSpace: 'pre-wrap',
+                  fontSize: 10,
+                  lineHeight: 1.45,
+                  color: 'var(--t2)',
+                  fontFamily: 'var(--font-space-mono), Space Mono, monospace',
+                  flex: 1,
+                  minHeight: 0,
+                  overflowY: 'auto',
+                }}
+              >
+                {auditOutput || 'No full report text available for this audit.'}
+              </pre>
+            </>
+          )}
+        </div>
+      )}
+
+      {activeTab === 'tear_sheet' && (
+        <div style={{ background: 'var(--bg2)', border: '1px solid var(--line)', borderRadius: 3, padding: 12, fontSize: 10, color: 'var(--t3)' }}>
+          Tear Sheet tab is ready for content.
+        </div>
+      )}
+
+      {activeTab === 'full_report' && (
+        <div style={{ background: 'var(--bg2)', border: '1px solid var(--line)', borderRadius: 3, padding: 12, fontSize: 10, color: 'var(--t3)' }}>
+          Full Report tab is ready for content.
+        </div>
+      )}
     </div>
   );
 }

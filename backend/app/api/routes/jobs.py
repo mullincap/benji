@@ -14,6 +14,40 @@ from app.workers.pipeline_worker import _parse_metrics, run_pipeline
 router = APIRouter(prefix="/api/jobs", tags=["jobs"])
 
 
+def _refresh_results_if_needed(job: dict[str, Any]) -> dict[str, Any]:
+    status = str(job.get("status", "")).lower()
+    if status not in {"complete", "completed", "done"}:
+        return job
+
+    results = (job.get("results") or {}) if isinstance(job.get("results"), dict) else {}
+    metrics = results.get("metrics") if isinstance(results.get("metrics"), dict) else {}
+    filter_rows = metrics.get("filter_comparison") if isinstance(metrics.get("filter_comparison"), list) else []
+
+    needs_refresh = (
+        not metrics.get("filters")
+        or (len(filter_rows) > 0 and not any(isinstance(r, dict) and r.get("is_run_summary_best") for r in filter_rows))
+    )
+    if not needs_refresh:
+        return job
+
+    job_id = str(job.get("id", "")).strip()
+    if not job_id:
+        return job
+
+    output_path = Path(settings.JOBS_DIR) / job_id / "audit_output.txt"
+    if not output_path.exists():
+        return job
+
+    parsed_metrics = _parse_metrics(output_path)
+    if not parsed_metrics:
+        return job
+
+    merged_metrics = {**metrics, **parsed_metrics}
+    merged_results = {**results, "metrics": merged_metrics}
+    updated = update_job(job_id, results=merged_results)
+    return updated
+
+
 # ---------------------------------------------------------------------------
 # Request model — every param from the left panel spec in CLAUDE.md
 # ---------------------------------------------------------------------------
@@ -226,7 +260,8 @@ def create_job_endpoint(req: JobRequest) -> JobCreateResponse:
 
 @router.get("", response_model=list[JobResponse])
 def list_jobs_endpoint() -> list[JobResponse]:
-    return list_jobs()[:20]
+    jobs = list_jobs()[:20]
+    return [_refresh_results_if_needed(job) for job in jobs]
 
 
 @router.get("/{job_id}", response_model=JobResponse)
@@ -269,23 +304,8 @@ def get_job_results(job_id: str) -> dict[str, Any]:
         raise HTTPException(status_code=404, detail="Job not found")
     if job["status"] != "complete":
         raise HTTPException(status_code=409, detail=f"Job status is '{job['status']}', not 'complete'")
-    results = (job.get("results") or {}) if isinstance(job.get("results"), dict) else {}
-    metrics = results.get("metrics") if isinstance(results.get("metrics"), dict) else {}
-
-    # Backfill richer parsed metrics for older completed jobs that were stored
-    # before per-filter FINAL_* parsing (charts need metrics.filters series).
-    if not metrics.get("filters"):
-        job_dir = Path(settings.JOBS_DIR) / job_id
-        output_path = job_dir / "audit_output.txt"
-        if output_path.exists():
-            parsed_metrics = _parse_metrics(output_path)
-            if parsed_metrics:
-                merged_metrics = {**metrics, **parsed_metrics}
-                merged_results = {**results, "metrics": merged_metrics}
-                update_job(job_id, results=merged_results)
-                return merged_results
-
-    return results
+    refreshed = _refresh_results_if_needed(job)
+    return (refreshed.get("results") or {}) if isinstance(refreshed.get("results"), dict) else {}
 
 
 @router.get("/{job_id}/output")

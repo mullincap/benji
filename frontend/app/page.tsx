@@ -212,6 +212,7 @@ export default function Home() {
   const [deletingJobId, setDeletingJobId] = useState<string | null>(null);
   const [cancellingAudit, setCancellingAudit] = useState(false);
   const [editingFromResults, setEditingFromResults] = useState(false);
+  const [collapseAuditConfigsSignal, setCollapseAuditConfigsSignal] = useState(0);
 
   const pollingRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const elapsedRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -419,6 +420,7 @@ export default function Home() {
   }
 
   function handleEditFromResults() {
+    setCollapseAuditConfigsSignal((n) => n + 1);
     setEditingFromResults(true);
     setErrorInfo(null);
     setAppState('results');
@@ -435,6 +437,7 @@ export default function Home() {
     setElapsedSeconds(0);
     lastStageRef.current = null;
     setEditingFromResults(false);
+    setCollapseAuditConfigsSignal(0);
   }
 
   return (
@@ -460,9 +463,20 @@ export default function Home() {
             )}
             {appState === 'running' && <RunningParams params={params} />}
             {appState === 'results' && (
-              editingFromResults
-                ? <ParamForm params={params} onChange={setParams} onSubmit={handleSubmit} />
-                : <ResultsSummary results={results} params={params} onRerun={handleEditFromResults} />
+              <>
+                <ResultsSummary
+                  key={`summary-${jobId ?? 'none'}-${collapseAuditConfigsSignal}`}
+                  results={results}
+                  params={params}
+                  onRerun={handleEditFromResults}
+                  startAuditConfigsCollapsed={editingFromResults}
+                />
+                {editingFromResults && (
+                  <div style={{ borderTop: '1px solid var(--line)' }}>
+                    <ParamForm params={params} onChange={setParams} onSubmit={handleSubmit} />
+                  </div>
+                )}
+              </>
             )}
             {appState === 'failed' && (
               <div style={{ padding: 16 }}>
@@ -501,7 +515,9 @@ export default function Home() {
             {appState === 'results' && (
               <div style={{ flex: 1, overflowY: 'auto' }}>
                 <ResultsView
+                  key={jobId ?? 'results-none'}
                   results={results}
+                  jobId={jobId}
                   startingCapital={typeof params.starting_capital === 'number' ? params.starting_capital : Number(params.starting_capital ?? 100000)}
                   params={params}
                 />

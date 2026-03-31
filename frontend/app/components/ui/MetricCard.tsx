@@ -4,10 +4,19 @@ interface MetricCardProps {
   label: string;
   value: string | number | null | undefined;
   unit?: string;
+  unitColor?: string;
+  secondary?: string;
   color?: string;
 }
 
-export default function MetricCard({ label, value, unit, color = 'var(--green)' }: MetricCardProps) {
+export default function MetricCard({
+  label,
+  value,
+  unit,
+  unitColor = 'var(--t2)',
+  secondary,
+  color = 'var(--green)',
+}: MetricCardProps) {
   return (
     <div
       style={{
@@ -52,7 +61,10 @@ export default function MetricCard({ label, value, unit, color = 'var(--green)' 
           {value === null || value === undefined ? 'N/A' : value}
         </span>
         {unit && (
-          <span style={{ fontSize: 10, color: 'var(--t2)' }}>{unit}</span>
+          <span style={{ fontSize: 10, color: unitColor }}>{unit}</span>
+        )}
+        {secondary && (
+          <span style={{ fontSize: 10, color: 'var(--t3)' }}>{secondary}</span>
         )}
       </div>
     </div>

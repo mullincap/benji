@@ -96,7 +96,8 @@ _FILTER_ROW_RE = re.compile(
     r"(?P<wst_1w>(?:[+-]?[\d.]+|n/?a|nan|\?))%?\s+"
     r"(?P<wst_1m>(?:[+-]?[\d.]+|n/?a|nan|\?))%?\s+"
     r"(?P<dsr>(?:[+-]?[\d.]+|n/?a|nan|\?))%?\s+"
-    r"(?P<grade>(?:\d+|n/?a|nan|\?))",
+    r"(?P<grade>(?:\d+|n/?a|nan|\?))"
+    r"(?:\s+(?P<winner>◄))?",
     re.MULTILINE,
 )
 
@@ -232,11 +233,14 @@ def _parse_metrics(audit_output_path: Path) -> dict:
             "wst_1m":      _parse_opt_float(g["wst_1m"]),
             "dsr_pct":     _parse_opt_float(g["dsr"]),
             "grade_score": _parse_opt_int(g["grade"]),
+            "is_run_summary_best": bool(g.get("winner")),
         })
     if filter_rows:
         metrics["filter_comparison"] = filter_rows
-        # Derive best_filter and CAGR from highest grade_score; fallback to Sharpe.
-        best = max(
+        # Prefer explicit winner marker from RUN SUMMARY (◄).
+        best_marked = next((r for r in filter_rows if r.get("is_run_summary_best")), None)
+        # Fallback to highest grade_score, then Sharpe.
+        best_fallback = max(
             filter_rows,
             key=lambda r: (
                 r["grade_score"] is not None,
@@ -244,9 +248,20 @@ def _parse_metrics(audit_output_path: Path) -> dict:
                 r["sharpe"] if r["sharpe"] is not None else float("-inf"),
             ),
         )
-        metrics.setdefault("best_filter", best["filter"])
+        best = best_marked or best_fallback
+        metrics["best_filter"] = best["filter"]
         if best.get("cagr") is not None:
-            metrics.setdefault("cagr", best["cagr"])
+            metrics["cagr"] = best["cagr"]
+        if best.get("sharpe") is not None:
+            metrics["sharpe"] = best["sharpe"]
+        if best.get("max_dd") is not None:
+            metrics["max_drawdown"] = best["max_dd"]
+        if best.get("wf_cv") is not None:
+            metrics["cv"] = best["wf_cv"]
+        if best.get("dsr_pct") is not None:
+            metrics["dsr_pct"] = best["dsr_pct"]
+        if best.get("grade_score") is not None:
+            metrics["grade_score"] = float(best["grade_score"])
 
     # ── Per-filter FINAL_* metrics (for UI filter selection) ──────────────────
     # Parse machine-readable FINAL_* lines so frontend can switch charts/cards
@@ -310,6 +325,12 @@ def _parse_metrics(audit_output_path: Path) -> dict:
                 canon = by_norm.get(_norm_label(raw))
                 if canon:
                     row["filter"] = canon
+            # Canonicalize best_filter label to match normalized filter rows.
+            if metrics.get("best_filter"):
+                bf = str(metrics["best_filter"]).strip()
+                canon_bf = by_norm.get(_norm_label(bf))
+                if canon_bf:
+                    metrics["best_filter"] = canon_bf
 
     if "All fetches failed - dispersion filter unavailable" in text:
         hints.append("Dispersion filters could not run because Binance data fetch failed. If you are behind geo restrictions, turn on VPN and re-run.")

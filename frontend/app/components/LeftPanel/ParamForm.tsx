@@ -1,6 +1,6 @@
 'use client';
 
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 
 import Toggle from '../ui/Toggle';
 import TierSection from '../ui/TierSection';
@@ -48,6 +48,14 @@ const subSectionLabel: React.CSSProperties = {
   opacity: 0.7,
 };
 
+const subSectionHeader: React.CSSProperties = {
+  display: 'flex',
+  alignItems: 'center',
+  justifyContent: 'space-between',
+  marginTop: 8,
+  marginBottom: 4,
+};
+
 const fieldLabel: React.CSSProperties = {
   fontSize: 10,
   color: 'var(--t2)',
@@ -60,6 +68,17 @@ const row: React.CSSProperties = {
   justifyContent: 'space-between',
   marginBottom: 4,
 };
+
+const FILTER_ENABLE_KEYS = [
+  'enable_tail_guardrail',
+  'enable_dispersion_filter',
+  'enable_tail_plus_disp',
+  'enable_vol_filter',
+  'enable_tail_disp_vol',
+  'enable_tail_or_vol',
+  'enable_tail_and_vol',
+  'enable_blofin_filter',
+];
 
 // ─────────────────────────────────────────────
 // Sub-components
@@ -224,9 +243,52 @@ export default function ParamForm({ params, onChange, onSubmit }: ParamFormProps
   function set(key: string, value: unknown) {
     onChange({ ...params, [key]: value });
   }
+  function setAllTrue(keys: string[]) {
+    const next = { ...params };
+    for (const key of keys) next[key] = true;
+    onChange(next);
+  }
 
   const p = params;
+  const parameterSweepKeys = [
+    'enable_sweep_l_high',
+    'enable_sweep_tail_guardrail',
+    'enable_sweep_trail_wide',
+    'enable_sweep_trail_narrow',
+    'enable_param_surfaces',
+  ];
+  const stabilityCubeKeys = ['enable_stability_cube', 'enable_risk_throttle_cube', 'enable_exit_cube'];
+  const robustnessKeys = [
+    'enable_noise_stability',
+    'enable_slippage_sweep',
+    'enable_equity_ensemble',
+    'enable_param_jitter',
+    'enable_return_concentration',
+    'enable_sharpe_ridge_map',
+    'enable_sharpe_plateau',
+    'enable_top_n_removal',
+    'enable_lucky_streak',
+    'enable_periodic_breakdown',
+    'enable_weekly_milestones',
+    'enable_monthly_milestones',
+    'enable_dsr_mtl',
+    'enable_shock_injection',
+    'enable_ruin_probability',
+  ];
+  const diagnosticsKeys = [
+    'enable_mcap_diagnostic',
+    'enable_capacity_curve',
+    'enable_regime_robustness',
+    'enable_min_cum_return',
+  ];
   const [openSections, setOpenSections] = useState<Record<string, boolean>>({});
+  useEffect(() => {
+    const missing = FILTER_ENABLE_KEYS.filter((k) => !params[k]);
+    if (missing.length === 0) return;
+    const next = { ...params };
+    for (const k of missing) next[k] = true;
+    onChange(next);
+  }, [params, onChange]);
   const isOpen = (key: string) => !!openSections[key];
   const toggleSection = (key: string) => {
     setOpenSections((prev) => ({ ...prev, [key]: !prev[key] }));
@@ -439,10 +501,7 @@ export default function ParamForm({ params, onChange, onSubmit }: ParamFormProps
       <CollapsibleSection title="FILTERS" open={isOpen('filters')} onToggle={() => toggleSection('filters')}>
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6 }}>
           <span style={{ ...fieldLabel, opacity: 0.8 }}>Mode</span>
-          <div style={{ display: 'flex', gap: 14 }}>
-            <span style={{ fontSize: 9, color: 'var(--t3)', width: 26, textAlign: 'center' }}>ENABLE</span>
-            <span style={{ fontSize: 9, color: 'var(--t3)', width: 26, textAlign: 'center' }}>RUN</span>
-          </div>
+          <span style={{ fontSize: 9, color: 'var(--t3)', width: 26, textAlign: 'center' }}>RUN</span>
         </div>
 
         {(
@@ -459,14 +518,13 @@ export default function ParamForm({ params, onChange, onSubmit }: ParamFormProps
         ).map(([label, enableKey, runKey]) => (
           <div key={label} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 4 }}>
             <span style={fieldLabel}>{label}</span>
-            <div style={{ display: 'flex', gap: 14, alignItems: 'center' }}>
-              <Toggle checked={!!p[enableKey]} onChange={(v) => set(enableKey, v)} />
-              <Toggle
-                checked={!!p[runKey]}
-                onChange={(v) => set(runKey, v)}
-                disabled={!p[enableKey]}
-              />
-            </div>
+            <Toggle
+              checked={!!p[runKey]}
+              onChange={(v) => {
+                set(runKey, v);
+                if (!p[enableKey]) set(enableKey, true);
+              }}
+            />
           </div>
         ))}
 
@@ -722,65 +780,68 @@ export default function ParamForm({ params, onChange, onSubmit }: ParamFormProps
           </Row>
 
           {/* Parameter Sweeps */}
-          <div style={subSectionLabel}>PARAMETER SWEEPS</div>
-          {(
-            [
-              'enable_sweep_l_high',
-              'enable_sweep_tail_guardrail',
-              'enable_sweep_trail_wide',
-              'enable_sweep_trail_narrow',
-              'enable_param_surfaces',
-            ] as string[]
-          ).map((k) => (
+          <div style={subSectionHeader}>
+            <div style={{ ...subSectionLabel, margin: 0 }}>PARAMETER SWEEPS</div>
+            <button
+              type="button"
+              onClick={() => setAllTrue(parameterSweepKeys)}
+              style={{ background: 'transparent', border: '1px solid var(--line2)', color: 'var(--t2)', borderRadius: 2, fontSize: 9, padding: '2px 6px', cursor: 'pointer' }}
+            >
+              Enable All
+            </button>
+          </div>
+          {parameterSweepKeys.map((k) => (
             <Row key={k} label={k}>
               <Toggle checked={!!p[k]} onChange={(v) => set(k, v)} />
             </Row>
           ))}
 
           {/* Stability Cubes */}
-          <div style={subSectionLabel}>STABILITY CUBES</div>
-          {(['enable_stability_cube', 'enable_risk_throttle_cube', 'enable_exit_cube'] as string[]).map((k) => (
+          <div style={subSectionHeader}>
+            <div style={{ ...subSectionLabel, margin: 0 }}>STABILITY CUBES</div>
+            <button
+              type="button"
+              onClick={() => setAllTrue(stabilityCubeKeys)}
+              style={{ background: 'transparent', border: '1px solid var(--line2)', color: 'var(--t2)', borderRadius: 2, fontSize: 9, padding: '2px 6px', cursor: 'pointer' }}
+            >
+              Enable All
+            </button>
+          </div>
+          {stabilityCubeKeys.map((k) => (
             <Row key={k} label={k}>
               <Toggle checked={!!p[k]} onChange={(v) => set(k, v)} />
             </Row>
           ))}
 
           {/* Robustness + Stress Tests */}
-          <div style={subSectionLabel}>ROBUSTNESS + STRESS TESTS</div>
-          {(
-            [
-              'enable_noise_stability',
-              'enable_slippage_sweep',
-              'enable_equity_ensemble',
-              'enable_param_jitter',
-              'enable_return_concentration',
-              'enable_sharpe_ridge_map',
-              'enable_sharpe_plateau',
-              'enable_top_n_removal',
-              'enable_lucky_streak',
-              'enable_periodic_breakdown',
-              'enable_weekly_milestones',
-              'enable_monthly_milestones',
-              'enable_dsr_mtl',
-              'enable_shock_injection',
-              'enable_ruin_probability',
-            ] as string[]
-          ).map((k) => (
+          <div style={subSectionHeader}>
+            <div style={{ ...subSectionLabel, margin: 0 }}>ROBUSTNESS + STRESS TESTS</div>
+            <button
+              type="button"
+              onClick={() => setAllTrue(robustnessKeys)}
+              style={{ background: 'transparent', border: '1px solid var(--line2)', color: 'var(--t2)', borderRadius: 2, fontSize: 9, padding: '2px 6px', cursor: 'pointer' }}
+            >
+              Enable All
+            </button>
+          </div>
+          {robustnessKeys.map((k) => (
             <Row key={k} label={k}>
               <Toggle checked={!!p[k]} onChange={(v) => set(k, v)} />
             </Row>
           ))}
 
           {/* Diagnostics */}
-          <div style={subSectionLabel}>DIAGNOSTICS</div>
-          {(
-            [
-              'enable_mcap_diagnostic',
-              'enable_capacity_curve',
-              'enable_regime_robustness',
-              'enable_min_cum_return',
-            ] as string[]
-          ).map((k) => (
+          <div style={subSectionHeader}>
+            <div style={{ ...subSectionLabel, margin: 0 }}>DIAGNOSTICS</div>
+            <button
+              type="button"
+              onClick={() => setAllTrue(diagnosticsKeys)}
+              style={{ background: 'transparent', border: '1px solid var(--line2)', color: 'var(--t2)', borderRadius: 2, fontSize: 9, padding: '2px 6px', cursor: 'pointer' }}
+            >
+              Enable All
+            </button>
+          </div>
+          {diagnosticsKeys.map((k) => (
             <Row key={k} label={k}>
               <Toggle checked={!!p[k]} onChange={(v) => set(k, v)} />
             </Row>

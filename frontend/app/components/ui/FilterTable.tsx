@@ -23,6 +23,35 @@ function fmt(v: number | null | undefined, decimals = 3): string {
   return v.toFixed(decimals);
 }
 
+function fmtPercent2(v: number | null | undefined): string {
+  if (v === null || v === undefined) return 'N/A';
+  return `${new Intl.NumberFormat(undefined, {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  }).format(v)}%`;
+}
+
+function asNum(v: unknown): number | null {
+  if (typeof v === 'number' && Number.isFinite(v)) return v;
+  if (typeof v === 'string') {
+    const n = Number(v);
+    if (Number.isFinite(n)) return n;
+  }
+  return null;
+}
+
+function metricColor(key: 'sharpe' | 'max_dd' | 'cagr' | 'cv' | 'dsr_pct' | 'grade', value: unknown): string {
+  const v = asNum(value);
+  if (v === null) return 'var(--t2)';
+  if (key === 'sharpe') return v > 1 ? 'var(--green)' : v > 0.5 ? 'var(--amber)' : 'var(--red)';
+  if (key === 'max_dd') return v > -20 ? 'var(--green)' : v > -30 ? 'var(--amber)' : 'var(--red)';
+  if (key === 'cagr') return v > 0 ? 'var(--green)' : v > -5 ? 'var(--amber)' : 'var(--red)';
+  if (key === 'cv') return v < 0.25 ? 'var(--green)' : v < 0.5 ? 'var(--amber)' : 'var(--red)';
+  if (key === 'dsr_pct') return v >= 95 ? 'var(--green)' : v >= 80 ? 'var(--amber)' : 'var(--red)';
+  if (key === 'grade') return v >= 80 ? 'var(--green)' : v >= 65 ? 'var(--amber)' : 'var(--red)';
+  return 'var(--t0)';
+}
+
 function normalizeFilterLabel(s: string): string {
   return s
     .toLowerCase()
@@ -72,6 +101,7 @@ export default function FilterTable({ rows, selectedFilter, onSelectFilter }: Fi
           const isMissing = !!row.not_run;
           const rowFilter = String(row.filter ?? '—');
           const isSelected = selectedNorm !== '' && selectedNorm === normalizeFilterLabel(rowFilter);
+          const rowOpacity = selectedNorm !== '' && !isSelected ? 0.66 : 1;
           return (
             <tr
               key={rowFilter || i}
@@ -88,6 +118,7 @@ export default function FilterTable({ rows, selectedFilter, onSelectFilter }: Fi
                       ? 'rgba(255,255,255,0.03)'
                       : 'transparent',
                 cursor: isMissing ? 'default' : 'pointer',
+                opacity: rowOpacity,
               }}
             >
               <td
@@ -97,9 +128,23 @@ export default function FilterTable({ rows, selectedFilter, onSelectFilter }: Fi
                   whiteSpace: 'nowrap',
                 }}
               >
-                {row.filter ?? '—'}{isBest ? ' ★' : ''}{isMissing ? ' (not run)' : ''}
+                {row.filter ?? '—'}{isMissing ? ' (not run)' : ''}{' '}
+                {isBest && (
+                  <span
+                    style={{
+                      fontSize: 8,
+                      letterSpacing: '0.08em',
+                      border: '1px solid var(--green-mid)',
+                      color: 'var(--green)',
+                      borderRadius: 2,
+                      padding: '1px 4px',
+                    }}
+                  >
+                    BEST
+                  </span>
+                )}
               </td>
-              <td style={{ padding: '6px 4px', textAlign: 'right', color: isBest ? 'var(--green)' : 'var(--t0)' }}>
+              <td style={{ padding: '6px 4px', textAlign: 'right', color: metricColor('sharpe', row.sharpe) }}>
                 <div>{fmt(row.sharpe)}</div>
                 {row.sharpe != null && (
                   <div
@@ -121,11 +166,11 @@ export default function FilterTable({ rows, selectedFilter, onSelectFilter }: Fi
                   </div>
                 )}
               </td>
-              <td style={{ padding: '6px 4px', textAlign: 'right', color: 'var(--t0)' }}>{fmt(row.max_dd)}</td>
-              <td style={{ padding: '6px 4px', textAlign: 'right', color: 'var(--t0)' }}>{fmt(row.cagr)}</td>
-              <td style={{ padding: '6px 4px', textAlign: 'right', color: 'var(--t0)' }}>{fmt((row.wf_cv ?? row.cv) as number)}</td>
-              <td style={{ padding: '6px 4px', textAlign: 'right', color: 'var(--t0)' }}>{fmt(row.dsr_pct as number, 1)}</td>
-              <td style={{ padding: '6px 4px', textAlign: 'right', color: 'var(--t1)' }}>{row.grade_score ?? row.grade ?? 'N/A'}</td>
+              <td style={{ padding: '6px 4px', textAlign: 'right', color: metricColor('max_dd', row.max_dd) }}>{fmtPercent2(row.max_dd)}</td>
+              <td style={{ padding: '6px 4px', textAlign: 'right', color: metricColor('cagr', row.cagr) }}>{fmtPercent2(row.cagr)}</td>
+              <td style={{ padding: '6px 4px', textAlign: 'right', color: metricColor('cv', (row.wf_cv ?? row.cv) as number) }}>{fmt((row.wf_cv ?? row.cv) as number)}</td>
+              <td style={{ padding: '6px 4px', textAlign: 'right', color: metricColor('dsr_pct', row.dsr_pct as number) }}>{fmt(row.dsr_pct as number, 1)}</td>
+              <td style={{ padding: '6px 4px', textAlign: 'right', color: metricColor('grade', row.grade_score ?? row.grade) }}>{row.grade_score ?? row.grade ?? 'N/A'}</td>
             </tr>
           );
         })}
