@@ -1,0 +1,17 @@
+{
+  "permissions": {
+    "allow": [
+      "Read(//opt/homebrew/**)",
+      "Read(//opt/homebrew/lib/**)",
+      "Bash(/opt/homebrew/Caskroom/miniforge/base/bin/python -c \"import pandas, pyarrow, scipy, sklearn; print\\(''all good''\\)\")",
+      "Bash(/opt/homebrew/Caskroom/miniforge/base/envs/benji311_x86/bin/python -c \"import pandas; print\\(''benji311 has pandas''\\)\")",
+      "Bash(/opt/homebrew/Caskroom/miniforge/base/envs/benji311_x86/bin/python -c \"import pandas, pyarrow, scipy, numpy, sklearn, tqdm, yfinance; print\\(''all pipeline deps present''\\)\")",
+      "Bash(/opt/homebrew/Caskroom/miniforge/base/bin/python -c \"import pandas, pyarrow, scipy, numpy, sklearn, tqdm, yfinance; print\\(''all pipeline deps present''\\)\")",
+      "Bash(python3 -c \"import sys,json; d=json.load\\(sys.stdin\\); print\\(d.get\\(''''status''''\\), d.get\\(''''error'''',''''''''\\)[:500]\\)\")",
+      "Bash(python3 -c \"from app.core.config import settings; print\\(''PARQUET_PATH:'', repr\\(settings.PARQUET_PATH\\)\\); print\\(''PIPELINE_PYTHON:'', repr\\(settings.PIPELINE_PYTHON\\)\\)\")",
+      "Bash(python3 -c \":*)",
+      "Read(//private/tmp/**)",
+      "Bash(ls /Users/johnmullin/Desktop/desk/benji3m/*.csv)"
+    ]
+  }
+}

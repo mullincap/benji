@@ -1,0 +1,9 @@
+{
+  "name": "benji3m-pipeline",
+  "version": "1.0.0",
+  "private": true,
+  "dependencies": {
+    "@anthropic-ai/vertex-sdk": "^0.7.0",
+    "docx": "^8.5.0"
+  }
+}

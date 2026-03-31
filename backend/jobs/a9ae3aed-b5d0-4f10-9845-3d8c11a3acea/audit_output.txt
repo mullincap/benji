@@ -1,0 +1,100 @@
+2026-03-31 06:08:58,157 [INFO] Starting overlap_analysis.py at 2026-03-31 06:08:58
+2026-03-31 06:08:58,158 [INFO] Filtered files found for 0M — skipping filter step...
+2026-03-31 06:08:58,158 [INFO]   Price : leaderboard_price_top100_filtered_0M.parquet
+2026-03-31 06:08:58,158 [INFO]   OI    : leaderboard_open_interest_top100_filtered_0M.parquet
+2026-03-31 06:09:00,616 [INFO] Applying 5m downsampling to frequency window...
+2026-03-31 06:09:00,617 [INFO] Sampled file found (5m) → loading leaderboard_price_top100_filtered_0M_5m.parquet
+2026-03-31 06:09:00,829 [INFO] Sampled file found (5m) → loading leaderboard_open_interest_top100_filtered_0M_5m.parquet
+2026-03-31 06:09:01,018 [INFO] Computing price snapshot at 06:00 (freq_width=20 cols)...
+2026-03-31 06:09:05,144 [INFO]   → 398 dates with price snapshot data
+2026-03-31 06:09:05,144 [INFO] Computing OI snapshot at 06:00 (freq_width=20 cols)...
+2026-03-31 06:09:08,555 [INFO]   → 398 dates with OI snapshot data
+2026-03-31 06:09:08,588 [INFO] Frequency table saved → freq_price_top100_w20_snapshot_0600_0M.csv  (398 dates, 20 symbols max)
+2026-03-31 06:09:08,599 [INFO] Frequency table saved → freq_oi_top100_w20_snapshot_0600_0M.csv  (398 dates, 20 symbols max)
+2026-03-31 06:09:08,599 [INFO] Computing overlap (freq_cutoff=20)...
+2026-03-31 06:09:08,606 [INFO]   → 398 dates processed
+2026-03-31 06:09:08,618 [INFO] Overlap diagnostic CSV saved → overlap_diagnostic_top100_w20c20_snapshot_0600_0M.csv
+2026-03-31 06:09:08,622 [INFO] ============================================================
+2026-03-31 06:09:08,622 [INFO] Overlap analysis complete
+2026-03-31 06:09:08,622 [INFO]   Min market cap  : $0
+2026-03-31 06:09:08,622 [INFO]   Freq width      : R1-R20
+2026-03-31 06:09:08,622 [INFO]   Mode            : snapshot (freq_width=20, 06:00 snapshot)
+2026-03-31 06:09:08,622 [INFO]   Dates processed : 398
+2026-03-31 06:09:08,622 [INFO]   Avg overlap/day : 6.9 symbols
+2026-03-31 06:09:08,622 [INFO]   Output          : overlap_top100_w20c20_snapshot_0600_0M.csv
+2026-03-31 06:09:08,622 [INFO] ============================================================
+2026-03-31 06:09:08,636 [INFO] Deploys CSV saved → /Users/johnmullin/Desktop/desk/benji3m/deploys_overlap_top100_w20c20_snapshot_0600_0M.csv
+2026-03-31 06:09:08,637 [INFO]   → 398 dates, avg 6.9 symbols/day
+2026-03-31 06:09:08,637 [INFO] Running audit: python3 audit.py --deploys /Users/johnmullin/Desktop/desk/benji3m/deploys_overlap_top100_w20c20_snapshot_0600_0M.csv --source parquet --sort-lookback 6 --capital-mode fixed --fixed-notional-cap internal --deployment-runtime-hours daily --end-cross-midnight --deployment-start-hour 6 --base-dir /Users/johnmullin/Desktop/desk/benji3m --leaderboard-index 100 --freq-width 20 --mode snapshot --min-mcap 0.0 --mcap-parquet /Users/johnmullin/Desktop/desk/benji3m/binetl/data/marketcap/marketcap_daily.parquet
+
+Sample output (first 5 dates):
+  2025-02-13 — 7 overlapping: ['CAKE', 'NFP', 'PEOPLE', 'RUNE', 'THE', 'UXLINK', 'ZEN']
+  2025-02-14 — 6 overlapping: ['ALPACA', 'FARTCOIN', 'HEI', 'POPCAT', 'SYN', 'VVV']
+  2025-02-15 — 5 overlapping: ['CAKE', 'LISTA', 'RATS', 'SWELL', 'XMR']
+  2025-02-16 — 8 overlapping: ['ALCH', 'HEI', 'HIVE', 'LISTA', 'PIPPIN', 'TNSR', 'TROY', 'X']
+  2025-02-17 — 10 overlapping: ['ARK', 'ID', 'NULS', 'POWR', 'RATS', 'SONIC', 'STORJ', 'SXP', 'USTC', 'ZRX']
+usage: audit.py [-h] [--deploys PATH] [--rebuild-script PATH]
+                [--matrix-out PATH] [--quick] [--grid-search-start-time]
+                [--grid-search-vol-lev-dd] [--min-listing-age MIN_LISTING_AGE]
+                [--source {binance,parquet}] [--max-port N] [--freq-csv PATH]
+                [--mcap-parquet PATH] [--mcap-quiet] [--min-mcap N]
+                [--base-dir PATH] [--leaderboard-index N] [--freq-width N]
+                [--mode {snapshot,frequency}] [--deployment-start-hour H]
+                [--deployment-runtime-hours H] [--sort-lookback N]
+                [--capital-mode {compounding,fixed}]
+                [--fixed-notional-cap {external,internal}]
+                [--end-cross-midnight] [--no-end-cross-midnight]
+audit.py: error: argument --deployment-runtime-hours: invalid int value: 'daily'
+DISPERSION_UNIVERSE_SIZE: 40
+[WARNING] DISPERSION_UNIVERSE_SIZE=40 not in [5, 10, 20, 30, 60, 90] — falling back to 90
+2026-03-31 06:09:23,490 [WARNING] audit.py exited with code 2
+2026-03-31 06:09:23,491 [WARNING] No-filter warning appended to gate_summary.txt
+2026-03-31 06:09:23,491 [INFO] Exporting to Google Sheets...
+2026-03-31 06:09:23,667 [INFO] Google OAuth token refreshed successfully
+2026-03-31 06:09:23,669 [INFO] Token saved → /Users/johnmullin/Desktop/desk/benji3m/token.json
+2026-03-31 06:09:53,882 [INFO]   → Confluence_20260331_060944 tab written (398 rows, 20p + 20oi + 15overlap cols)
+2026-03-31 06:10:02,935 [INFO]   → Deploys_20260331_060944 tab written (398 rows)
+2026-03-31 06:10:02,935 [INFO]   → Sheet: https://docs.google.com/spreadsheets/d/19HP3wIRVbU8Wy2xGo4-uhJFK50h26GCFsK5Wk1I7WwE
+2026-03-31 06:10:02,944 [INFO] ============================================================
+2026-03-31 06:10:02,944 [INFO] RUN INPUTS SUMMARY
+2026-03-31 06:10:02,944 [INFO] ============================================================
+2026-03-31 06:10:02,944 [INFO]   --leaderboard-index  : 100
+2026-03-31 06:10:02,945 [INFO]   --min-mcap           : $0 ⚠ NO FILTER APPLIED — all symbols passed forward
+2026-03-31 06:10:02,945 [INFO]   --freq-width         : 20
+2026-03-31 06:10:02,945 [INFO]   --freq-cutoff        : 20
+2026-03-31 06:10:02,945 [INFO]   --sample-interval    : 5m
+2026-03-31 06:10:02,945 [INFO]   --sort-by            : price
+2026-03-31 06:10:02,945 [INFO]   --mode               : snapshot
+2026-03-31 06:10:02,945 [INFO]   --deployment-start-hour : 06:00 UTC
+2026-03-31 06:10:02,945 [INFO]   --index-lookback        : 6h  (anchor=00:00 UTC)
+2026-03-31 06:10:02,945 [INFO]   --deployment-runtime-hours : 18
+2026-03-31 06:10:02,945 [INFO]   --sort-lookback      : 6
+2026-03-31 06:10:02,945 [INFO]   --end-cross-midnight : True
+2026-03-31 06:10:02,945 [INFO]   --drop-unverified    : False
+2026-03-31 06:10:02,945 [INFO]   --max-mcap           : no ceiling
+2026-03-31 06:10:02,945 [INFO] ============================================================
+2026-03-31 06:10:02,945 [INFO] Finished in 1m 4s
+
+============================================================
+OUTPUT FILES
+============================================================
+  ✓  /Users/johnmullin/Desktop/desk/benji3m/freq_price_top100_w20_snapshot_0600_0M.csv
+  ✓  /Users/johnmullin/Desktop/desk/benji3m/freq_oi_top100_w20_snapshot_0600_0M.csv
+  ✓  /Users/johnmullin/Desktop/desk/benji3m/overlap_diagnostic_top100_w20c20_snapshot_0600_0M.csv
+  ✓  /Users/johnmullin/Desktop/desk/benji3m/overlap_top100_w20c20_snapshot_0600_0M.csv
+  ✓  /Users/johnmullin/Desktop/desk/benji3m/deploys_overlap_top100_w20c20_snapshot_0600_0M.csv
+  ✓  /Users/johnmullin/Desktop/desk/benji3m/gate_summary.txt
+  ✓  /Users/johnmullin/Desktop/desk/benji3m/portfolio_matrix_gated.csv
+  ✓  /Users/johnmullin/Desktop/desk/benji3m/eligibility_gate_report.csv
+============================================================
+
+████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████
+  RUN SUMMARY
+████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████
+  Config          : top100  w20c20  snapshot  0M  sort=price
+  Dates processed : 398
+  Avg overlap/day : 6.9 symbols
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  (run with --audit to see performance metrics)
+████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████
+

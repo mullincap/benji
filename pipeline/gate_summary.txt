@@ -1,0 +1,21 @@
+ELIGIBILITY GATE SUMMARY
+============================================================
+Total deploy days:        398
+Days fully flat (gated):  2  (0.5%)
+Days partially gated:     17  (4.3%)
+Days unaffected:          379
+
+Fold    Days   Any Drop   Full Flat  Dropped symbols
+----------------------------------------------------------------------
+F1        30          1           0  G
+F2        30          2           0  BOB
+F3        30          5           0  BOB, G
+F4        30          1           0  WHY
+F5        30          0           0  
+F6        30          3           0  BOB, WHY
+F7        30          1           0  BOB
+F8        28          0           0  
+
+Gate:      MIN_LISTING_AGE_DAYS = 0
+Leverage:  4.0x   Stop: -6% (unleveraged 1x per symbol)
+Session:   06:00 – 23:55 UTC  (5-min bars)

@@ -1,0 +1,498 @@
+"""
+Celery task that orchestrates the full audit pipeline chain:
+  1. overlap_analysis.py --audit   (streams stdout+stderr → audit_output.txt)
+  2. node generate_audit_report.js (produces overlap_audit_report.docx)
+  3. Parse audit_output.txt for key metrics and filter comparison table
+  4. Write results back to job store
+"""
+
+import re
+import subprocess
+from pathlib import Path
+
+from celery import Celery
+
+from app.core.config import settings
+from app.services.job_store import update_job
+
+celery_app = Celery("pipeline_worker", broker=settings.REDIS_URL, backend=settings.REDIS_URL)
+
+celery_app.conf.update(
+    task_serializer="json",
+    result_serializer="json",
+    accept_content=["json"],
+    task_track_started=True,
+)
+
+# ---------------------------------------------------------------------------
+# Python binary — must have pandas, pyarrow, scipy etc (miniforge base, not the FastAPI venv)
+# Configured via PIPELINE_PYTHON in .env
+# ---------------------------------------------------------------------------
+_PIPELINE_PYTHON = settings.PIPELINE_PYTHON
+
+# ---------------------------------------------------------------------------
+# Metric parsing
+#
+# Patterns are anchored to the exact log lines produced by audit.py /
+# institutional_audit.py as observed in audit_output.txt.
+# ---------------------------------------------------------------------------
+
+# ── Canonical single-line summary emitted once per best filter, e.g.:
+#   NetRet=+248.9%  Sharpe=2.053  MaxDD=-53.23%  WF-CV=1.205  FA-OOS Sharpe=2.417  Flat=0d  Active=398d  Equity-R²=0.8795
+_CANON_RE = re.compile(
+    r"NetRet=[+-]?[\d.]+%\s+"
+    r"Sharpe=(?P<sharpe>[+-]?[\d.]+)\s+"
+    r"MaxDD=(?P<maxdd>[+-]?[\d.]+)%\s+"
+    r"WF-CV=(?P<cv>[+-]?[\d.]+)\s+"
+    r"FA-OOS Sharpe=(?P<fa_oos_sharpe>[+-]?[\d.]+)\s+"
+    r"Flat=(?P<flat>\d+)d\s+"
+    r"Active=(?P<active>\d+)d"
+)
+
+# Ratio block lines, e.g.:
+#   │  Sortino Ratio:               3.517
+#   │  Calmar Ratio:                8.457
+#   │  Omega Ratio:                 1.372
+#   │  Ulcer Index:                23.910  (lower = better)
+_SORTINO_RE = re.compile(r"Sortino Ratio:\s*(?P<v>[+-]?[\d.]+)")
+_CALMAR_RE  = re.compile(r"Calmar Ratio:\s*(?P<v>[+-]?[\d.]+)")
+_OMEGA_RE   = re.compile(r"Omega Ratio:\s*(?P<v>[+-]?[\d.]+)")
+_ULCER_RE   = re.compile(r"Ulcer Index:\s*(?P<v>[+-]?[\d.]+)")
+
+# DSR line, e.g.:
+#   DSR (prob Sharpe is genuine):   91.796%
+_DSR_RE = re.compile(r"DSR\s*\(prob Sharpe is genuine\):\s*(?P<dsr>[+-]?[\d.]+)%")
+
+# CAGR from filter table row (captured below) — also grab from canonical line
+_CAGR_RE = re.compile(r"NetRet=[+-]?[\d.]+%\s+Sharpe=[+-]?[\d.]+\s+MaxDD=[+-]?[\d.]+%.*?CAGR=(?P<cagr>[+-]?[\d.]+)%")
+
+# Overall grade + score, e.g.:
+#   OVERALL GRADE                                 C (54/100)
+_OVERALL_GRADE_RE = re.compile(r"OVERALL GRADE\s+(?P<grade>[A-F][+-]?)\s+\((?P<score>\d+)/100\)")
+
+# Final machine-readable tags emitted by audit.py:
+#   FINAL_WF_CV(A_-_No_Filter):         1.2055
+#   FINAL_GRADE(A_-_No_Filter):         C
+#   FINAL_GRADE_SCORE(A_-_No_Filter):   54.0
+_FINAL_CV_RE     = re.compile(r"FINAL_WF_CV\([^)]+\):\s*(?P<cv>[+-]?[\d.]+)")
+_FINAL_GRADE_RE  = re.compile(r"FINAL_GRADE\([^)]+\):\s*(?P<grade>[A-F][+-]?)")
+_FINAL_SCORE_RE  = re.compile(r"FINAL_GRADE_SCORE\([^)]+\):\s*(?P<score>[+-]?[\d.]+)")
+_FINAL_EQUITY_RE = re.compile(r"FINAL_EQUITY_SERIES\([^)]+\):\s*(\[[\d.,\s\-]+\])")
+_FINAL_DD_RE     = re.compile(r"FINAL_DD_SERIES\([^)]+\):\s*(\[[\d.,\s\-]+\])")
+
+# Filter comparison table rows, e.g.:
+#   A - No Filter                             2.053    450.2%   -53.23%      398    1.206     248.9%   3.49×   -6.10%  -21.05%  -29.58%   91.8%    54 ◄
+# Columns: Filter  Sharpe  CAGR%  MaxDD%  Active  WF-CV  TotRet%  Eq  Wst1D%  Wst1W%  Wst1M%  DSR%  Grd
+_FILTER_ROW_RE = re.compile(
+    r"^\s*(?P<label>[A-F]\s+-\s+[^\n]+?)\s+"
+    r"(?P<sharpe>[+-]?[\d.]+)\s+"
+    r"(?P<cagr>[+-]?[\d.]+)%\s+"
+    r"(?P<maxdd>[+-]?[\d.]+)%\s+"
+    r"(?P<active>\d+)\s+"
+    r"(?P<wf_cv>[+-]?[\d.]+)\s+"
+    r"(?P<tot_ret>[+-]?[\d.]+)%\s+"
+    r"(?P<eq>[+-]?[\d.]+)×\s+"
+    r"(?P<wst_1d>[+-]?[\d.]+)%\s+"
+    r"(?P<wst_1w>[+-]?[\d.]+)%\s+"
+    r"(?P<wst_1m>[+-]?[\d.]+)%\s+"
+    r"(?P<dsr>[+-]?[\d.]+)%\s+"
+    r"(?P<grade>\d+)",
+    re.MULTILINE,
+)
+
+
+def _parse_metrics(audit_output_path: Path) -> dict:
+    if not audit_output_path.exists():
+        return {}
+
+    text = audit_output_path.read_text(errors="replace")
+    metrics: dict = {}
+
+    # ── Canonical summary line (most reliable single source) ─────────────────
+    # NetRet=+248.9%  Sharpe=2.053  MaxDD=-53.23%  WF-CV=1.205  FA-OOS Sharpe=2.417  Flat=0d  Active=398d
+    canon = _CANON_RE.search(text)
+    if canon:
+        metrics["sharpe"]        = float(canon.group("sharpe"))
+        metrics["max_drawdown"]  = float(canon.group("maxdd"))
+        metrics["cv"]            = float(canon.group("cv"))
+        metrics["fa_oos_sharpe"] = float(canon.group("fa_oos_sharpe"))
+        metrics["flat_days"]     = int(canon.group("flat"))
+        metrics["active_days"]   = int(canon.group("active"))
+
+    # ── Ratio block ───────────────────────────────────────────────────────────
+    m = _SORTINO_RE.search(text)
+    if m:
+        metrics["sortino"] = float(m.group("v"))
+    m = _CALMAR_RE.search(text)
+    if m:
+        metrics["calmar"] = float(m.group("v"))
+    m = _OMEGA_RE.search(text)
+    if m:
+        metrics["omega"] = float(m.group("v"))
+    m = _ULCER_RE.search(text)
+    if m:
+        metrics["ulcer_index"] = float(m.group("v"))
+
+    # ── DSR ───────────────────────────────────────────────────────────────────
+    m = _DSR_RE.search(text)
+    if m:
+        metrics["dsr_pct"] = float(m.group("dsr"))
+
+    # ── Overall grade + score ─────────────────────────────────────────────────
+    og = _OVERALL_GRADE_RE.search(text)
+    if og:
+        metrics["grade"]       = og.group("grade")
+        metrics["grade_score"] = float(og.group("score"))
+
+    # ── Machine-readable FINAL_ tags (most precise — override above) ──────────
+    m = _FINAL_CV_RE.search(text)
+    if m:
+        metrics["cv"] = float(m.group("cv"))
+    m = _FINAL_GRADE_RE.search(text)
+    if m:
+        metrics["grade"] = m.group("grade")
+    m = _FINAL_SCORE_RE.search(text)
+    if m:
+        metrics["grade_score"] = float(m.group("score"))
+
+    # ── Daily series for charts ───────────────────────────────────────────────
+    import json as _json
+    m = _FINAL_EQUITY_RE.search(text)
+    if m:
+        try:
+            metrics["equity_curve"] = _json.loads(m.group(1))
+        except Exception:
+            pass
+    m = _FINAL_DD_RE.search(text)
+    if m:
+        try:
+            metrics["drawdown_curve"] = _json.loads(m.group(1))
+        except Exception:
+            pass
+
+    # ── Filter comparison table ───────────────────────────────────────────────
+    # Row format (actual):
+    #   A - No Filter                             2.053    450.2%   -53.23%      398    1.206     248.9%   3.49×   -6.10%  -21.05%  -29.58%   91.8%    54 ◄
+    filter_rows = []
+    seen_labels: set[str] = set()
+    for row in _FILTER_ROW_RE.finditer(text):
+        g = row.groupdict()
+        label = g["label"].strip()
+        if label in seen_labels:
+            continue
+        seen_labels.add(label)
+        filter_rows.append({
+            "filter":      label,
+            "sharpe":      float(g["sharpe"]),
+            "cagr":        float(g["cagr"]),
+            "max_dd":      float(g["maxdd"]),
+            "active":      int(g["active"]),
+            "wf_cv":       float(g["wf_cv"]),
+            "tot_ret":     float(g["tot_ret"]),
+            "eq":          float(g["eq"]),
+            "wst_1d":      float(g["wst_1d"]),
+            "wst_1w":      float(g["wst_1w"]),
+            "wst_1m":      float(g["wst_1m"]),
+            "dsr_pct":     float(g["dsr"]),
+            "grade_score": int(g["grade"]),
+        })
+    if filter_rows:
+        metrics["filter_comparison"] = filter_rows
+        # Derive best_filter and CAGR from the highest-scoring row
+        best = max(filter_rows, key=lambda r: r["grade_score"])
+        metrics.setdefault("best_filter", best["filter"])
+        metrics.setdefault("cagr", best["cagr"])
+
+    return metrics
+
+
+def _build_cli_args(params: dict) -> list[str]:
+    """Map job params → overlap_analysis.py CLI flags.
+
+    Only flags that overlap_analysis.py actually accepts go here.
+    audit.py-only params (leverage, stop_raw_pct, min_listing_age, etc.)
+    are passed via env vars in pipeline_env and do not appear on the CLI.
+    """
+    flag_map = {
+        "leaderboard_index":        "--leaderboard-index",
+        "min_mcap":                 "--min-mcap",
+        "max_mcap":                 "--max-mcap",
+        "sort_by":                  "--sort-by",
+        "mode":                     "--mode",
+        "sample_interval":          "--sample-interval",
+        "freq_width":               "--freq-width",
+        "freq_cutoff":              "--freq-cutoff",
+        "deployment_start_hour":    "--deployment-start-hour",
+        "index_lookback":           "--index-lookback",
+        "sort_lookback":            "--sort-lookback",
+        "deployment_runtime_hours": "--deployment-runtime-hours",
+        "capital_mode":             "--capital-mode",
+        "fixed_notional_cap":       "--fixed-notional-cap",
+    }
+    bool_flags = {
+        "end_cross_midnight": "--end-cross-midnight",
+        "drop_unverified":    "--drop-unverified",
+        "quick":              "--quick",
+    }
+
+    # --audit chains into rebuild_portfolio_matrix.py and audit.py automatically.
+    # --audit-source parquet skips Google Sheets (correct flag name).
+    args: list[str] = ["--audit", "--audit-source", "parquet"]
+
+    for param, flag in flag_map.items():
+        value = params.get(param)
+        if value is not None:
+            args += [flag, str(value)]
+
+    for param, flag in bool_flags.items():
+        if params.get(param):
+            args.append(flag)
+
+    return args
+
+
+@celery_app.task(bind=True, name="pipeline_worker.run_pipeline")
+def run_pipeline(self, job_id: str, params: dict) -> dict:
+    """
+    Execute the full audit pipeline for a job.
+
+    Stages:
+      overlap   — runs overlap_analysis.py --audit (chains portfolio + audit)
+      report    — runs node generate_audit_report.js
+      parsing   — extracts key metrics from audit_output.txt
+    """
+    pipeline_dir  = Path(settings.PIPELINE_DIR)
+    job_dir       = Path(settings.JOBS_DIR) / job_id
+    job_dir.mkdir(parents=True, exist_ok=True)
+    audit_output_path = job_dir / "audit_output.txt"
+
+    # Env vars passed to subprocesses so pipeline scripts pick up correct paths.
+    # Every JobRequest param is forwarded as SNAKE_UPPER_CASE so audit.py can
+    # read it via os.environ.get("PARAM_NAME", default).
+    import os
+
+    def _boolenv(v: bool) -> str:
+        return "1" if v else "0"
+
+    pipeline_env = {
+        **os.environ,
+        # Ensure miniforge python is found first when pipeline scripts call "python3"
+        "PATH": "/opt/homebrew/Caskroom/miniforge/base/bin:" + os.environ.get("PATH", ""),
+        # Infrastructure paths
+        "BASE_DATA_DIR":       str(settings.BASE_DATA_DIR),
+        "PARQUET_PATH":        settings.PARQUET_PATH,
+        "MARKETCAP_DIR":       settings.MARKETCAP_DIR,
+        # Blank LOCAL_MATRIX_CSV tells audit.py to rebuild the matrix fresh
+        "LOCAL_MATRIX_CSV":    "",
+
+        # ── Basic ─────────────────────────────────────────────────────────────
+        "LEADERBOARD_INDEX":          str(params.get("leaderboard_index", 100)),
+        "SORT_BY":                    str(params.get("sort_by", "price")),
+        "MODE":                       str(params.get("mode", "snapshot")),
+        "FREQ_WIDTH":                 str(params.get("freq_width", 20)),
+        "FREQ_CUTOFF":                str(params.get("freq_cutoff", 20)),
+        "SAMPLE_INTERVAL":            str(params.get("sample_interval", 5)),
+        "DEPLOYMENT_START_HOUR":      str(params.get("deployment_start_hour", 6)),
+        "INDEX_LOOKBACK":             str(params.get("index_lookback", 6)),
+        "SORT_LOOKBACK":              str(params.get("sort_lookback", "6")),
+        "DEPLOYMENT_RUNTIME_HOURS":   str(params.get("deployment_runtime_hours", "daily")),
+        "END_CROSS_MIDNIGHT":         _boolenv(params.get("end_cross_midnight", True)),
+        "STARTING_CAPITAL":           str(params.get("starting_capital", 100000.0)),
+        "CAPITAL_MODE":               str(params.get("capital_mode", "fixed")),
+        "FIXED_NOTIONAL_CAP":         str(params.get("fixed_notional_cap", "internal")),
+        "PIVOT_LEVERAGE":             str(params.get("pivot_leverage", 4.0)),
+        "MIN_MCAP":                   str(params.get("min_mcap", 0.0)),
+        "MAX_MCAP":                   str(params.get("max_mcap", 0.0)),
+        "MIN_LISTING_AGE":            str(params.get("min_listing_age", 0)),
+        "MAX_PORT":                   str(params.get("max_port", "")),
+        "DROP_UNVERIFIED":            _boolenv(params.get("drop_unverified", False)),
+        "LEVERAGE":                   str(params.get("leverage", 4.0)),
+        "STOP_RAW_PCT":               str(params.get("stop_raw_pct", -6.0)),
+        "PRICE_SOURCE":               str(params.get("price_source", "parquet")),
+        "SAVE_CHARTS":                _boolenv(params.get("save_charts", True)),
+        "TRIAL_PURCHASES":            _boolenv(params.get("trial_purchases", False)),
+        "QUICK":                      _boolenv(params.get("quick", False)),
+        "TAKER_FEE_PCT":              str(params.get("taker_fee_pct", 0.0008)),
+        "FUNDING_RATE_DAILY_PCT":     str(params.get("funding_rate_daily_pct", 0.0002)),
+
+        # CANDIDATE_CONFIGS execution params
+        "EARLY_KILL_X":               str(params.get("early_kill_x", 5)),
+        "EARLY_KILL_Y":               str(params.get("early_kill_y", -999.0)),
+        "EARLY_INSTILL_Y":            str(params.get("early_instill_y", -999.0)),
+        "L_BASE":                     str(params.get("l_base", 0.0)),
+        "L_HIGH":                     str(params.get("l_high", 1.0)),
+        "PORT_TSL":                   str(params.get("port_tsl", 0.99)),
+        "PORT_SL":                    str(params.get("port_sl", -0.99)),
+        "EARLY_FILL_Y":               str(params.get("early_fill_y", 0.99)),
+        "EARLY_FILL_X":               str(params.get("early_fill_x", 5)),
+
+        # ── Filters ───────────────────────────────────────────────────────────
+        "ENABLE_TAIL_GUARDRAIL":      _boolenv(params.get("enable_tail_guardrail", True)),
+        "ENABLE_DISPERSION_FILTER":   _boolenv(params.get("enable_dispersion_filter", True)),
+        "ENABLE_TAIL_PLUS_DISP":      _boolenv(params.get("enable_tail_plus_disp", True)),
+        "ENABLE_VOL_FILTER":          _boolenv(params.get("enable_vol_filter", True)),
+        "ENABLE_TAIL_DISP_VOL":       _boolenv(params.get("enable_tail_disp_vol", False)),
+        "ENABLE_TAIL_OR_VOL":         _boolenv(params.get("enable_tail_or_vol", False)),
+        "ENABLE_TAIL_AND_VOL":        _boolenv(params.get("enable_tail_and_vol", False)),
+        "ENABLE_BLOFIN_FILTER":       _boolenv(params.get("enable_blofin_filter", False)),
+        "ENABLE_BTC_MA_FILTER":       _boolenv(params.get("enable_btc_ma_filter", False)),
+        "ENABLE_IC_DIAGNOSTIC":       _boolenv(params.get("enable_ic_diagnostic", False)),
+        "ENABLE_IC_FILTER":           _boolenv(params.get("enable_ic_filter", False)),
+        "RUN_FILTER_NONE":            _boolenv(params.get("run_filter_none", True)),
+        "RUN_FILTER_TAIL":            _boolenv(params.get("run_filter_tail", False)),
+        "RUN_FILTER_DISPERSION":      _boolenv(params.get("run_filter_dispersion", False)),
+        "RUN_FILTER_TAIL_DISP":       _boolenv(params.get("run_filter_tail_disp", False)),
+        "RUN_FILTER_VOL":             _boolenv(params.get("run_filter_vol", False)),
+        "RUN_FILTER_TAIL_DISP_VOL":   _boolenv(params.get("run_filter_tail_disp_vol", False)),
+        "RUN_FILTER_TAIL_OR_VOL":     _boolenv(params.get("run_filter_tail_or_vol", False)),
+        "RUN_FILTER_TAIL_AND_VOL":    _boolenv(params.get("run_filter_tail_and_vol", False)),
+        "RUN_FILTER_TAIL_BLOFIN":     _boolenv(params.get("run_filter_tail_blofin", False)),
+        "RUN_FILTER_CALENDAR":        _boolenv(params.get("run_filter_calendar", False)),
+
+        # ── Advanced — Strategy tuning ────────────────────────────────────────
+        "DISPERSION_THRESHOLD":         str(params.get("dispersion_threshold", 0.66)),
+        "DISPERSION_BASELINE_WIN":      str(params.get("dispersion_baseline_win", 33)),
+        "DISPERSION_DYNAMIC_UNIVERSE":  _boolenv(params.get("dispersion_dynamic_universe", True)),
+        "DISPERSION_N":                 str(params.get("dispersion_n", 40)),
+        "VOL_LOOKBACK":                 str(params.get("vol_lookback", 10)),
+        "VOL_PERCENTILE":               str(params.get("vol_percentile", 0.25)),
+        "VOL_BASELINE_WIN":             str(params.get("vol_baseline_win", 90)),
+        "TAIL_DROP_PCT":                str(params.get("tail_drop_pct", 0.04)),
+        "TAIL_VOL_MULT":                str(params.get("tail_vol_mult", 1.4)),
+        "IC_SIGNAL":                    str(params.get("ic_signal", "mom1d")),
+        "IC_WINDOW":                    str(params.get("ic_window", 30)),
+        "IC_THRESHOLD":                 str(params.get("ic_threshold", 0.02)),
+        "BTC_MA_DAYS":                  str(params.get("btc_ma_days", 20)),
+        "BLOFIN_MIN_SYMBOLS":           str(params.get("blofin_min_symbols", 1)),
+        "LEADERBOARD_TOP_N":            str(params.get("leaderboard_top_n", 333)),
+        "TRAIN_TEST_SPLIT":             str(params.get("train_test_split", 0.60)),
+        "N_TRIALS":                     str(params.get("n_trials", 3)),
+
+        # ── Advanced — Leverage scaling ───────────────────────────────────────
+        "ENABLE_PERF_LEV_SCALING":    _boolenv(params.get("enable_perf_lev_scaling", False)),
+        "PERF_LEV_WINDOW":            str(params.get("perf_lev_window", 10)),
+        "PERF_LEV_SORTINO_TARGET":    str(params.get("perf_lev_sortino_target", 3.0)),
+        "PERF_LEV_MAX_BOOST":         str(params.get("perf_lev_max_boost", 1.5)),
+        "ENABLE_VOL_LEV_SCALING":     _boolenv(params.get("enable_vol_lev_scaling", False)),
+        "VOL_LEV_WINDOW":             str(params.get("vol_lev_window", 30)),
+        "VOL_LEV_TARGET_VOL":         str(params.get("vol_lev_target_vol", 0.02)),
+        "VOL_LEV_MAX_BOOST":          str(params.get("vol_lev_max_boost", 2.0)),
+        "VOL_LEV_DD_THRESHOLD":       str(params.get("vol_lev_dd_threshold", -0.06)),
+        "ENABLE_CONTRA_LEV_SCALING":  _boolenv(params.get("enable_contra_lev_scaling", False)),
+        "CONTRA_LEV_WINDOW":          str(params.get("contra_lev_window", 30)),
+        "CONTRA_LEV_MAX_BOOST":       str(params.get("contra_lev_max_boost", 2.0)),
+        "CONTRA_LEV_DD_THRESHOLD":    str(params.get("contra_lev_dd_threshold", -0.15)),
+
+        # ── Advanced — Risk overlays ──────────────────────────────────────────
+        "ENABLE_PPH":                       _boolenv(params.get("enable_pph", False)),
+        "PPH_FREQUENCY":                    str(params.get("pph_frequency", "weekly")),
+        "PPH_THRESHOLD":                    str(params.get("pph_threshold", 0.20)),
+        "PPH_HARVEST_FRAC":                 str(params.get("pph_harvest_frac", 0.50)),
+        "PPH_SWEEP_ENABLED":                _boolenv(params.get("pph_sweep_enabled", False)),
+        "ENABLE_RATCHET":                   _boolenv(params.get("enable_ratchet", False)),
+        "RATCHET_FREQUENCY":                str(params.get("ratchet_frequency", "weekly")),
+        "RATCHET_TRIGGER":                  str(params.get("ratchet_trigger", 0.20)),
+        "RATCHET_LOCK_PCT":                 str(params.get("ratchet_lock_pct", 0.15)),
+        "RATCHET_RISK_OFF_LEV_SCALE":       str(params.get("ratchet_risk_off_lev_scale", 0.0)),
+        "RATCHET_SWEEP_ENABLED":            _boolenv(params.get("ratchet_sweep_enabled", False)),
+        "ENABLE_ADAPTIVE_RATCHET":          _boolenv(params.get("enable_adaptive_ratchet", False)),
+        "ADAPTIVE_RATCHET_FREQUENCY":       str(params.get("adaptive_ratchet_frequency", "weekly")),
+        "ADAPTIVE_RATCHET_VOL_WINDOW":      str(params.get("adaptive_ratchet_vol_window", 20)),
+        "ADAPTIVE_RATCHET_VOL_LOW":         str(params.get("adaptive_ratchet_vol_low", 0.03)),
+        "ADAPTIVE_RATCHET_VOL_HIGH":        str(params.get("adaptive_ratchet_vol_high", 0.07)),
+        "ADAPTIVE_RATCHET_RISK_OFF_SCALE":  str(params.get("adaptive_ratchet_risk_off_scale", 0.0)),
+        "ADAPTIVE_RATCHET_FLOOR_DECAY":     str(params.get("adaptive_ratchet_floor_decay", 0.995)),
+        "ADAPTIVE_RATCHET_SWEEP_ENABLED":   _boolenv(params.get("adaptive_ratchet_sweep_enabled", False)),
+
+        # ── Advanced — Sweeps, cubes, robustness ─────────────────────────────
+        "ENABLE_SWEEP_L_HIGH":          _boolenv(params.get("enable_sweep_l_high", False)),
+        "ENABLE_SWEEP_TAIL_GUARDRAIL":  _boolenv(params.get("enable_sweep_tail_guardrail", False)),
+        "ENABLE_SWEEP_TRAIL_WIDE":      _boolenv(params.get("enable_sweep_trail_wide", False)),
+        "ENABLE_SWEEP_TRAIL_NARROW":    _boolenv(params.get("enable_sweep_trail_narrow", False)),
+        "ENABLE_PARAM_SURFACES":        _boolenv(params.get("enable_param_surfaces", False)),
+        "ENABLE_STABILITY_CUBE":        _boolenv(params.get("enable_stability_cube", False)),
+        "ENABLE_RISK_THROTTLE_CUBE":    _boolenv(params.get("enable_risk_throttle_cube", False)),
+        "ENABLE_EXIT_CUBE":             _boolenv(params.get("enable_exit_cube", False)),
+        "ENABLE_NOISE_STABILITY":       _boolenv(params.get("enable_noise_stability", False)),
+        "ENABLE_SLIPPAGE_SWEEP":        _boolenv(params.get("enable_slippage_sweep", False)),
+        "ENABLE_EQUITY_ENSEMBLE":       _boolenv(params.get("enable_equity_ensemble", False)),
+        "ENABLE_PARAM_JITTER":          _boolenv(params.get("enable_param_jitter", False)),
+        "ENABLE_RETURN_CONCENTRATION":  _boolenv(params.get("enable_return_concentration", False)),
+        "ENABLE_SHARPE_RIDGE_MAP":      _boolenv(params.get("enable_sharpe_ridge_map", False)),
+        "ENABLE_SHARPE_PLATEAU":        _boolenv(params.get("enable_sharpe_plateau", False)),
+        "ENABLE_TOP_N_REMOVAL":         _boolenv(params.get("enable_top_n_removal", False)),
+        "ENABLE_LUCKY_STREAK":          _boolenv(params.get("enable_lucky_streak", False)),
+        "ENABLE_PERIODIC_BREAKDOWN":    _boolenv(params.get("enable_periodic_breakdown", False)),
+        "ENABLE_WEEKLY_MILESTONES":     _boolenv(params.get("enable_weekly_milestones", False)),
+        "ENABLE_MONTHLY_MILESTONES":    _boolenv(params.get("enable_monthly_milestones", False)),
+        "ENABLE_DSR_MTL":               _boolenv(params.get("enable_dsr_mtl", False)),
+        "ENABLE_SHOCK_INJECTION":       _boolenv(params.get("enable_shock_injection", False)),
+        "ENABLE_RUIN_PROBABILITY":      _boolenv(params.get("enable_ruin_probability", False)),
+        "ENABLE_MCAP_DIAGNOSTIC":       _boolenv(params.get("enable_mcap_diagnostic", False)),
+        "ENABLE_CAPACITY_CURVE":        _boolenv(params.get("enable_capacity_curve", False)),
+        "ENABLE_REGIME_ROBUSTNESS":     _boolenv(params.get("enable_regime_robustness", False)),
+        "ENABLE_MIN_CUM_RETURN":        _boolenv(params.get("enable_min_cum_return", False)),
+
+        # ── Expert ────────────────────────────────────────────────────────────
+        "ANNUALIZATION_FACTOR":  str(params.get("annualization_factor", 365)),
+        "BAR_MINUTES":           str(params.get("bar_minutes", 5)),
+        "SAVE_DAILY_FILES":      _boolenv(params.get("save_daily_files", False)),
+        "BUILD_MASTER_FILE":     _boolenv(params.get("build_master_file", True)),
+    }
+
+    # ------------------------------------------------------------------
+    # Stage 1: overlap_analysis.py --audit
+    # ------------------------------------------------------------------
+    update_job(job_id, status="running", stage="overlap", progress=5)
+
+    overlap_script = pipeline_dir / "overlap_analysis.py"
+    cmd = [_PIPELINE_PYTHON, str(overlap_script)] + _build_cli_args(params)
+
+    try:
+        with audit_output_path.open("wb") as out_fh:
+            proc = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                cwd=str(pipeline_dir),
+                env=pipeline_env,
+            )
+
+            # Stream output line-by-line to audit_output.txt in real time
+            progress = 5
+            for line in proc.stdout:  # type: ignore[union-attr]
+                out_fh.write(line)
+                out_fh.flush()
+                # Pulse progress slowly while the pipeline runs (cap at 75)
+                if progress < 75:
+                    progress += 1
+                    if progress % 5 == 0:
+                        update_job(job_id, progress=progress)
+
+            proc.wait()
+
+        if proc.returncode != 0:
+            raise RuntimeError(
+                f"overlap_analysis.py exited with code {proc.returncode}. "
+                f"See audit_output.txt for details."
+            )
+    except Exception as exc:
+        update_job(job_id, status="failed", stage="overlap", error=str(exc))
+        raise
+
+    update_job(job_id, stage="overlap", progress=90)
+
+    # ------------------------------------------------------------------
+    # Stage 2: Parse metrics from audit_output.txt
+    # ------------------------------------------------------------------
+    update_job(job_id, stage="parsing", progress=95)
+
+    metrics = _parse_metrics(audit_output_path)
+
+    results = {
+        "metrics":            metrics,
+        "audit_output_path":  str(audit_output_path),
+    }
+
+    update_job(job_id, status="complete", stage="done", progress=100, results=results)
+    return results
