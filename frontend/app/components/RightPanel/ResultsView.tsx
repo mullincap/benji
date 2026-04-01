@@ -201,6 +201,161 @@ function parseHeadingLine(line: string): string | null {
 
 type ParsedSection = { title: string; body: string };
 
+type FullReportCategoryKey =
+  | 'executive_summary'
+  | 'core_performance'
+  | 'risk_profile'
+  | 'signal_quality'
+  | 'robustness_stress'
+  | 'parameter_exploration'
+  | 'stability_cubes'
+  | 'capacity_diagnostics'
+  | 'milestones_appendices'
+  | 'artifact_outputs';
+
+type FullReportCategoryDef = {
+  key: FullReportCategoryKey;
+  title: string;
+  defaultOpen: boolean;
+};
+
+const FULL_REPORT_CATEGORIES: FullReportCategoryDef[] = [
+  { key: 'executive_summary', title: 'Executive Summary', defaultOpen: true },
+  { key: 'core_performance', title: 'Core Performance', defaultOpen: true },
+  { key: 'risk_profile', title: 'Risk Profile', defaultOpen: true },
+  { key: 'signal_quality', title: 'Signal Quality', defaultOpen: false },
+  { key: 'robustness_stress', title: 'Robustness & Stress', defaultOpen: false },
+  { key: 'parameter_exploration', title: 'Parameter Exploration', defaultOpen: false },
+  { key: 'stability_cubes', title: 'Stability Cubes', defaultOpen: false },
+  { key: 'capacity_diagnostics', title: 'Capacity & Diagnostics', defaultOpen: false },
+  { key: 'milestones_appendices', title: 'Milestones & Appendices', defaultOpen: false },
+  { key: 'artifact_outputs', title: 'Artifact Outputs', defaultOpen: false },
+];
+
+function fullReportCategoryForTitle(title: string): FullReportCategoryKey {
+  const t = title.toUpperCase();
+  if (/^RUN SUMMARY\b/.test(t) || /^BEST FILTER HEADLINE STATS\b/.test(t)) return 'executive_summary';
+
+  if (
+    /^DAILY SERIES AUDIT\b/.test(t)
+    || /^RETURN RATES BY PERIOD\b/.test(t)
+    || /^RETURN DISTRIBUTION\b/.test(t)
+    || /^RETURN \+ CONDITIONAL ANALYSIS\b/.test(t)
+    || /^ROLLING MAX DRAWDOWN\b/.test(t)
+  ) {
+    return 'core_performance';
+  }
+
+  if (
+    /^RISK-ADJUSTED RETURN QUALITY\b/.test(t)
+    || /^DAILY VAR \/ CVAR\b/.test(t)
+    || /^DRAWDOWN EPISODE ANALYSIS\b/.test(t)
+    || /^DEFLATED SHARPE RATIO \+ MINIMUM TRACK RECORD LENGTH\b/.test(t)
+    || /^RUIN PROBABILITY\b/.test(t)
+  ) {
+    return 'risk_profile';
+  }
+
+  if (
+    /^SIGNAL PREDICTIVENESS\b/.test(t)
+    || /^ALLOCATOR VIEW SCORECARD\b/.test(t)
+    || /^TECHNICAL APPENDIX SCORECARD\b/.test(t)
+  ) {
+    return 'signal_quality';
+  }
+
+  if (
+    /^SLIPPAGE IMPACT SWEEP\b/.test(t)
+    || /^NOISE PERTURBATION STABILITY TEST\b/.test(t)
+    || /^PARAM JITTER \/ SHARPE STABILITY TEST\b/.test(t)
+    || /^RETURN CONCENTRATION ANALYSIS\b/.test(t)
+    || /^PERIODIC RETURN BREAKDOWN\b/.test(t)
+    || /^SHOCK INJECTION TEST\b/.test(t)
+    || /^REGIME ROBUSTNESS TEST\b/.test(t)
+    || /^REGIME CONSISTENCY SUMMARY\b/.test(t)
+  ) {
+    return 'robustness_stress';
+  }
+
+  if (
+    /^TAIL GUARDRAIL GRID SWEEP\b/.test(t)
+    || /^PARAMETER SWEEP\b/.test(t)
+    || /^L_HIGH SURFACE - RANKED BY SHARPE\b/.test(t)
+    || /^PARAMETER SURFACE MAP\b/.test(t)
+    || /^SHARPE RIDGE MAP\b/.test(t)
+    || /^SHARPE PLATEAU DETECTOR\b/.test(t)
+  ) {
+    return 'parameter_exploration';
+  }
+
+  if (
+    /^PARAMETRIC STABILITY CUBE\b/.test(t)
+    || /^RISK THROTTLE STABILITY CUBE\b/.test(t)
+    || /^EXIT ARCHITECTURE STABILITY CUBE\b/.test(t)
+  ) {
+    return 'stability_cubes';
+  }
+
+  if (
+    /^LIQUIDITY CAPACITY CURVE\b/.test(t)
+    || /^MINIMUM CUMULATIVE RETURN\b/.test(t)
+    || /^MARKET CAP DIAGNOSTIC\b/.test(t)
+    || /^MARKET CAP UNIVERSE SUMMARY\b/.test(t)
+  ) {
+    return 'capacity_diagnostics';
+  }
+
+  if (
+    /^WEEKLY MILESTONES\b/.test(t)
+    || /^MONTHLY MILESTONES\b/.test(t)
+    || /^WHAT YOU HAVE\b/.test(t)
+    || /^WHAT YOU STILL NEED\b/.test(t)
+    || /^BOTTOM LINE\b/.test(t)
+  ) {
+    return 'milestones_appendices';
+  }
+
+  if (
+    /^EQUITY ENSEMBLE\b/.test(t)
+    || /OUTPUT FILES/i.test(t)
+    || /SAVED:/i.test(t)
+  ) {
+    return 'artifact_outputs';
+  }
+
+  return 'core_performance';
+}
+
+function extractRunSummarySection(text: string): ParsedSection | null {
+  if (!text) return null;
+  const lines = text.split('\n');
+  const start = lines.findIndex((l) => /\bRUN SUMMARY\b/i.test(l));
+  if (start < 0) return null;
+  let end = lines.length;
+  for (let i = start + 1; i < lines.length; i += 1) {
+    const t = lines[i].trim();
+    if (parseHeadingLine(t)) {
+      end = i;
+      break;
+    }
+    if (isDividerLine(t)) {
+      const next = (lines[i + 1] ?? '').trim();
+      if (
+        parseHeadingLine(next)
+        || isSpecialSectionTitleLine(next)
+        || /^OUTPUT FILES$/i.test(next)
+        || /^RUN INPUTS SUMMARY$/i.test(next)
+      ) {
+        end = i;
+        break;
+      }
+    }
+  }
+  const body = lines.slice(start + 1, end).join('\n').trim();
+  if (!body) return null;
+  return { title: 'RUN SUMMARY', body };
+}
+
 function extractSelectedFilterAdvancedSections(text: string, selectedFilter: string | null): ParsedSection[] {
   if (!text || !selectedFilter) return [];
   const lines = text.split('\n');
@@ -569,6 +724,64 @@ function extractSpecialFullReportSections(text: string, selectedFilter: string |
   return sections;
 }
 
+function fullReportOrderRank(title: string): number {
+  const t = title.toUpperCase();
+  const order: Array<[RegExp, number]> = [
+    [/^DAILY SERIES AUDIT\b/, 10],
+    [/^SIMULATION BIAS AUDIT\b/, 20],
+    [/^RETURN RATES BY PERIOD\b/, 30],
+    [/^RISK-ADJUSTED RETURN QUALITY\b/, 40],
+    [/^DRAWDOWN EPISODE ANALYSIS\b/, 50],
+    [/^RETURN DISTRIBUTION\b/, 60],
+    [/^RETURN \+ CONDITIONAL ANALYSIS\b/, 70],
+    [/^ROLLING MAX DRAWDOWN\b/, 80],
+    [/^DAILY VAR \/ CVAR\b/, 90],
+
+    [/^SIGNAL PREDICTIVENESS\b/, 120],
+    [/^ALLOCATOR VIEW SCORECARD\b/, 130],
+    [/^TECHNICAL APPENDIX SCORECARD\b/, 140],
+
+    [/^WEEKLY MILESTONES\b/, 160],
+    [/^MONTHLY MILESTONES\b/, 170],
+
+    [/^TAIL GUARDRAIL GRID SWEEP\b/, 200],
+    [/^PARAMETER SWEEP\b/, 210],
+    [/^L_HIGH SURFACE - RANKED BY SHARPE\b/, 220],
+    [/^PARAMETER SURFACE MAP\b/, 230],
+    [/^SHARPE RIDGE MAP\b/, 240],
+    [/^SHARPE PLATEAU DETECTOR\b/, 250],
+
+    [/^PARAMETRIC STABILITY CUBE\b/, 300],
+    [/^RISK THROTTLE STABILITY CUBE\b/, 310],
+    [/^EXIT ARCHITECTURE STABILITY CUBE\b/, 320],
+
+    [/^SLIPPAGE IMPACT SWEEP\b/, 350],
+    [/^NOISE PERTURBATION STABILITY TEST\b/, 360],
+    [/^PARAM JITTER \/ SHARPE STABILITY TEST\b/, 370],
+    [/^RETURN CONCENTRATION ANALYSIS\b/, 380],
+    [/^PERIODIC RETURN BREAKDOWN\b/, 390],
+    [/^SHOCK INJECTION TEST\b/, 400],
+    [/^RUIN PROBABILITY\b/, 410],
+    [/^REGIME ROBUSTNESS TEST\b/, 420],
+    [/^REGIME CONSISTENCY SUMMARY\b/, 430],
+
+    [/^LIQUIDITY CAPACITY CURVE\b/, 450],
+    [/^MINIMUM CUMULATIVE RETURN\b/, 460],
+    [/^MARKET CAP DIAGNOSTIC\b/, 470],
+    [/^MARKET CAP UNIVERSE SUMMARY\b/, 480],
+    [/^EQUITY ENSEMBLE\b/, 490],
+
+    [/^DEFLATED SHARPE RATIO \+ MINIMUM TRACK RECORD LENGTH\b/, 520],
+    [/^WHAT YOU HAVE\b/, 530],
+    [/^WHAT YOU STILL NEED\b/, 540],
+    [/^BOTTOM LINE\b/, 550],
+  ];
+  for (const [rx, rank] of order) {
+    if (rx.test(t)) return rank;
+  }
+  return 999;
+}
+
 function buildFullReportSections(text: string, selectedFilter: string | null): ParsedSection[] {
   const all = extractFullReportSections(text);
   const stress = extractSelectedFilterAdvancedSections(text, selectedFilter);
@@ -612,8 +825,13 @@ function buildFullReportSections(text: string, selectedFilter: string | null): P
     }
     folded.push(s);
   }
-  if (folded.length > 0) return folded;
-  return filterSectionsForSelectedFilter(all, selectedFilter);
+  const sortSections = (sections: ParsedSection[]) => sections
+    .map((s, idx) => ({ s, idx, rank: fullReportOrderRank(s.title) }))
+    .sort((a, b) => (a.rank - b.rank) || (a.idx - b.idx))
+    .map((x) => x.s);
+
+  if (folded.length > 0) return sortSections(folded);
+  return sortSections(filterSectionsForSelectedFilter(all, selectedFilter));
 }
 
 function syntheticDateAt(index: number, total: number): Date {
@@ -919,6 +1137,14 @@ export default function ResultsView({ results, jobId, startingCapital, params }:
   const [outputError, setOutputError] = useState<string | null>(null);
   const [copyState, setCopyState] = useState<'idle' | 'copied' | 'error'>('idle');
   const [tearTemplate, setTearTemplate] = useState('');
+  const [openFullReportCategories, setOpenFullReportCategories] = useState<Record<FullReportCategoryKey, boolean>>(() => (
+    FULL_REPORT_CATEGORIES.reduce((acc, cat) => {
+      acc[cat.key] = cat.defaultOpen;
+      return acc;
+    }, {} as Record<FullReportCategoryKey, boolean>)
+  ));
+  const [openFullReportSectionKeys, setOpenFullReportSectionKeys] = useState<Record<string, boolean>>({});
+  const filterComparisonRef = useRef<HTMLDetailsElement | null>(null);
   const defaultSelectedFilter = (() => {
     if (mergedFilters.length === 0) return null;
     const candidates = mergedFilters.filter((r) => !r.not_run);
@@ -942,9 +1168,94 @@ export default function ResultsView({ results, jobId, startingCapital, params }:
     () => extractSelectedFilterAdvancedSections(auditOutput, selectedFilter),
     [auditOutput, selectedFilter],
   );
-  const fullReportSections = useMemo(() => {
+  const fullReportSectionsSelected = useMemo(() => {
     return buildFullReportSections(auditOutput, selectedFilter);
   }, [auditOutput, selectedFilter]);
+  const runSummarySection = useMemo(() => extractRunSummarySection(auditOutput), [auditOutput]);
+  const bestFilterHeadlineSection = useMemo<ParsedSection | null>(() => {
+    const sharpe = selectedRow?.sharpe ?? m.sharpe;
+    const cagr = selectedRow?.cagr ?? m.cagr;
+    const maxDd = selectedRow?.max_dd ?? m.max_drawdown;
+    const dsr = selectedRow?.dsr_pct ?? m.dsr_pct;
+    const grade = selectedRow?.grade_score ?? selectedRow?.grade ?? m.grade_score;
+    const body = [
+      `Filter: ${selectedFilter ?? 'N/A'}`,
+      `Sharpe: ${fmtMetric(sharpe)}`,
+      `CAGR %: ${fmtPercent2(cagr)}`,
+      `Max DD %: ${fmtPercent2(maxDd)}`,
+      `DSR %: ${fmtPercent2(dsr)}`,
+      `Grade: ${grade ?? 'N/A'}`,
+    ].join('\n');
+    return { title: 'BEST FILTER HEADLINE STATS', body };
+  }, [selectedRow, selectedFilter, m]);
+  const fullReportSections = useMemo(() => {
+    const withExecutive = [
+      ...(runSummarySection ? [runSummarySection] : []),
+      ...(bestFilterHeadlineSection ? [bestFilterHeadlineSection] : []),
+      ...fullReportSectionsSelected,
+    ];
+    const seen = new Set<string>();
+    const out: ParsedSection[] = [];
+    for (const s of withExecutive) {
+      const key = `${s.title}\n${s.body}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.push(s);
+    }
+    return out;
+  }, [
+    fullReportSectionsSelected,
+    runSummarySection,
+    bestFilterHeadlineSection,
+  ]);
+  const fullReportCategoryGroups = useMemo(() => {
+    const byKey = FULL_REPORT_CATEGORIES.reduce((acc, cat) => {
+      acc[cat.key] = [];
+      return acc;
+    }, {} as Record<FullReportCategoryKey, ParsedSection[]>);
+    for (const section of fullReportSections) {
+      const cat = fullReportCategoryForTitle(section.title);
+      byKey[cat].push(section);
+    }
+    return FULL_REPORT_CATEGORIES
+      .map((cat) => ({ ...cat, sections: byKey[cat.key] }))
+      .filter((cat) => cat.sections.length > 0);
+  }, [fullReportSections]);
+  const fullReportSectionCount = useMemo(
+    () => fullReportCategoryGroups.reduce((acc, cat) => acc + cat.sections.length, 0),
+    [fullReportCategoryGroups],
+  );
+  const fullReportKpis = useMemo(() => ([
+    { label: 'Sharpe', key: 'sharpe', value: fmtMetric(selectedRow?.sharpe ?? m.sharpe), colorValue: selectedRow?.sharpe ?? m.sharpe },
+    { label: 'CAGR %', key: 'cagr', value: fmtPercent2(selectedRow?.cagr ?? m.cagr), colorValue: selectedRow?.cagr ?? m.cagr },
+    { label: 'Max DD %', key: 'max_dd', value: fmtPercent2(selectedRow?.max_dd ?? m.max_drawdown), colorValue: selectedRow?.max_dd ?? m.max_drawdown },
+    { label: 'DSR %', key: 'dsr_pct', value: fmtPercent2(selectedRow?.dsr_pct ?? m.dsr_pct), colorValue: selectedRow?.dsr_pct ?? m.dsr_pct },
+    {
+      label: 'Grade',
+      key: 'grade',
+      value: String((selectedRow?.grade_score ?? selectedRow?.grade ?? m.grade_score) ?? 'N/A'),
+      colorValue: selectedRow?.grade_score ?? m.grade_score,
+    },
+  ]), [selectedRow, m]);
+
+  useEffect(() => {
+    setOpenFullReportSectionKeys((prev) => {
+      const next: Record<string, boolean> = {};
+      for (const cat of fullReportCategoryGroups) {
+        for (let idx = 0; idx < cat.sections.length; idx += 1) {
+          const key = `${cat.key}-${idx}-${cat.sections[idx].title}`;
+          next[key] = prev[key] ?? false;
+        }
+      }
+      const prevKeys = Object.keys(prev);
+      const nextKeys = Object.keys(next);
+      if (prevKeys.length !== nextKeys.length) return next;
+      for (const k of nextKeys) {
+        if (prev[k] !== next[k]) return next;
+      }
+      return prev;
+    });
+  }, [fullReportCategoryGroups]);
 
   const selectedEquityCurve = ((selectedRow?.equity_curve as Point[] | undefined) ?? equityCurve) as Point[] | null | undefined;
   const selectedDrawdownCurve = ((selectedRow?.drawdown_curve as Point[] | undefined) ?? drawdownCurve) as Point[] | null | undefined;
@@ -1456,6 +1767,13 @@ export default function ResultsView({ results, jobId, startingCapital, params }:
     }
   }
 
+  function jumpToFilterComparison() {
+    setActiveTab('summary');
+    requestAnimationFrame(() => {
+      filterComparisonRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    });
+  }
+
   return (
     <div style={{ padding: 16, display: 'flex', flexDirection: 'column', gap: 16 }}>
       <div
@@ -1575,7 +1893,11 @@ export default function ResultsView({ results, jobId, startingCapital, params }:
             </details>
           </div>
 
-          <details open style={{ background: 'var(--bg2)', border: '1px solid var(--line)', borderRadius: 3, padding: '8px 10px' }}>
+          <details
+            ref={filterComparisonRef}
+            open
+            style={{ background: 'var(--bg2)', border: '1px solid var(--line)', borderRadius: 3, padding: '8px 10px' }}
+          >
             <summary style={{ cursor: 'pointer', fontSize: 9, color: 'var(--t3)', textTransform: 'uppercase', letterSpacing: '0.12em', fontWeight: 700 }}>
               Filter Comparison
             </summary>
@@ -1775,54 +2097,252 @@ export default function ResultsView({ results, jobId, startingCapital, params }:
       )}
 
       {activeTab === 'full_report' && (
-        <div style={{ background: 'var(--bg2)', border: '1px solid var(--line)', borderRadius: 3, padding: 12, display: 'flex', flexDirection: 'column', gap: 10 }}>
+        <div
+          style={{
+            background: 'var(--bg2)',
+            border: '1px solid var(--line)',
+            borderRadius: 3,
+            height: 'calc(100vh - 170px)',
+            display: 'flex',
+            flexDirection: 'column',
+            overflow: 'hidden',
+          }}
+        >
           {outputLoading && <div style={{ fontSize: 10, color: 'var(--t3)' }}>Loading full report sections...</div>}
           {outputError && <div style={{ fontSize: 10, color: 'var(--red)' }}>{outputError}</div>}
           {!outputLoading && !outputError && (
             <>
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 10 }}>
-                <div style={{ fontSize: 9, color: 'var(--t3)', textTransform: 'uppercase', letterSpacing: '0.1em' }}>
-                  Full Report • {fullReportSections.length} sections
+              <div style={{ padding: '12px 12px 0 12px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 10 }}>
+                <div style={{ fontSize: 9, color: 'var(--t3)', textTransform: 'uppercase', letterSpacing: '0.1em', fontWeight: 700 }}>
+                  Full Report • {fullReportSectionCount} sections
                 </div>
-                <button
-                  onClick={copyRawOutput}
+                <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                  <button
+                    onClick={jumpToFilterComparison}
+                    style={{
+                      height: 24,
+                      padding: '0 8px',
+                      borderRadius: 3,
+                      border: '1px solid var(--line2)',
+                      background: 'var(--bg1)',
+                      color: 'var(--t2)',
+                      fontSize: 9,
+                      letterSpacing: '0.06em',
+                      textTransform: 'uppercase',
+                      cursor: 'pointer',
+                    }}
+                    title="Jump to Filter Comparison in Summary"
+                  >
+                    Selected Filter: {selectedFilter ?? 'N/A'}
+                  </button>
+                  <button
+                    onClick={copyRawOutput}
+                    style={{
+                      height: 24,
+                      padding: '0 8px',
+                      borderRadius: 3,
+                      border: '1px solid var(--line2)',
+                      background: 'var(--bg1)',
+                      color: copyState === 'copied' ? 'var(--green)' : copyState === 'error' ? 'var(--red)' : 'var(--t1)',
+                      fontSize: 9,
+                      letterSpacing: '0.08em',
+                      fontWeight: 700,
+                      cursor: 'pointer',
+                    }}
+                  >
+                    {copyState === 'copied' ? 'COPIED' : copyState === 'error' ? 'COPY FAILED' : 'COPY ALL'}
+                  </button>
+                </div>
+              </div>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 8, minHeight: 0, overflowY: 'auto', padding: '0 12px 12px 12px' }}>
+                <div
                   style={{
-                    height: 24,
-                    padding: '0 8px',
-                    borderRadius: 3,
-                    border: '1px solid var(--line2)',
-                    background: 'var(--bg1)',
-                    color: copyState === 'copied' ? 'var(--green)' : copyState === 'error' ? 'var(--red)' : 'var(--t1)',
-                    fontSize: 9,
-                    letterSpacing: '0.08em',
-                    fontWeight: 700,
-                    cursor: 'pointer',
+                    position: 'sticky',
+                    top: 0,
+                    zIndex: 3,
+                    background: 'var(--bg2)',
+                    paddingTop: 8,
+                    paddingBottom: 8,
+                    borderBottom: '1px solid var(--line)',
+                    display: 'flex',
+                    flexDirection: 'column',
+                    gap: 8,
                   }}
                 >
-                  {copyState === 'copied' ? 'COPIED' : copyState === 'error' ? 'COPY FAILED' : 'COPY ALL'}
-                </button>
-              </div>
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 8, maxHeight: 'calc(100vh - 220px)', overflowY: 'auto', paddingRight: 2 }}>
+                  <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                    {fullReportCategoryGroups.map((cat) => (
+                      <button
+                        key={`toc-${cat.key}`}
+                        onClick={() => {
+                          const el = document.getElementById(`full-report-cat-${cat.key}`);
+                          if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+                        }}
+                        style={{
+                          height: 22,
+                          padding: '0 8px',
+                          borderRadius: 3,
+                          border: '1px solid var(--line2)',
+                          background: 'var(--bg1)',
+                          color: 'var(--t2)',
+                          fontSize: 9,
+                          letterSpacing: '0.06em',
+                          textTransform: 'uppercase',
+                          cursor: 'pointer',
+                        }}
+                      >
+                        {cat.title} ({cat.sections.length})
+                      </button>
+                    ))}
+                  </div>
+                  <div
+                    style={{
+                      display: 'grid',
+                      gridTemplateColumns: 'repeat(5, minmax(0, 1fr))',
+                      gap: 6,
+                    }}
+                  >
+                    {fullReportKpis.map((kpi) => (
+                      <div
+                        key={`fr-kpi-${kpi.key}`}
+                        style={{
+                          border: '1px solid var(--line)',
+                          borderRadius: 3,
+                          background: 'var(--bg1)',
+                          padding: '6px 8px',
+                          display: 'flex',
+                          justifyContent: 'space-between',
+                          alignItems: 'center',
+                          gap: 10,
+                        }}
+                      >
+                        <span style={{ fontSize: 9, color: 'var(--t3)', letterSpacing: '0.08em', textTransform: 'uppercase' }}>{kpi.label}</span>
+                        <span style={{ fontSize: 12, fontWeight: 700, color: metricColor(kpi.key, kpi.colorValue) }}>{kpi.value}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
                 {fullReportSections.length === 0 && (
                   <div style={{ fontSize: 10, color: 'var(--t3)' }}>No full report sections detected.</div>
                 )}
-                {fullReportSections.map((section, idx) => (
-                  <details key={`${idx}-${section.title}`} style={{ border: '1px solid var(--line)', borderRadius: 3, padding: '6px 8px', background: 'var(--bg1)' }}>
-                    <summary style={{ cursor: 'pointer', fontSize: 10, color: 'var(--t1)', fontWeight: 600 }}>
-                      {section.title}
-                    </summary>
-                    <pre
+                {fullReportCategoryGroups.map((cat) => (
+                  <details
+                    key={`group-${cat.key}`}
+                    id={`full-report-cat-${cat.key}`}
+                    open={openFullReportCategories[cat.key]}
+                    onToggle={(e) => {
+                      const isOpen = (e.currentTarget as HTMLDetailsElement).open;
+                      setOpenFullReportCategories((prev) => ({ ...prev, [cat.key]: isOpen }));
+                    }}
+                    style={{ border: '1px solid var(--line)', borderRadius: 3, padding: '6px 8px', background: 'var(--bg1)' }}
+                  >
+                    <summary
                       style={{
-                        margin: '8px 0 0 0',
-                        whiteSpace: 'pre-wrap',
+                        cursor: 'pointer',
                         fontSize: 10,
-                        lineHeight: 1.45,
-                        color: 'var(--t2)',
-                        fontFamily: 'var(--font-space-mono), Space Mono, monospace',
+                        color: 'var(--t1)',
+                        fontWeight: 700,
+                        letterSpacing: '0.08em',
+                        textTransform: 'uppercase',
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'space-between',
+                        gap: 8,
                       }}
                     >
-                      {section.body}
-                    </pre>
+                      <span>{cat.title} • {cat.sections.length}</span>
+                      <span style={{ display: 'inline-flex', gap: 6 }}>
+                        <button
+                          onClick={(e) => {
+                            e.preventDefault();
+                            e.stopPropagation();
+                            setOpenFullReportSectionKeys((prev) => {
+                              const next = { ...prev };
+                              for (let idx = 0; idx < cat.sections.length; idx += 1) {
+                                next[`${cat.key}-${idx}-${cat.sections[idx].title}`] = true;
+                              }
+                              return next;
+                            });
+                          }}
+                          style={{
+                            height: 20,
+                            padding: '0 8px',
+                            borderRadius: 3,
+                            border: '1px solid var(--line2)',
+                            background: 'var(--bg0)',
+                            color: 'var(--t2)',
+                            fontSize: 9,
+                            letterSpacing: '0.06em',
+                            textTransform: 'uppercase',
+                            cursor: 'pointer',
+                          }}
+                        >
+                          Expand All
+                        </button>
+                        <button
+                          onClick={(e) => {
+                            e.preventDefault();
+                            e.stopPropagation();
+                            setOpenFullReportSectionKeys((prev) => {
+                              const next = { ...prev };
+                              for (let idx = 0; idx < cat.sections.length; idx += 1) {
+                                next[`${cat.key}-${idx}-${cat.sections[idx].title}`] = false;
+                              }
+                              return next;
+                            });
+                          }}
+                          style={{
+                            height: 20,
+                            padding: '0 8px',
+                            borderRadius: 3,
+                            border: '1px solid var(--line2)',
+                            background: 'var(--bg0)',
+                            color: 'var(--t2)',
+                            fontSize: 9,
+                            letterSpacing: '0.06em',
+                            textTransform: 'uppercase',
+                            cursor: 'pointer',
+                          }}
+                        >
+                          Collapse All
+                        </button>
+                      </span>
+                    </summary>
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginTop: 8, marginLeft: 24, paddingLeft: 10, borderLeft: '1px solid var(--line2)' }}>
+                      {cat.sections.map((section, idx) => (
+                        <details
+                          key={`${cat.key}-${idx}-${section.title}`}
+                          open={!!openFullReportSectionKeys[`${cat.key}-${idx}-${section.title}`]}
+                          onToggle={(e) => {
+                            const key = `${cat.key}-${idx}-${section.title}`;
+                            const isOpen = (e.currentTarget as HTMLDetailsElement).open;
+                            setOpenFullReportSectionKeys((prev) => ({ ...prev, [key]: isOpen }));
+                          }}
+                          style={{
+                            border: '1px solid var(--line2)',
+                            borderRadius: 3,
+                            padding: '6px 8px',
+                            background: 'var(--bg0)',
+                            width: 'calc(100% - 24px)',
+                          }}
+                        >
+                          <summary style={{ cursor: 'pointer', fontSize: 10, color: 'var(--t1)', fontWeight: 600 }}>
+                            {section.title}
+                          </summary>
+                          <pre
+                            style={{
+                              margin: '8px 0 0 0',
+                              whiteSpace: 'pre-wrap',
+                              fontSize: 10,
+                              lineHeight: 1.45,
+                              color: 'color-mix(in srgb, var(--t1) 88%, white 12%)',
+                              fontFamily: 'var(--font-space-mono), Space Mono, monospace',
+                            }}
+                          >
+                            {section.body}
+                          </pre>
+                        </details>
+                      ))}
+                    </div>
                   </details>
                 ))}
               </div>

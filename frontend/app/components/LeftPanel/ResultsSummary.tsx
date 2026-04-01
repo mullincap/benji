@@ -34,21 +34,74 @@ function fmtPercent1(v: unknown): string {
   return String(v);
 }
 
+function parseDateLike(v: unknown): Date | null {
+  if (v instanceof Date && Number.isFinite(v.getTime())) return v;
+  if (typeof v === 'string') {
+    const d = new Date(v);
+    return Number.isFinite(d.getTime()) ? d : null;
+  }
+  if (typeof v === 'number') {
+    const ms = v > 1e12 ? v : v > 1e9 ? v * 1000 : null;
+    if (!ms) return null;
+    const d = new Date(ms);
+    return Number.isFinite(d.getTime()) ? d : null;
+  }
+  return null;
+}
+
+function avgMonthlyReturnPctFromCurve(curve: unknown): number | null {
+  if (!Array.isArray(curve) || curve.length < 2) return null;
+  const points = curve
+    .map((p) => {
+      if (!p || typeof p !== 'object') return null;
+      const rec = p as { x?: unknown; y?: unknown };
+      const d = parseDateLike(rec.x);
+      const y = typeof rec.y === 'number' ? rec.y : Number(rec.y);
+      if (!d || !Number.isFinite(y)) return null;
+      return { d, y };
+    })
+    .filter((p): p is { d: Date; y: number } => p !== null);
+  if (points.length < 2) return null;
+
+  const buckets = new Map<string, { first: number; last: number }>();
+  for (const p of points) {
+    const key = `${p.d.getFullYear()}-${String(p.d.getMonth() + 1).padStart(2, '0')}`;
+    const cur = buckets.get(key);
+    if (!cur) {
+      buckets.set(key, { first: p.y, last: p.y });
+    } else {
+      cur.last = p.y;
+    }
+  }
+  const monthly = Array.from(buckets.values())
+    .map((m) => (m.first !== 0 ? ((m.last / m.first) - 1) * 100 : NaN))
+    .filter((v) => Number.isFinite(v));
+  if (monthly.length === 0) return null;
+  return monthly.reduce((a, b) => a + b, 0) / monthly.length;
+}
+
+function avgMonthlyFromCagrPct(cagrPct: unknown): number | null {
+  const c = typeof cagrPct === 'number' ? cagrPct : Number(cagrPct);
+  if (!Number.isFinite(c)) return null;
+  // CAGR is stored/displayed in percent points (e.g., 842.96 means 842.96%).
+  const annual = 1 + (c / 100);
+  if (annual <= 0) return null;
+  return (Math.pow(annual, 1 / 12) - 1) * 100;
+}
+
 function kpiColor(key: string, value: unknown): string {
-  if (typeof value !== 'number') return 'var(--t0)';
+  if (typeof value !== 'number' || !Number.isFinite(value)) return 'var(--t0)';
   if (key === 'sharpe' || key === 'sortino') {
     if (value >= 1.5) return 'var(--green)';
     if (value >= 0.8) return 'var(--amber)';
     return 'var(--red)';
   }
   if (key === 'max_dd') {
-    if (value > -0.15) return 'var(--green)';
-    if (value > -0.3) return 'var(--amber)';
     return 'var(--red)';
   }
-  if (key === 'cagr') {
-    if (value > 0.3) return 'var(--green)';
-    if (value > 0) return 'var(--amber)';
+  if (key === 'avg_1m_ret') {
+    if (value > 0) return 'var(--green)';
+    if (value > -5) return 'var(--amber)';
     return 'var(--red)';
   }
   return value >= 0 ? 'var(--green)' : 'var(--red)';
@@ -300,6 +353,10 @@ export default function ResultsSummary({
   const sharpe = (bestRow?.sharpe ?? metrics?.sharpe) as number | undefined;
   const maxDd = (bestRow?.max_dd ?? metrics?.max_drawdown) as number | undefined;
   const cagr = (bestRow?.cagr ?? metrics?.cagr) as number | undefined;
+  const avg1mRet = (
+    avgMonthlyReturnPctFromCurve(bestRow?.equity_curve ?? metrics?.equity_curve)
+    ?? avgMonthlyFromCagrPct(cagr)
+  );
 
   const hiddenKeys = getInactiveChildKeys(params);
   const activeConfigs = Object.entries(params)
@@ -356,14 +413,14 @@ export default function ResultsSummary({
           {[
             { label: 'Sharpe', key: 'sharpe', value: sharpe },
             { label: 'Max DD', key: 'max_dd', value: maxDd },
-            { label: 'CAGR', key: 'cagr', value: cagr },
+            { label: 'avg. 1M ret', key: 'avg_1m_ret', value: avg1mRet },
           ].map(({ label, key, value }) => (
             <div key={key} style={{ textAlign: 'center' }}>
-              <div style={{ fontSize: 9, color: 'var(--t3)', letterSpacing: '0.08em', marginBottom: 2 }}>
+              <div style={{ fontSize: 9, color: 'var(--t3)', letterSpacing: '0.08em', marginBottom: 2, opacity: 0.72 }}>
                 {label}
               </div>
-              <div style={{ fontSize: 15, fontWeight: 700, color: kpiColor(key, value) }}>
-                {key === 'max_dd' || key === 'cagr' ? fmtPercent1(value) : fmtVal(value)}
+              <div style={{ fontSize: 15, fontWeight: 700, color: kpiColor(key, value), opacity: 0.72 }}>
+                {key === 'max_dd' || key === 'avg_1m_ret' ? fmtPercent1(value) : fmtVal(value)}
               </div>
             </div>
           ))}

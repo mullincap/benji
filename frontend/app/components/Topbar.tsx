@@ -52,7 +52,7 @@ export default function Topbar({ jobId, appState, results }: TopbarProps) {
           BENJI3M
         </span>
         <span style={{ fontSize: 9, color: 'var(--t3)', letterSpacing: '0.18em', textTransform: 'uppercase' }}>
-          RISK AUDIT ENGINE
+
         </span>
       </div>
 
