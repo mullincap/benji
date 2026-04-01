@@ -52,7 +52,7 @@ function normalizeStatus(status: string): string {
 
 function statusColor(status: string): string {
   const s = normalizeStatus(status);
-  if (s === 'complete') return 'var(--green)';
+  if (s === 'complete') return 'var(--t1)';
   if (s === 'failed') return 'var(--red)';
   if (s === 'running') return 'var(--amber)';
   return 'var(--t2)';
@@ -126,7 +126,7 @@ export default function AuditHistory({
       style={{
         width: collapsed ? 40 : 300,
         borderLeft: '1px solid var(--line)',
-        background: 'var(--bg1)',
+        background: 'var(--bg0)',
         display: 'flex',
         flexDirection: 'column',
         flexShrink: 0,
@@ -212,8 +212,8 @@ export default function AuditHistory({
                     marginBottom: 8,
                     padding: 8,
                     borderRadius: 3,
-                    border: `1px solid ${selected ? 'var(--green)' : 'var(--line2)'}`,
-                    background: selected ? 'var(--green-dim)' : 'var(--bg2)',
+                    border: `1px solid ${selected ? 'rgba(255, 255, 255, 0.45)' : 'var(--line2)'}`,
+                    background: selected ? 'rgba(255, 255, 255, 0.06)' : 'var(--bg2)',
                     cursor: 'pointer',
                   }}
                 >

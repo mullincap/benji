@@ -206,6 +206,7 @@ export default function Home() {
   const [errorInfo, setErrorInfo] = useState<{ message: string; jobId: string | null } | null>(null);
   const [params, setParams] = useState<Record<string, unknown>>(DEFAULT_PARAMS);
   const [historyCollapsed, setHistoryCollapsed] = useState(false);
+  const [leftCollapsed, setLeftCollapsed] = useState(false);
   const [auditHistory, setAuditHistory] = useState<AuditHistoryItem[]>([]);
   const [historyLoading, setHistoryLoading] = useState(false);
   const [historyError, setHistoryError] = useState<string | null>(null);
@@ -442,59 +443,130 @@ export default function Home() {
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100vh', background: 'var(--bg0)' }}>
-      <Topbar jobId={jobId} appState={appState} results={results} />
+      <Topbar />
 
       <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
         <div style={{ display: 'flex', flex: 1, overflow: 'hidden' }}>
           {/* Left panel */}
           <div
             style={{
-              width: 288,
+              width: leftCollapsed ? 38 : 288,
               borderRight: '1px solid var(--line)',
-              overflowY: 'auto',
+              overflow: 'hidden',
               flexShrink: 0,
-              opacity: appState === 'running' ? 0.4 : 1,
-              pointerEvents: appState === 'running' ? 'none' : 'auto',
-              transition: 'opacity 0.3s',
+              transition: 'width 0.2s ease',
+              background: 'var(--bg0)',
+              display: 'flex',
+              flexDirection: 'column',
             }}
           >
-            {appState === 'idle' && (
-              <ParamForm params={params} onChange={setParams} onSubmit={handleSubmit} />
-            )}
-            {appState === 'running' && <RunningParams params={params} />}
-            {appState === 'results' && (
-              <>
-                <ResultsSummary
-                  key={`summary-${jobId ?? 'none'}-${collapseAuditConfigsSignal}`}
-                  results={results}
-                  params={params}
-                  onRerun={handleEditFromResults}
-                  startAuditConfigsCollapsed={editingFromResults}
-                />
-                {editingFromResults && (
-                  <div style={{ borderTop: '1px solid var(--line)' }}>
-                    <ParamForm params={params} onChange={setParams} onSubmit={handleSubmit} />
-                  </div>
-                )}
-              </>
-            )}
-            {appState === 'failed' && (
-              <div style={{ padding: 16 }}>
-                <div style={{ fontSize: 9, color: 'var(--t3)', textTransform: 'uppercase', letterSpacing: '0.12em', fontWeight: 700, marginBottom: 12 }}>JOB FAILED</div>
-                <div style={{ fontSize: 10, color: 'var(--red)', background: 'var(--red-dim)', border: '1px solid var(--red)', borderRadius: 3, padding: '8px 10px', marginBottom: 12, wordBreak: 'break-word', lineHeight: 1.6 }}>
-                  {errorInfo?.message ?? 'Unknown error'}
-                </div>
-                {errorInfo?.jobId && (
-                  <div style={{ fontSize: 9, color: 'var(--t3)', marginBottom: 12, wordBreak: 'break-all' }}>
-                    job: {errorInfo.jobId}
-                  </div>
-                )}
-                <button
-                  onClick={handleResetToIdle}
-                  style={{ width: '100%', height: 32, background: 'transparent', border: '1px solid var(--line2)', borderRadius: 3, color: 'var(--t1)', fontFamily: 'Space Mono, monospace', fontSize: 10, cursor: 'pointer' }}
+            <div
+              style={{
+                height: 40,
+                borderBottom: '1px solid var(--line)',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: leftCollapsed ? 'center' : 'space-between',
+                padding: leftCollapsed ? 0 : '0 8px',
+                flexShrink: 0,
+              }}
+            >
+              {!leftCollapsed && (
+                <span
+                  style={{
+                    fontSize: 9,
+                    textTransform: 'uppercase',
+                    letterSpacing: '0.12em',
+                    color: 'var(--t3)',
+                    fontWeight: 700,
+                  }}
                 >
-                  EDIT &amp; RETRY
-                </button>
+                  Audit Panel
+                </span>
+              )}
+              <button
+                onClick={() => setLeftCollapsed((v) => !v)}
+                title={leftCollapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+                style={{
+                  width: 24,
+                  height: 24,
+                  border: '1px solid var(--line2)',
+                  borderRadius: 3,
+                  background: 'transparent',
+                  color: 'var(--t1)',
+                  fontSize: 11,
+                  cursor: 'pointer',
+                }}
+              >
+                {leftCollapsed ? '»' : '«'}
+              </button>
+            </div>
+
+            {!leftCollapsed && (
+              <div
+                style={{
+                  flex: 1,
+                  overflowY: 'auto',
+                  opacity: appState === 'running' ? 0.4 : 1,
+                  pointerEvents: appState === 'running' ? 'none' : 'auto',
+                  transition: 'opacity 0.3s',
+                }}
+              >
+                {appState === 'idle' && (
+                  <ParamForm params={params} onChange={setParams} onSubmit={handleSubmit} />
+                )}
+                {appState === 'running' && <RunningParams params={params} />}
+                {appState === 'results' && (
+                  <>
+                    <ResultsSummary
+                      key={`summary-${jobId ?? 'none'}-${collapseAuditConfigsSignal}`}
+                      results={results}
+                      params={params}
+                      onRerun={handleEditFromResults}
+                      startAuditConfigsCollapsed={editingFromResults}
+                    />
+                    {editingFromResults && (
+                      <div style={{ borderTop: '1px solid var(--line)' }}>
+                        <ParamForm params={params} onChange={setParams} onSubmit={handleSubmit} />
+                      </div>
+                    )}
+                  </>
+                )}
+                {appState === 'failed' && (
+                  <div style={{ padding: 16 }}>
+                    <div style={{ fontSize: 9, color: 'var(--t3)', textTransform: 'uppercase', letterSpacing: '0.12em', fontWeight: 700, marginBottom: 12 }}>JOB FAILED</div>
+                    <div style={{ fontSize: 10, color: 'var(--red)', background: 'var(--red-dim)', border: '1px solid var(--red)', borderRadius: 3, padding: '8px 10px', marginBottom: 12, wordBreak: 'break-word', lineHeight: 1.6 }}>
+                      {errorInfo?.message ?? 'Unknown error'}
+                    </div>
+                    {errorInfo?.jobId && (
+                      <div style={{ fontSize: 9, color: 'var(--t3)', marginBottom: 12, wordBreak: 'break-all' }}>
+                        job: {errorInfo.jobId}
+                      </div>
+                    )}
+                    <button
+                      onClick={handleResetToIdle}
+                      style={{ width: '100%', height: 32, background: 'transparent', border: '1px solid var(--line2)', borderRadius: 3, color: 'var(--t1)', fontFamily: 'Space Mono, monospace', fontSize: 10, cursor: 'pointer' }}
+                    >
+                      EDIT &amp; RETRY
+                    </button>
+                  </div>
+                )}
+              </div>
+            )}
+            {leftCollapsed && (
+              <div
+                style={{
+                  flex: 1,
+                  display: 'flex',
+                  alignItems: 'flex-end',
+                  justifyContent: 'center',
+                  paddingBottom: 8,
+                  pointerEvents: 'none',
+                }}
+              >
+                <div style={{ fontSize: 8, color: 'var(--t3)', transform: 'rotate(-90deg)', whiteSpace: 'nowrap', letterSpacing: '0.08em' }}>
+                  SIDEBAR
+                </div>
               </div>
             )}
           </div>
@@ -503,14 +575,40 @@ export default function Home() {
           <div style={{ flex: 1, overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
             {appState === 'idle' && <EmptyState />}
             {appState === 'running' && (
-              <RunningView
-                jobId={jobId}
-                jobData={jobData}
-                logLines={logLines}
-                elapsedSeconds={elapsedSeconds}
-                onCancel={handleCancelAudit}
-                cancelling={cancellingAudit}
-              />
+              <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0 }}>
+                <div
+                  style={{
+                    height: 40,
+                    borderBottom: '1px solid var(--line)',
+                    display: 'flex',
+                    alignItems: 'center',
+                    padding: '0 10px',
+                    flexShrink: 0,
+                  }}
+                >
+                  <span
+                    style={{
+                      fontSize: 9,
+                      textTransform: 'uppercase',
+                      letterSpacing: '0.12em',
+                      color: 'var(--t3)',
+                      fontWeight: 700,
+                    }}
+                  >
+                    Audit Engine
+                  </span>
+                </div>
+                <div style={{ flex: 1, minHeight: 0, overflow: 'hidden' }}>
+                  <RunningView
+                    jobId={jobId}
+                    jobData={jobData}
+                    logLines={logLines}
+                    elapsedSeconds={elapsedSeconds}
+                    onCancel={handleCancelAudit}
+                    cancelling={cancellingAudit}
+                  />
+                </div>
+              </div>
             )}
             {appState === 'results' && (
               <div style={{ flex: 1, overflowY: 'auto' }}>

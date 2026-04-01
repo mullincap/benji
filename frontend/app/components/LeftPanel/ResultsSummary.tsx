@@ -198,6 +198,12 @@ function asNum(v: unknown): number | null {
   return null;
 }
 
+function prettySectionTitle(title: string): string {
+  return title
+    .toLowerCase()
+    .replace(/\b\w/g, (m) => m.toUpperCase());
+}
+
 type ConfigSection = { title: string; keys: string[] };
 
 const CONFIG_SECTIONS: ConfigSection[] = [
@@ -363,6 +369,10 @@ export default function ResultsSummary({
     .filter(([k, v]) => !hiddenKeys.has(k) && isActiveConfigValue(v))
     .sort(([a], [b]) => a.localeCompare(b));
   const groupedActiveConfigs = groupActiveConfigs(activeConfigs);
+  const topLevelConfigSections = groupedActiveConfigs.filter((s) => !s.title.startsWith('ADVANCED • '));
+  const advancedConfigSections = groupedActiveConfigs
+    .filter((s) => s.title.startsWith('ADVANCED • '))
+    .map((s) => ({ ...s, title: s.title.replace(/^ADVANCED\s*•\s*/i, '') }));
   const [auditConfigsOpen, setAuditConfigsOpen] = useState(!startAuditConfigsCollapsed);
   const [openConfigSections, setOpenConfigSections] = useState<Record<string, boolean>>({});
 
@@ -371,25 +381,29 @@ export default function ResultsSummary({
       {/* Grade Hero Block */}
       <div
         style={{
-          background: 'var(--bg0)',
-          border: '1px solid var(--green)',
-          borderRadius: 3,
-          padding: 12,
-          marginBottom: 12,
+          background: 'var(--bg1)',
+          border: '1px solid var(--line)',
+          borderRadius: '3px 3px 0 0',
+          padding: 10,
+          marginBottom: 0,
         }}
       >
         {/* Grade circle + filter name */}
-        <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', marginBottom: 10 }}>
+        <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', marginBottom: 8 }}>
           <div
             style={{
-              width: 48,
-              height: 48,
-              borderRadius: '50%',
-              border: '2px solid var(--green)',
+              minWidth: 54,
+              height: 44,
+              padding: '0 12px',
+              borderRadius: 8,
+              background: 'linear-gradient(135deg, rgba(255, 255, 255, 0.08), rgba(255, 255, 255, 0.02))',
+              backdropFilter: 'blur(8px)',
+              WebkitBackdropFilter: 'blur(8px)',
+              boxShadow: 'rgba(255, 255, 255, 0.15) 0px 1px 0px inset, rgba(0, 0, 0, 0.35) 0px 6px 16px',
               display: 'flex',
               alignItems: 'center',
               justifyContent: 'center',
-              marginBottom: 6,
+              marginBottom: 5,
             }}
           >
             <span style={{ fontSize: 20, fontWeight: 700, color: 'var(--green)' }}>{grade}</span>
@@ -413,7 +427,7 @@ export default function ResultsSummary({
           {[
             { label: 'Sharpe', key: 'sharpe', value: sharpe },
             { label: 'Max DD', key: 'max_dd', value: maxDd },
-            { label: 'avg. 1M ret', key: 'avg_1m_ret', value: avg1mRet },
+            { label: 'avg. 1M', key: 'avg_1m_ret', value: avg1mRet },
           ].map(({ label, key, value }) => (
             <div key={key} style={{ textAlign: 'center' }}>
               <div style={{ fontSize: 9, color: 'var(--t3)', letterSpacing: '0.08em', marginBottom: 2, opacity: 0.72 }}>
@@ -434,9 +448,9 @@ export default function ResultsSummary({
           onToggle={(e) => setAuditConfigsOpen((e.currentTarget as HTMLDetailsElement).open)}
           style={{
             border: '1px solid var(--line)',
-            borderRadius: 3,
+            borderRadius: '0 0 3px 3px',
             background: 'var(--bg1)',
-            padding: '6px 8px',
+            padding: '12px 16px',
           }}
         >
           <summary
@@ -456,55 +470,163 @@ export default function ResultsSummary({
             {activeConfigs.length === 0 && (
               <div style={{ fontSize: 10, color: 'var(--t2)' }}>No active configs.</div>
             )}
-            {groupedActiveConfigs.map((section) => (
-              <details
-                key={section.title}
-                open={!!openConfigSections[section.title]}
-                onToggle={(e) => {
-                  const isOpen = (e.currentTarget as HTMLDetailsElement).open;
-                  setOpenConfigSections((prev) => ({ ...prev, [section.title]: isOpen }));
-                }}
-                style={{
-                  marginBottom: 8,
-                  border: '1px solid var(--line)',
-                  borderRadius: 3,
-                  background: 'var(--bg0)',
-                  padding: '4px 6px',
-                }}
-              >
-                <summary
-                  style={{
-                    fontSize: 8,
-                    textTransform: 'uppercase',
-                    letterSpacing: '0.1em',
-                    color: 'var(--t3)',
-                    fontWeight: 700,
-                    cursor: 'pointer',
-                    userSelect: 'none',
-                  }}
-                >
-                  {section.title}
-                </summary>
-                <div style={{ marginTop: 6 }}>
-                  {section.entries.map(([k, v]) => (
-                    <div
-                      key={k}
+            {[...topLevelConfigSections, ...(advancedConfigSections.length > 0 ? [{ title: 'ADVANCED', entries: [] as Array<[string, unknown]> }] : [])]
+              .map((section, sectionIdx, allSections) => {
+                const isAdvancedGroup = section.title === 'ADVANCED';
+                const sectionKey = isAdvancedGroup ? 'ADVANCED_GROUP' : section.title;
+                const sectionOpen = !!openConfigSections[sectionKey];
+                return (
+                  <details
+                    key={sectionKey}
+                    open={sectionOpen}
+                    onToggle={(e) => {
+                      const isOpen = (e.currentTarget as HTMLDetailsElement).open;
+                      setOpenConfigSections((prev) => ({ ...prev, [sectionKey]: isOpen }));
+                    }}
+                    style={{
+                      marginBottom: sectionIdx === allSections.length - 1 ? 0 : 4,
+                      borderBottom: sectionIdx === allSections.length - 1 ? 'none' : '1px solid var(--line)',
+                      paddingBottom: 4,
+                      background: sectionOpen ? 'rgba(255,255,255,0.03)' : 'transparent',
+                      boxShadow: sectionOpen ? 'inset 2px 0 0 var(--green-mid)' : 'none',
+                    }}
+                  >
+                    <summary
                       style={{
+                        fontSize: 10,
+                        letterSpacing: '0.06em',
+                        color: sectionOpen ? 'var(--t1)' : 'color-mix(in srgb, var(--t1) 86%, var(--t3) 14%)',
+                        fontWeight: 700,
+                        cursor: 'pointer',
+                        userSelect: 'none',
                         display: 'flex',
+                        alignItems: 'center',
                         justifyContent: 'space-between',
-                        marginBottom: 3,
-                        gap: 8,
+                        minHeight: 32,
+                        listStyle: 'none',
                       }}
                     >
-                      <span style={{ fontSize: 10, color: 'var(--t2)' }}>{k}</span>
-                      <span style={{ fontSize: 10, color: 'var(--t1)', fontFamily: 'Space Mono, monospace' }}>
-                        {String(v)}
+                      <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+                        <span
+                          style={{
+                            display: 'inline-block',
+                            transform: sectionOpen ? 'rotate(90deg)' : 'rotate(0deg)',
+                            transition: 'transform 140ms ease',
+                            color: 'var(--t3)',
+                            width: 8,
+                            textAlign: 'center',
+                          }}
+                        >
+                          ▶
+                        </span>
+                        {prettySectionTitle(section.title)}
                       </span>
-                    </div>
-                  ))}
-                </div>
-              </details>
-            ))}
+                      {!sectionOpen && (
+                        <span style={{ fontSize: 9, color: 'color-mix(in srgb, var(--t3) 70%, var(--bg1) 30%)', opacity: 0.46 }}>
+                          {isAdvancedGroup ? advancedConfigSections.length : section.entries.length}
+                        </span>
+                      )}
+                    </summary>
+                    {!isAdvancedGroup && (
+                      <div style={{ marginTop: 4, marginLeft: 14, paddingLeft: 8, borderLeft: '1px solid var(--line2)' }}>
+                        {section.entries.map(([k, v]) => (
+                          <div
+                            key={k}
+                            style={{
+                              display: 'flex',
+                              justifyContent: 'space-between',
+                              marginBottom: 3,
+                              gap: 8,
+                            }}
+                          >
+                            <span style={{ fontSize: 10, color: 'var(--t2)' }}>{k}</span>
+                            <span style={{ fontSize: 10, color: 'var(--t1)', fontFamily: 'Space Mono, monospace' }}>
+                              {String(v)}
+                            </span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                    {isAdvancedGroup && (
+                      <div style={{ marginTop: 4, marginLeft: 14, paddingLeft: 8, borderLeft: '1px solid var(--line2)' }}>
+                        {advancedConfigSections.map((sub) => {
+                          const subKey = `ADVANCED_${sub.title}`;
+                          const subOpen = !!openConfigSections[subKey];
+                          return (
+                            <details
+                              key={subKey}
+                              open={subOpen}
+                              onToggle={(e) => {
+                                const isOpen = (e.currentTarget as HTMLDetailsElement).open;
+                                setOpenConfigSections((prev) => ({ ...prev, [subKey]: isOpen }));
+                              }}
+                              style={{
+                                marginBottom: 4,
+                                borderBottom: '1px dashed var(--line2)',
+                                paddingBottom: 4,
+                                background: subOpen ? 'rgba(255,255,255,0.02)' : 'transparent',
+                              }}
+                            >
+                              <summary
+                                style={{
+                                  fontSize: 9,
+                                  letterSpacing: '0.06em',
+                                  color: subOpen ? 'var(--t1)' : 'color-mix(in srgb, var(--t1) 84%, var(--t3) 16%)',
+                                  fontWeight: 700,
+                                  cursor: 'pointer',
+                                  userSelect: 'none',
+                                  display: 'flex',
+                                  alignItems: 'center',
+                                  justifyContent: 'space-between',
+                                  minHeight: 30,
+                                  listStyle: 'none',
+                                }}
+                              >
+                                <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+                                  <span
+                                    style={{
+                                      display: 'inline-block',
+                                      transform: subOpen ? 'rotate(90deg)' : 'rotate(0deg)',
+                                      transition: 'transform 140ms ease',
+                                      color: 'var(--t3)',
+                                      width: 8,
+                                      textAlign: 'center',
+                                    }}
+                                  >
+                                    ▶
+                                  </span>
+                                  {prettySectionTitle(sub.title)}
+                                </span>
+                                {!subOpen && (
+                                  <span style={{ fontSize: 9, color: 'color-mix(in srgb, var(--t3) 70%, var(--bg1) 30%)', opacity: 0.46 }}>{sub.entries.length}</span>
+                                )}
+                              </summary>
+                              <div style={{ marginTop: 4, marginLeft: 14, paddingLeft: 8, borderLeft: '1px solid var(--line2)' }}>
+                                {sub.entries.map(([k, v]) => (
+                                  <div
+                                    key={k}
+                                    style={{
+                                      display: 'flex',
+                                      justifyContent: 'space-between',
+                                      marginBottom: 3,
+                                      gap: 8,
+                                    }}
+                                  >
+                                    <span style={{ fontSize: 10, color: 'var(--t2)' }}>{k}</span>
+                                    <span style={{ fontSize: 10, color: 'var(--t1)', fontFamily: 'Space Mono, monospace' }}>
+                                      {String(v)}
+                                    </span>
+                                  </div>
+                                ))}
+                              </div>
+                            </details>
+                          );
+                        })}
+                      </div>
+                    )}
+                  </details>
+                );
+              })}
           </div>
         </details>
       </div>
@@ -552,31 +674,56 @@ export default function ResultsSummary({
         </div>
       )}
 
-      {/* Re-run button (sticky so it's always reachable) */}
+      {/* Action bar (sticky so it's always reachable) */}
       <div
         style={{
           position: 'sticky',
           bottom: 0,
           paddingTop: 8,
           background: 'linear-gradient(to bottom, transparent, var(--bg0) 35%)',
+          display: 'flex',
+          gap: 6,
         }}
       >
         <button
+          onClick={() => {
+            setAuditConfigsOpen(false);
+            setOpenConfigSections({});
+          }}
+          style={{
+            width: 92,
+            height: 32,
+            border: '1px solid color-mix(in srgb, var(--t2) 46%, var(--line2) 54%)',
+            background: 'color-mix(in srgb, var(--bg1) 92%, white 8%)',
+            color: 'color-mix(in srgb, var(--t1) 86%, var(--t3) 14%)',
+            fontFamily: 'Space Mono, monospace',
+            fontSize: 9,
+            borderRadius: 3,
+            cursor: 'pointer',
+            letterSpacing: '0.06em',
+          }}
+          onMouseEnter={(e) => ((e.target as HTMLButtonElement).style.background = 'color-mix(in srgb, var(--bg4) 88%, white 12%)')}
+          onMouseLeave={(e) => ((e.target as HTMLButtonElement).style.background = 'color-mix(in srgb, var(--bg1) 92%, white 8%)')}
+        >
+          COLLAPSE ALL
+        </button>
+        <button
           onClick={onRerun}
           style={{
-            width: '100%',
+            flex: 1,
             height: 32,
-            border: '1px solid var(--line2)',
-            background: 'var(--bg1)',
-            color: 'var(--t1)',
+            border: '1px solid var(--green-mid)',
+            background: 'var(--green-dim)',
+            color: 'var(--green)',
             fontFamily: 'Space Mono, monospace',
             fontSize: 10,
             borderRadius: 3,
             cursor: 'pointer',
             letterSpacing: '0.06em',
+            fontWeight: 700,
           }}
-          onMouseEnter={(e) => ((e.target as HTMLButtonElement).style.background = 'var(--bg4)')}
-          onMouseLeave={(e) => ((e.target as HTMLButtonElement).style.background = 'var(--bg1)')}
+          onMouseEnter={(e) => ((e.target as HTMLButtonElement).style.background = 'rgba(0, 200, 150, 0.18)')}
+          onMouseLeave={(e) => ((e.target as HTMLButtonElement).style.background = 'var(--green-dim)')}
         >
           EDIT &amp; RE-RUN
         </button>

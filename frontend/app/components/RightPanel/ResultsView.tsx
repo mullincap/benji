@@ -1775,18 +1775,17 @@ export default function ResultsView({ results, jobId, startingCapital, params }:
   }
 
   return (
-    <div style={{ padding: 16, display: 'flex', flexDirection: 'column', gap: 16 }}>
+    <div style={{ padding: '0 16px 16px 16px', display: 'flex', flexDirection: 'column', gap: 16 }}>
       <div
         style={{
           display: 'flex',
           alignItems: 'center',
           justifyContent: 'space-between',
+          height: 40,
           position: 'sticky',
           top: 0,
           zIndex: 20,
           background: 'var(--bg0)',
-          paddingTop: 8,
-          paddingBottom: 8,
           borderBottom: '1px solid var(--line)',
         }}
       >
@@ -1795,7 +1794,7 @@ export default function ResultsView({ results, jobId, startingCapital, params }:
             fontSize: 10,
             letterSpacing: '0.08em',
             textTransform: 'uppercase',
-            color: 'var(--t2)',
+            color: 'var(--t3)',
             fontWeight: 700,
             whiteSpace: 'nowrap',
           }}
@@ -1819,9 +1818,9 @@ export default function ResultsView({ results, jobId, startingCapital, params }:
                 height: 28,
                 padding: '0 10px',
                 borderRadius: 3,
-                border: `1px solid ${activeTab === tab ? 'var(--green)' : 'var(--line2)'}`,
-                background: activeTab === tab ? 'var(--green-dim)' : 'var(--bg1)',
-                color: activeTab === tab ? 'var(--green)' : 'var(--t2)',
+                border: `1px solid ${activeTab === tab ? 'rgba(255, 255, 255, 0.5)' : 'var(--line2)'}`,
+                background: activeTab === tab ? 'rgba(255, 255, 255, 0.08)' : 'var(--bg1)',
+                color: activeTab === tab ? 'var(--t1)' : 'var(--t2)',
                 fontSize: 9,
                 letterSpacing: '0.1em',
                 fontWeight: 700,
@@ -2263,20 +2262,21 @@ export default function ResultsView({ results, jobId, startingCapital, params }:
                               return next;
                             });
                           }}
+                          title="Expand all sections"
+                          aria-label="Expand all sections"
                           style={{
-                            height: 20,
-                            padding: '0 8px',
-                            borderRadius: 3,
-                            border: '1px solid var(--line2)',
-                            background: 'var(--bg0)',
+                            width: 18,
+                            height: 18,
+                            border: 'none',
+                            background: 'transparent',
                             color: 'var(--t2)',
-                            fontSize: 9,
-                            letterSpacing: '0.06em',
-                            textTransform: 'uppercase',
+                            fontSize: 13,
+                            lineHeight: 1,
                             cursor: 'pointer',
+                            padding: 0,
                           }}
                         >
-                          Expand All
+                          ⊞
                         </button>
                         <button
                           onClick={(e) => {
@@ -2290,20 +2290,21 @@ export default function ResultsView({ results, jobId, startingCapital, params }:
                               return next;
                             });
                           }}
+                          title="Collapse all sections"
+                          aria-label="Collapse all sections"
                           style={{
-                            height: 20,
-                            padding: '0 8px',
-                            borderRadius: 3,
-                            border: '1px solid var(--line2)',
-                            background: 'var(--bg0)',
+                            width: 18,
+                            height: 18,
+                            border: 'none',
+                            background: 'transparent',
                             color: 'var(--t2)',
-                            fontSize: 9,
-                            letterSpacing: '0.06em',
-                            textTransform: 'uppercase',
+                            fontSize: 13,
+                            lineHeight: 1,
                             cursor: 'pointer',
+                            padding: 0,
                           }}
                         >
-                          Collapse All
+                          ⊟
                         </button>
                       </span>
                     </summary>
