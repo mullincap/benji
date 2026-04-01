@@ -7,6 +7,7 @@ interface ResultsSummaryProps {
   params: Record<string, unknown>;
   onRerun: () => void;
   startAuditConfigsCollapsed?: boolean;
+  hideActionBar?: boolean;
 }
 
 type FilterMetricRow = {
@@ -349,6 +350,7 @@ export default function ResultsSummary({
   params,
   onRerun,
   startAuditConfigsCollapsed = false,
+  hideActionBar = false,
 }: ResultsSummaryProps) {
   const metrics = (results?.metrics ?? {}) as Record<string, unknown>;
   const bestRow = pickBestFilterRow(metrics);
@@ -373,8 +375,18 @@ export default function ResultsSummary({
   const advancedConfigSections = groupedActiveConfigs
     .filter((s) => s.title.startsWith('ADVANCED • '))
     .map((s) => ({ ...s, title: s.title.replace(/^ADVANCED\s*•\s*/i, '') }));
+  const expertIndex = topLevelConfigSections.findIndex((s) => s.title === 'EXPERT');
+  const sectionsBeforeExpert = expertIndex >= 0 ? topLevelConfigSections.slice(0, expertIndex) : topLevelConfigSections;
+  const sectionsFromExpert = expertIndex >= 0 ? topLevelConfigSections.slice(expertIndex) : [];
+  const orderedConfigSections = [
+    ...sectionsBeforeExpert,
+    ...(advancedConfigSections.length > 0 ? [{ title: 'ADVANCED', entries: [] as Array<[string, unknown]> }] : []),
+    ...sectionsFromExpert,
+  ];
   const [auditConfigsOpen, setAuditConfigsOpen] = useState(!startAuditConfigsCollapsed);
-  const [openConfigSections, setOpenConfigSections] = useState<Record<string, boolean>>({});
+  const [openConfigSections, setOpenConfigSections] = useState<Record<string, boolean>>({
+    'EXECUTION CONFIG': true,
+  });
 
   return (
     <div style={{ padding: 12, paddingBottom: 12 }}>
@@ -470,8 +482,7 @@ export default function ResultsSummary({
             {activeConfigs.length === 0 && (
               <div style={{ fontSize: 10, color: 'var(--t2)' }}>No active configs.</div>
             )}
-            {[...topLevelConfigSections, ...(advancedConfigSections.length > 0 ? [{ title: 'ADVANCED', entries: [] as Array<[string, unknown]> }] : [])]
-              .map((section, sectionIdx, allSections) => {
+            {orderedConfigSections.map((section, sectionIdx, allSections) => {
                 const isAdvancedGroup = section.title === 'ADVANCED';
                 const sectionKey = isAdvancedGroup ? 'ADVANCED_GROUP' : section.title;
                 const sectionOpen = !!openConfigSections[sectionKey];
@@ -674,60 +685,61 @@ export default function ResultsSummary({
         </div>
       )}
 
-      {/* Action bar (sticky so it's always reachable) */}
-      <div
-        style={{
-          position: 'sticky',
-          bottom: 0,
-          paddingTop: 8,
-          background: 'linear-gradient(to bottom, transparent, var(--bg0) 35%)',
-          display: 'flex',
-          gap: 6,
-        }}
-      >
-        <button
-          onClick={() => {
-            setAuditConfigsOpen(false);
-            setOpenConfigSections({});
-          }}
+      {!hideActionBar && (
+        <div
           style={{
-            width: 92,
-            height: 32,
-            border: '1px solid color-mix(in srgb, var(--t2) 46%, var(--line2) 54%)',
-            background: 'color-mix(in srgb, var(--bg1) 92%, white 8%)',
-            color: 'color-mix(in srgb, var(--t1) 86%, var(--t3) 14%)',
-            fontFamily: 'Space Mono, monospace',
-            fontSize: 9,
-            borderRadius: 3,
-            cursor: 'pointer',
-            letterSpacing: '0.06em',
+            position: 'sticky',
+            bottom: 0,
+            paddingTop: 8,
+            background: 'linear-gradient(to bottom, transparent, var(--bg0) 35%)',
+            display: 'flex',
+            gap: 6,
           }}
-          onMouseEnter={(e) => ((e.target as HTMLButtonElement).style.background = 'color-mix(in srgb, var(--bg4) 88%, white 12%)')}
-          onMouseLeave={(e) => ((e.target as HTMLButtonElement).style.background = 'color-mix(in srgb, var(--bg1) 92%, white 8%)')}
         >
-          COLLAPSE ALL
-        </button>
-        <button
-          onClick={onRerun}
-          style={{
-            flex: 1,
-            height: 32,
-            border: '1px solid var(--green-mid)',
-            background: 'var(--green-dim)',
-            color: 'var(--green)',
-            fontFamily: 'Space Mono, monospace',
-            fontSize: 10,
-            borderRadius: 3,
-            cursor: 'pointer',
-            letterSpacing: '0.06em',
-            fontWeight: 700,
-          }}
-          onMouseEnter={(e) => ((e.target as HTMLButtonElement).style.background = 'rgba(0, 200, 150, 0.18)')}
-          onMouseLeave={(e) => ((e.target as HTMLButtonElement).style.background = 'var(--green-dim)')}
-        >
-          EDIT &amp; RE-RUN
-        </button>
-      </div>
+          <button
+            onClick={() => {
+              setAuditConfigsOpen(false);
+              setOpenConfigSections({});
+            }}
+            style={{
+              width: 92,
+              height: 32,
+              border: '1px solid color-mix(in srgb, var(--t2) 46%, var(--line2) 54%)',
+              background: 'color-mix(in srgb, var(--bg1) 92%, white 8%)',
+              color: 'color-mix(in srgb, var(--t1) 86%, var(--t3) 14%)',
+              fontFamily: 'Space Mono, monospace',
+              fontSize: 9,
+              borderRadius: 3,
+              cursor: 'pointer',
+              letterSpacing: '0.06em',
+            }}
+            onMouseEnter={(e) => ((e.target as HTMLButtonElement).style.background = 'color-mix(in srgb, var(--bg4) 88%, white 12%)')}
+            onMouseLeave={(e) => ((e.target as HTMLButtonElement).style.background = 'color-mix(in srgb, var(--bg1) 92%, white 8%)')}
+          >
+            COLLAPSE ALL
+          </button>
+          <button
+            onClick={onRerun}
+            style={{
+              flex: 1,
+              height: 32,
+              border: '1px solid var(--green-mid)',
+              background: 'var(--green-dim)',
+              color: 'var(--green)',
+              fontFamily: 'Space Mono, monospace',
+              fontSize: 10,
+              borderRadius: 3,
+              cursor: 'pointer',
+              letterSpacing: '0.06em',
+              fontWeight: 700,
+            }}
+            onMouseEnter={(e) => ((e.target as HTMLButtonElement).style.background = 'rgba(0, 200, 150, 0.18)')}
+            onMouseLeave={(e) => ((e.target as HTMLButtonElement).style.background = 'var(--green-dim)')}
+          >
+            EDIT &amp; RE-RUN
+          </button>
+        </div>
+      )}
     </div>
   );
 }

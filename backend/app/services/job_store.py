@@ -20,6 +20,7 @@ def create_job(job_id: str, params: dict[str, Any]) -> dict[str, Any]:
     job_dir.mkdir(parents=True, exist_ok=True)
     job: dict[str, Any] = {
         "id": job_id,
+        "display_name": None,
         "status": "queued",
         "stage": None,
         "progress": 0,

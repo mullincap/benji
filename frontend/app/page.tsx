@@ -187,6 +187,7 @@ const STAGE_LABELS: Record<string, string> = {
 
 interface AuditHistoryItem {
   id: string;
+  display_name?: string | null;
   status: string;
   stage?: string | null;
   progress?: number;
@@ -211,6 +212,7 @@ export default function Home() {
   const [historyLoading, setHistoryLoading] = useState(false);
   const [historyError, setHistoryError] = useState<string | null>(null);
   const [deletingJobId, setDeletingJobId] = useState<string | null>(null);
+  const [renamingJobId, setRenamingJobId] = useState<string | null>(null);
   const [cancellingAudit, setCancellingAudit] = useState(false);
   const [editingFromResults, setEditingFromResults] = useState(false);
   const [collapseAuditConfigsSignal, setCollapseAuditConfigsSignal] = useState(0);
@@ -325,6 +327,37 @@ export default function Home() {
 
     setResults(null);
     setAppState('running');
+  }
+
+  async function handleRenameAudit(job: AuditHistoryItem, displayName: string) {
+    setRenamingJobId(job.id);
+    try {
+      const payload = { display_name: displayName.length > 0 ? displayName : null };
+      let res = await fetch(`${API_BASE}/api/jobs/${job.id}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      // Backward-compatible fallback for servers that do not allow PATCH on /api/jobs/{id}.
+      if (res.status === 405) {
+        res = await fetch(`${API_BASE}/api/jobs/${job.id}/rename`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+        });
+      }
+      if (!res.ok) throw new Error(`PATCH /api/jobs/${job.id} failed: ${res.status}`);
+      const updated = (await res.json()) as AuditHistoryItem;
+      setAuditHistory((prev) => prev.map((j) => (j.id === updated.id ? { ...j, display_name: updated.display_name ?? null } : j)));
+      if (jobId === updated.id) {
+        setJobData((prev) => (prev ? { ...prev, display_name: updated.display_name ?? null } : prev));
+      }
+      setHistoryError(null);
+    } catch (err) {
+      setHistoryError(String(err));
+    } finally {
+      setRenamingJobId(null);
+    }
   }
 
   function stopPolling() {
@@ -524,6 +557,7 @@ export default function Home() {
                       params={params}
                       onRerun={handleEditFromResults}
                       startAuditConfigsCollapsed={editingFromResults}
+                      hideActionBar={editingFromResults}
                     />
                     {editingFromResults && (
                       <div style={{ borderTop: '1px solid var(--line)' }}>
@@ -640,9 +674,11 @@ export default function Home() {
             loading={historyLoading}
             error={historyError}
             deletingJobId={deletingJobId}
+            renamingJobId={renamingJobId}
             onToggle={() => setHistoryCollapsed((v) => !v)}
             onSelect={handleSelectAudit}
             onDelete={handleDeleteAudit}
+            onRename={handleRenameAudit}
           />
         </div>
       </div>

@@ -18488,7 +18488,16 @@ def main():
             _cube_filter_lbl, _cube_filter_mode, _cube_filter = FILTER_MODES[0]
         _cube_filter_mode = _cube_filter_mode or "none"
         _cube_filter_lbl  = _cube_filter_lbl  or "No Filter"
-        _cube_vlev = (_vlev_params if ENABLE_VOL_LEV_SCALING else None)
+        _cube_vlev = (_vlev_params if ENABLE_VOL_LEV_SCALING else {
+            "target_vol": VOL_LEV_TARGET_VOL,
+            "window": VOL_LEV_WINDOW,
+            "sharpe_ref": VOL_LEV_SHARPE_REF,
+            "dd_threshold": VOL_LEV_DD_THRESHOLD,
+            "dd_scale": VOL_LEV_DD_SCALE,
+            "max_boost": VOL_LEV_MAX_BOOST,
+        })
+        if not ENABLE_VOL_LEV_SCALING:
+            print("  [stability-cube] Vol-lev scaling is OFF; using baseline vol-lev parameters for cube sweeps.")
         run_parametric_stability_cube(
             df_4x          = df_4x,
             base_params    = base_params,
@@ -18513,7 +18522,16 @@ def main():
             _cube_filter_lbl, _cube_filter_mode, _cube_filter = FILTER_MODES[0]
         _cube_filter_mode = _cube_filter_mode or "none"
         _cube_filter_lbl  = _cube_filter_lbl  or "No Filter"
-        _cube_vlev = (_vlev_params if ENABLE_VOL_LEV_SCALING else None)
+        _cube_vlev = (_vlev_params if ENABLE_VOL_LEV_SCALING else {
+            "target_vol": VOL_LEV_TARGET_VOL,
+            "window": VOL_LEV_WINDOW,
+            "sharpe_ref": VOL_LEV_SHARPE_REF,
+            "dd_threshold": VOL_LEV_DD_THRESHOLD,
+            "dd_scale": VOL_LEV_DD_SCALE,
+            "max_boost": VOL_LEV_MAX_BOOST,
+        })
+        if not ENABLE_VOL_LEV_SCALING:
+            print("  [risk-throttle-cube] Vol-lev scaling is OFF; using baseline vol-lev parameters for cube sweeps.")
         run_risk_throttle_stability_cube(
             df_4x           = df_4x,
             base_params     = base_params,
@@ -18538,7 +18556,16 @@ def main():
             _cube_filter_lbl, _cube_filter_mode, _cube_filter = FILTER_MODES[0]
         _cube_filter_mode = _cube_filter_mode or "none"
         _cube_filter_lbl  = _cube_filter_lbl  or "No Filter"
-        _cube_vlev = (_vlev_params if ENABLE_VOL_LEV_SCALING else None)
+        _cube_vlev = (_vlev_params if ENABLE_VOL_LEV_SCALING else {
+            "target_vol": VOL_LEV_TARGET_VOL,
+            "window": VOL_LEV_WINDOW,
+            "sharpe_ref": VOL_LEV_SHARPE_REF,
+            "dd_threshold": VOL_LEV_DD_THRESHOLD,
+            "dd_scale": VOL_LEV_DD_SCALE,
+            "max_boost": VOL_LEV_MAX_BOOST,
+        })
+        if not ENABLE_VOL_LEV_SCALING:
+            print("  [exit-cube] Vol-lev scaling is OFF; using baseline vol-lev parameters for cube sweeps.")
         run_exit_stability_cube(
             df_4x            = df_4x,
             base_params      = base_params,

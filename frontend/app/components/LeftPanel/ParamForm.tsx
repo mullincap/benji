@@ -250,6 +250,7 @@ export default function ParamForm({ params, onChange, onSubmit }: ParamFormProps
   }
 
   const p = params;
+  const volLevEnabled = !!p.enable_vol_lev_scaling;
   const parameterSweepKeys = [
     'enable_sweep_l_high',
     'enable_sweep_tail_guardrail',
@@ -289,6 +290,15 @@ export default function ParamForm({ params, onChange, onSubmit }: ParamFormProps
     for (const k of missing) next[k] = true;
     onChange(next);
   }, [params, onChange]);
+  useEffect(() => {
+    if (volLevEnabled) return;
+    const keys = ['enable_stability_cube', 'enable_risk_throttle_cube', 'enable_exit_cube'];
+    const hasEnabled = keys.some((k) => !!params[k]);
+    if (!hasEnabled) return;
+    const next = { ...params };
+    for (const k of keys) next[k] = false;
+    onChange(next);
+  }, [volLevEnabled, params, onChange]);
   const isOpen = (key: string) => !!openSections[key];
   const toggleSection = (key: string) => {
     setOpenSections((prev) => ({ ...prev, [key]: !prev[key] }));
@@ -802,14 +812,29 @@ export default function ParamForm({ params, onChange, onSubmit }: ParamFormProps
             <button
               type="button"
               onClick={() => setAllTrue(stabilityCubeKeys)}
-              style={{ background: 'transparent', border: '1px solid var(--line2)', color: 'var(--t2)', borderRadius: 2, fontSize: 9, padding: '2px 6px', cursor: 'pointer' }}
+              disabled={!volLevEnabled}
+              style={{
+                background: 'transparent',
+                border: '1px solid var(--line2)',
+                color: 'var(--t2)',
+                borderRadius: 2,
+                fontSize: 9,
+                padding: '2px 6px',
+                cursor: volLevEnabled ? 'pointer' : 'not-allowed',
+                opacity: volLevEnabled ? 1 : 0.55,
+              }}
             >
               Enable All
             </button>
           </div>
+          {!volLevEnabled && (
+            <div style={{ fontSize: 9, color: 'var(--t3)', marginBottom: 6 }}>
+              Requires <span style={{ color: 'var(--t2)' }}>enable_vol_lev_scaling</span>.
+            </div>
+          )}
           {stabilityCubeKeys.map((k) => (
             <Row key={k} label={k}>
-              <Toggle checked={!!p[k]} onChange={(v) => set(k, v)} />
+              <Toggle checked={!!p[k]} onChange={(v) => set(k, v)} disabled={!volLevEnabled} />
             </Row>
           ))}
 

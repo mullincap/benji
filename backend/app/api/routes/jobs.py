@@ -236,6 +236,7 @@ class JobCreateResponse(BaseModel):
 
 class JobResponse(BaseModel):
     id:         str
+    display_name: str | None = None
     status:     str
     stage:      str | None
     progress:   int
@@ -244,6 +245,14 @@ class JobResponse(BaseModel):
     error:      str | None
     created_at: float
     updated_at: float
+
+
+class JobPatchRequest(BaseModel):
+    display_name: str | None = None
+
+
+class JobRenameRequest(BaseModel):
+    display_name: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -270,6 +279,40 @@ def get_job_endpoint(job_id: str) -> JobResponse:
     if job is None:
         raise HTTPException(status_code=404, detail="Job not found")
     return job
+
+
+@router.patch("/{job_id}", response_model=JobResponse)
+def patch_job_endpoint(job_id: str, req: JobPatchRequest) -> JobResponse:
+    job = get_job(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    fields: dict[str, Any] = {}
+    if "display_name" in req.model_fields_set:
+        raw = req.display_name
+        if isinstance(raw, str):
+            name = raw.strip()
+            fields["display_name"] = name or None
+        else:
+            fields["display_name"] = None
+
+    if not fields:
+        return job
+
+    return update_job(job_id, **fields)
+
+
+@router.post("/{job_id}/rename", response_model=JobResponse)
+def rename_job_endpoint(job_id: str, req: JobRenameRequest) -> JobResponse:
+    job = get_job(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    raw = req.display_name
+    if isinstance(raw, str):
+        name = raw.strip()
+        return update_job(job_id, display_name=name or None)
+    return update_job(job_id, display_name=None)
 
 
 @router.delete("/{job_id}")

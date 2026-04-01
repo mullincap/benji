@@ -1,6 +1,18 @@
 'use client';
 
 import { useEffect, useMemo, useRef, useState } from 'react';
+import {
+  Area,
+  CartesianGrid,
+  ComposedChart,
+  Line,
+  ReferenceDot,
+  ReferenceLine,
+  ResponsiveContainer,
+  Tooltip,
+  XAxis,
+  YAxis,
+} from 'recharts';
 
 import MetricCard from '../ui/MetricCard';
 import FilterTable from '../ui/FilterTable';
@@ -24,6 +36,15 @@ function fmtCurrency(v: number): string {
     currency: 'USD',
     maximumFractionDigits: 0,
   }).format(v);
+}
+
+function fmtUsdCompact(v: number): string {
+  const n = Number(v);
+  if (!Number.isFinite(n)) return 'N/A';
+  const abs = Math.abs(n);
+  if (abs >= 1_000_000) return `$${(n / 1_000_000).toFixed(1).replace(/\.0$/, '')}M`;
+  if (abs >= 1_000) return `$${(n / 1_000).toFixed(0)}k`;
+  return `$${Math.round(n)}`;
 }
 
 function fmtPercent2(v: unknown): string {
@@ -74,14 +95,16 @@ function metricColor(key: string, value: unknown): string {
     dsr_pct: (v) => (v > 95 ? 'var(--green)' : v > 80 ? 'var(--amber)' : 'var(--red)'),
     cv: (v) => (v < 0.25 ? 'var(--green)' : v < 0.5 ? 'var(--amber)' : 'var(--red)'),
     flat_days: (v) => (v < 30 ? 'var(--green)' : v < 60 ? 'var(--amber)' : 'var(--red)'),
+    avg_win_loss: (v) => (v >= 1.5 ? 'var(--green)' : v >= 1 ? 'var(--amber)' : 'var(--red)'),
+    profit_factor: (v) => (v >= 1.5 ? 'var(--green)' : v >= 1 ? 'var(--amber)' : 'var(--red)'),
+    uw_streak: (v) => (v <= 20 ? 'var(--green)' : v <= 60 ? 'var(--amber)' : 'var(--red)'),
+    avg_1m: (v) => (v > 0 ? 'var(--green)' : v > -5 ? 'var(--amber)' : 'var(--red)'),
   };
   return heuristics[key]?.(value) ?? 'var(--t0)';
 }
 
 type XValue = number | string | Date;
 type Point = { x: XValue; y: number } | number;
-
-type ChartPoint = { px: number; py: number; y: number; x?: XValue };
 
 function parseDateLike(v: XValue | undefined): Date | null {
   if (v === undefined || v === null) return null;
@@ -169,6 +192,1175 @@ function percentile(sorted: number[], p: number): number {
   if (lo === hi) return sorted[lo];
   const w = idx - lo;
   return sorted[lo] * (1 - w) + sorted[hi] * w;
+}
+
+type BoxStats = {
+  min: number;
+  q1: number;
+  median: number;
+  q3: number;
+  max: number;
+  mean: number;
+};
+
+function computeBoxStats(values: number[]): BoxStats | null {
+  const clean = values.filter((v) => Number.isFinite(v)).sort((a, b) => a - b);
+  if (clean.length === 0) return null;
+  const mean = clean.reduce((a, b) => a + b, 0) / clean.length;
+  return {
+    min: clean[0],
+    q1: percentile(clean, 0.25),
+    median: percentile(clean, 0.5),
+    q3: percentile(clean, 0.75),
+    max: clean[clean.length - 1],
+    mean,
+  };
+}
+
+function weekStartKey(d: Date): string {
+  const dt = new Date(d);
+  const day = dt.getDay();
+  const diff = (day + 6) % 7; // Monday-start week
+  dt.setDate(dt.getDate() - diff);
+  const y = dt.getFullYear();
+  const m = String(dt.getMonth() + 1).padStart(2, '0');
+  const dd = String(dt.getDate()).padStart(2, '0');
+  return `${y}-${m}-${dd}`;
+}
+
+function periodReturnsFromEquity(
+  eq: Array<{ d: Date; y: number }>,
+  keyFn: (d: Date) => string,
+): number[] {
+  if (eq.length < 2) return [];
+  const grouped = new Map<string, { first: number; last: number }>();
+  for (const p of eq) {
+    const key = keyFn(p.d);
+    if (!grouped.has(key)) grouped.set(key, { first: p.y, last: p.y });
+    const cur = grouped.get(key)!;
+    cur.last = p.y;
+  }
+  return Array.from(grouped.values())
+    .map((r) => (r.first > 0 ? ((r.last / r.first) - 1) * 100 : NaN))
+    .filter((v) => Number.isFinite(v));
+}
+
+type CalendarCell = {
+  date: Date | null;
+  key: string;
+  day: number | null;
+  ret: number | null;
+};
+
+type CalendarMonth = {
+  monthKey: string;
+  label: string;
+  cells: CalendarCell[];
+};
+
+function dateKey(d: Date): string {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const dd = String(d.getDate()).padStart(2, '0');
+  return `${y}-${m}-${dd}`;
+}
+
+function buildCalendarMonths(eqSeries: Array<{ d: Date; y: number }>): CalendarMonth[] {
+  if (eqSeries.length < 2) return [];
+  const byDay = new Map<string, number>();
+  for (let i = 1; i < eqSeries.length; i += 1) {
+    const prev = eqSeries[i - 1].y;
+    const cur = eqSeries[i].y;
+    if (prev <= 0 || !Number.isFinite(cur)) continue;
+    byDay.set(dateKey(eqSeries[i].d), ((cur / prev) - 1) * 100);
+  }
+
+  const start = new Date(eqSeries[0].d.getFullYear(), eqSeries[0].d.getMonth(), 1);
+  const end = new Date(eqSeries[eqSeries.length - 1].d.getFullYear(), eqSeries[eqSeries.length - 1].d.getMonth(), 1);
+  const out: CalendarMonth[] = [];
+  const cursor = new Date(start);
+
+  while (cursor <= end) {
+    const y = cursor.getFullYear();
+    const m = cursor.getMonth();
+    const first = new Date(y, m, 1);
+    const daysInMonth = new Date(y, m + 1, 0).getDate();
+    const lead = first.getDay(); // Sunday start.
+    const cells: CalendarCell[] = [];
+    for (let i = 0; i < lead; i += 1) {
+      cells.push({ date: null, key: `${y}-${m + 1}-lead-${i}`, day: null, ret: null });
+    }
+    for (let d = 1; d <= daysInMonth; d += 1) {
+      const dt = new Date(y, m, d);
+      const k = dateKey(dt);
+      cells.push({
+        date: dt,
+        key: k,
+        day: d,
+        ret: byDay.get(k) ?? null,
+      });
+    }
+    while (cells.length % 7 !== 0) {
+      cells.push({ date: null, key: `${y}-${m + 1}-trail-${cells.length}`, day: null, ret: null });
+    }
+    out.push({
+      monthKey: `${y}-${String(m + 1).padStart(2, '0')}`,
+      label: first.toLocaleDateString(undefined, { month: 'short', year: 'numeric' }),
+      cells,
+    });
+    cursor.setMonth(cursor.getMonth() + 1);
+  }
+  return out;
+}
+
+type XYPoint = { x: number; y: number };
+
+function sampleSorted(values: number[], target = 240): number[] {
+  if (values.length <= target) return values;
+  const out: number[] = [];
+  for (let i = 0; i < target; i += 1) {
+    const idx = Math.round((i / Math.max(1, target - 1)) * (values.length - 1));
+    out.push(values[idx]);
+  }
+  return out;
+}
+
+function computeCdfPoints(values: number[]): XYPoint[] {
+  const sorted = [...values].sort((a, b) => a - b);
+  if (sorted.length === 0) return [];
+  const sampled = sampleSorted(sorted);
+  return sampled.map((x, i) => ({ x, y: (i + 1) / sampled.length }));
+}
+
+function computeEqfPoints(values: number[]): XYPoint[] {
+  const sorted = [...values].sort((a, b) => a - b);
+  if (sorted.length === 0) return [];
+  const sampled = sampleSorted(sorted);
+  return sampled.map((y, i) => ({ x: i / Math.max(1, sampled.length - 1), y }));
+}
+
+function computePdfPoints(values: number[]): XYPoint[] {
+  const sorted = [...values].sort((a, b) => a - b);
+  const n = sorted.length;
+  if (n < 2) return [];
+  const min = sorted[0];
+  const max = sorted[n - 1];
+  const range = Math.max(1e-9, max - min);
+  const q1 = percentile(sorted, 0.25);
+  const q3 = percentile(sorted, 0.75);
+  const iqr = Math.max(1e-9, q3 - q1);
+  const fdWidth = 2 * iqr / Math.cbrt(Math.max(2, n));
+  const width = Math.max(1e-9, Number.isFinite(fdWidth) ? fdWidth : (range / 24));
+  const totalBins = Math.max(18, Math.min(72, Math.ceil(range / width)));
+
+  // Pass 1: uniform estimate to locate peak.
+  const baseBins = new Array(totalBins).fill(0);
+  for (const v of sorted) {
+    const idx = Math.min(totalBins - 1, Math.max(0, Math.floor((v - min) / width)));
+    baseBins[idx] += 1;
+  }
+  const baseSmooth = baseBins.map((_, i) => {
+    const a = baseBins[Math.max(0, i - 1)];
+    const b = baseBins[i];
+    const c = baseBins[Math.min(totalBins - 1, i + 1)];
+    return (a + (2 * b) + c) / 4;
+  });
+  let peakIdx = 0;
+  for (let i = 1; i < baseSmooth.length; i += 1) {
+    if (baseSmooth[i] > baseSmooth[peakIdx]) peakIdx = i;
+  }
+  const peakX = min + (peakIdx + 0.5) * width;
+
+  // Pass 2: asymmetric bins (more left of peak, fewer right of peak).
+  const leftSpan = peakX - min;
+  const rightSpan = max - peakX;
+  if (leftSpan <= 1e-9 || rightSpan <= 1e-9) {
+    return baseSmooth.map((count, i) => {
+      const center = min + (i + 0.5) * width;
+      const density = count / (n * width);
+      return { x: center, y: density };
+    });
+  }
+  const leftBins = Math.max(10, Math.min(totalBins - 4, Math.round(totalBins * 0.68)));
+  const rightBins = Math.max(4, totalBins - leftBins);
+  const edges: number[] = [min];
+  for (let i = 1; i <= leftBins; i += 1) {
+    edges.push(min + (leftSpan * i) / leftBins);
+  }
+  for (let i = 1; i <= rightBins; i += 1) {
+    edges.push(peakX + (rightSpan * i) / rightBins);
+  }
+
+  const counts = new Array(edges.length - 1).fill(0);
+  for (const v of sorted) {
+    let idx = edges.length - 2;
+    for (let i = 0; i < edges.length - 1; i += 1) {
+      const lo = edges[i];
+      const hi = edges[i + 1];
+      const inBin = (v >= lo && v < hi) || (i === edges.length - 2 && v <= hi);
+      if (inBin) {
+        idx = i;
+        break;
+      }
+    }
+    counts[idx] += 1;
+  }
+
+  const densityRaw = counts.map((count, i) => {
+    const bw = Math.max(1e-9, edges[i + 1] - edges[i]);
+    return count / (n * bw);
+  });
+  const densitySmooth = densityRaw.map((_, i) => {
+    const a = densityRaw[Math.max(0, i - 1)];
+    const b = densityRaw[i];
+    const c = densityRaw[Math.min(densityRaw.length - 1, i + 1)];
+    return (a + (2 * b) + c) / 4;
+  });
+  return densitySmooth.map((d, i) => ({
+    x: (edges[i] + edges[i + 1]) / 2,
+    y: d,
+  }));
+}
+
+function inverseNormalCdf(p: number): number {
+  // Acklam's approximation for inverse standard normal CDF.
+  const pp = Math.min(1 - 1e-12, Math.max(1e-12, p));
+  const a = [-39.6968302866538, 220.946098424521, -275.928510446969, 138.357751867269, -30.6647980661472, 2.50662827745924];
+  const b = [-54.4760987982241, 161.585836858041, -155.698979859887, 66.8013118877197, -13.2806815528857];
+  const c = [-0.00778489400243029, -0.322396458041136, -2.40075827716184, -2.54973253934373, 4.37466414146497, 2.93816398269878];
+  const d = [0.00778469570904146, 0.32246712907004, 2.445134137143, 3.75440866190742];
+  const plow = 0.02425;
+  const phigh = 1 - plow;
+  if (pp < plow) {
+    const q = Math.sqrt(-2 * Math.log(pp));
+    return (((((c[0] * q + c[1]) * q + c[2]) * q + c[3]) * q + c[4]) * q + c[5])
+      / ((((d[0] * q + d[1]) * q + d[2]) * q + d[3]) * q + 1);
+  }
+  if (pp > phigh) {
+    const q = Math.sqrt(-2 * Math.log(1 - pp));
+    return -(((((c[0] * q + c[1]) * q + c[2]) * q + c[3]) * q + c[4]) * q + c[5])
+      / ((((d[0] * q + d[1]) * q + d[2]) * q + d[3]) * q + 1);
+  }
+  const q = pp - 0.5;
+  const r = q * q;
+  return (((((a[0] * r + a[1]) * r + a[2]) * r + a[3]) * r + a[4]) * r + a[5]) * q
+    / (((((b[0] * r + b[1]) * r + b[2]) * r + b[3]) * r + b[4]) * r + 1);
+}
+
+function DistributionCard({
+  title,
+  subtitle,
+  points,
+  mode,
+  xMinLabel,
+  xMidLabel,
+  xMaxLabel,
+  xAxisLabel,
+  yAxisLabel,
+  yTickFormatter,
+  xMarkers,
+  guideX = null,
+  hoverXFormatter,
+  hoverYFormatter,
+  summary,
+  chips,
+  splitColorBySign = false,
+  signAxis = 'x',
+  splitThreshold = 0,
+}: {
+  title: string;
+  subtitle: string;
+  points: XYPoint[];
+  mode: 'line' | 'bar' | 'step_area';
+  xMinLabel: string;
+  xMidLabel: string;
+  xMaxLabel: string;
+  xAxisLabel: string;
+  yAxisLabel: string;
+  yTickFormatter: (v: number) => string;
+  xMarkers?: Array<{ x: number; label: string; color?: string }>;
+  guideX?: number | null;
+  hoverXFormatter: (v: number) => string;
+  hoverYFormatter: (v: number) => string;
+  summary?: string;
+  chips?: Array<{ label: string; value: string; color?: string }>;
+  splitColorBySign?: boolean;
+  signAxis?: 'x' | 'y';
+  splitThreshold?: number;
+}) {
+  const H = 190;
+  const W = 280;
+  const padL = 42;
+  const padR = 14;
+  const padT = 10;
+  const padB = 22;
+  const xs = points.map((p) => p.x);
+  const ys = points.map((p) => p.y);
+  const minX = xs.length ? Math.min(...xs) : 0;
+  const maxX = xs.length ? Math.max(...xs) : 1;
+  const minY = ys.length ? Math.min(...ys) : 0;
+  const maxY = ys.length ? Math.max(...ys) : 1;
+  const rangeX = Math.max(1e-9, maxX - minX);
+  const rangeY = Math.max(1e-9, maxY - minY);
+  const toPx = (x: number) => padL + ((x - minX) / rangeX) * (W - padL - padR);
+  const toPy = (y: number) => H - padB - ((y - minY) / rangeY) * (H - padT - padB);
+  const yTicks = Array.from({ length: 5 }, (_, i) => minY + ((maxY - minY) * i) / 4);
+  const guideXInside = guideX !== null && guideX !== undefined && guideX >= minX && guideX <= maxX;
+  const guideXPx = guideXInside ? toPx(guideX as number) : null;
+  const zeroYInside = minY <= 0 && maxY >= 0;
+  const barBaselineY = zeroYInside ? toPy(0) : toPy(minY);
+  const svgRef = useRef<SVGSVGElement | null>(null);
+  const [hoverIdx, setHoverIdx] = useState<number | null>(null);
+  const pointPixels = points.map((p) => ({ px: toPx(p.x), py: toPy(p.y), x: p.x, y: p.y }));
+  const hoverPoint = hoverIdx !== null ? pointPixels[hoverIdx] : null;
+  const signValueOf = (p: XYPoint) => (signAxis === 'x' ? p.x : p.y);
+  const lineColorFor = (v: number) => (v < splitThreshold ? 'rgba(255, 77, 77, 0.96)' : 'rgba(0, 200, 150, 0.96)');
+  const barFillFor = (v: number) => (v < splitThreshold ? 'rgba(255, 77, 77, 0.35)' : 'rgba(0, 200, 150, 0.35)');
+  const barStrokeFor = (v: number) => (v < splitThreshold ? 'rgba(255, 77, 77, 0.78)' : 'rgba(0, 200, 150, 0.78)');
+  const linePath = pointPixels.length > 1
+    ? pointPixels.map((p, i) => `${i === 0 ? 'M' : 'L'} ${p.px.toFixed(2)} ${p.py.toFixed(2)}`).join(' ')
+    : '';
+  const stepPath = pointPixels.length > 1
+    ? (() => {
+      const segs = [`M ${pointPixels[0].px.toFixed(2)} ${pointPixels[0].py.toFixed(2)}`];
+      for (let i = 1; i < pointPixels.length; i += 1) {
+        const prev = pointPixels[i - 1];
+        const cur = pointPixels[i];
+        segs.push(`L ${cur.px.toFixed(2)} ${prev.py.toFixed(2)}`);
+        segs.push(`L ${cur.px.toFixed(2)} ${cur.py.toFixed(2)}`);
+      }
+      return segs.join(' ');
+    })()
+    : '';
+  const stepAreaPath = (mode === 'step_area' && stepPath && pointPixels.length > 1)
+    ? `${stepPath} L ${pointPixels[pointPixels.length - 1].px.toFixed(2)} ${barBaselineY.toFixed(2)} L ${pointPixels[0].px.toFixed(2)} ${barBaselineY.toFixed(2)} Z`
+    : '';
+  const barWidth = (() => {
+    if (pointPixels.length < 2) return 4;
+    let minDx = Number.POSITIVE_INFINITY;
+    for (let i = 1; i < pointPixels.length; i += 1) {
+      const dx = pointPixels[i].px - pointPixels[i - 1].px;
+      if (dx > 0 && dx < minDx) minDx = dx;
+    }
+    if (!Number.isFinite(minDx)) return 4;
+    return Math.max(1, Math.min(12, minDx * 0.7));
+  })();
+  return (
+    <div
+      style={{
+        background: 'var(--bg2)',
+        border: '1px solid var(--line)',
+        borderRadius: 3,
+        padding: 12,
+        minWidth: 0,
+        position: 'relative',
+      }}
+    >
+      <div style={{ fontSize: 9, color: 'var(--t3)', textTransform: 'uppercase', letterSpacing: '0.12em', fontWeight: 700, marginBottom: 8 }}>
+        {title}
+      </div>
+      <div
+        style={{
+          fontSize: 9,
+          color: 'var(--t2)',
+          marginBottom: 6,
+          fontFamily: 'var(--font-space-mono), Space Mono, monospace',
+        }}
+      >
+        {subtitle}
+      </div>
+      {points.length > 1 ? (
+        <svg
+          ref={svgRef}
+          viewBox={`0 0 ${W} ${H}`}
+          style={{ width: '100%', height: H, display: 'block' }}
+          preserveAspectRatio="none"
+          onMouseMove={(e) => {
+            if (!svgRef.current || pointPixels.length === 0) return;
+            const rect = svgRef.current.getBoundingClientRect();
+            const x = ((e.clientX - rect.left) / rect.width) * W;
+            let best = 0;
+            let bestDist = Math.abs(pointPixels[0].px - x);
+            for (let i = 1; i < pointPixels.length; i += 1) {
+              const d = Math.abs(pointPixels[i].px - x);
+              if (d < bestDist) {
+                bestDist = d;
+                best = i;
+              }
+            }
+            setHoverIdx(best);
+          }}
+          onMouseLeave={() => setHoverIdx(null)}
+        >
+          {yTicks.map((t, i) => {
+            const y = toPy(t);
+            return (
+              <g key={`y-${i}`}>
+                <line x1={padL} y1={y} x2={W - padR} y2={y} stroke="var(--line2)" strokeDasharray="2 2" opacity={0.65} />
+                <text x={4} y={y + 3} fill="var(--t1)" fontSize="8.5" fontFamily="var(--font-space-mono), Space Mono, monospace">
+                  {yTickFormatter(t)}
+                </text>
+              </g>
+            );
+          })}
+          <line x1={padL} y1={H - padB} x2={W - padR} y2={H - padB} stroke="var(--line2)" />
+          <line x1={padL} y1={padT} x2={padL} y2={H - padB} stroke="var(--line2)" />
+          <text
+            x={8}
+            y={padT - 2}
+            fill="var(--t2)"
+            fontSize="8"
+            fontFamily="var(--font-space-mono), Space Mono, monospace"
+          >
+            {yAxisLabel}
+          </text>
+          <text
+            x={(padL + (W - padR)) / 2}
+            y={H - 4}
+            textAnchor="middle"
+            fill="var(--t2)"
+            fontSize="8"
+            fontFamily="var(--font-space-mono), Space Mono, monospace"
+          >
+            {xAxisLabel}
+          </text>
+          {zeroYInside && (
+            <line
+              x1={padL}
+              y1={barBaselineY}
+              x2={W - padR}
+              y2={barBaselineY}
+              stroke="rgba(255,255,255,0.35)"
+              strokeDasharray="2 2"
+            />
+          )}
+          {guideXInside && guideXPx !== null && (
+            <line
+              x1={guideXPx}
+              y1={padT}
+              x2={guideXPx}
+              y2={H - padB}
+              stroke="rgba(255,255,255,0.5)"
+              strokeWidth="0.8"
+            />
+          )}
+          {mode === 'bar' ? pointPixels.map((p, i) => {
+            const top = Math.min(barBaselineY, p.py);
+            const h = Math.max(1, Math.abs(p.py - barBaselineY));
+            const signV = signValueOf(points[i]);
+            return (
+              <rect
+                key={`bar-${i}`}
+                x={p.px - (barWidth / 2)}
+                y={top}
+                width={barWidth}
+                height={h}
+                fill={splitColorBySign ? barFillFor(signV) : 'rgba(0, 200, 150, 0.35)'}
+                stroke={splitColorBySign ? barStrokeFor(signV) : 'rgba(0, 200, 150, 0.75)'}
+                strokeWidth="0.4"
+              />
+            );
+          }) : mode === 'step_area' ? (
+            <>
+              {stepAreaPath && (
+                <path
+                  d={stepAreaPath}
+                  fill="rgba(0, 200, 150, 0.22)"
+                  stroke="none"
+                />
+              )}
+              <path
+                d={stepPath}
+                fill="none"
+                stroke="rgba(0, 200, 150, 0.95)"
+                strokeWidth="1.6"
+                strokeLinejoin="miter"
+                strokeLinecap="square"
+              />
+            </>
+          ) : (
+            splitColorBySign ? (
+              <>
+                {pointPixels.slice(1).map((p, i) => {
+                  const prev = pointPixels[i];
+                  const midSignVal = (signValueOf(points[i]) + signValueOf(points[i + 1])) / 2;
+                  return (
+                    <line
+                      key={`seg-${i}`}
+                      x1={prev.px}
+                      y1={prev.py}
+                      x2={p.px}
+                      y2={p.py}
+                      stroke={lineColorFor(midSignVal)}
+                      strokeWidth="1.8"
+                      strokeLinejoin="round"
+                      strokeLinecap="round"
+                    />
+                  );
+                })}
+              </>
+            ) : (
+              <path
+                d={linePath}
+                fill="none"
+                stroke="#00c896"
+                strokeWidth="1.8"
+                strokeLinejoin="round"
+                strokeLinecap="round"
+              />
+            )
+          )}
+          {mode === 'bar' && (
+            <path
+              d={linePath}
+              fill="none"
+              stroke="rgba(0, 200, 150, 0.95)"
+              strokeWidth="1.2"
+              strokeLinejoin="round"
+              strokeLinecap="round"
+            />
+          )}
+          {(xMarkers ?? []).map((m, i) => {
+            if (!Number.isFinite(m.x)) return null;
+            const x = toPx(m.x);
+            return (
+              <g key={`mk-${i}`}>
+                <line x1={x} y1={padT} x2={x} y2={H - padB} stroke={m.color ?? 'rgba(0,200,150,0.45)'} strokeDasharray="2 2" />
+                <text
+                  x={Math.min(W - padR - 16, Math.max(padL + 2, x + 2))}
+                  y={H - padB + 12}
+                  fill={m.color ?? 'var(--t1)'}
+                  fontSize="8"
+                  fontFamily="var(--font-space-mono), Space Mono, monospace"
+                >
+                  {m.label}
+                </text>
+              </g>
+            );
+          })}
+          {hoverPoint && (
+            <>
+              <line x1={hoverPoint.px} y1={padT} x2={hoverPoint.px} y2={H - padB} stroke="rgba(255,255,255,0.45)" strokeDasharray="2 2" />
+              <circle cx={hoverPoint.px} cy={hoverPoint.py} r={2.8} fill="#ffba4d" />
+            </>
+          )}
+        </svg>
+      ) : (
+        <div style={{ height: H, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 10, color: 'var(--t3)' }}>
+          Not enough data
+        </div>
+      )}
+      {hoverPoint && (
+        <div
+          style={{
+            position: 'absolute',
+            left: `${Math.min(92, Math.max(8, (hoverPoint.px / W) * 100))}%`,
+            top: 54,
+            transform: 'translateX(-50%)',
+            background: 'var(--bg1)',
+            border: '1px solid var(--line2)',
+            borderRadius: 3,
+            padding: '4px 6px',
+            fontSize: 9,
+            color: 'var(--t1)',
+            whiteSpace: 'nowrap',
+            pointerEvents: 'none',
+            fontFamily: 'var(--font-space-mono), Space Mono, monospace',
+          }}
+        >
+          x: {hoverXFormatter(hoverPoint.x)} | y: {hoverYFormatter(hoverPoint.y)}
+        </div>
+      )}
+      {(chips && chips.length > 0) && (
+        <div style={{ marginTop: 8, display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+          {chips.map((chip) => (
+            <span
+              key={`${chip.label}-${chip.value}`}
+              style={{
+                border: '1px solid var(--line2)',
+                background: 'var(--bg1)',
+                borderRadius: 3,
+                padding: '2px 6px',
+                fontSize: 8,
+                color: chip.color ?? 'var(--t1)',
+                fontFamily: 'var(--font-space-mono), Space Mono, monospace',
+              }}
+            >
+              {chip.label}: {chip.value}
+            </span>
+          ))}
+        </div>
+      )}
+      {summary && (
+        <div
+          style={{
+            marginTop: 6,
+            fontSize: 9,
+            color: 'var(--t2)',
+            lineHeight: 1.35,
+            fontFamily: 'var(--font-space-mono), Space Mono, monospace',
+          }}
+        >
+          {summary}
+        </div>
+      )}
+      <div
+        style={{
+          marginTop: 8,
+          display: 'grid',
+          gridTemplateColumns: 'repeat(3, minmax(0, 1fr))',
+          gap: 6,
+          fontSize: 9,
+          color: 'var(--t2)',
+          fontFamily: 'var(--font-space-mono), Space Mono, monospace',
+        }}
+      >
+        <span>{xMinLabel}</span>
+        <span style={{ textAlign: 'center' }}>{xMidLabel}</span>
+        <span style={{ textAlign: 'right' }}>{xMaxLabel}</span>
+      </div>
+    </div>
+  );
+}
+
+function QqPlotCard({
+  points,
+  summary,
+}: {
+  points: XYPoint[];
+  summary?: string;
+}) {
+  const H = 190;
+  const W = 280;
+  const padL = 42;
+  const padR = 14;
+  const padT = 10;
+  const padB = 22;
+  const xs = points.map((p) => p.x);
+  const ys = points.map((p) => p.y);
+  const minX = xs.length ? Math.min(...xs) : 0;
+  const maxX = xs.length ? Math.max(...xs) : 1;
+  const minY = ys.length ? Math.min(...ys) : 0;
+  const maxY = ys.length ? Math.max(...ys) : 1;
+  const low = Math.min(minX, minY);
+  const high = Math.max(maxX, maxY);
+  const range = Math.max(1e-9, high - low);
+  const toPx = (v: number) => padL + ((v - low) / range) * (W - padL - padR);
+  const toPy = (v: number) => H - padB - ((v - low) / range) * (H - padT - padB);
+  const svgRef = useRef<SVGSVGElement | null>(null);
+  const [hoverIdx, setHoverIdx] = useState<number | null>(null);
+  const pixels = points.map((p) => ({ px: toPx(p.x), py: toPy(p.y), x: p.x, y: p.y }));
+  const hover = hoverIdx !== null ? pixels[hoverIdx] : null;
+  const pointColor = (v: number) => (v < 0 ? 'rgba(255,77,77,0.85)' : 'rgba(0,200,150,0.85)');
+  const tickVals = Array.from({ length: 5 }, (_, i) => low + ((high - low) * i) / 4);
+
+  return (
+    <div style={{ background: 'var(--bg2)', border: '1px solid var(--line)', borderRadius: 3, padding: 12, minWidth: 0, position: 'relative' }}>
+      <div style={{ fontSize: 9, color: 'var(--t3)', textTransform: 'uppercase', letterSpacing: '0.12em', fontWeight: 700, marginBottom: 8 }}>
+        Q-Q Plot vs Normal Distribution
+      </div>
+      <div style={{ fontSize: 9, color: 'var(--t2)', marginBottom: 6, fontFamily: 'var(--font-space-mono), Space Mono, monospace' }}>
+        x: theoretical normal quantiles, y: observed returns
+      </div>
+      {points.length > 1 ? (
+        <svg
+          ref={svgRef}
+          viewBox={`0 0 ${W} ${H}`}
+          style={{ width: '100%', height: H, display: 'block' }}
+          preserveAspectRatio="none"
+          onMouseMove={(e) => {
+            if (!svgRef.current || pixels.length === 0) return;
+            const rect = svgRef.current.getBoundingClientRect();
+            const x = ((e.clientX - rect.left) / rect.width) * W;
+            const y = ((e.clientY - rect.top) / rect.height) * H;
+            let best = 0;
+            let bestD = Number.POSITIVE_INFINITY;
+            for (let i = 0; i < pixels.length; i += 1) {
+              const dx = pixels[i].px - x;
+              const dy = pixels[i].py - y;
+              const d = (dx * dx) + (dy * dy);
+              if (d < bestD) {
+                bestD = d;
+                best = i;
+              }
+            }
+            setHoverIdx(best);
+          }}
+          onMouseLeave={() => setHoverIdx(null)}
+        >
+          {tickVals.map((t, i) => {
+            const x = toPx(t);
+            const y = toPy(t);
+            return (
+              <g key={`qq-tick-${i}`}>
+                <line x1={padL} y1={y} x2={W - padR} y2={y} stroke="var(--line2)" strokeDasharray="2 2" opacity={0.65} />
+                <line x1={x} y1={padT} x2={x} y2={H - padB} stroke="var(--line2)" strokeDasharray="2 2" opacity={0.35} />
+                <text x={4} y={y + 3} fill="var(--t1)" fontSize="8.5" fontFamily="var(--font-space-mono), Space Mono, monospace">
+                  {t.toFixed(2)}%
+                </text>
+              </g>
+            );
+          })}
+          <line x1={padL} y1={H - padB} x2={W - padR} y2={H - padB} stroke="var(--line2)" />
+          <line x1={padL} y1={padT} x2={padL} y2={H - padB} stroke="var(--line2)" />
+          {low <= 0 && high >= 0 && (
+            <line
+              x1={toPx(0)}
+              y1={padT}
+              x2={toPx(0)}
+              y2={H - padB}
+              stroke="rgba(255,255,255,0.5)"
+              strokeWidth="0.8"
+            />
+          )}
+          <line
+            x1={toPx(low)}
+            y1={toPy(low)}
+            x2={toPx(high)}
+            y2={toPy(high)}
+            stroke="rgba(255,255,255,0.5)"
+            strokeWidth="0.9"
+          />
+          {pixels.map((p, i) => (
+            <circle key={`qq-point-${i}`} cx={p.px} cy={p.py} r={2.1} fill={pointColor(p.y)} />
+          ))}
+          {hover && (
+            <>
+              <line x1={hover.px} y1={padT} x2={hover.px} y2={H - padB} stroke="rgba(255,255,255,0.45)" strokeDasharray="2 2" />
+              <line x1={padL} y1={hover.py} x2={W - padR} y2={hover.py} stroke="rgba(255,255,255,0.45)" strokeDasharray="2 2" />
+              <circle cx={hover.px} cy={hover.py} r={2.8} fill="#ffba4d" />
+            </>
+          )}
+          <text x={(padL + (W - padR)) / 2} y={H - 4} textAnchor="middle" fill="var(--t2)" fontSize="8" fontFamily="var(--font-space-mono), Space Mono, monospace">
+            theoretical quantile return %
+          </text>
+          <text x={8} y={padT - 2} fill="var(--t2)" fontSize="8" fontFamily="var(--font-space-mono), Space Mono, monospace">
+            observed return %
+          </text>
+        </svg>
+      ) : (
+        <div style={{ height: H, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 10, color: 'var(--t3)' }}>
+          Not enough data
+        </div>
+      )}
+      {hover && (
+        <div
+          style={{
+            position: 'absolute',
+            left: `${Math.min(92, Math.max(8, (hover.px / W) * 100))}%`,
+            top: 56,
+            transform: 'translateX(-50%)',
+            background: 'var(--bg1)',
+            border: '1px solid var(--line2)',
+            borderRadius: 3,
+            padding: '4px 6px',
+            fontSize: 9,
+            color: 'var(--t1)',
+            whiteSpace: 'nowrap',
+            pointerEvents: 'none',
+            fontFamily: 'var(--font-space-mono), Space Mono, monospace',
+          }}
+        >
+          theo: {hover.x.toFixed(2)}% | obs: {hover.y.toFixed(2)}%
+        </div>
+      )}
+      {summary && (
+        <div style={{ marginTop: 8, fontSize: 9, color: 'var(--t2)', lineHeight: 1.35, fontFamily: 'var(--font-space-mono), Space Mono, monospace' }}>
+          {summary}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function DailyReturnBarStatCard({
+  values,
+}: {
+  values: number[];
+}) {
+  const svgRef = useRef<SVGSVGElement | null>(null);
+  const [hoverIdx, setHoverIdx] = useState<number | null>(null);
+  const H = 190;
+  const W = 280;
+  const padL = 42;
+  const padR = 14;
+  const padT = 10;
+  const padB = 22;
+  const clean = values.filter((v) => Number.isFinite(v));
+  if (clean.length === 0) {
+    return (
+      <div style={{ background: 'var(--bg2)', border: '1px solid var(--line)', borderRadius: 3, padding: 12, minWidth: 0 }}>
+        <div style={{ fontSize: 9, color: 'var(--t3)', textTransform: 'uppercase', letterSpacing: '0.12em', fontWeight: 700, marginBottom: 8 }}>
+          Daily Returns Bar Chart
+        </div>
+        <div style={{ height: H, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 10, color: 'var(--t3)' }}>
+          No return data
+        </div>
+      </div>
+    );
+  }
+
+  // Preserve original chronological order (active-day sequence).
+  const sampled = (() => {
+    if (clean.length <= 160) return clean;
+    return Array.from({ length: 160 }, (_, i) => {
+      const idx = Math.round((i / 159) * (clean.length - 1));
+      return clean[idx];
+    });
+  })();
+  const mean = sampled.reduce((a, b) => a + b, 0) / sampled.length;
+  const median = percentile(sampled, 0.5);
+  const minVal = Math.min(...sampled, 0);
+  const maxVal = Math.max(...sampled, 0);
+  const range = Math.max(1e-9, maxVal - minVal);
+  const toPy = (v: number) => H - padB - ((v - minVal) / range) * (H - padT - padB);
+  const yMedian = toPy(median);
+  const yMean = toPy(mean);
+  const yZero = toPy(0);
+  const plotW = W - padL - padR;
+  const barW = Math.max(1, Math.min(3.5, plotW / Math.max(1, sampled.length)));
+  const ticks = Array.from({ length: 5 }, (_, i) => minVal + ((maxVal - minVal) * i) / 4);
+  const hoverVal = hoverIdx !== null ? sampled[hoverIdx] : null;
+  const hoverX = hoverIdx !== null ? (padL + ((hoverIdx + 0.5) / sampled.length) * plotW) : null;
+  const mappedOriginalIdx = (i: number) => {
+    if (clean.length <= sampled.length) return i + 1;
+    return Math.round((i / Math.max(1, sampled.length - 1)) * (clean.length - 1)) + 1;
+  };
+
+  return (
+    <div style={{ background: 'var(--bg2)', border: '1px solid var(--line)', borderRadius: 3, padding: 12, minWidth: 0, position: 'relative' }}>
+      <div style={{ fontSize: 9, color: 'var(--t3)', textTransform: 'uppercase', letterSpacing: '0.12em', fontWeight: 700, marginBottom: 8 }}>
+        Daily Returns Bar Chart
+      </div>
+      <div style={{ fontSize: 9, color: 'var(--t2)', marginBottom: 6, fontFamily: 'var(--font-space-mono), Space Mono, monospace' }}>
+        Chronological active-day returns
+      </div>
+      <svg
+        ref={svgRef}
+        viewBox={`0 0 ${W} ${H}`}
+        style={{ width: '100%', height: H, display: 'block' }}
+        preserveAspectRatio="none"
+        onMouseMove={(e) => {
+          if (!svgRef.current || sampled.length === 0) return;
+          const rect = svgRef.current.getBoundingClientRect();
+          const x = ((e.clientX - rect.left) / rect.width) * W;
+          let idx = Math.floor(((x - padL) / Math.max(1e-9, plotW)) * sampled.length);
+          idx = Math.max(0, Math.min(sampled.length - 1, idx));
+          setHoverIdx(idx);
+        }}
+        onMouseLeave={() => setHoverIdx(null)}
+      >
+        {ticks.map((t, i) => {
+          const y = toPy(t);
+          return (
+            <g key={`dret-tick-${i}`}>
+              <line x1={padL} y1={y} x2={W - padR} y2={y} stroke="var(--line2)" strokeDasharray="2 2" opacity={0.65} />
+              <text x={4} y={y + 3} fill="var(--t1)" fontSize="8.5" fontFamily="var(--font-space-mono), Space Mono, monospace">
+                {t.toFixed(2)}%
+              </text>
+            </g>
+          );
+        })}
+        <line x1={padL} y1={H - padB} x2={W - padR} y2={H - padB} stroke="var(--line2)" />
+        <line x1={padL} y1={padT} x2={padL} y2={H - padB} stroke="var(--line2)" />
+        <line x1={padL} y1={yZero} x2={W - padR} y2={yZero} stroke="rgba(255,255,255,0.35)" strokeDasharray="2 2" />
+        {sampled.map((v, i) => {
+          const x = padL + ((i + 0.5) / sampled.length) * plotW;
+          const y = toPy(v);
+          const top = Math.min(yZero, y);
+          const h = Math.max(1, Math.abs(y - yZero));
+          const isNeg = v < 0;
+          const fill = isNeg ? 'rgba(255, 77, 77, 0.38)' : 'rgba(0, 200, 150, 0.35)';
+          const stroke = isNeg ? 'rgba(255, 77, 77, 0.82)' : 'rgba(0, 200, 150, 0.75)';
+          const isHover = hoverIdx === i;
+          return (
+            <rect
+              key={`dbar-${i}`}
+              x={x - (barW / 2)}
+              y={top}
+              width={barW}
+              height={h}
+              fill={isHover ? (isNeg ? 'rgba(255,77,77,0.62)' : 'rgba(0,200,150,0.58)') : fill}
+              stroke={isHover ? '#ffba4d' : stroke}
+              strokeWidth={isHover ? 0.8 : 0.35}
+            />
+          );
+        })}
+        {hoverX !== null && (
+          <line
+            x1={hoverX}
+            y1={padT}
+            x2={hoverX}
+            y2={H - padB}
+            stroke="rgba(255,255,255,0.45)"
+            strokeDasharray="2 2"
+          />
+        )}
+
+        <line
+          x1={padL}
+          y1={yMedian}
+          x2={W - padR}
+          y2={yMedian}
+          stroke="rgba(255,255,255,0.9)"
+          strokeWidth="1"
+          strokeDasharray="3 2"
+        />
+        <line
+          x1={padL}
+          y1={yMean}
+          x2={W - padR}
+          y2={yMean}
+          stroke="rgba(255,186,77,0.95)"
+          strokeWidth="1"
+          strokeDasharray="3 2"
+        />
+        <text
+          x={W - padR - 2}
+          y={yMean - 3}
+          textAnchor="end"
+          fill="rgba(255,186,77,0.95)"
+          fontSize="8.5"
+          fontFamily="var(--font-space-mono), Space Mono, monospace"
+        >
+          mean {mean.toFixed(2)}%
+        </text>
+        <text
+          x={(padL + (W - padR)) / 2}
+          y={H - 4}
+          textAnchor="middle"
+          fill="var(--t2)"
+          fontSize="8"
+          fontFamily="var(--font-space-mono), Space Mono, monospace"
+        >
+          active day index (chronological)
+        </text>
+      </svg>
+      {hoverIdx !== null && hoverVal !== null && (
+        <div
+          style={{
+            position: 'absolute',
+            left: `${Math.min(92, Math.max(8, ((hoverX ?? 0) / W) * 100))}%`,
+            top: 56,
+            transform: 'translateX(-50%)',
+            background: 'var(--bg1)',
+            border: '1px solid var(--line2)',
+            borderRadius: 3,
+            padding: '4px 6px',
+            fontSize: 9,
+            color: 'var(--t1)',
+            whiteSpace: 'nowrap',
+            pointerEvents: 'none',
+            fontFamily: 'var(--font-space-mono), Space Mono, monospace',
+          }}
+        >
+          idx: {mappedOriginalIdx(hoverIdx)} | ret: {hoverVal.toFixed(2)}%
+        </div>
+      )}
+      <div style={{ marginTop: 8, fontSize: 9, color: 'var(--t2)', fontFamily: 'var(--font-space-mono), Space Mono, monospace' }}>
+        n: {clean.length}
+      </div>
+    </div>
+  );
+}
+
+function ReturnBoxPlotCard({
+  title,
+  stats,
+  count,
+}: {
+  title: string;
+  stats: BoxStats | null;
+  count: number;
+}) {
+  const H = 340;
+  const W = 240;
+  const yAxisPadLeft = 44;
+  const yAxisPadRight = 16;
+  const svgRef = useRef<SVGSVGElement | null>(null);
+  const [hovering, setHovering] = useState(false);
+  if (!stats) {
+    return (
+      <div
+        style={{
+          background: 'var(--bg2)',
+          border: '1px solid var(--line)',
+          borderRadius: 3,
+          padding: 12,
+          flex: 1,
+          minWidth: 0,
+          height: H + 52,
+          display: 'flex',
+          flexDirection: 'column',
+          gap: 8,
+        }}
+      >
+        <div style={{ fontSize: 9, color: 'var(--t3)', textTransform: 'uppercase', letterSpacing: '0.12em', fontWeight: 700 }}>
+          {title}
+        </div>
+        <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 10, color: 'var(--t3)' }}>
+          No return data
+        </div>
+      </div>
+    );
+  }
+
+  const minVal = Math.min(stats.min, 0);
+  const maxVal = Math.max(stats.max, 0);
+  const range = Math.max(1e-9, maxVal - minVal);
+  const yFor = (v: number) => 10 + (1 - (v - minVal) / range) * (H - 20);
+  const xMid = yAxisPadLeft + ((W - yAxisPadLeft - yAxisPadRight) / 2);
+  const boxTop = yFor(stats.q3);
+  const boxBottom = yFor(stats.q1);
+  const medianY = yFor(stats.median);
+  const minY = yFor(stats.min);
+  const maxY = yFor(stats.max);
+  const meanY = yFor(stats.mean);
+  const zeroY = yFor(0);
+  const zeroInside = 0 >= minVal && 0 <= maxVal;
+  const tickCount = 5;
+  const tickValues = Array.from({ length: tickCount }, (_, i) => {
+    if (tickCount === 1) return minVal;
+    return minVal + ((maxVal - minVal) * i) / (tickCount - 1);
+  });
+
+  return (
+    <div
+      style={{
+        background: 'var(--bg2)',
+        border: '1px solid var(--line)',
+        borderRadius: 3,
+        padding: 12,
+        flex: 1,
+        minWidth: 0,
+        position: 'relative',
+      }}
+    >
+      <div style={{ fontSize: 9, color: 'var(--t3)', textTransform: 'uppercase', letterSpacing: '0.12em', fontWeight: 700, marginBottom: 8 }}>
+        {title}
+      </div>
+      <svg
+        ref={svgRef}
+        viewBox={`0 0 ${W} ${H}`}
+        style={{ width: '100%', height: H, display: 'block' }}
+        preserveAspectRatio="none"
+        onMouseEnter={() => setHovering(true)}
+        onMouseLeave={() => setHovering(false)}
+      >
+        {tickValues.map((tick, idx) => {
+          const y = yFor(tick);
+          const label = `${tick.toFixed(2)}%`;
+          return (
+            <g key={`tick-${idx}`}>
+              <line
+                x1={yAxisPadLeft}
+                y1={y}
+                x2={W - yAxisPadRight}
+                y2={y}
+                stroke="var(--line2)"
+                strokeDasharray="2 2"
+                opacity={0.65}
+              />
+              <text
+                x={8}
+                y={y + 3}
+                fill="var(--t3)"
+                fontSize="9"
+                fontFamily="var(--font-space-mono), Space Mono, monospace"
+              >
+                {label}
+              </text>
+            </g>
+          );
+        })}
+        {zeroInside && (
+          <line
+            x1={yAxisPadLeft}
+            y1={zeroY}
+            x2={W - yAxisPadRight}
+            y2={zeroY}
+            stroke="var(--line2)"
+            strokeDasharray="3 2"
+            opacity={1}
+          />
+        )}
+        <line x1={xMid} y1={maxY} x2={xMid} y2={boxTop} stroke="var(--t2)" />
+        <line x1={xMid} y1={boxBottom} x2={xMid} y2={minY} stroke="var(--t2)" />
+        <line x1={xMid - 18} y1={maxY} x2={xMid + 18} y2={maxY} stroke="var(--t2)" />
+        <line x1={xMid - 18} y1={minY} x2={xMid + 18} y2={minY} stroke="var(--t2)" />
+        <rect
+          x={xMid - 26}
+          y={boxTop}
+          width={52}
+          height={Math.max(1, boxBottom - boxTop)}
+          fill="rgba(0, 200, 150, 0.18)"
+          stroke="rgba(0, 200, 150, 0.7)"
+        />
+        <line x1={xMid - 26} y1={medianY} x2={xMid + 26} y2={medianY} stroke="#00c896" strokeWidth={1.5} />
+        <line
+          x1={yAxisPadLeft}
+          y1={meanY}
+          x2={W - yAxisPadRight}
+          y2={meanY}
+          stroke="rgba(255,186,77,0.95)"
+          strokeWidth="1"
+          strokeDasharray="3 2"
+        />
+        <circle cx={xMid} cy={meanY} r={3.2} fill="#ffba4d" />
+        <text
+          x={W - yAxisPadRight - 2}
+          y={meanY - 3}
+          textAnchor="end"
+          fill="rgba(255,186,77,0.95)"
+          fontSize="8.5"
+          fontFamily="var(--font-space-mono), Space Mono, monospace"
+        >
+          mean {stats.mean.toFixed(2)}%
+        </text>
+      </svg>
+      {hovering && (
+        <div
+          style={{
+            position: 'absolute',
+            right: 10,
+            top: 28,
+            background: 'var(--bg1)',
+            border: '1px solid var(--line2)',
+            borderRadius: 3,
+            padding: '6px 8px',
+            fontSize: 9,
+            color: 'var(--t1)',
+            whiteSpace: 'nowrap',
+            pointerEvents: 'none',
+            fontFamily: 'var(--font-space-mono), Space Mono, monospace',
+            lineHeight: 1.45,
+          }}
+        >
+          <div>min: {stats.min.toFixed(2)}%</div>
+          <div>q1: {stats.q1.toFixed(2)}%</div>
+          <div>median: {stats.median.toFixed(2)}%</div>
+          <div>mean: {stats.mean.toFixed(2)}%</div>
+          <div>q3: {stats.q3.toFixed(2)}%</div>
+          <div>max: {stats.max.toFixed(2)}%</div>
+        </div>
+      )}
+      <div
+        style={{
+          marginTop: 8,
+          display: 'grid',
+          gridTemplateColumns: 'repeat(3, minmax(0, 1fr))',
+          gap: 6,
+          fontSize: 9,
+          color: 'var(--t2)',
+          fontFamily: 'var(--font-space-mono), Space Mono, monospace',
+        }}
+      >
+        <span>n: {count}</span>
+        <span>mean: {stats.mean.toFixed(2)}%</span>
+        <span>med: {stats.median.toFixed(2)}%</span>
+      </div>
+    </div>
+  );
 }
 
 function normalizeFilterLabel(s: string): string {
@@ -841,34 +2033,6 @@ function syntheticDateAt(index: number, total: number): Date {
   return d;
 }
 
-function makeTickIndices(total: number): number[] {
-  if (total <= 1) return [0];
-  const raw = [0, Math.floor((total - 1) * 0.25), Math.floor((total - 1) * 0.5), Math.floor((total - 1) * 0.75), total - 1];
-  return Array.from(new Set(raw)).sort((a, b) => a - b);
-}
-
-function buildChartPoints(data: Point[], width: number, height: number, pad = 4): ChartPoint[] {
-  if (!data || data.length === 0) return [];
-  const values = data.map((d) => (typeof d === 'number' ? d : d.y));
-  const min = Math.min(...values);
-  const max = Math.max(...values);
-  const range = max - min || 1;
-  return values.map((v, i) => {
-    const x = pad + (i / (values.length - 1)) * (width - pad * 2);
-    const y = height - pad - ((v - min) / range) * (height - pad * 2);
-    return {
-      px: x,
-      py: y,
-      y: v,
-      x: typeof data[i] === 'number' ? undefined : (data[i] as { x: XValue; y: number }).x,
-    };
-  });
-}
-
-function pointsToPolyline(points: ChartPoint[]): string {
-  return points.map((p) => `${p.px.toFixed(1)},${p.py.toFixed(1)}`).join(' ');
-}
-
 function CurveCard({
   title,
   data,
@@ -876,8 +2040,17 @@ function CurveCard({
   gradientId,
   height = 160,
   fillAbove = false,
+  showMonthlyGridlines = false,
+  showAthLine = false,
+  showMovingAverage = false,
+  movingAverageWindow = 20,
   valueFormatter,
   showTitle = true,
+  annotateMin = false,
+  annotationLabel = 'Min',
+  baselineValue = null,
+  compactCurrencyTicks = false,
+  statsBar,
 }: {
   title: string;
   data: Point[] | null | undefined;
@@ -885,45 +2058,124 @@ function CurveCard({
   gradientId: string;
   height?: number;
   fillAbove?: boolean;
+  showMonthlyGridlines?: boolean;
+  showAthLine?: boolean;
+  showMovingAverage?: boolean;
+  movingAverageWindow?: number;
   valueFormatter?: (v: number) => string;
   showTitle?: boolean;
+  annotateMin?: boolean;
+  annotationLabel?: string;
+  baselineValue?: number | null;
+  compactCurrencyTicks?: boolean;
+  statsBar?: Array<{ label: string; value: string; color: string }>;
 }) {
-  const W = 480;
-  const H = height;
-  const svgRef = useRef<SVGSVGElement | null>(null);
-  const [hoverIdx, setHoverIdx] = useState<number | null>(null);
-  const points = useMemo(() => (data && data.length > 1 ? buildChartPoints(data, W, H) : []), [data, H]);
-  const polyline = points.length > 1 ? pointsToPolyline(points) : null;
-  const hoverPoint = hoverIdx !== null ? points[hoverIdx] : null;
-  const tickIndices = useMemo(() => makeTickIndices(points.length), [points.length]);
-
-  // Build area path from polyline
-  let areaPath = '';
-  if (polyline) {
-    const pts = polyline.split(' ');
-    const first = pts[0];
-    const last = pts[pts.length - 1];
-    const lastX = last.split(',')[0];
-    const firstX = first.split(',')[0];
-    if (fillAbove) {
-      areaPath = `M ${first} ${pts.slice(1).map((p) => `L ${p}`).join(' ')} L ${lastX},0 L ${firstX},0 Z`;
-    } else {
-      areaPath = `M ${first} ${pts.slice(1).map((p) => `L ${p}`).join(' ')} L ${lastX},${H} L ${firstX},${H} Z`;
+  const rows = useMemo(() => {
+    const src = data ?? [];
+    return src
+      .map((p, idx) => {
+        const y = typeof p === 'number' ? p : p.y;
+        if (!Number.isFinite(y)) return null;
+        const d = typeof p === 'number'
+          ? syntheticDateAt(idx, src.length)
+          : (parseDateLike(p.x) ?? syntheticDateAt(idx, src.length));
+        return {
+          idx,
+          ts: d.getTime(),
+          date: d,
+          y,
+        };
+      })
+      .filter((r): r is { idx: number; ts: number; date: Date; y: number } => r !== null);
+  }, [data]);
+  const isDrawdownPanel = fillAbove || /drawdown/i.test(title);
+  const withSeries = useMemo(() => {
+    if (rows.length === 0) return [] as Array<{
+      idx: number;
+      ts: number;
+      date: Date;
+      y: number;
+      dailyRetPct: number | null;
+      ath?: number;
+      ma?: number | null;
+    }>;
+    const out = rows.map((r, i) => {
+      const prev = i > 0 ? rows[i - 1].y : null;
+      const dailyRetPct = prev && prev !== 0 ? ((r.y / prev) - 1) * 100 : null;
+      const ath = showAthLine ? Math.max(...rows.slice(0, i + 1).map((x) => x.y)) : undefined;
+      return {
+        ...r,
+        dailyRetPct,
+        ath,
+        ma: null as number | null,
+      };
+    });
+    if (showMovingAverage) {
+      const w = Math.max(2, Math.floor(movingAverageWindow));
+      let sum = 0;
+      for (let i = 0; i < out.length; i += 1) {
+        sum += out[i].y;
+        if (i >= w) sum -= out[i - w].y;
+        if (i >= w - 1) out[i].ma = sum / w;
+      }
     }
-  }
+    return out;
+  }, [rows, showAthLine, showMovingAverage, movingAverageWindow]);
+  const monthRefs = useMemo(() => {
+    if (!showMonthlyGridlines || withSeries.length < 2) return [] as number[];
+    const out: number[] = [];
+    let prevKey = `${withSeries[0].date.getFullYear()}-${withSeries[0].date.getMonth()}`;
+    for (let i = 1; i < withSeries.length; i += 1) {
+      const key = `${withSeries[i].date.getFullYear()}-${withSeries[i].date.getMonth()}`;
+      if (key !== prevKey) {
+        out.push(withSeries[i].ts);
+        prevKey = key;
+      }
+    }
+    return out;
+  }, [withSeries, showMonthlyGridlines]);
+  const minPointInfo = useMemo(() => {
+    if (!annotateMin || withSeries.length === 0) return null;
+    let minIdx = 0;
+    for (let i = 1; i < withSeries.length; i += 1) {
+      if (withSeries[i].y < withSeries[minIdx].y) minIdx = i;
+    }
+    return withSeries[minIdx];
+  }, [annotateMin, withSeries]);
+  const valueFmt = valueFormatter ?? ((v: number) => v.toFixed(3));
+  const yTickFmt = (v: number) => (compactCurrencyTicks ? fmtUsdCompact(v) : valueFmt(v));
 
   return (
     <div
       style={{
-        background: 'var(--bg2)',
+        background: 'var(--bg0)',
         border: '1px solid var(--line)',
         borderRadius: 3,
         padding: 12,
         flex: 1,
         minWidth: 0,
-        position: 'relative',
       }}
     >
+      {statsBar && statsBar.length > 0 && (
+        <div
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: 12,
+            marginBottom: 8,
+            fontSize: 9,
+            fontFamily: 'var(--font-space-mono), Space Mono, monospace',
+            letterSpacing: '0.06em',
+            textTransform: 'uppercase',
+          }}
+        >
+          {statsBar.map((s) => (
+            <span key={`s-${s.label}`} style={{ color: 'var(--t2)' }}>
+              {s.label}: <span style={{ color: s.color, fontWeight: 700 }}>{s.value}</span>
+            </span>
+          ))}
+        </div>
+      )}
       {showTitle && (
         <div
           style={{
@@ -938,106 +2190,131 @@ function CurveCard({
           {title}
         </div>
       )}
-      {polyline ? (
-        <svg
-          ref={svgRef}
-          viewBox={`0 0 ${W} ${H}`}
-          style={{ width: '100%', height: H, display: 'block' }}
-          preserveAspectRatio="none"
-          onMouseMove={(e) => {
-            if (!svgRef.current || points.length === 0) return;
-            const rect = svgRef.current.getBoundingClientRect();
-            const x = ((e.clientX - rect.left) / rect.width) * W;
-            let bestIdx = 0;
-            let bestDist = Math.abs(points[0].px - x);
-            for (let i = 1; i < points.length; i += 1) {
-              const dist = Math.abs(points[i].px - x);
-              if (dist < bestDist) {
-                bestDist = dist;
-                bestIdx = i;
-              }
-            }
-            setHoverIdx(bestIdx);
-          }}
-          onMouseLeave={() => setHoverIdx(null)}
-        >
-          <defs>
-            <linearGradient id={gradientId} x1="0" y1="0" x2="0" y2="1">
-              <stop offset="0%" stopColor={color} stopOpacity="0.20" />
-              <stop offset="100%" stopColor={color} stopOpacity="0" />
-            </linearGradient>
-          </defs>
-          {areaPath && <path d={areaPath} fill={`url(#${gradientId})`} />}
-          <polyline
-            points={polyline}
-            fill="none"
-            stroke={color}
-            strokeWidth="1.5"
-            vectorEffect="non-scaling-stroke"
-          />
-          {hoverPoint && (
-            <>
-              <line
-                x1={hoverPoint.px}
-                y1={0}
-                x2={hoverPoint.px}
-                y2={H}
-                stroke="var(--line2)"
-                strokeWidth="1"
-                strokeDasharray="2 2"
+      {withSeries.length > 1 ? (
+        <div style={{ width: '100%', height }}>
+          <ResponsiveContainer width="100%" height="100%">
+            <ComposedChart data={withSeries} margin={{ top: 6, right: 10, bottom: 12, left: 8 }}>
+              <defs>
+                <linearGradient id={gradientId} x1="0" y1="0" x2="0" y2="1">
+                  <stop offset="0%" stopColor={color} stopOpacity={isDrawdownPanel ? 0.188 : 0.125} />
+                  <stop offset="100%" stopColor={color} stopOpacity={0} />
+                </linearGradient>
+              </defs>
+              <CartesianGrid stroke="var(--line)" strokeOpacity={0.2} vertical={false} />
+              <XAxis
+                dataKey="ts"
+                type="number"
+                domain={['dataMin', 'dataMax']}
+                tickFormatter={(ts) => fmtDateLabel(new Date(Number(ts)))}
+                tick={{ fill: 'var(--t2)', fontSize: 9, fontFamily: 'var(--font-space-mono), Space Mono, monospace' }}
+                axisLine={{ stroke: 'var(--line)', strokeOpacity: 0.35 }}
+                tickLine={{ stroke: 'var(--line)', strokeOpacity: 0.35 }}
               />
-              <circle
-                cx={hoverPoint.px}
-                cy={hoverPoint.py}
-                r={3}
-                fill={color}
-                stroke="var(--bg2)"
-                strokeWidth="1"
+              <YAxis
+                tickFormatter={(v) => yTickFmt(Number(v))}
+                tick={{ fill: 'var(--t2)', fontSize: 9, fontFamily: 'var(--font-space-mono), Space Mono, monospace' }}
+                axisLine={{ stroke: 'var(--line)', strokeOpacity: 0.35 }}
+                tickLine={{ stroke: 'var(--line)', strokeOpacity: 0.35 }}
+                width={54}
               />
-            </>
-          )}
-        </svg>
+              <Tooltip
+                cursor={{ stroke: 'var(--line2)', strokeDasharray: '2 2', strokeOpacity: 0.4 }}
+                content={({ active, payload }) => {
+                  if (!active || !payload || payload.length === 0) return null;
+                  const row = payload[0]?.payload as { date?: Date; y?: number; dailyRetPct?: number | null } | undefined;
+                  if (!row || typeof row.y !== 'number') return null;
+                  return (
+                    <div
+                      style={{
+                        background: '#141416',
+                        border: '1px solid #242428',
+                        borderRadius: 3,
+                        color: 'var(--t0)',
+                        fontFamily: 'var(--font-space-mono), Space Mono, monospace',
+                        fontSize: 10,
+                        padding: '6px 8px',
+                        lineHeight: 1.45,
+                      }}
+                    >
+                      <div>{row.date ? fmtDateLong(new Date(row.date)) : ''}</div>
+                      <div>{title}: {valueFmt(row.y)}</div>
+                      <div>Daily Return %: {row.dailyRetPct !== null && row.dailyRetPct !== undefined ? fmtPercent2(row.dailyRetPct) : 'N/A'}</div>
+                    </div>
+                  );
+                }}
+              />
+              {monthRefs.map((ts, i) => (
+                <ReferenceLine
+                  key={`month-ref-${i}`}
+                  x={ts}
+                  stroke="var(--line)"
+                  strokeOpacity={0.35}
+                  strokeDasharray="2 3"
+                />
+              ))}
+              {baselineValue !== null && Number.isFinite(baselineValue) && (
+                <ReferenceLine
+                  y={baselineValue}
+                  stroke="var(--line2)"
+                  strokeDasharray="4 4"
+                  strokeOpacity={0.8}
+                />
+              )}
+              <Area
+                type="monotone"
+                dataKey="y"
+                stroke={color}
+                strokeWidth={1.5}
+                fill={`url(#${gradientId})`}
+                dot={false}
+                isAnimationActive={false}
+              />
+              {!isDrawdownPanel && showAthLine && (
+                <Line
+                  type="monotone"
+                  dataKey="ath"
+                  stroke="rgba(255,255,255,0.45)"
+                  strokeDasharray="3 3"
+                  strokeWidth={1}
+                  dot={false}
+                  isAnimationActive={false}
+                />
+              )}
+              {!isDrawdownPanel && showMovingAverage && (
+                <Line
+                  type="monotone"
+                  dataKey="ma"
+                  stroke="rgba(255,186,77,0.92)"
+                  strokeDasharray="4 2"
+                  strokeWidth={1.1}
+                  dot={false}
+                  connectNulls
+                  isAnimationActive={false}
+                />
+              )}
+              {minPointInfo && (
+                <ReferenceDot
+                  x={minPointInfo.ts}
+                  y={minPointInfo.y}
+                  r={2.5}
+                  fill="#ff4d4d"
+                  stroke="var(--bg0)"
+                  strokeWidth={1}
+                  label={{
+                    value: `${annotationLabel}: ${valueFmt(minPointInfo.y)}`,
+                    fill: 'var(--t2)',
+                    fontSize: 9,
+                    fontFamily: 'var(--font-space-mono), Space Mono, monospace',
+                    position: 'top',
+                  }}
+                />
+              )}
+            </ComposedChart>
+          </ResponsiveContainer>
+        </div>
       ) : (
-        <div style={{ height: H, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+        <div style={{ height, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
           <span style={{ fontSize: 10, color: 'var(--t3)' }}>No chart data</span>
-        </div>
-      )}
-      {hoverPoint && (
-        <div
-          style={{
-            position: 'absolute',
-            left: `${Math.min(92, Math.max(8, (hoverPoint.px / W) * 100))}%`,
-            top: 30,
-            transform: 'translateX(-50%)',
-            background: 'var(--bg1)',
-            border: '1px solid var(--line2)',
-            color: 'var(--t0)',
-            fontSize: 9,
-            padding: '4px 6px',
-            borderRadius: 2,
-            pointerEvents: 'none',
-            whiteSpace: 'nowrap',
-          }}
-        >
-          x: {fmtDateLabel(parseDateLike(hoverPoint.x) ?? syntheticDateAt(hoverIdx ?? 0, points.length || 1))}  y: {(valueFormatter ?? ((v) => v.toFixed(3)))(hoverPoint.y)}
-        </div>
-      )}
-      {points.length > 1 && (
-        <div
-          style={{
-            display: 'flex',
-            justifyContent: 'space-between',
-            marginTop: 6,
-            color: 'var(--t3)',
-            fontSize: 9,
-            fontFamily: 'var(--font-space-mono), Space Mono, monospace',
-          }}
-        >
-          {tickIndices.map((idx) => {
-            const p = points[idx];
-            const d = parseDateLike(p?.x) ?? syntheticDateAt(idx, points.length);
-            return <span key={idx}>{fmtDateLabel(d)}</span>;
-          })}
         </div>
       )}
     </div>
@@ -1060,7 +2337,7 @@ type FilterRow = Record<string, unknown> & {
   equity_curve?: Point[];
   drawdown_curve?: Point[];
 };
-type ReportTab = 'summary' | 'stress_tests' | 'raw_output' | 'tear_sheet' | 'full_report';
+type ReportTab = 'summary' | 'breakdown' | 'stress_tests' | 'raw_output' | 'tear_sheet' | 'full_report';
 
 function asNum(v: unknown): number | null {
   if (typeof v === 'number' && Number.isFinite(v)) return v;
@@ -1137,6 +2414,13 @@ export default function ResultsView({ results, jobId, startingCapital, params }:
   const [outputError, setOutputError] = useState<string | null>(null);
   const [copyState, setCopyState] = useState<'idle' | 'copied' | 'error'>('idle');
   const [tearTemplate, setTearTemplate] = useState('');
+  const [calendarHover, setCalendarHover] = useState<{
+    x: number;
+    y: number;
+    text: string;
+  } | null>(null);
+  const [calendarRowHoverKey, setCalendarRowHoverKey] = useState<string | null>(null);
+  const [calendarViewMode, setCalendarViewMode] = useState<'grid' | 'chart'>('grid');
   const [openFullReportCategories, setOpenFullReportCategories] = useState<Record<FullReportCategoryKey, boolean>>(() => (
     FULL_REPORT_CATEGORIES.reduce((acc, cat) => {
       acc[cat.key] = cat.defaultOpen;
@@ -1283,6 +2567,164 @@ export default function ResultsView({ results, jobId, startingCapital, params }:
       ? p * runStartingCapital
       : { ...p, y: p.y * runStartingCapital }
   ));
+  const equitySeriesDated = useMemo(() => {
+    const src = equityCurveDollars ?? [];
+    return src.map((p, idx) => {
+      if (typeof p === 'number') return { d: syntheticDateAt(idx, src.length), y: p };
+      return { d: parseDateLike(p.x) ?? syntheticDateAt(idx, src.length), y: p.y };
+    }).filter((p) => Number.isFinite(p.y));
+  }, [equityCurveDollars]);
+  const returnProfile = useMemo(() => {
+    if (equitySeriesDated.length < 2) {
+      return {
+        daily: [] as number[],
+        weekly: [] as number[],
+        monthly: [] as number[],
+        quarterly: [] as number[],
+      };
+    }
+    const daily: number[] = [];
+    for (let i = 1; i < equitySeriesDated.length; i += 1) {
+      const prev = equitySeriesDated[i - 1].y;
+      const cur = equitySeriesDated[i].y;
+      if (prev > 0 && Number.isFinite(cur)) {
+        const r = ((cur / prev) - 1) * 100;
+        // Daily profile uses active-day returns so the quartiles are informative.
+        if (Math.abs(r) > 1e-12) daily.push(r);
+      }
+    }
+    const weekly = periodReturnsFromEquity(equitySeriesDated, weekStartKey);
+    const monthly = periodReturnsFromEquity(
+      equitySeriesDated,
+      (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`,
+    );
+    const quarterly = periodReturnsFromEquity(
+      equitySeriesDated,
+      (d) => `${d.getFullYear()}-Q${Math.floor(d.getMonth() / 3) + 1}`,
+    );
+    return { daily, weekly, monthly, quarterly };
+  }, [equitySeriesDated]);
+  const derivedSummaryStats = useMemo(() => {
+    const daily = returnProfile.daily.filter((v) => Number.isFinite(v));
+    const wins = daily.filter((v) => v > 0);
+    const losses = daily.filter((v) => v < 0);
+    const avgWin = wins.length ? wins.reduce((a, b) => a + b, 0) / wins.length : null;
+    const avgLoss = losses.length ? losses.reduce((a, b) => a + b, 0) / losses.length : null;
+    const avgWinLoss = (
+      avgWin !== null
+      && avgLoss !== null
+      && avgLoss < 0
+    ) ? (avgWin / Math.abs(avgLoss)) : null;
+    const profitFactor = (
+      wins.length > 0
+      && losses.length > 0
+    ) ? (wins.reduce((a, b) => a + b, 0) / Math.abs(losses.reduce((a, b) => a + b, 0))) : null;
+    const avg1M = returnProfile.monthly.length
+      ? returnProfile.monthly.reduce((a, b) => a + b, 0) / returnProfile.monthly.length
+      : null;
+    const drawdownValues = (Array.isArray(selectedDrawdownCurve) ? selectedDrawdownCurve : [])
+      .map((p) => (typeof p === 'number' ? p : p.y))
+      .filter((v) => Number.isFinite(v))
+      .map((v) => normalizeDrawdownDecimal(v));
+    let longestUnderwaterStreak = 0;
+    let streak = 0;
+    for (const dd of drawdownValues) {
+      if (dd < 0) {
+        streak += 1;
+        if (streak > longestUnderwaterStreak) longestUnderwaterStreak = streak;
+      } else {
+        streak = 0;
+      }
+    }
+    return { avgWinLoss, profitFactor, avg1M, longestUnderwaterStreak };
+  }, [returnProfile.daily, returnProfile.monthly, selectedDrawdownCurve]);
+  const monthlyHeatmap = useMemo(() => {
+    const monthMap = new Map<string, { label: string; first: number; last: number; d: Date }>();
+    for (const p of equitySeriesDated) {
+      const y = p.d.getFullYear();
+      const m = p.d.getMonth();
+      const key = `${y}-${String(m + 1).padStart(2, '0')}`;
+      if (!monthMap.has(key)) {
+        monthMap.set(key, {
+          label: p.d.toLocaleDateString(undefined, { month: 'short', year: '2-digit' }).replace(' ', " '"),
+          first: p.y,
+          last: p.y,
+          d: new Date(y, m, 1),
+        });
+      }
+      const row = monthMap.get(key)!;
+      row.last = p.y;
+    }
+    const rows = Array.from(monthMap.values())
+      .sort((a, b) => a.d.getTime() - b.d.getTime())
+      .map((r) => ({
+        label: r.label.toUpperCase(),
+        pct: r.first > 0 ? ((r.last / r.first) - 1) * 100 : 0,
+      }));
+    const absVals = rows.map((r) => Math.abs(r.pct)).filter((v) => Number.isFinite(v)).sort((a, b) => a - b);
+    const scale = absVals.length > 0 ? Math.max(1, percentile(absVals, 0.95)) : 1;
+    const positive = rows.filter((r) => r.pct > 0).length;
+    const negative = rows.filter((r) => r.pct < 0).length;
+    const winRate = rows.length > 0 ? (positive / rows.length) * 100 : 0;
+    const mean = rows.length > 0 ? (rows.reduce((a, b) => a + b.pct, 0) / rows.length) : 0;
+    return { rows, scale, positive, negative, winRate, mean };
+  }, [equitySeriesDated]);
+  const returnProfileStats = useMemo(() => ({
+    daily: computeBoxStats(returnProfile.daily),
+    weekly: computeBoxStats(returnProfile.weekly),
+    monthly: computeBoxStats(returnProfile.monthly),
+    quarterly: computeBoxStats(returnProfile.quarterly),
+  }), [returnProfile]);
+  const dailyVolatilityPct = useMemo(() => {
+    const vals = returnProfile.daily.filter((v) => Number.isFinite(v));
+    if (vals.length < 2) return null;
+    const mean = vals.reduce((a, b) => a + b, 0) / vals.length;
+    const variance = vals.reduce((a, b) => a + ((b - mean) ** 2), 0) / (vals.length - 1);
+    return Math.sqrt(Math.max(0, variance));
+  }, [returnProfile.daily]);
+  const calendarMonths = useMemo(() => buildCalendarMonths(equitySeriesDated), [equitySeriesDated]);
+  const calendarScale = useMemo(() => {
+    const vals = calendarMonths
+      .flatMap((mth) => mth.cells)
+      .map((c) => c.ret)
+      .filter((v): v is number => typeof v === 'number' && Number.isFinite(v))
+      .map((v) => Math.abs(v))
+      .sort((a, b) => a - b);
+    if (vals.length === 0) return 1;
+    return Math.max(1, percentile(vals, 0.95));
+  }, [calendarMonths]);
+  const statisticalCharts = useMemo(() => {
+    const source = returnProfile.daily;
+    const sorted = [...source].sort((a, b) => a - b);
+    const cdf = computeCdfPoints(source);
+    const eqf = computeEqfPoints(source);
+    const pdf = computePdfPoints(source);
+    const qq = (() => {
+      if (sorted.length < 2) return [] as XYPoint[];
+      const mean = sorted.reduce((a, b) => a + b, 0) / sorted.length;
+      const variance = sorted.reduce((a, b) => a + (b - mean) ** 2, 0) / sorted.length;
+      const sigma = Math.sqrt(Math.max(variance, 1e-12));
+      const sampled = sampleSorted(sorted);
+      return sampled.map((obs, i) => {
+        const q = (i + 0.5) / sampled.length;
+        const z = inverseNormalCdf(q);
+        const theo = mean + (sigma * z);
+        return { x: theo, y: obs };
+      });
+    })();
+    const min = sorted.length ? sorted[0] : NaN;
+    const max = sorted.length ? sorted[sorted.length - 1] : NaN;
+    const median = sorted.length ? percentile(sorted, 0.5) : NaN;
+    const p10 = sorted.length ? percentile(sorted, 0.1) : NaN;
+    const p90 = sorted.length ? percentile(sorted, 0.9) : NaN;
+    const percentileMarkers = [0.01, 0.25, 0.5, 0.75, 0.9, 0.95, 0.99]
+      .map((q) => ({
+        q,
+        value: sorted.length ? percentile(sorted, q) : NaN,
+      }))
+      .filter((m) => Number.isFinite(m.value));
+    return { cdf, eqf, pdf, qq, min, max, median, p10, p90, percentileMarkers, n: source.length };
+  }, [returnProfile.daily]);
 
   useEffect(() => {
     let mounted = true;
@@ -1721,6 +3163,32 @@ export default function ResultsView({ results, jobId, startingCapital, params }:
       { label: 'DSR %', key: 'dsr_pct', value: fmtPercent2(selectedRow.dsr_pct), colorValue: selectedRow.dsr_pct },
       { label: 'Sum of Daily Return %', key: 'tot_ret', value: fmtPercent2(selectedRow.tot_ret), colorValue: selectedRow.tot_ret },
       { label: 'Grade', key: 'grade', value: selectedRow.grade_score != null ? String(selectedRow.grade_score) : String(selectedRow.grade ?? 'N/A'), colorValue: selectedRow.grade_score },
+      {
+        label: 'Avg Win / Avg Loss',
+        key: 'avg_win_loss',
+        value: derivedSummaryStats.avgWinLoss !== null ? `${derivedSummaryStats.avgWinLoss.toFixed(2)}x` : 'N/A',
+        colorValue: derivedSummaryStats.avgWinLoss,
+      },
+      {
+        label: 'Profit Factor',
+        key: 'profit_factor',
+        value: derivedSummaryStats.profitFactor !== null ? derivedSummaryStats.profitFactor.toFixed(2) : 'N/A',
+        colorValue: derivedSummaryStats.profitFactor,
+      },
+      {
+        label: 'Longest UW Streak',
+        key: 'uw_streak',
+        value: String(derivedSummaryStats.longestUnderwaterStreak),
+        unit: 'days',
+        unitColor: 'var(--t1)',
+        colorValue: derivedSummaryStats.longestUnderwaterStreak,
+      },
+      {
+        label: 'Avg 1M Return %',
+        key: 'avg_1m',
+        value: derivedSummaryStats.avg1M !== null ? fmtPercent2(derivedSummaryStats.avg1M) : 'N/A',
+        colorValue: derivedSummaryStats.avg1M,
+      },
     ]
     : [
       { label: 'Sortino', key: 'sortino', value: fmtMetric(m.sortino), colorValue: m.sortino },
@@ -1732,6 +3200,30 @@ export default function ResultsView({ results, jobId, startingCapital, params }:
       { label: 'WF-CV', key: 'cv', value: fmtMetric(m.cv), colorValue: m.cv },
       { label: 'Flat Days', key: 'flat_days', value: fmtMetric(m.flat_days, true), colorValue: m.flat_days },
     ];
+  const equityStatsBar = selectedRow ? [
+    {
+      label: 'Total Return %',
+      value: fmtPercent2(asNum(selectedRow.tot_ret) ?? 0),
+      color: metricColor('tot_ret', selectedRow.tot_ret),
+    },
+    {
+      label: 'Sharpe',
+      value: fmtMetric(selectedRow.sharpe),
+      color: metricColor('sharpe', selectedRow.sharpe),
+    },
+    {
+      label: 'Max DD',
+      value: fmtPercent2(asNum(selectedRow.max_dd) ?? 0),
+      color: metricColor('max_dd', selectedRow.max_dd),
+    },
+    {
+      label: 'Volatility',
+      value: dailyVolatilityPct !== null ? fmtPercent2(dailyVolatilityPct) : 'N/A',
+      color: dailyVolatilityPct !== null
+        ? (dailyVolatilityPct <= 4 ? 'var(--green)' : dailyVolatilityPct <= 8 ? 'var(--amber)' : 'var(--red)')
+        : 'var(--t2)',
+    },
+  ] : null;
   if (!results) {
     return (
       <div style={{ padding: 16, color: 'var(--t3)', fontSize: 10 }}>
@@ -1804,6 +3296,7 @@ export default function ResultsView({ results, jobId, startingCapital, params }:
         <div style={{ display: 'flex', gap: 6, justifyContent: 'flex-end' }}>
           {([
             ['summary', 'SUMMARY'],
+            ['breakdown', 'Breakdown'],
             ['tear_sheet', 'Tear Sheet'],
             ['full_report', 'Full Report'],
             ['raw_output', 'Raw Output'],
@@ -1812,7 +3305,7 @@ export default function ResultsView({ results, jobId, startingCapital, params }:
               key={tab}
               onClick={async () => {
                 setActiveTab(tab);
-                if (tab !== 'summary') await ensureAuditOutputLoaded();
+                if (tab !== 'summary' && tab !== 'breakdown') await ensureAuditOutputLoaded();
               }}
               style={{
                 height: 28,
@@ -1839,7 +3332,7 @@ export default function ResultsView({ results, jobId, startingCapital, params }:
           <div
             style={{
               display: 'grid',
-              gridTemplateColumns: 'repeat(4, 1fr)',
+              gridTemplateColumns: 'repeat(6, 1fr)',
               gap: 8,
             }}
           >
@@ -1857,37 +3350,138 @@ export default function ResultsView({ results, jobId, startingCapital, params }:
           </div>
 
           {/* Full-width stacked charts */}
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 0 }}>
             <details open style={{ background: 'var(--bg2)', border: '1px solid var(--line)', borderRadius: 3, padding: '8px 10px' }}>
               <summary style={{ cursor: 'pointer', fontSize: 9, color: 'var(--t3)', textTransform: 'uppercase', letterSpacing: '0.12em', fontWeight: 700 }}>
                 Equity Curve ($)
               </summary>
-              <div style={{ marginTop: 8 }}>
+              <div style={{ marginTop: 8, display: 'flex', flexDirection: 'column', gap: 0 }}>
                 <CurveCard
                   title="Equity Curve ($)"
                   data={equityCurveDollars}
                   color="#00c896"
                   gradientId="equity-gradient"
                   height={480}
+                  showMonthlyGridlines
+                  showAthLine
+                  showMovingAverage
+                  movingAverageWindow={20}
+                  baselineValue={100000}
+                  compactCurrencyTicks
                   valueFormatter={fmtCurrency}
+                  statsBar={equityStatsBar ?? undefined}
                   showTitle={false}
                 />
-              </div>
-            </details>
-
-            <details open style={{ background: 'var(--bg2)', border: '1px solid var(--line)', borderRadius: 3, padding: '8px 10px' }}>
-              <summary style={{ cursor: 'pointer', fontSize: 9, color: 'var(--t3)', textTransform: 'uppercase', letterSpacing: '0.12em', fontWeight: 700 }}>
-                Drawdown Curve
-              </summary>
-              <div style={{ marginTop: 8 }}>
                 <CurveCard
                   title="Drawdown Curve"
                   data={selectedDrawdownCurve}
                   color="#ff4d4d"
                   gradientId="drawdown-gradient"
+                  height={100}
                   fillAbove
+                  valueFormatter={fmtPercent2}
+                  annotateMin
+                  annotationLabel="Max DD"
                   showTitle={false}
                 />
+              </div>
+            </details>
+            <details open style={{ background: 'var(--bg2)', border: '1px solid var(--line)', borderRadius: 3, padding: '8px 10px' }}>
+              <summary
+                style={{
+                  cursor: 'pointer',
+                  fontSize: 9,
+                  color: 'var(--t3)',
+                  textTransform: 'uppercase',
+                  letterSpacing: '0.12em',
+                  fontWeight: 700,
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'space-between',
+                  gap: 8,
+                }}
+              >
+                <span>Monthly Returns Heat Map</span>
+                <span
+                  style={{
+                    fontSize: 9,
+                    color: 'var(--t3)',
+                    letterSpacing: '0.12em',
+                    textTransform: 'uppercase',
+                    fontFamily: 'var(--font-space-mono), Space Mono, monospace',
+                    whiteSpace: 'nowrap',
+                  }}
+                >
+                  {monthlyHeatmap.positive} positive&nbsp; | &nbsp;{monthlyHeatmap.negative} negative&nbsp; | &nbsp;{monthlyHeatmap.winRate.toFixed(1)}% win rate&nbsp; | &nbsp;mean {monthlyHeatmap.mean >= 0 ? '+' : ''}{monthlyHeatmap.mean.toFixed(2)}%
+                </span>
+              </summary>
+              <div style={{ marginTop: 8 }}>
+                <div
+                  style={{
+                    background: 'var(--bg2)',
+                    border: '1px solid var(--line)',
+                    borderRadius: 3,
+                    padding: 10,
+                  }}
+                >
+                  <div
+                    style={{
+                      display: 'flex',
+                      gap: 6,
+                      overflowX: 'auto',
+                      paddingBottom: 2,
+                    }}
+                  >
+                    {monthlyHeatmap.rows.map((mRow) => {
+                      const strength = Math.min(1, Math.abs(mRow.pct) / Math.max(1e-9, monthlyHeatmap.scale));
+                      const alpha = 0.12 + (0.58 * strength);
+                      const isPos = mRow.pct >= 0;
+                      const bg = isPos
+                        ? `rgba(0, 200, 150, ${alpha.toFixed(3)})`
+                        : `rgba(255, 77, 77, ${alpha.toFixed(3)})`;
+                      const border = isPos ? 'rgba(0, 200, 150, 0.35)' : 'rgba(255, 77, 77, 0.35)';
+                      const valColor = isPos ? '#6ad6ac' : '#f17a73';
+                      return (
+                        <div
+                          key={`m-heat-${mRow.label}`}
+                          style={{
+                            minWidth: 102,
+                            borderRadius: 2,
+                            border: `1px solid ${border}`,
+                            background: bg,
+                            padding: '8px 10px',
+                            display: 'flex',
+                            flexDirection: 'column',
+                            gap: 6,
+                            flexShrink: 0,
+                          }}
+                        >
+                          <div
+                            style={{
+                              fontSize: 8,
+                              color: 'rgba(255,255,255,0.68)',
+                              letterSpacing: '0.1em',
+                              textTransform: 'uppercase',
+                              fontFamily: 'var(--font-space-mono), Space Mono, monospace',
+                            }}
+                          >
+                            {mRow.label}
+                          </div>
+                          <div
+                            style={{
+                              fontSize: 12,
+                              color: valColor,
+                              fontWeight: 700,
+                              fontFamily: 'var(--font-space-mono), Space Mono, monospace',
+                            }}
+                          >
+                            {mRow.pct >= 0 ? '+' : ''}{mRow.pct.toFixed(2)}%
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
               </div>
             </details>
           </div>
@@ -1940,7 +3534,539 @@ export default function ResultsView({ results, jobId, startingCapital, params }:
               />
             </div>
           </details>
+
+          <details
+            open
+            style={{ background: 'var(--bg2)', border: '1px solid var(--line)', borderRadius: 3, padding: '8px 10px' }}
+          >
+            <summary
+              style={{
+                cursor: 'pointer',
+                fontSize: 9,
+                color: 'var(--t3)',
+                textTransform: 'uppercase',
+                letterSpacing: '0.12em',
+                fontWeight: 700,
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'space-between',
+                gap: 8,
+              }}
+            >
+              <span>Return Profile (Box Plots)</span>
+              <span
+                style={{
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  gap: 10,
+                  color: 'var(--t2)',
+                  fontSize: 8.5,
+                  letterSpacing: '0.08em',
+                  fontWeight: 600,
+                }}
+              >
+                <span>1D μ {returnProfileStats.daily ? fmtPercent2(returnProfileStats.daily.mean) : 'N/A'}</span>
+                <span>1W μ {returnProfileStats.weekly ? fmtPercent2(returnProfileStats.weekly.mean) : 'N/A'}</span>
+                <span>1M μ {returnProfileStats.monthly ? fmtPercent2(returnProfileStats.monthly.mean) : 'N/A'}</span>
+                <span>1Q μ {returnProfileStats.quarterly ? fmtPercent2(returnProfileStats.quarterly.mean) : 'N/A'}</span>
+              </span>
+            </summary>
+            <div style={{ marginTop: 8, display: 'grid', gridTemplateColumns: 'repeat(4, minmax(0, 1fr))', gap: 8 }}>
+              <ReturnBoxPlotCard
+                title="Daily Returns"
+                stats={returnProfileStats.daily}
+                count={returnProfile.daily.length}
+              />
+              <ReturnBoxPlotCard
+                title="Weekly Returns"
+                stats={returnProfileStats.weekly}
+                count={returnProfile.weekly.length}
+              />
+              <ReturnBoxPlotCard
+                title="Monthly Returns"
+                stats={returnProfileStats.monthly}
+                count={returnProfile.monthly.length}
+              />
+              <ReturnBoxPlotCard
+                title="Quarterly Returns"
+                stats={returnProfileStats.quarterly}
+                count={returnProfile.quarterly.length}
+              />
+            </div>
+          </details>
+
+          <details
+            open
+            style={{ background: 'var(--bg2)', border: '1px solid var(--line)', borderRadius: 3, padding: '8px 10px' }}
+          >
+            <summary style={{ cursor: 'pointer', fontSize: 9, color: 'var(--t3)', textTransform: 'uppercase', letterSpacing: '0.12em', fontWeight: 700 }}>
+              Statistical Functions (Daily Active Returns)
+            </summary>
+            <div style={{ marginTop: 8, display: 'grid', gridTemplateColumns: 'repeat(3, minmax(0, 1fr))', gap: 8 }}>
+              <DistributionCard
+                title="Cumulative Distribution Function (CDF)"
+                subtitle="P(Return ≤ x)"
+                mode="line"
+                splitColorBySign
+                signAxis="x"
+                points={statisticalCharts.cdf}
+                xMinLabel={Number.isFinite(statisticalCharts.min) ? `${statisticalCharts.min.toFixed(2)}%` : 'N/A'}
+                xMidLabel={Number.isFinite(statisticalCharts.median) ? `med ${statisticalCharts.median.toFixed(2)}%` : 'N/A'}
+                xMaxLabel={Number.isFinite(statisticalCharts.max) ? `${statisticalCharts.max.toFixed(2)}%` : 'N/A'}
+                xAxisLabel="daily return %"
+                yAxisLabel="cum prob"
+                yTickFormatter={(v) => v.toFixed(2)}
+                hoverXFormatter={(v) => `${v.toFixed(2)}%`}
+                hoverYFormatter={(v) => v.toFixed(3)}
+                xMarkers={[
+                  { x: statisticalCharts.p10, label: 'p10', color: 'rgba(255,186,77,0.9)' },
+                  { x: statisticalCharts.median, label: 'p50', color: 'rgba(255,255,255,0.8)' },
+                  { x: statisticalCharts.p90, label: 'p90', color: 'rgba(0,200,150,0.85)' },
+                ]}
+                chips={[
+                  { label: 'p10', value: Number.isFinite(statisticalCharts.p10) ? `${statisticalCharts.p10.toFixed(2)}%` : 'N/A', color: 'rgba(255,186,77,0.9)' },
+                  { label: 'p50', value: Number.isFinite(statisticalCharts.median) ? `${statisticalCharts.median.toFixed(2)}%` : 'N/A', color: 'rgba(255,255,255,0.9)' },
+                  { label: 'p90', value: Number.isFinite(statisticalCharts.p90) ? `${statisticalCharts.p90.toFixed(2)}%` : 'N/A', color: 'rgba(0,200,150,0.9)' },
+                ]}
+                summary={`90% of active days are ≤ ${Number.isFinite(statisticalCharts.p90) ? `${statisticalCharts.p90.toFixed(2)}%` : 'N/A'} return.`}
+                guideX={0}
+              />
+              <DistributionCard
+                title="Empirical Quantile Function (EQF)"
+                subtitle="Return at quantile q"
+                mode="line"
+                splitColorBySign
+                signAxis="y"
+                points={statisticalCharts.eqf}
+                xMinLabel="q0.00"
+                xMidLabel="q0.50"
+                xMaxLabel="q1.00"
+                xAxisLabel="quantile q"
+                yAxisLabel="return %"
+                yTickFormatter={(v) => `${v.toFixed(2)}%`}
+                hoverXFormatter={(v) => `q${v.toFixed(3)}`}
+                hoverYFormatter={(v) => `${v.toFixed(2)}%`}
+                chips={[
+                  { label: 'median', value: Number.isFinite(statisticalCharts.median) ? `${statisticalCharts.median.toFixed(2)}%` : 'N/A' },
+                ]}
+                summary={`Median active-day return is ${Number.isFinite(statisticalCharts.median) ? `${statisticalCharts.median.toFixed(2)}%` : 'N/A'}.`}
+                guideX={0.5}
+              />
+              <DistributionCard
+                title="Probability Density Function (PDF)"
+                subtitle="Relative likelihood of return x"
+                mode="step_area"
+                points={statisticalCharts.pdf}
+                xMinLabel={Number.isFinite(statisticalCharts.min) ? `${statisticalCharts.min.toFixed(2)}%` : 'N/A'}
+                xMidLabel="mode density"
+                xMaxLabel={Number.isFinite(statisticalCharts.max) ? `${statisticalCharts.max.toFixed(2)}%` : 'N/A'}
+                xAxisLabel="daily return %"
+                yAxisLabel="density"
+                yTickFormatter={(v) => v.toFixed(3)}
+                hoverXFormatter={(v) => `${v.toFixed(2)}%`}
+                hoverYFormatter={(v) => v.toFixed(4)}
+                xMarkers={[
+                  { x: statisticalCharts.p10, label: 'p10', color: 'rgba(255,186,77,0.9)' },
+                  { x: statisticalCharts.median, label: 'p50', color: 'rgba(255,255,255,0.8)' },
+                  { x: statisticalCharts.p90, label: 'p90', color: 'rgba(0,200,150,0.85)' },
+                ]}
+                chips={[
+                  { label: 'tail', value: Number.isFinite(statisticalCharts.min) ? `${statisticalCharts.min.toFixed(2)}%` : 'N/A' },
+                  { label: 'center', value: Number.isFinite(statisticalCharts.median) ? `${statisticalCharts.median.toFixed(2)}%` : 'N/A' },
+                ]}
+                summary="Right tail indicates occasional large upside days; left tail captures downside shock frequency."
+                guideX={0}
+              />
+              <QqPlotCard
+                points={statisticalCharts.qq}
+                summary="Closer alignment to the diagonal suggests returns are approximately normal; tail curvature indicates fat tails/skew."
+              />
+              <DistributionCard
+                title="Sorted Returns with Percentile Markers"
+                subtitle="Ordered active-day returns with key percentile cuts"
+                mode="line"
+                splitColorBySign
+                signAxis="y"
+                points={statisticalCharts.eqf}
+                xMinLabel="q0.00"
+                xMidLabel="q0.50"
+                xMaxLabel="q1.00"
+                xAxisLabel="quantile q"
+                yAxisLabel="return %"
+                yTickFormatter={(v) => `${v.toFixed(2)}%`}
+                hoverXFormatter={(v) => `q${v.toFixed(3)}`}
+                hoverYFormatter={(v) => `${v.toFixed(2)}%`}
+                xMarkers={statisticalCharts.percentileMarkers.map((m) => ({
+                  x: m.q,
+                  label: `p${Math.round(m.q * 100)}`,
+                  color: m.q === 0.5 ? 'rgba(255,255,255,0.9)' : 'rgba(0,200,150,0.65)',
+                }))}
+                chips={statisticalCharts.percentileMarkers.map((m) => ({
+                  label: `p${Math.round(m.q * 100)}`,
+                  value: `${m.value.toFixed(2)}%`,
+                  color: m.q === 0.5 ? 'rgba(255,255,255,0.9)' : 'var(--t1)',
+                }))}
+                summary="Percentile cuts show return asymmetry and tail risk concentration directly on the sorted curve."
+                guideX={0}
+              />
+              <DailyReturnBarStatCard values={returnProfile.daily} />
+            </div>
+            <div style={{ marginTop: 8, fontSize: 9, color: 'var(--t3)', fontFamily: 'var(--font-space-mono), Space Mono, monospace' }}>
+              n: {statisticalCharts.n}
+            </div>
+          </details>
+
+          <details
+            open
+            style={{ background: 'var(--bg2)', border: '1px solid var(--line)', borderRadius: 3, padding: '8px 10px' }}
+          >
+            <summary
+              style={{
+                cursor: 'pointer',
+                fontSize: 9,
+                color: 'var(--t3)',
+                textTransform: 'uppercase',
+                letterSpacing: '0.12em',
+                fontWeight: 700,
+                display: 'flex',
+                justifyContent: 'space-between',
+                alignItems: 'center',
+                gap: 8,
+              }}
+            >
+              <span>Calendar Returns Heatmap</span>
+              <span
+                onClick={(e) => {
+                  e.preventDefault();
+                  e.stopPropagation();
+                }}
+                style={{ display: 'inline-flex', border: '1px solid var(--line2)', borderRadius: 3, overflow: 'hidden' }}
+              >
+                {(['grid', 'chart'] as const).map((mode) => {
+                  const active = calendarViewMode === mode;
+                  return (
+                    <button
+                      key={`calendar-mode-${mode}`}
+                      type="button"
+                      onClick={(e) => {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        setCalendarViewMode(mode);
+                        setCalendarRowHoverKey(null);
+                        setCalendarHover(null);
+                      }}
+                      style={{
+                        border: 'none',
+                        borderRight: mode === 'grid' ? '1px solid var(--line2)' : 'none',
+                        background: active ? 'rgba(255,255,255,0.08)' : 'var(--bg1)',
+                        color: active ? 'var(--t1)' : 'var(--t2)',
+                        fontSize: 9,
+                        letterSpacing: '0.08em',
+                        textTransform: 'uppercase',
+                        fontFamily: 'var(--font-space-mono), Space Mono, monospace',
+                        padding: '4px 8px',
+                        cursor: 'pointer',
+                      }}
+                    >
+                      {mode}
+                    </button>
+                  );
+                })}
+              </span>
+            </summary>
+            <div style={{ marginTop: 8, display: 'grid', gridTemplateColumns: 'repeat(3, minmax(0, 1fr))', gap: 8 }}>
+              {calendarMonths.map((month) => (
+                <div
+                  key={month.monthKey}
+                  style={{
+                    border: '1px solid var(--line)',
+                    borderRadius: 3,
+                    padding: 8,
+                    background: 'var(--bg1)',
+                  }}
+                >
+                  {(() => {
+                    const monthSum = month.cells
+                      .map((c) => c.ret)
+                      .filter((v): v is number => typeof v === 'number' && Number.isFinite(v))
+                      .reduce((a, b) => a + b, 0);
+                    const monthSumColor = monthSum > 0 ? 'var(--green)' : monthSum < 0 ? 'var(--red)' : 'var(--t2)';
+                    const monthSumText = `${monthSum >= 0 ? '+' : ''}${monthSum.toFixed(2)}%`;
+                    return (
+                      <div
+                        style={{
+                          fontSize: 9,
+                          color: 'var(--t2)',
+                          textTransform: 'uppercase',
+                          letterSpacing: '0.08em',
+                          fontWeight: 700,
+                          marginBottom: 6,
+                          display: 'flex',
+                          alignItems: 'center',
+                          gap: 6,
+                        }}
+                      >
+                        <span>{month.label}</span>
+                        <span style={{ color: 'var(--t3)' }}>•</span>
+                        <span style={{ color: monthSumColor }}>{monthSumText}</span>
+                      </div>
+                    );
+                  })()}
+                  <div style={{ minHeight: 190, display: 'flex', flexDirection: 'column' }}>
+                    {calendarViewMode === 'grid' ? (
+                      <>
+                      <div
+                        style={{
+                          display: 'grid',
+                          gridTemplateColumns: '22px repeat(7, minmax(0, 1fr)) 22px',
+                          gap: 2,
+                          marginBottom: 4,
+                        }}
+                      >
+                        <div />
+                        {['S', 'M', 'T', 'W', 'T', 'F', 'S'].map((w, i) => (
+                          <div
+                            key={`${month.monthKey}-wd-${i}`}
+                            style={{
+                              textAlign: 'center',
+                              fontSize: 8,
+                              color: 'var(--t3)',
+                              fontFamily: 'var(--font-space-mono), Space Mono, monospace',
+                            }}
+                          >
+                            {w}
+                          </div>
+                        ))}
+                        <div />
+                      </div>
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+                        {Array.from({ length: Math.ceil(month.cells.length / 7) }, (_, rowIdx) => {
+                          const rowCells = month.cells.slice(rowIdx * 7, (rowIdx + 1) * 7);
+                          const rowSum = rowCells
+                            .map((c) => c.ret)
+                            .filter((v): v is number => typeof v === 'number' && Number.isFinite(v))
+                            .reduce((a, b) => a + b, 0);
+                          const rowSumText = `${rowSum >= 0 ? '+' : ''}${rowSum.toFixed(1)}%`;
+                          const rowSumColor = rowSum > 0 ? 'var(--green)' : rowSum < 0 ? 'var(--red)' : 'rgba(255,255,255,0.55)';
+                          const rowKey = `${month.monthKey}-row-${rowIdx}`;
+                          return (
+                            <div
+                              key={rowKey}
+                              onMouseEnter={() => setCalendarRowHoverKey(rowKey)}
+                              onMouseLeave={() => setCalendarRowHoverKey((prev) => (prev === rowKey ? null : prev))}
+                              style={{
+                                display: 'grid',
+                                gridTemplateColumns: '22px repeat(7, minmax(0, 1fr)) 22px',
+                                gap: 2,
+                                alignItems: 'stretch',
+                              }}
+                            >
+                              <div />
+                              {rowCells.map((cell) => {
+                                if (!cell.date || cell.day === null) {
+                                  return (
+                                    <div
+                                      key={cell.key}
+                                      style={{
+                                        aspectRatio: '1 / 1',
+                                        borderRadius: 2,
+                                        background: 'transparent',
+                                        border: '1px solid transparent',
+                                      }}
+                                    />
+                                  );
+                                }
+                                const r = cell.ret;
+                                let bg = 'rgba(255,255,255,0.03)';
+                                let border = 'rgba(255,255,255,0.08)';
+                                if (typeof r === 'number' && Number.isFinite(r)) {
+                                  const strength = Math.min(1, Math.abs(r) / Math.max(1e-9, calendarScale));
+                                  const alpha = 0.10 + (0.70 * strength);
+                                  if (r >= 0) {
+                                    bg = `rgba(0, 200, 150, ${alpha.toFixed(3)})`;
+                                    border = 'rgba(0, 200, 150, 0.35)';
+                                  } else {
+                                    bg = `rgba(255, 77, 77, ${alpha.toFixed(3)})`;
+                                    border = 'rgba(255, 77, 77, 0.35)';
+                                  }
+                                }
+                                const title = `${cell.key}${typeof r === 'number' && Number.isFinite(r) ? ` | ${r >= 0 ? '+' : ''}${r.toFixed(2)}%` : ' | no return'}`;
+                                return (
+                                  <div
+                                    key={cell.key}
+                                    title={title}
+                                    onMouseEnter={(e) => {
+                                      if (typeof r !== 'number' || !Number.isFinite(r)) return;
+                                      setCalendarHover({
+                                        x: e.clientX,
+                                        y: e.clientY,
+                                        text: `${cell.key} | ${r >= 0 ? '+' : ''}${r.toFixed(2)}%`,
+                                      });
+                                    }}
+                                    onMouseMove={(e) => {
+                                      if (typeof r !== 'number' || !Number.isFinite(r)) return;
+                                      setCalendarHover((prev) => (prev
+                                        ? { ...prev, x: e.clientX, y: e.clientY }
+                                        : {
+                                          x: e.clientX,
+                                          y: e.clientY,
+                                          text: `${cell.key} | ${r >= 0 ? '+' : ''}${r.toFixed(2)}%`,
+                                        }));
+                                    }}
+                                    onMouseLeave={() => setCalendarHover(null)}
+                                    style={{
+                                      aspectRatio: '1 / 1',
+                                      borderRadius: 2,
+                                      background: bg,
+                                      border: `1px solid ${border}`,
+                                      display: 'flex',
+                                      alignItems: 'center',
+                                      justifyContent: 'center',
+                                      fontSize: 8,
+                                      color: 'rgba(255,255,255,0.9)',
+                                      fontFamily: 'var(--font-space-mono), Space Mono, monospace',
+                                      lineHeight: 1,
+                                    }}
+                                  >
+                                    {cell.day}
+                                  </div>
+                                );
+                              })}
+                              <div
+                                style={{
+                                  display: 'flex',
+                                  alignItems: 'center',
+                                  justifyContent: 'center',
+                                  color: rowSumColor,
+                                  fontSize: 8,
+                                  fontFamily: 'var(--font-space-mono), Space Mono, monospace',
+                                  transform: 'rotate(90deg)',
+                                  transformOrigin: 'center center',
+                                  whiteSpace: 'nowrap',
+                                  opacity: calendarRowHoverKey === rowKey ? 1 : 0,
+                                  transition: 'opacity 120ms ease',
+                                }}
+                              >
+                                {rowSumText}
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                      </>
+                    ) : (
+                      (() => {
+                      const daily = month.cells
+                        .filter((c): c is CalendarCell & { date: Date; day: number; ret: number } => (
+                          c.date instanceof Date
+                          && typeof c.day === 'number'
+                          && typeof c.ret === 'number'
+                          && Number.isFinite(c.ret)
+                        ));
+                      const cum: Array<{ key: string; day: number; pct: number }> = [];
+                      let eq = 1;
+                      for (const c of daily) {
+                        eq *= (1 + (c.ret / 100));
+                        cum.push({
+                          key: c.key,
+                          day: c.day,
+                          pct: (eq - 1) * 100,
+                        });
+                      }
+                      if (cum.length === 0) {
+                        return (
+                          <div style={{ fontSize: 9, color: 'var(--t3)', fontFamily: 'var(--font-space-mono), Space Mono, monospace' }}>
+                            No daily return data
+                          </div>
+                        );
+                      }
+                      const h = 190;
+                      const w = 240;
+                      const padL = 24;
+                      const padR = 8;
+                      const padT = 8;
+                      const padB = 18;
+                      const minCum = Math.min(0, ...cum.map((c) => c.pct));
+                      const maxCum = Math.max(0, ...cum.map((c) => c.pct));
+                      const range = Math.max(1e-9, maxCum - minCum);
+                      const toY = (v: number) => h - padB - ((v - minCum) / range) * (h - padT - padB);
+                      const plotW = w - padL - padR;
+                      const barW = Math.max(1, Math.min(6, plotW / Math.max(1, cum.length) * 0.9));
+                      const yZero = toY(0);
+                      return (
+                        <svg viewBox={`0 0 ${w} ${h}`} style={{ width: '100%', height: '100%', display: 'block' }} preserveAspectRatio="none">
+                          <line x1={padL} y1={padT} x2={padL} y2={h - padB} stroke="var(--line2)" />
+                          <line x1={padL} y1={h - padB} x2={w - padR} y2={h - padB} stroke="var(--line2)" />
+                          <line x1={padL} y1={yZero} x2={w - padR} y2={yZero} stroke="rgba(255,255,255,0.35)" strokeDasharray="2 2" />
+                          {cum.map((c, i) => {
+                            const x = padL + ((i + 0.5) / cum.length) * plotW;
+                            const y = toY(c.pct);
+                            const top = Math.min(yZero, y);
+                            const hh = Math.max(1, Math.abs(y - yZero));
+                            const isPos = c.pct >= 0;
+                            return (
+                              <rect
+                                key={`${month.monthKey}-cum-${c.key}`}
+                                x={x - (barW / 2)}
+                                y={top}
+                                width={barW}
+                                height={hh}
+                                fill={isPos ? 'rgba(0, 200, 150, 0.35)' : 'rgba(255, 77, 77, 0.35)'}
+                                stroke={isPos ? 'rgba(0, 200, 150, 0.75)' : 'rgba(255, 77, 77, 0.75)'}
+                                strokeWidth={0.35}
+                                onMouseEnter={(e) => setCalendarHover({
+                                  x: e.clientX,
+                                  y: e.clientY,
+                                  text: `${c.key} | cum ${c.pct >= 0 ? '+' : ''}${c.pct.toFixed(2)}%`,
+                                })}
+                                onMouseMove={(e) => setCalendarHover((prev) => (prev
+                                  ? { ...prev, x: e.clientX, y: e.clientY }
+                                  : { x: e.clientX, y: e.clientY, text: `${c.key} | cum ${c.pct >= 0 ? '+' : ''}${c.pct.toFixed(2)}%` }))}
+                                onMouseLeave={() => setCalendarHover(null)}
+                              />
+                            );
+                          })}
+                          <text x={4} y={toY(maxCum) + 3} fill="var(--t3)" fontSize="8" fontFamily="var(--font-space-mono), Space Mono, monospace">
+                            {`${maxCum.toFixed(1)}%`}
+                          </text>
+                          <text x={4} y={toY(minCum) + 3} fill="var(--t3)" fontSize="8" fontFamily="var(--font-space-mono), Space Mono, monospace">
+                            {`${minCum.toFixed(1)}%`}
+                          </text>
+                        </svg>
+                      );
+                    })()
+                    )}
+                  </div>
+                </div>
+              ))}
+            </div>
+            {calendarHover && (
+              <div
+                style={{
+                  position: 'fixed',
+                  left: calendarHover.x + 10,
+                  top: calendarHover.y + 10,
+                  zIndex: 80,
+                  background: 'var(--bg1)',
+                  border: '1px solid var(--line2)',
+                  borderRadius: 3,
+                  padding: '4px 6px',
+                  fontSize: 9,
+                  color: 'var(--t1)',
+                  pointerEvents: 'none',
+                  whiteSpace: 'nowrap',
+                  fontFamily: 'var(--font-space-mono), Space Mono, monospace',
+                }}
+              >
+                {calendarHover.text}
+              </div>
+            )}
+          </details>
         </>
+      )}
+
+      {activeTab === 'breakdown' && (
+        <div />
       )}
 
       {activeTab === 'stress_tests' && (

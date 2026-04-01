@@ -4,6 +4,7 @@ interface FilterRow {
   filter: string;
   sharpe?: number | null;
   max_dd?: number | null;
+  active?: number | null;
   cagr?: number | null;
   cv?: number | null;
   dsr_pct?: number | null;
@@ -29,6 +30,14 @@ function fmtPercent2(v: number | null | undefined): string {
     minimumFractionDigits: 2,
     maximumFractionDigits: 2,
   }).format(v)}%`;
+}
+
+function fmtInt(v: unknown): string {
+  const n = asNum(v);
+  if (n === null) return 'N/A';
+  return new Intl.NumberFormat(undefined, {
+    maximumFractionDigits: 0,
+  }).format(Math.round(n));
 }
 
 function asNum(v: unknown): number | null {
@@ -78,7 +87,7 @@ export default function FilterTable({ rows, selectedFilter, onSelectFilter }: Fi
     <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 9 }}>
       <thead>
         <tr style={{ borderBottom: '1px solid var(--line)' }}>
-          {['Filter', 'Sharpe', 'Max DD', 'CAGR', 'WF-CV', 'DSR%', 'Grade'].map((h) => (
+          {['Filter', 'Sharpe', 'Max DD', 'Active Days', 'CAGR', 'WF-CV', 'DSR%', 'Grade'].map((h) => (
             <th
               key={h}
               style={{
@@ -167,6 +176,7 @@ export default function FilterTable({ rows, selectedFilter, onSelectFilter }: Fi
                 )}
               </td>
               <td style={{ padding: '6px 4px', textAlign: 'right', color: metricColor('max_dd', row.max_dd) }}>{fmtPercent2(row.max_dd)}</td>
+              <td style={{ padding: '6px 4px', textAlign: 'right', color: 'var(--t1)' }}>{fmtInt(row.active)}</td>
               <td style={{ padding: '6px 4px', textAlign: 'right', color: metricColor('cagr', row.cagr) }}>{fmtPercent2(row.cagr)}</td>
               <td style={{ padding: '6px 4px', textAlign: 'right', color: metricColor('cv', (row.wf_cv ?? row.cv) as number) }}>{fmt((row.wf_cv ?? row.cv) as number)}</td>
               <td style={{ padding: '6px 4px', textAlign: 'right', color: metricColor('dsr_pct', row.dsr_pct as number) }}>{fmt(row.dsr_pct as number, 1)}</td>

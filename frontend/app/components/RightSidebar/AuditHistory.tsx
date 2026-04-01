@@ -4,6 +4,7 @@ import { useState } from 'react';
 
 interface AuditHistoryItem {
   id: string;
+  display_name?: string | null;
   status: string;
   stage?: string | null;
   created_at?: number;
@@ -27,9 +28,11 @@ interface AuditHistoryProps {
   loading: boolean;
   error: string | null;
   deletingJobId: string | null;
+  renamingJobId: string | null;
   onToggle: () => void;
   onSelect: (job: AuditHistoryItem) => void;
   onDelete: (job: AuditHistoryItem) => void;
+  onRename: (job: AuditHistoryItem, displayName: string) => void | Promise<void>;
 }
 
 function fmtWhen(ts?: number): string {
@@ -115,11 +118,15 @@ export default function AuditHistory({
   loading,
   error,
   deletingJobId,
+  renamingJobId,
   onToggle,
   onSelect,
   onDelete,
+  onRename,
 }: AuditHistoryProps) {
   const [pendingDeleteId, setPendingDeleteId] = useState<string | null>(null);
+  const [editingRenameId, setEditingRenameId] = useState<string | null>(null);
+  const [renameDraft, setRenameDraft] = useState('');
 
   return (
     <div
@@ -189,11 +196,14 @@ export default function AuditHistory({
           {!error &&
             jobs.map((job) => {
               const selected = selectedJobId === job.id;
-              const mode = String(job.params?.mode ?? '—');
-              const sortBy = String(job.params?.sort_by ?? '—');
               const bestSharpe = pickBestSharpe(job.results as Record<string, unknown> | null | undefined);
               const sharpeVal = bestSharpe !== null ? bestSharpe.toFixed(3) : '—';
               const deleting = deletingJobId === job.id;
+              const renaming = renamingJobId === job.id;
+              const isEditingName = editingRenameId === job.id;
+              const displayName = (typeof job.display_name === 'string' && job.display_name.trim().length > 0)
+                ? job.display_name.trim()
+                : '';
               return (
                 <div
                   key={job.id}
@@ -342,9 +352,129 @@ export default function AuditHistory({
                       </span>
                     )}
                   </div>
-                  <div style={{ fontSize: 9, color: 'var(--t1)', marginBottom: 4 }}>
-                    mode: {mode} · sort: {sortBy}
-                  </div>
+                  {isEditingName ? (
+                    <div style={{ display: 'flex', gap: 6, alignItems: 'center', marginBottom: 6 }}>
+                      <input
+                        value={renameDraft}
+                        onChange={(e) => setRenameDraft(e.target.value)}
+                        placeholder="Audit name"
+                        onClick={(e) => e.stopPropagation()}
+                        onKeyDown={async (e) => {
+                          e.stopPropagation();
+                          if (e.key === 'Escape') {
+                            setEditingRenameId(null);
+                            setRenameDraft('');
+                            return;
+                          }
+                          if (e.key === 'Enter') {
+                            if (renaming) return;
+                            await onRename(job, renameDraft.trim());
+                            setEditingRenameId(null);
+                            setRenameDraft('');
+                          }
+                        }}
+                        style={{
+                          flex: 1,
+                          height: 22,
+                          border: '1px solid var(--line2)',
+                          borderRadius: 2,
+                          background: 'var(--bg1)',
+                          color: 'var(--t1)',
+                          fontSize: 9,
+                          fontFamily: 'Space Mono, monospace',
+                          padding: '0 6px',
+                          outline: 'none',
+                        }}
+                      />
+                      <button
+                        type="button"
+                        onClick={async (e) => {
+                          e.stopPropagation();
+                          if (renaming) return;
+                          await onRename(job, renameDraft.trim());
+                          setEditingRenameId(null);
+                          setRenameDraft('');
+                        }}
+                        disabled={renaming}
+                        style={{
+                          height: 22,
+                          border: '1px solid var(--line2)',
+                          borderRadius: 2,
+                          background: 'var(--bg1)',
+                          color: renaming ? 'var(--t2)' : 'var(--t1)',
+                          fontSize: 9,
+                          fontFamily: 'Space Mono, monospace',
+                          padding: '0 6px',
+                          cursor: renaming ? 'not-allowed' : 'pointer',
+                        }}
+                      >
+                        {renaming ? '…' : 'SAVE'}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          if (renaming) return;
+                          setEditingRenameId(null);
+                          setRenameDraft('');
+                        }}
+                        disabled={renaming}
+                        style={{
+                          height: 22,
+                          border: '1px solid var(--line2)',
+                          borderRadius: 2,
+                          background: 'var(--bg1)',
+                          color: 'var(--t2)',
+                          fontSize: 9,
+                          fontFamily: 'Space Mono, monospace',
+                          padding: '0 6px',
+                          cursor: renaming ? 'not-allowed' : 'pointer',
+                        }}
+                      >
+                        CANCEL
+                      </button>
+                    </div>
+                  ) : (
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 6 }}>
+                      <div
+                        style={{
+                          fontSize: 9,
+                          color: displayName ? 'var(--t1)' : 'var(--t2)',
+                          fontFamily: 'Space Mono, monospace',
+                          whiteSpace: 'nowrap',
+                          overflow: 'hidden',
+                          textOverflow: 'ellipsis',
+                          flex: 1,
+                        }}
+                        title={displayName || 'Unnamed audit'}
+                      >
+                        {displayName || 'Unnamed audit'}
+                      </div>
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          if (renaming) return;
+                          setEditingRenameId(job.id);
+                          setRenameDraft(displayName);
+                        }}
+                        disabled={renaming}
+                        style={{
+                          height: 18,
+                          border: '1px solid var(--line2)',
+                          borderRadius: 2,
+                          background: 'var(--bg1)',
+                          color: 'var(--t2)',
+                          fontSize: 9,
+                          fontFamily: 'Space Mono, monospace',
+                          padding: '0 6px',
+                          cursor: renaming ? 'not-allowed' : 'pointer',
+                        }}
+                      >
+                        RENAME
+                      </button>
+                    </div>
+                  )}
                   <div style={{ fontSize: 9, color: 'var(--t1)', marginBottom: 4 }}>
                     sharpe: {sharpeVal}
                   </div>
