@@ -1,0 +1,1000 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Altcoin Momentum Futures — Investor Tear Sheet</title>
+<link href="https://fonts.googleapis.com/css2?family=Playfair+Display:ital,wght@0,400;0,600;0,700;1,400&family=DM+Mono:ital,wght@0,300;0,400;0,500;1,300&family=Inter:wght@300;400;500;600&display=swap" rel="stylesheet">
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  :root {
+    --bg:        #07090f;
+    --card:      #0d1120;
+    --card2:     #111827;
+    --border:    #1e2b45;
+    --gold:      #c8a45a;
+    --gold-dim:  #8a6e38;
+    --gold-bg:   rgba(200, 164, 90, 0.07);
+    --cyan:      #5bbfc8;
+    --cyan-dim:  #3a8089;
+    --red:       #d45f58;
+    --red-dim:   rgba(212, 95, 88, 0.15);
+    --green:     #4fa87a;
+    --green-dim: rgba(79, 168, 122, 0.15);
+    --text:      #e4e8f2;
+    --sub:       #7a8aaa;
+    --faint:     #1e2b45;
+    --mono:      'DM Mono', monospace;
+    --serif:     'Playfair Display', serif;
+    --sans:      'Inter', sans-serif;
+  }
+
+  html, body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--sans);
+    font-size: 13px;
+    line-height: 1.5;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  .page { max-width: 1100px; margin: 0 auto; padding: 28px 28px 40px; }
+
+  /* HEADER */
+  .header {
+    display: flex; justify-content: space-between; align-items: flex-start;
+    border-bottom: 1px solid var(--gold-dim); padding-bottom: 18px; margin-bottom: 22px;
+  }
+  .strategy-tag { font-family: var(--mono); font-size: 10px; font-weight: 500; letter-spacing: 0.18em; text-transform: uppercase; color: var(--gold); margin-bottom: 5px; }
+  .strategy-name { font-family: var(--serif); font-size: 26px; font-weight: 700; color: var(--text); line-height: 1.1; margin-bottom: 6px; }
+  .header-sub { font-family: var(--mono); font-size: 11px; color: var(--sub); letter-spacing: 0.04em; }
+  .header-sub span { color: var(--cyan); margin: 0 3px; }
+  .header-right { text-align: right; flex-shrink: 0; }
+  .as-of-stamp { font-family: var(--mono); font-size: 11px; color: var(--cyan); letter-spacing: 0.08em; margin-bottom: 4px; font-weight: 500; }
+  .as-of-stamp span { font-size: 14px; font-weight: 500; color: var(--text); }
+  .run-id { font-family: var(--mono); font-size: 10px; color: var(--sub); letter-spacing: 0.06em; margin-bottom: 4px; }
+  .header-badges { display: flex; gap: 6px; justify-content: flex-end; flex-wrap: wrap; }
+  .badge { font-family: var(--mono); font-size: 10px; letter-spacing: 0.08em; padding: 3px 8px; border-radius: 2px; text-transform: uppercase; }
+  .badge-green { background: var(--green-dim); color: var(--green); border: 1px solid rgba(79,168,122,0.3); }
+  .badge-gold  { background: var(--gold-bg);   color: var(--gold);  border: 1px solid rgba(200,164,90,0.3); }
+  .badge-cyan  { background: rgba(91,191,200,0.08); color: var(--cyan); border: 1px solid rgba(91,191,200,0.2); }
+
+  /* HERO */
+  .hero-grid { display: grid; grid-template-columns: repeat(6, 1fr); gap: 8px; margin-bottom: 20px; }
+  .hero-card { background: var(--card); border: 1px solid var(--border); padding: 14px 12px; position: relative; transition: border-color 0.2s; }
+  .hero-card::before { content: ''; position: absolute; top: 0; left: 0; right: 0; height: 2px; background: var(--border); }
+  .hero-card.accent         { border-color: var(--gold-dim); background: linear-gradient(145deg, #0f1826, #0d1120); }
+  .hero-card.accent::before { background: var(--gold-dim); }
+  .hero-card.green-accent         { border-color: rgba(79,168,122,0.45); background: linear-gradient(145deg, #0c1a14, #0d1120); }
+  .hero-card.green-accent::before { background: rgba(79,168,122,0.5); }
+  .hero-card.neg::before    { background: var(--red); opacity: 0.6; }
+  .hero-label { font-family: var(--mono); font-size: 9.5px; font-weight: 500; letter-spacing: 0.14em; text-transform: uppercase; color: var(--sub); margin-bottom: 8px; }
+  .hero-value { font-family: var(--mono); font-size: 22px; font-weight: 500; line-height: 1; }
+  .hero-value.pos  { color: var(--gold); }
+  .hero-value.neg  { color: var(--red); }
+  .hero-value.neu  { color: var(--text); }
+  .hero-value.cyan { color: var(--cyan); }
+  .hero-sub { font-family: var(--mono); font-size: 10px; color: var(--sub); margin-top: 4px; }
+
+  /* GRIDS */
+  .body-grid   { display: grid; grid-template-columns: 1fr 1fr;     gap: 10px; margin-bottom: 10px; }
+  .body-grid-3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 10px; margin-bottom: 10px; }
+
+  /* SECTION CARD */
+  .sec { background: var(--card); border: 1px solid var(--border); padding: 16px; }
+  .sec-title { font-family: var(--mono); font-size: 9.5px; font-weight: 500; letter-spacing: 0.18em; text-transform: uppercase; color: var(--gold); margin-bottom: 12px; padding-bottom: 8px; border-bottom: 1px solid var(--faint); display: flex; align-items: center; gap: 6px; }
+  .sec-title::before { content: ''; display: inline-block; width: 12px; height: 1px; background: var(--gold-dim); }
+
+  /* STAT ROWS */
+  .stat-row { display: flex; justify-content: space-between; align-items: center; padding: 5px 0; border-bottom: 1px solid rgba(30,43,69,0.5); }
+  .stat-row:last-child { border-bottom: none; }
+  .stat-key { font-family: var(--sans); font-size: 11.5px; color: var(--sub); font-weight: 400; }
+  .stat-val { font-family: var(--mono); font-size: 12px; font-weight: 500; letter-spacing: 0.02em; }
+  .v-pos  { color: var(--green); }
+  .v-neg  { color: var(--red); }
+  .v-gold { color: var(--gold); }
+  .v-cyan { color: var(--cyan); }
+  .v-neu  { color: var(--text); }
+  .v-warn { color: #c8933a; }
+  .stat-row.hi        { background: rgba(200,164,90,0.04); }
+  .stat-row.benchmark { background: rgba(91,191,200,0.03); }
+
+  /* SPARKLINE */
+  .sparkline-label { font-family: var(--mono); font-size: 9px; color: var(--sub); letter-spacing: 0.05em; white-space: nowrap; }
+
+  /* EQUITY CHART */
+  .chart-sec { margin-bottom: 10px; background: var(--card); border: 1px solid var(--border); padding: 16px; position: relative; }
+  .chart-title { font-family: var(--mono); font-size: 9.5px; font-weight: 500; letter-spacing: 0.18em; text-transform: uppercase; color: var(--gold); margin-bottom: 12px; padding-bottom: 8px; border-bottom: 1px solid var(--faint); display: flex; justify-content: space-between; align-items: center; }
+  .chart-title-left { display: flex; align-items: center; gap: 6px; }
+  .chart-title-left::before { content: ''; display: inline-block; width: 12px; height: 1px; background: var(--gold-dim); }
+  .chart-stats { display: flex; gap: 16px; font-size: 10px; color: var(--sub); }
+  .chart-stats span { color: var(--text); margin-left: 4px; font-weight: 500; }
+  .chart-separator { height: 1px; background: var(--gold-dim); opacity: 0.4; }
+  svg text { font-family: var(--mono); }
+  #chartTooltip { position: absolute; pointer-events: none; background: #0a0e1a; border: 1px solid var(--gold-dim); padding: 7px 11px; font-family: var(--mono); font-size: 11px; color: var(--text); white-space: nowrap; opacity: 0; transition: opacity 0.1s; z-index: 10; transform: translate(-50%, -100%); margin-top: -8px; }
+  #chartTooltip .tt-date { color: var(--sub); font-size: 9.5px; margin-bottom: 3px; letter-spacing: 0.08em; }
+  #chartTooltip .tt-val  { color: var(--gold); font-size: 13px; font-weight: 500; }
+  #chartTooltip .tt-ret  { font-size: 10px; margin-top: 2px; }
+
+  /* MONTHLY HEAT MAP */
+  .monthly-sec { margin-bottom: 10px; background: var(--card); border: 1px solid var(--border); padding: 16px; }
+  .monthly-grid { display: grid; grid-template-columns: repeat(14, 1fr); gap: 4px; }
+  .mo-cell { padding: 9px 6px; text-align: center; border-radius: 1px; }
+  .mo-label { font-family: var(--mono); font-size: 9px; letter-spacing: 0.08em; text-transform: uppercase; margin-bottom: 4px; opacity: 0.7; }
+  .mo-val   { font-family: var(--mono); font-size: 13px; font-weight: 500; }
+  .mo-pos { background: rgba(79,168,122,0.12); border: 1px solid rgba(79,168,122,0.2); }
+  .mo-neg { background: rgba(212,95,88,0.12);  border: 1px solid rgba(212,95,88,0.2); }
+  .mo-pos .mo-label { color: rgba(79,168,122,0.7); }
+  .mo-neg .mo-label { color: rgba(212,95,88,0.7); }
+  .mo-pos .mo-val { color: var(--green); }
+  .mo-neg .mo-val { color: var(--red); }
+  .mo-partial { border-style: dashed; opacity: 0.75; }
+
+  /* CAPACITY CALLOUT */
+  .capacity-callout { background: rgba(200,164,90,0.05); border: 1px solid var(--gold-dim); border-left: 3px solid var(--gold); padding: 12px 16px; display: flex; align-items: center; gap: 16px; margin-bottom: 10px; }
+  .capacity-callout-icon { font-size: 18px; flex-shrink: 0; }
+  .capacity-callout-label { font-family: var(--mono); font-size: 9.5px; letter-spacing: 0.16em; text-transform: uppercase; color: var(--gold); margin-bottom: 3px; }
+  .capacity-callout-body { font-family: var(--mono); font-size: 12px; color: var(--text); line-height: 1.5; }
+  .capacity-callout-body strong { color: var(--gold); }
+
+  /* AUDIT ROW */
+  .audit-row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-bottom: 10px; }
+  .audit-block { display: flex; align-items: center; gap: 8px; background: var(--card); border: 1px solid var(--border); padding: 11px 14px; flex: 1; min-width: 180px; }
+  .audit-icon { font-size: 16px; flex-shrink: 0; }
+  .audit-name  { font-family: var(--mono); font-size: 9.5px; letter-spacing: 0.12em; text-transform: uppercase; color: var(--sub); margin-bottom: 2px; }
+  .audit-score { font-family: var(--mono); font-size: 13px; font-weight: 500; }
+  .audit-pass { color: var(--green); }
+  .audit-fail { color: var(--red); }
+  .audit-warn { color: var(--gold); }
+
+  /* SCORECARD BAR */
+  .scorecard-bar { background: var(--card); border: 1px solid var(--border); padding: 14px 16px; margin-bottom: 10px; display: flex; align-items: center; gap: 14px; }
+  .sb-label { font-family: var(--mono); font-size: 9.5px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--sub); white-space: nowrap; flex-shrink: 0; }
+  .sb-track { flex: 1; height: 6px; background: var(--faint); border-radius: 1px; overflow: hidden; display: flex; }
+  .sb-pass { background: rgba(79,168,122,0.6); }
+  .sb-fail { background: rgba(212,95,88,0.6); }
+  .sb-warn { background: rgba(200,164,90,0.5); }
+  .sb-na   { background: rgba(122,138,170,0.2); }
+  .sb-numbers { display: flex; gap: 14px; flex-shrink: 0; }
+  .sb-num { font-family: var(--mono); font-size: 11px; display: flex; align-items: center; gap: 4px; }
+  .sb-num .dot { width: 6px; height: 6px; border-radius: 50%; display: inline-block; }
+
+  /* FOOTER */
+  .footer { margin-top: 20px; padding-top: 14px; border-top: 1px solid var(--faint); display: flex; justify-content: space-between; align-items: center; }
+  .footer-left  { font-family: var(--mono); font-size: 9px; color: var(--sub); letter-spacing: 0.06em; line-height: 1.8; }
+  .footer-right { font-family: var(--serif); font-style: italic; font-size: 11px; color: var(--gold-dim); text-align: right; }
+
+  .full-width { grid-column: 1 / -1; }
+
+  @media print {
+    @page { size: A4 landscape; margin: 12mm; }
+    html, body { background: #fff !important; color: #111 !important; font-size: 10px; }
+    .page { max-width: 100%; padding: 0; }
+    :root { --bg:#fff; --card:#f8f9fc; --border:#d0d8e8; --gold:#7a5c1e; --gold-dim:#a07830; --text:#111; --sub:#555; --faint:#d0d8e8; --cyan:#1a6a7a; --green:#1a6a3a; --red:#8a2020; }
+    .chart-sec, .hero-grid, .body-grid, .body-grid-3, .monthly-sec, .scorecard-bar, .audit-row { page-break-inside: avoid; }
+    #chartTooltip { display: none !important; }
+  }
+</style>
+</head>
+<body>
+<div class="page">
+
+  <!-- HEADER -->
+  <div class="header">
+    <div class="header-left">
+      <div class="strategy-tag">Quantitative Systematic Strategy</div>
+      <div class="strategy-name">Altcoin Momentum Futures</div>
+      <div class="header-sub">
+        Feb 13 2025 – Mar 19 2026<span>·</span>398 Calendar Days (1.09 yrs)<span>·</span>$100,000 Starting Capital<span>·</span>BloFin Exchange
+      </div>
+    </div>
+    <div class="header-right">
+      <div class="as-of-stamp">As of <span>Mar 28, 2026</span></div>
+      <div class="run-id">RUN: 20260328_192837_sh3.412</div>
+      <div class="header-badges">
+        <span class="badge badge-green">✓ Sim Bias Clean</span>
+        <span class="badge badge-green">✓ Series Clean</span>
+        <span class="badge badge-gold">Tail Guardrail</span>
+        <span class="badge badge-cyan">Vol-Lev Scaling</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- HERO METRICS -->
+  <div class="hero-grid">
+    <div class="hero-card green-accent">
+      <div class="hero-label">Avg Monthly Return</div>
+      <div class="hero-value" style="color:var(--green)">+22.65%</div>
+      <div class="hero-sub">85.7% monthly win rate ✅</div>
+    </div>
+    <div class="hero-card accent">
+      <div class="hero-label">CAGR</div>
+      <div class="hero-value pos">833.4%</div>
+      <div class="hero-sub">ann. compound return</div>
+    </div>
+    <div class="hero-card">
+      <div class="hero-label">Sharpe Ratio</div>
+      <div class="hero-value cyan">3.41</div>
+      <div class="hero-sub">goal &gt;2.0 ✅</div>
+    </div>
+    <div class="hero-card">
+      <div class="hero-label">Sortino Ratio</div>
+      <div class="hero-value cyan">10.96</div>
+      <div class="hero-sub">goal &gt;3.0 ✅</div>
+    </div>
+    <div class="hero-card neg">
+      <div class="hero-label">Max Drawdown</div>
+      <div class="hero-value neg">−22.08%</div>
+      <div class="hero-sub">goal &gt;−30% ✅</div>
+    </div>
+    <div class="hero-card">
+      <div class="hero-label">Calmar Ratio</div>
+      <div class="hero-value pos">37.75</div>
+      <div class="hero-sub">goal &gt;3.0 ✅</div>
+    </div>
+  </div>
+
+  <!-- EQUITY CURVE -->
+  <div class="chart-sec" id="chartWrap">
+    <div class="chart-title">
+      <div class="chart-title-left">Equity Curve — Tail Guardrail Filter</div>
+      <div class="chart-stats">
+        +1,042% net &nbsp;·&nbsp; <span>$100k</span> → <span>$1.14M</span> &nbsp;·&nbsp; R² <span>0.975</span> &nbsp;·&nbsp; Sharpe <span>3.41</span>
+      </div>
+    </div>
+    <svg id="equitySVG" viewBox="0 0 1110 220" style="width:100%;height:220px;display:block;overflow:visible;">
+      <defs>
+        <linearGradient id="curveFill" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%"   stop-color="#c8a45a" stop-opacity="0.28"/>
+          <stop offset="70%"  stop-color="#c8a45a" stop-opacity="0.06"/>
+          <stop offset="100%" stop-color="#c8a45a" stop-opacity="0.00"/>
+        </linearGradient>
+        <linearGradient id="curveLine" x1="0" y1="0" x2="1" y2="0">
+          <stop offset="0%"   stop-color="#5bbfc8"/>
+          <stop offset="45%"  stop-color="#8ab87e"/>
+          <stop offset="80%"  stop-color="#c8a45a"/>
+          <stop offset="100%" stop-color="#e8c070"/>
+        </linearGradient>
+        <filter id="glow" x="-20%" y="-20%" width="140%" height="140%">
+          <feGaussianBlur in="SourceGraphic" stdDeviation="3.5" result="blur"/>
+          <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+        </filter>
+        <filter id="glowStrong" x="-30%" y="-30%" width="160%" height="160%">
+          <feGaussianBlur in="SourceGraphic" stdDeviation="5" result="blur"/>
+          <feMerge><feMergeNode in="blur"/><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+        </filter>
+        <clipPath id="chartClip">
+          <rect id="clipRect" x="44" y="0" width="0" height="221"/>
+        </clipPath>
+      </defs>
+    </svg>
+    <div class="chart-separator"></div>
+    <svg id="ddSVG" viewBox="0 0 1110 70" style="width:100%;height:70px;display:block;overflow:visible;margin-top:0;">
+      <defs>
+        <linearGradient id="ddFill" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%"   stop-color="#d45f58" stop-opacity="0.04"/>
+          <stop offset="100%" stop-color="#d45f58" stop-opacity="0.55"/>
+        </linearGradient>
+        <clipPath id="ddClip">
+          <rect id="ddClipRect" x="44" y="0" width="0" height="70"/>
+        </clipPath>
+      </defs>
+    </svg>
+    <div id="chartTooltip">
+      <div class="tt-date" id="ttDate"></div>
+      <div class="tt-val"  id="ttVal"></div>
+      <div class="tt-ret"  id="ttRet"></div>
+    </div>
+  </div>
+
+  <!-- PERFORMANCE + RISK -->
+  <div class="body-grid">
+    <div class="sec">
+      <div class="sec-title">Performance</div>
+      <div class="stat-row hi">
+        <span class="stat-key">Cumulative Net Return</span>
+        <span class="stat-val v-gold">+1,042.27%</span>
+      </div>
+      <div class="stat-row">
+        <span class="stat-key">CAGR (Annualised)</span>
+        <span class="stat-val v-gold">833.39%</span>
+      </div>
+      <div class="stat-row">
+        <span class="stat-key">Equity Multiplier</span>
+        <span class="stat-val v-neu">11.42×</span>
+      </div>
+      <div class="stat-row">
+        <span class="stat-key">Final Equity</span>
+        <span class="stat-val v-neu">$1,142,267</span>
+      </div>
+      <div class="stat-row">
+        <span class="stat-key">Best Single Day</span>
+        <span class="stat-val v-pos">+19.62%</span>
+      </div>
+      <div class="stat-row">
+        <span class="stat-key">Worst Single Day</span>
+        <span class="stat-val v-neg">−11.75%</span>
+      </div>
+      <div class="stat-row">
+        <span class="stat-key">Avg Daily Return (active)</span>
+        <span class="stat-val v-pos">+2.45%</span>
+      </div>
+      <div class="stat-row">
+        <span class="stat-key">Avg Weekly Return</span>
+        <span class="stat-val v-pos">+5.35%</span>
+      </div>
+      <div class="stat-row">
+        <span class="stat-key">Avg Monthly Return</span>
+        <span class="stat-val v-pos">+22.65%</span>
+      </div>
+      <div class="stat-row benchmark">
+        <span class="stat-key" style="color:var(--cyan)">vs BTC Buy-and-Hold</span>
+        <span class="stat-val" style="color:var(--red)">−31.8% (same period)</span>
+      </div>
+    </div>
+
+    <div class="sec">
+      <div class="sec-title">Risk-Adjusted Quality</div>
+      <div class="stat-row hi">
+        <span class="stat-key">Sharpe Ratio</span>
+        <div style="display:flex;align-items:center;gap:8px;">
+          <span class="sparkline-label">min −0.4</span>
+          <svg id="sharpeSpark" width="110" height="22" style="display:inline-block;vertical-align:middle;"></svg>
+          <span class="sparkline-label">max 6.0</span>
+          <span class="stat-val v-cyan" style="margin-left:4px;">3.41</span>
+        </div>
+      </div>
+      <div class="stat-row">
+        <span class="stat-key">Sortino Ratio</span>
+        <span class="stat-val v-cyan">10.96</span>
+      </div>
+      <div class="stat-row">
+        <span class="stat-key">Calmar Ratio</span>
+        <span class="stat-val v-cyan">37.75</span>
+      </div>
+      <div class="stat-row">
+        <span class="stat-key">Omega Ratio</span>
+        <span class="stat-val v-neu">2.51</span>
+      </div>
+      <div class="stat-row">
+        <span class="stat-key">Profit Factor</span>
+        <span class="stat-val v-neu">2.51</span>
+      </div>
+      <div class="stat-row">
+        <span class="stat-key">Gain-to-Pain Ratio</span>
+        <span class="stat-val v-neu">1.51</span>
+      </div>
+      <div class="stat-row">
+        <span class="stat-key">Ulcer Index</span>
+        <span class="stat-val v-neu">6.81</span>
+      </div>
+      <div class="stat-row">
+        <span class="stat-key">Skewness</span>
+        <span class="stat-val v-pos">+0.51 ↑</span>
+      </div>
+      <div class="stat-row">
+        <span class="stat-key">Kurtosis</span>
+        <span class="stat-val v-neu">−0.61</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- DRAWDOWN + WIN RATES + EXECUTION -->
+  <div class="body-grid-3">
+    <div class="sec">
+      <div class="sec-title">Drawdown Profile</div>
+      <div class="stat-row hi"><span class="stat-key">Max Drawdown</span><span class="stat-val v-neg">−22.08%</span></div>
+      <div class="stat-row"><span class="stat-key">Avg Drawdown</span><span class="stat-val v-neg">−7.21%</span></div>
+      <div class="stat-row"><span class="stat-key">Avg Max DD / Episode</span><span class="stat-val v-neg">−7.66%</span></div>
+      <div class="stat-row"><span class="stat-key">Longest DD Duration</span><span class="stat-val v-neu">39 days</span></div>
+      <div class="stat-row"><span class="stat-key">Max DD Recovery</span><span class="stat-val v-pos">12 days</span></div>
+      <div class="stat-row"><span class="stat-key">% Time Underwater</span><span class="stat-val v-warn">61.4%</span></div>
+      <div class="stat-row"><span class="stat-key">CVaR 5% (daily)</span><span class="stat-val v-neg">−6.06%</span></div>
+      <div class="stat-row"><span class="stat-key">CVaR 1% (daily)</span><span class="stat-val v-neg">−8.38%</span></div>
+      <div class="stat-row"><span class="stat-key">Tail Ratio</span><span class="stat-val v-pos">2.17</span></div>
+    </div>
+
+    <div class="sec">
+      <div class="sec-title">Win Rate Analysis</div>
+      <div class="stat-row hi"><span class="stat-key">Monthly Win Rate</span><span class="stat-val v-gold">85.7% (12W/2L)</span></div>
+      <div class="stat-row"><span class="stat-key">Weekly Win Rate</span><span class="stat-val v-pos">55.4%</span></div>
+      <div class="stat-row"><span class="stat-key">Active Day Win Rate</span><span class="stat-val v-pos">53.15%</span></div>
+      <div class="stat-row"><span class="stat-key">Best Month</span><span class="stat-val v-pos">+91.44%</span></div>
+      <div class="stat-row"><span class="stat-key">Worst Month</span><span class="stat-val v-neg">−5.33%</span></div>
+      <div class="stat-row"><span class="stat-key">Avg Win (daily)</span><span class="stat-val v-pos">+7.66%</span></div>
+      <div class="stat-row"><span class="stat-key">Avg Loss (daily)</span><span class="stat-val v-neg">−3.47%</span></div>
+      <div class="stat-row"><span class="stat-key">Avg Win / Avg Loss</span><span class="stat-val v-pos">2.21×</span></div>
+      <div class="stat-row"><span class="stat-key">Max Consec. Losses</span><span class="stat-val v-neu">2 days</span></div>
+    </div>
+
+    <div class="sec">
+      <div class="sec-title">Execution &amp; Capacity</div>
+      <div class="stat-row hi"><span class="stat-key">Active Days</span><span class="stat-val v-neu">111 / 398 (27.89%)</span></div>
+      <div class="stat-row"><span class="stat-key">Filtered (Guardrail)</span><span class="stat-val v-neu">287 days</span></div>
+      <div class="stat-row"><span class="stat-key">Avg Leverage Used</span><span class="stat-val v-neu">1.35×</span></div>
+      <div class="stat-row"><span class="stat-key">Leverage Range</span><span class="stat-val v-neu">1.10× – 2.20×</span></div>
+      <div class="stat-row"><span class="stat-key">Avg Symbols / Day</span><span class="stat-val v-neu">6.9 / day</span></div>
+      <div class="stat-row"><span class="stat-key">Universe Size</span><span class="stat-val v-neu">Top 100</span></div>
+      <div class="stat-row"><span class="stat-key">Turnover</span><span class="stat-val v-neu">102 / yr</span></div>
+      <div class="stat-row"><span class="stat-key">Total Fee Drag</span><span class="stat-val v-warn">4.04%</span></div>
+      <div class="stat-row"><span class="stat-key">Taker Fee / Side</span><span class="stat-val v-neu">0.040%</span></div>
+      <div class="stat-row"><span class="stat-key">Capacity Ceiling (est.)</span><span class="stat-val v-warn">~$1.0M</span></div>
+    </div>
+  </div>
+
+  <!-- MONTHLY HEAT MAP -->
+  <div class="monthly-sec">
+    <div class="sec-title" style="border-bottom:1px solid var(--faint); padding-bottom:8px; margin-bottom:12px; display:flex; align-items:center; gap:6px;">
+      <span style="display:inline-block; width:12px; height:1px; background:var(--gold-dim)"></span>
+      Monthly Returns Heat Map
+      <span style="margin-left:auto; font-size:10px; color:var(--sub); font-weight:300;">12 positive &nbsp;|&nbsp; 2 negative &nbsp;|&nbsp; 85.7% win rate</span>
+    </div>
+    <div class="monthly-grid">
+      <div class="mo-cell mo-pos"><div class="mo-label">Feb '25</div><div class="mo-val">+18.18%</div></div>
+      <div class="mo-cell mo-neg"><div class="mo-label">Mar '25</div><div class="mo-val">−5.33%</div></div>
+      <div class="mo-cell mo-pos"><div class="mo-label">Apr '25</div><div class="mo-val">+48.26%</div></div>
+      <div class="mo-cell mo-pos"><div class="mo-label">May '25</div><div class="mo-val">+21.13%</div></div>
+      <div class="mo-cell mo-pos"><div class="mo-label">Jun '25</div><div class="mo-val">+17.79%</div></div>
+      <div class="mo-cell mo-pos"><div class="mo-label">Jul '25</div><div class="mo-val">+26.05%</div></div>
+      <div class="mo-cell mo-neg"><div class="mo-label">Aug '25</div><div class="mo-val">−0.58%</div></div>
+      <div class="mo-cell mo-pos"><div class="mo-label">Sep '25</div><div class="mo-val">+31.24%</div></div>
+      <div class="mo-cell mo-pos"><div class="mo-label">Oct '25</div><div class="mo-val">+14.73%</div></div>
+      <div class="mo-cell mo-pos"><div class="mo-label">Nov '25</div><div class="mo-val">+19.16%</div></div>
+      <div class="mo-cell mo-pos"><div class="mo-label">Dec '25</div><div class="mo-val">+16.80%</div></div>
+      <div class="mo-cell mo-pos"><div class="mo-label">Jan '26</div><div class="mo-val">+41.22%</div></div>
+      <div class="mo-cell mo-pos"><div class="mo-label">Feb '26</div><div class="mo-val">+15.94%</div></div>
+      <div class="mo-cell mo-pos mo-partial"><div class="mo-label">Mar '26 *</div><div class="mo-val">+12.25%</div></div>
+    </div>
+  </div>
+
+  <!-- CAPACITY CALLOUT -->
+  <div class="capacity-callout">
+    <div class="capacity-callout-icon">⚠</div>
+    <div class="capacity-callout-text">
+      <div class="capacity-callout-label">Capacity Constraint — Important Disclosure</div>
+      <div class="capacity-callout-body">
+        Strategy approaches <strong>market impact limits at ~$1.0M AUM</strong> (10% daily volume threshold crossed at day 383).
+        At $100k–$250k AUM impact is negligible (Sharpe &gt;3.4). Above $500k, costs compound rapidly.
+        Suitable for <strong>sub-$500k deployment</strong> at current universe size (Top-100 altcoins).
+      </div>
+    </div>
+  </div>
+
+  <!-- ROBUSTNESS & STATISTICAL VALIDITY -->
+  <div class="body-grid">
+    <div class="sec">
+      <div class="sec-title">Statistical Validity</div>
+      <div class="stat-row hi"><span class="stat-key">Deflated Sharpe Ratio</span><span class="stat-val v-gold">99.94%</span></div>
+      <div class="stat-row"><span class="stat-key">DSR — Genuine Sharpe Prob.</span><span class="stat-val v-gold">99.935%</span></div>
+      <div class="stat-row"><span class="stat-key">False Positive Probability</span><span class="stat-val v-pos">0.065%</span></div>
+      <div class="stat-row"><span class="stat-key">Track Record Length</span><span class="stat-val v-neu">398 days (1.1 yrs)</span></div>
+      <div class="stat-row"><span class="stat-key">Probability of Loss</span><span class="stat-val v-pos">0.00%</span></div>
+      <div class="stat-row"><span class="stat-key">Ruin Prob. (50% DD / 365d)</span><span class="stat-val v-pos">0.30%</span></div>
+      <div class="stat-row"><span class="stat-key">Equity Curve R²</span><span class="stat-val v-pos">0.975</span></div>
+    </div>
+
+    <div class="sec">
+      <div class="sec-title">Walk-Forward &amp; Robustness</div>
+      <div class="stat-row hi"><span class="stat-key">IS / OOS CAGR Ratio</span><span class="stat-val v-gold">1.40× (OOS beats IS)</span></div>
+      <div class="stat-row"><span class="stat-key">OOS Sharpe</span><span class="stat-val v-cyan">3.52</span></div>
+      <div class="stat-row"><span class="stat-key">Sharpe Decay (IS→OOS)</span><span class="stat-val v-pos">11.5% ✅ STABLE</span></div>
+      <div class="stat-row"><span class="stat-key">Walk-Forward CV</span><span class="stat-val v-pos">0.22 (goal &lt;0.40)</span></div>
+      <div class="stat-row"><span class="stat-key">Positive WF Folds</span><span class="stat-val v-pos">100%</span></div>
+      <div class="stat-row"><span class="stat-key">FA-WF Mean DSR</span><span class="stat-val v-pos">88.53%</span></div>
+      <div class="stat-row"><span class="stat-key">Sharpe @2× Slippage</span><span class="stat-val v-pos">3.41</span></div>
+      <div class="stat-row"><span class="stat-key">Slippage Sensitivity</span><span class="stat-val v-pos">✅ LOW (−1.97)</span></div>
+    </div>
+  </div>
+
+  <!-- SCORECARD BAR -->
+  <div class="scorecard-bar">
+    <div class="sb-label">92-Metric Scorecard</div>
+    <div class="sb-track">
+      <div class="sb-pass" style="width:60.9%"></div>
+      <div class="sb-fail" style="width:5.4%"></div>
+      <div class="sb-warn" style="width:1.1%"></div>
+      <div class="sb-na"   style="width:32.6%"></div>
+    </div>
+    <div class="sb-numbers">
+      <div class="sb-num"><span class="dot" style="background:rgba(79,168,122,0.7)"></span><span style="color:var(--green)">56 Pass</span></div>
+      <div class="sb-num"><span class="dot" style="background:rgba(212,95,88,0.7)"></span><span style="color:var(--red)">5 Fail</span></div>
+      <div class="sb-num"><span class="dot" style="background:rgba(200,164,90,0.6)"></span><span style="color:var(--gold)">1 Borderline</span></div>
+      <div class="sb-num"><span class="dot" style="background:rgba(122,138,170,0.3)"></span><span style="color:var(--sub)">30 N/A</span></div>
+    </div>
+  </div>
+
+  <!-- AUDIT BADGES -->
+  <div class="audit-row">
+    <div class="audit-block">
+      <div class="audit-icon">✅</div>
+      <div class="audit-content">
+        <div class="audit-name">Simulation Bias Audit</div>
+        <div class="audit-score audit-pass">10 / 10 CLEAN — no lookahead</div>
+      </div>
+    </div>
+    <div class="audit-block">
+      <div class="audit-icon">✅</div>
+      <div class="audit-content">
+        <div class="audit-name">Daily Series Audit</div>
+        <div class="audit-score audit-pass">6 / 6 CLEAN — causal integrity</div>
+      </div>
+    </div>
+    <div class="audit-block">
+      <div class="audit-icon">✅</div>
+      <div class="audit-content">
+        <div class="audit-name">Parameter Robustness</div>
+        <div class="audit-score audit-pass">L_HIGH, L_BASE, PORT_SL — range 0.00 ✅</div>
+      </div>
+    </div>
+    <div class="audit-block">
+      <div class="audit-icon">⚠</div>
+      <div class="audit-content">
+        <div class="audit-name">Known Weaknesses</div>
+        <div class="audit-score audit-warn">PBO 46.5% | Neighbor Plateau 38.5%</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- CONFIG STRIP -->
+  <div style="background:var(--card); border:1px solid var(--border); padding:12px 16px; display:flex; gap:28px; flex-wrap:wrap; align-items:center;">
+    <div style="font-family:var(--mono); font-size:9.5px; letter-spacing:0.14em; text-transform:uppercase; color:var(--gold); flex-shrink:0;">Config A — Tail Guardrail</div>
+    <div style="font-family:var(--mono); font-size:11px; color:var(--sub);">L_HIGH <span style="color:var(--text)">1.1</span></div>
+    <div style="font-family:var(--mono); font-size:11px; color:var(--sub);">L_BASE <span style="color:var(--text)">0</span></div>
+    <div style="font-family:var(--mono); font-size:11px; color:var(--sub);">PORT_TSL <span style="color:var(--text)">7.5%</span></div>
+    <div style="font-family:var(--mono); font-size:11px; color:var(--sub);">PORT_SL <span style="color:var(--text)">−6%</span></div>
+    <div style="font-family:var(--mono); font-size:11px; color:var(--sub);">Filter <span style="color:var(--text)">drop&lt;−3% ∧ vol&gt;1.4×</span></div>
+    <div style="font-family:var(--mono); font-size:11px; color:var(--sub);">Lev Model <span style="color:var(--text)">VOL_LEV (window=30d, target=2%, boost=2×)</span></div>
+    <div style="font-family:var(--mono); font-size:11px; color:var(--sub);">Taker Fee <span style="color:var(--text)">0.08% rt</span></div>
+  </div>
+
+  <!-- FOOTER -->
+  <div class="footer">
+    <div class="footer-left">
+      Generated: Mar 28, 2026 &nbsp;|&nbsp; Backtested on 398 days of live exchange data &nbsp;|&nbsp; Past performance does not guarantee future results<br>
+      * Mar 2026 return is partial (through Mar 19) &nbsp;|&nbsp; Sample size &lt;500d is noted as a known limitation<br>
+      Strategy trades USDT-margined perp futures on Top-100 altcoins, long-only, daily bars
+    </div>
+    <div class="footer-right">Altcoin Momentum Futures<br>Quantitative Strategy Report</div>
+  </div>
+
+</div>
+
+<script>
+// ═══════════════════════════════════════════════════════════
+//  EQUITY CURVE — FULL UPGRADE v3
+//  MC bands · BTC right axis · DD annotations · Sparkline
+//  Animated draw · Hover tooltip · Glow · Milestones
+// ═══════════════════════════════════════════════════════════
+
+const weeklyData = [
+  { date: "Feb 13 '25", bal: 100000 }, { date: "Feb 23 '25", bal: 106713 },
+  { date: "Mar 02 '25", bal: 118182 }, { date: "Mar 09 '25", bal: 118182 },
+  { date: "Mar 16 '25", bal: 128741 }, { date: "Mar 23 '25", bal: 122451 },
+  { date: "Mar 30 '25", bal: 111884 }, { date: "Apr 06 '25", bal: 111494 },
+  { date: "Apr 13 '25", bal: 111494 }, { date: "Apr 20 '25", bal: 146788 },
+  { date: "Apr 27 '25", bal: 159639 }, { date: "May 04 '25", bal: 165881 },
+  { date: "May 11 '25", bal: 199140 }, { date: "May 18 '25", bal: 199479 },
+  { date: "May 25 '25", bal: 199479 }, { date: "Jun 01 '25", bal: 198442 },
+  { date: "Jun 08 '25", bal: 192090 }, { date: "Jun 15 '25", bal: 217773 },
+  { date: "Jun 22 '25", bal: 226786 }, { date: "Jun 29 '25", bal: 236665 },
+  { date: "Jul 06 '25", bal: 261448 }, { date: "Jul 13 '25", bal: 256340 },
+  { date: "Jul 20 '25", bal: 308926 }, { date: "Jul 27 '25", bal: 298325 },
+  { date: "Aug 03 '25", bal: 308170 }, { date: "Aug 10 '25", bal: 322174 },
+  { date: "Aug 17 '25", bal: 311276 }, { date: "Aug 24 '25", bal: 311276 },
+  { date: "Aug 31 '25", bal: 296587 }, { date: "Sep 07 '25", bal: 261728 },
+  { date: "Sep 14 '25", bal: 340417 }, { date: "Sep 21 '25", bal: 350454 },
+  { date: "Sep 28 '25", bal: 389233 }, { date: "Oct 05 '25", bal: 333822 },
+  { date: "Oct 12 '25", bal: 371320 }, { date: "Oct 19 '25", bal: 410154 },
+  { date: "Oct 26 '25", bal: 402023 }, { date: "Nov 02 '25", bal: 446557 },
+  { date: "Nov 09 '25", bal: 516909 }, { date: "Nov 16 '25", bal: 511706 },
+  { date: "Nov 23 '25", bal: 483648 }, { date: "Nov 30 '25", bal: 532103 },
+  { date: "Dec 07 '25", bal: 495345 }, { date: "Dec 14 '25", bal: 567588 },
+  { date: "Dec 21 '25", bal: 669448 }, { date: "Dec 28 '25", bal: 621520 },
+  { date: "Jan 04 '26", bal: 621520 }, { date: "Jan 11 '26", bal: 598754 },
+  { date: "Jan 18 '26", bal: 595691 }, { date: "Jan 25 '26", bal: 719139 },
+  { date: "Feb 01 '26", bal: 877725 }, { date: "Feb 08 '26", bal: 877725 },
+  { date: "Feb 15 '26", bal: 951398 }, { date: "Feb 22 '26", bal: 934837 },
+  { date: "Mar 01 '26", bal:1017642 }, { date: "Mar 08 '26", bal:1069691 },
+  { date: "Mar 15 '26", bal:1113404 }, { date: "Mar 22 '26", bal:1142267 },
+];
+
+const btcWeekly = [
+  100000, 98462, 92308, 85128, 86667, 84103, 82051, 81026,
+  84103,  88205, 92308, 97436,101026,104615,106667,109231,
+  105641,110769,114872,117949,121026,118462,123077,118974,
+  123590,126154,129231,126667,122051,115897,112821,109744,
+  106667,102564, 99487,101538, 98462, 95385, 91795, 89231,
+   86154, 89231, 86154, 86667, 85128, 82051, 81026, 78974,
+   76923, 75897, 80744, 78974, 77436, 75385, 73846, 71795,
+   69744, 68718
+];
+
+// Optional: injected from app as actual audit drawdown series (decimal, e.g. -0.22).
+const drawdownWeekly = [];
+
+const balances = weeklyData.map(d => d.bal);
+const n = balances.length;
+const startCapital = balances[0] || 100000;
+const strategyRetPct = ((balances[n-1] / startCapital) - 1) * 100;
+
+const W = 1110, H = 220;
+const padL = 52, padR = 60, padT = 12, padB = 0;
+const cW = W - padL - padR, cH = H - padT - padB;
+const minV = 0;
+const maxBal = Math.max(...balances);
+const roughTop = Math.max(startCapital * 1.2, maxBal * 1.08);
+const pow10 = Math.pow(10, Math.floor(Math.log10(roughTop)));
+const norm = roughTop / pow10;
+const niceNorm = norm <= 1 ? 1 : norm <= 2 ? 2 : norm <= 5 ? 5 : 10;
+const maxV = niceNorm * pow10;
+
+function xp(i)   { return padL + (i / (n-1)) * cW; }
+function yp(val) { return padT + cH - ((val - minV) / (maxV - minV)) * cH; }
+
+function smoothPath(pts) {
+  if (pts.length < 2) return '';
+  let d = `M ${pts[0][0]} ${pts[0][1]}`;
+  for (let i = 0; i < pts.length-1; i++) {
+    const [x0,y0] = pts[i], [x1,y1] = pts[i+1], cpx = (x0+x1)/2;
+    d += ` C ${cpx} ${y0} ${cpx} ${y1} ${x1} ${y1}`;
+  }
+  return d;
+}
+
+// strategy paths
+const pts   = balances.map((b,i) => [xp(i), yp(b)]);
+const lineD = smoothPath(pts);
+const areaD = lineD + ` L ${pts[n-1][0]} ${padT+cH} L ${pts[0][0]} ${padT+cH} Z`;
+
+// MC band
+const wlr = [];
+for (let i=1; i<n; i++) wlr.push(Math.log(balances[i]/balances[i-1]));
+const muL  = wlr.reduce((a,b)=>a+b,0)/wlr.length;
+const sigL = Math.sqrt(wlr.reduce((a,b)=>a+Math.pow(b-muL,2),0)/wlr.length);
+const p10Pts=[],p90Pts=[];
+for (let i=0; i<n; i++) {
+  const k=Math.sqrt(Math.max(i,0.5));
+  p10Pts.push([xp(i), Math.max(padT,Math.min(padT+cH, yp(startCapital*Math.exp(i*muL-1.28*k*sigL))))]);
+  p90Pts.push([xp(i), Math.max(padT,Math.min(padT+cH, yp(startCapital*Math.exp(i*muL+1.28*k*sigL))))]);
+}
+let bandD = `M ${p90Pts[0][0]} ${p90Pts[0][1]}`;
+for (let i=1;i<n;i++) { const [x0,y0]=p90Pts[i-1],[x1,y1]=p90Pts[i]; bandD+=` C ${(x0+x1)/2} ${y0} ${(x0+x1)/2} ${y1} ${x1} ${y1}`; }
+for (let i=n-1;i>=0;i--) { const [x1,y1]=p10Pts[i]; if(i===n-1){bandD+=` L ${x1} ${y1}`;continue;} const [x0,y0]=p10Pts[i+1]; bandD+=` C ${(x0+x1)/2} ${y0} ${(x0+x1)/2} ${y1} ${x1} ${y1}`; }
+bandD+=' Z';
+
+// BTC right axis (USD)
+const btcMinRaw = Math.min(...btcWeekly);
+const btcMaxRaw = Math.max(...btcWeekly);
+const btcPad = Math.max(2000, (btcMaxRaw - btcMinRaw) * 0.12);
+const btcMinV = Math.max(0, btcMinRaw - btcPad);
+const btcMaxV = btcMaxRaw + btcPad;
+function ypBtc(v){ return padT+cH-((v-btcMinV)/(btcMaxV-btcMinV))*cH; }
+const btcPts  = btcWeekly.map((b,i)=>[xp(i),Math.max(padT,Math.min(padT+cH,ypBtc(b)))]);
+const btcLineD = smoothPath(btcPts);
+let btcAxisHTML='';
+const btcTicks = Array.from({length:5}, (_,i)=> btcMinV + (i/4)*(btcMaxV-btcMinV));
+const fmtUsdCompact = (v) => {
+  if (v >= 1000000) return `$${(v/1000000).toFixed(2).replace(/\.00$/,'')}M`;
+  if (v >= 1000) return `$${Math.round(v/1000)}k`;
+  return `$${Math.round(v)}`;
+};
+btcTicks.forEach(v=>{
+  const y=ypBtc(v); if(y<padT||y>padT+cH)return;
+  const lbl=fmtUsdCompact(v);
+  btcAxisHTML+=`<line x1="${padL+cW*0.72}" y1="${y}" x2="${W-padR}" y2="${y}" stroke="#2a1e0e" stroke-width="1" stroke-dasharray="2 4" opacity="0.6"/>`;
+  btcAxisHTML+=`<text x="${W-padR+5}" y="${y+3.5}" font-size="8.5" fill="#9a5e20" text-anchor="start" font-family="DM Mono,monospace" opacity="0.8">${lbl}</text>`;
+});
+btcAxisHTML+=`<text x="${W-padR+34}" y="${padT+cH/2}" font-size="8" fill="#9a5e20" opacity="0.6" text-anchor="middle" font-family="DM Mono,monospace" transform="rotate(90,${W-padR+34},${padT+cH/2})">BTC / USD</text>`;
+
+// drawdown
+let peak=balances[0];
+const ddFromEquity=balances.map(b=>{if(b>peak)peak=b;return(b-peak)/peak;});
+const ddPct = (Array.isArray(drawdownWeekly) && drawdownWeekly.length===n)
+  ? drawdownWeekly
+  : ddFromEquity;
+const ddH=70,ddPadT=4,ddPadB=18,ddPadL=padL,ddPadR=padR;
+const ddCH=ddH-ddPadT-ddPadB, ddMin=Math.min(...ddPct);
+const ddPts=ddPct.map((d,i)=>[ddPadL+(i/(n-1))*(W-ddPadL-ddPadR), ddPadT+(d/ddMin)*ddCH]);
+const ddLineD=smoothPath(ddPts);
+const ddAreaD=ddLineD+` L ${ddPts[n-1][0]} ${ddPadT} L ${ddPts[0][0]} ${ddPadT} Z`;
+
+// milestones
+const milestones=[
+  {val:startCapital*2,label:`$${Math.round((startCapital*2)/1000)}k`},
+  {val:startCapital*5,label:`$${Math.round((startCapital*5)/1000)}k`},
+  {val:startCapital*10,label:`$${(startCapital*10)>=1000000?`${((startCapital*10)/1000000).toFixed(1).replace(/\.0$/,'')}M`:`${Math.round((startCapital*10)/1000)}k`}`},
+];
+function findCrossing(v){for(let i=1;i<n;i++)if(balances[i-1]<v&&balances[i]>=v)return i;return null;}
+
+const xLabels=[
+  {i:0,t:"Feb'25"},{i:4,t:"Mar"},{i:10,t:"Apr"},{i:14,t:"May"},
+  {i:18,t:"Jun"},{i:22,t:"Jul"},{i:27,t:"Aug"},{i:33,t:"Sep"},
+  {i:36,t:"Oct"},{i:41,t:"Nov"},{i:44,t:"Dec"},{i:47,t:"Jan'26"},
+  {i:51,t:"Feb"},{i:56,t:"Mar'26"},
+];
+
+// BUILD EQUITY SVG
+const svg=document.getElementById('equitySVG');
+let gridHTML='';
+const leftAxisTicks = Array.from({ length: 5 }, (_, i) => ((i + 1) / 5) * maxV);
+leftAxisTicks.forEach(v=>{
+  const y=yp(v), lbl=v>=1000000?`$${(v/1000000).toFixed(1).replace(/\.0$/,'')}M`:`$${Math.round(v/1000)}k`;
+  gridHTML+=`<line x1="${padL}" y1="${y}" x2="${W-padR}" y2="${y}" stroke="#1e2b45" stroke-width="1" stroke-dasharray="${v===1000000?'4 3':''}"/>`;
+  gridHTML+=`<text x="${padL-5}" y="${y+3.5}" font-size="9" fill="#3a4e6a" text-anchor="end" font-family="DM Mono,monospace">${lbl}</text>`;
+});
+gridHTML+=`<line x1="${padL}" y1="${yp(startCapital)}" x2="${W-padR}" y2="${yp(startCapital)}" stroke="#2a3a55" stroke-width="1" stroke-dasharray="3 4"/>`;
+gridHTML+=`<text x="${padL-5}" y="${yp(startCapital)+3.5}" font-size="9" fill="#3a4e6a" text-anchor="end" font-family="DM Mono,monospace">${fmtUsdCompact(startCapital)}</text>`;
+
+let tickHTML='';
+xLabels.forEach(l=>{ tickHTML+=`<line x1="${xp(l.i)}" y1="${padT+cH}" x2="${xp(l.i)}" y2="${padT+cH+3}" stroke="#2a3a55" stroke-width="1"/>`; });
+
+let msHTML='';
+milestones.forEach(ms=>{
+  const idx=findCrossing(ms.val); if(!idx)return;
+  const mx=xp(idx), my=yp(ms.val);
+  msHTML+=`<line x1="${mx}" y1="${padT}" x2="${mx}" y2="${padT+cH}" stroke="#9e7e3a" stroke-width="1" stroke-dasharray="3 3" opacity="0.5"/>`;
+  msHTML+=`<circle cx="${mx}" cy="${my}" r="4.5" fill="#0d1120" stroke="#c8a45a" stroke-width="1.5" filter="url(#glowStrong)"/>`;
+  msHTML+=`<text x="${mx+6}" y="${my-6}" font-size="9" fill="#9e7e3a" font-family="DM Mono,monospace" letter-spacing="0.05em">${ms.label} ✓</text>`;
+});
+
+const tx=xp(n-1), ty=yp(balances[n-1]);
+const btcStart = btcWeekly[0];
+const btcEnd = btcWeekly[n-1];
+const btcRetPct = ((btcEnd / btcStart) - 1) * 100;
+
+svg.innerHTML+=`
+  <defs>
+    <linearGradient id="mcBandFill" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#5bbfc8" stop-opacity="0.06"/>
+      <stop offset="100%" stop-color="#5bbfc8" stop-opacity="0.02"/>
+    </linearGradient>
+  </defs>
+  ${gridHTML}
+  <line x1="${W-padR}" y1="${padT}" x2="${W-padR}" y2="${padT+cH}" stroke="#3a1a1a" stroke-width="1"/>
+  ${btcAxisHTML}
+  <g clip-path="url(#chartClip)">
+    <path d="${bandD}" fill="url(#mcBandFill)" stroke="none"/>
+    <path d="${smoothPath(p10Pts)}" fill="none" stroke="#5bbfc8" stroke-width="1" stroke-dasharray="4 3" opacity="0.3"/>
+    <path d="${smoothPath(p90Pts)}" fill="none" stroke="#5bbfc8" stroke-width="1" stroke-dasharray="4 3" opacity="0.3"/>
+  </g>
+  <text x="${xp(n-1)-2}" y="${p90Pts[n-1][1]-4}" font-size="8" fill="#5bbfc8" opacity="0.5" font-family="DM Mono,monospace" text-anchor="end">p90</text>
+  <text x="${xp(n-1)-2}" y="${p10Pts[n-1][1]+10}" font-size="8" fill="#5bbfc8" opacity="0.5" font-family="DM Mono,monospace" text-anchor="end">p10</text>
+  <g clip-path="url(#chartClip)">
+    <path id="btcPath" d="${btcLineD}" fill="none" stroke="#e8842a" stroke-width="1.5" stroke-dasharray="5 3" opacity="0.65"/>
+  </g>
+  <circle cx="${btcPts[n-1][0]}" cy="${btcPts[n-1][1]}" r="3" fill="#0d1120" stroke="#e8842a" stroke-width="1.2" opacity="0.8"/>
+  <rect x="${padL+6}" y="${padT+5}" width="18" height="3" rx="1" fill="url(#curveLine)" opacity="0.9"/>
+  <text x="${padL+28}" y="${padT+9}" font-size="8.5" fill="#c8a45a" font-family="DM Mono,monospace">Strategy ${strategyRetPct>=0?'+':''}${strategyRetPct.toFixed(1)}%</text>
+  <line x1="${padL+6}" y1="${padT+18}" x2="${padL+24}" y2="${padT+18}" stroke="#e8842a" stroke-width="1.5" stroke-dasharray="5 3" opacity="0.7"/>
+  <text x="${padL+28}" y="${padT+22}" font-size="8.5" fill="#e8842a" font-family="DM Mono,monospace" opacity="0.85">BTC ${btcRetPct>=0?'+':''}${btcRetPct.toFixed(1)}% (${fmtUsdCompact(btcStart)} → ${fmtUsdCompact(btcEnd)}) (right axis →)</text>
+  <g clip-path="url(#chartClip)">
+    <path id="areaPath" d="${areaD}" fill="url(#curveFill)"/>
+    <path id="glowPath" d="${lineD}" fill="none" stroke="url(#curveLine)" stroke-width="4" filter="url(#glow)" opacity="0.55"/>
+    <path id="linePath" d="${lineD}" fill="none" stroke="url(#curveLine)" stroke-width="2.2"/>
+  </g>
+  ${msHTML}${tickHTML}
+  <g id="terminalDot">
+    <circle cx="${tx}" cy="${ty}" r="7" fill="#c8a45a" opacity="0.12">
+      <animate attributeName="r"       values="7;13;7"      dur="2.4s" repeatCount="indefinite"/>
+      <animate attributeName="opacity" values="0.12;0;0.12" dur="2.4s" repeatCount="indefinite"/>
+    </circle>
+    <circle cx="${tx}" cy="${ty}" r="4" fill="#0d1120" stroke="#c8a45a" stroke-width="1.8" filter="url(#glowStrong)"/>
+    <circle cx="${tx}" cy="${ty}" r="1.8" fill="#e8c070"/>
+  </g>
+  <rect id="hoverOverlay" x="${padL}" y="${padT}" width="${cW}" height="${cH}" fill="transparent" cursor="crosshair"/>
+  <line id="hoverLine" x1="0" y1="${padT}" x2="0" y2="${padT+cH}" stroke="#c8a45a" stroke-width="1" stroke-dasharray="3 3" opacity="0" pointer-events="none"/>
+  <circle id="hoverDot" cx="0" cy="0" r="4" fill="#0d1120" stroke="#c8a45a" stroke-width="1.5" opacity="0" pointer-events="none"/>
+`;
+
+// BUILD DD SVG
+const ddSVG=document.getElementById('ddSVG');
+let ddGridHTML=`<line x1="${ddPadL}" y1="${ddPadT}" x2="${W-ddPadR}" y2="${ddPadT}" stroke="#2a3a55" stroke-width="1" stroke-dasharray="3 3"/>`;
+ddGridHTML+=`<text x="${ddPadL-5}" y="${ddPadT+3.5}" font-size="8" fill="#3a4e6a" text-anchor="end" font-family="DM Mono,monospace">0%</text>`;
+[-0.05,-0.10,-0.15,-0.20].forEach(v=>{
+  const yv=ddPadT+(v/ddMin)*ddCH;
+  if(yv>ddPadT&&yv<ddH-ddPadB+2){
+    ddGridHTML+=`<line x1="${ddPadL}" y1="${yv}" x2="${W-ddPadR}" y2="${yv}" stroke="#1e2b45" stroke-width="1"/>`;
+    ddGridHTML+=`<text x="${ddPadL-5}" y="${yv+3}" font-size="8" fill="#3a4e6a" text-anchor="end" font-family="DM Mono,monospace">${Math.round(v*100)}%</text>`;
+  }
+});
+let ddLabelsHTML='';
+xLabels.forEach(l=>{ ddLabelsHTML+=`<text x="${xp(l.i)}" y="${ddH-2}" font-size="8.5" fill="#4a5a7a" text-anchor="middle" font-family="DM Mono,monospace">${l.t}</text>`; });
+
+const worstDd = [...ddPct]
+  .map((v, i) => ({ v, i }))
+  .sort((a, b) => a.v - b.v)
+  .slice(0, 2);
+const annotHTML = worstDd.map((p, idx) => {
+  const ax = ddPts[p.i][0];
+  const ay = ddPts[p.i][1];
+  const side = idx % 2 === 0 ? -1 : 1;
+  const pct = `${p.v < 0 ? '−' : '+'}${Math.abs(p.v * 100).toFixed(1)}%`;
+  const lbl = weeklyData[p.i]?.date ?? '';
+  return `
+    <circle cx="${ax}" cy="${ay}" r="3" fill="none" stroke="#d45f58" stroke-width="1.2" opacity="${idx === 0 ? '0.8' : '0.6'}"/>
+    <line x1="${ax}" y1="${ay}" x2="${ax + (2 * side)}" y2="${ay + 9}" stroke="#d45f58" stroke-width="0.8" opacity="${idx === 0 ? '0.6' : '0.5'}"/>
+    <text x="${ax + (3 * side)}" y="${ay + 19}" font-size="8" fill="#d45f58" opacity="${idx === 0 ? '0.85' : '0.7'}" text-anchor="middle" font-family="DM Mono,monospace">${pct}</text>
+    <text x="${ax + (3 * side)}" y="${ay + 28}" font-size="7" fill="#d45f58" opacity="${idx === 0 ? '0.55' : '0.45'}" text-anchor="middle" font-family="DM Mono,monospace">${lbl}</text>
+  `;
+}).join('');
+ddSVG.innerHTML+=`${ddGridHTML}<g clip-path="url(#ddClip)"><path id="ddAreaPath" d="${ddAreaD}" fill="url(#ddFill)"/><path id="ddLinePath" d="${ddLineD}" fill="none" stroke="#d45f58" stroke-width="1.4" opacity="0.8"/></g>${annotHTML}${ddLabelsHTML}`;
+
+// ROLLING SHARPE SPARKLINE
+const wRets=[];
+for(let i=1;i<n;i++) wRets.push(balances[i]/balances[i-1]-1);
+const wsz=8, rS=[];
+for(let i=wsz;i<=wRets.length;i++){
+  const w=wRets.slice(i-wsz,i), m=w.reduce((a,b)=>a+b,0)/wsz;
+  const s=Math.sqrt(w.reduce((a,b)=>a+Math.pow(b-m,2),0)/wsz);
+  rS.push(s>0.001?(m/s)*Math.sqrt(52):0);
+}
+const spk=document.getElementById('sharpeSpark');
+if(spk&&rS.length>1){
+  const sw=110,sh=22,sp=2,sMin=Math.min(...rS),sMax=Math.max(...rS);
+  const sx=i=>sp+(i/(rS.length-1))*(sw-2*sp);
+  const sy=v=>sh-sp-((v-sMin)/(sMax-sMin))*(sh-2*sp);
+  let sd=`M ${sx(0)} ${sy(rS[0])}`;
+  for(let i=1;i<rS.length;i++) sd+=` L ${sx(i)} ${sy(rS[i])}`;
+  spk.innerHTML=`<line x1="${sp}" y1="${sy(0)}" x2="${sw-sp}" y2="${sy(0)}" stroke="#2a3a55" stroke-width="0.8"/>
+    <path d="${sd}" fill="none" stroke="#5bbfc8" stroke-width="1.4" stroke-linejoin="round" stroke-linecap="round"/>
+    <circle cx="${sx(rS.length-1)}" cy="${sy(rS[rS.length-1])}" r="2" fill="#5bbfc8"/>`;
+}
+
+// ANIMATE
+function animatePaths(){
+  const mL=document.getElementById('linePath'), gL=document.getElementById('glowPath');
+  const aP=document.getElementById('areaPath'), dL=document.getElementById('ddLinePath');
+  const dA=document.getElementById('ddAreaPath'), bP=document.getElementById('btcPath');
+  const tL=mL.getTotalLength?mL.getTotalLength():3000;
+  const dLen=dL.getTotalLength?dL.getTotalLength():3000;
+  const bLen=bP.getTotalLength?bP.getTotalLength():3000;
+  [mL,gL].forEach(el=>{el.style.strokeDasharray=tL;el.style.strokeDashoffset=tL;el.style.transition='stroke-dashoffset 2.6s cubic-bezier(0.4,0,0.2,1)';});
+  aP.style.opacity='0'; aP.style.transition='opacity 0.8s ease 1.2s';
+  dL.style.strokeDasharray=dLen; dL.style.strokeDashoffset=dLen; dL.style.transition='stroke-dashoffset 2.4s cubic-bezier(0.4,0,0.2,1) 0.3s';
+  dA.style.opacity='0'; dA.style.transition='opacity 0.6s ease 1.4s';
+  bP.style.strokeDasharray=bLen; bP.style.strokeDashoffset=bLen; bP.style.transition='stroke-dashoffset 2.6s cubic-bezier(0.4,0,0.2,1) 0.1s';
+  const cR=document.getElementById('clipRect'), dR=document.getElementById('ddClipRect');
+  cR.setAttribute('width',0); dR.setAttribute('width',0);
+  const cTW=W-padL-padR, st=performance.now(), dur=2600;
+  function ac(now){const t=Math.min((now-st)/dur,1),e=1-Math.pow(1-t,3);cR.setAttribute('width',e*cTW);dR.setAttribute('width',e*cTW);if(t<1)requestAnimationFrame(ac);}
+  requestAnimationFrame(()=>requestAnimationFrame(()=>{
+    mL.style.strokeDashoffset=0; gL.style.strokeDashoffset=0; aP.style.opacity='1';
+    dL.style.strokeDashoffset=0; dA.style.opacity='1'; bP.style.strokeDashoffset=0;
+    requestAnimationFrame(ac);
+  }));
+}
+
+// HOVER TOOLTIP
+const ov=document.getElementById('hoverOverlay'), hL=document.getElementById('hoverLine');
+const hD=document.getElementById('hoverDot'), tt=document.getElementById('chartTooltip');
+const ttD=document.getElementById('ttDate'), ttV=document.getElementById('ttVal');
+const ttR=document.getElementById('ttRet'), cW2=document.getElementById('chartWrap');
+
+ov.addEventListener('mousemove',e=>{
+  const sv=document.getElementById('equitySVG'), rc=sv.getBoundingClientRect();
+  const rx=(e.clientX-rc.left)*(W/rc.width)-padL;
+  if(rx<0||rx>cW)return;
+  const cl=Math.max(0,Math.min(n-1,Math.round((rx/cW)*(n-1))));
+  const cx=xp(cl), cy=yp(balances[cl]);
+  hL.setAttribute('x1',cx);hL.setAttribute('x2',cx);hL.setAttribute('opacity','0.6');
+  hD.setAttribute('cx',cx);hD.setAttribute('cy',cy);hD.setAttribute('opacity','1');
+  const ret=((balances[cl]-startCapital)/startCapital*100).toFixed(1);
+  const btcPx = btcWeekly[cl];
+  const btcR=((btcPx-btcStart)/btcStart*100).toFixed(1);
+  ttD.textContent=weeklyData[cl].date;
+  ttV.textContent='$'+balances[cl].toLocaleString();
+  ttR.innerHTML=`<span style="color:${ret>=0?'#4fa87a':'#d45f58'}">${ret>=0?'+':''}${ret}%</span> strat &nbsp;·&nbsp; <span style="color:#e8842a;opacity:0.85">BTC $${Math.round(btcPx).toLocaleString()} (${btcR>=0?'+':''}${btcR}%)</span>`;
+  const wr=cW2.getBoundingClientRect();
+  tt.style.left=(e.clientX-wr.left)+'px';
+  tt.style.top=(cy*(rc.height/H)+16)+'px';
+  tt.style.opacity='1';
+});
+ov.addEventListener('mouseleave',()=>{ hL.setAttribute('opacity','0'); hD.setAttribute('opacity','0'); tt.style.opacity='0'; });
+
+setTimeout(animatePaths,120);
+</script>
+
+<!-- PDF EXPORT via html2canvas + jsPDF -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+
+<style>
+  #pdf-btn {
+    position: fixed;
+    bottom: 28px;
+    right: 28px;
+    z-index: 9999;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 11px 20px;
+    background: #141416;
+    border: none;
+    color: #a09d96;
+    font-family: 'DM Mono', monospace;
+    font-size: 11px;
+    font-weight: 500;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    cursor: pointer;
+    border-radius: 2px;
+    box-shadow: 0 4px 14px rgba(0,0,0,0.35);
+    transition: background 0.2s, border-color 0.2s, color 0.2s, opacity 0.2s, box-shadow 0.2s;
+  }
+  #pdf-btn:hover:not(:disabled) {
+    background: rgba(79,168,122,0.12);
+    color: var(--green);
+    border-color: rgba(79,168,122,0.45);
+    box-shadow: 0 0 0 1px rgba(79,168,122,0.2), 0 4px 16px rgba(0,0,0,0.45);
+  }
+  #pdf-btn:disabled { opacity: 0.55; cursor: wait; }
+  #pdf-btn .btn-icon { flex-shrink: 0; }
+  #pdf-btn .btn-spinner {
+    width: 13px; height: 13px; flex-shrink: 0;
+    border: 1.5px solid rgba(122,138,170,0.35);
+    border-top-color: var(--green);
+    border-radius: 50%;
+    animation: spin 0.7s linear infinite;
+    display: none;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+</style>
+
+<button id="pdf-btn" onclick="exportPDF()">
+  <svg class="btn-icon" width="13" height="14" viewBox="0 0 13 14" fill="none">
+    <path d="M6.5 1v8M3.5 6l3 3 3-3" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/>
+    <path d="M1 10v2.5h11V10" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/>
+  </svg>
+  <div class="btn-spinner" id="pdf-spinner"></div>
+  <span id="pdf-label">Save as PDF</span>
+</button>
+
+<script>
+async function exportPDF() {
+  const btn = document.getElementById('pdf-btn');
+  const label = document.getElementById('pdf-label');
+  const spinner = document.getElementById('pdf-spinner');
+  const icon = btn.querySelector('.btn-icon');
+  btn.disabled = true;
+  icon.style.display = 'none';
+  spinner.style.display = 'block';
+  label.textContent = 'Rendering…';
+  btn.style.visibility = 'hidden';
+  try {
+    const page = document.querySelector('.page');
+    const canvas = await html2canvas(page, {
+      scale: 2, useCORS: true, allowTaint: true,
+      backgroundColor: '#07090f',
+      width: page.scrollWidth, height: page.scrollHeight,
+      windowWidth: page.scrollWidth, scrollX: 0, scrollY: 0, logging: false,
+    });
+    const { jsPDF } = window.jspdf;
+    const pdfW = 420, pdfH = 297;
+    const ratio = pdfW / canvas.width;
+    const scaledH = canvas.height * ratio;
+    const pageCount = Math.ceil(scaledH / pdfH);
+    const pdf = new jsPDF({ orientation: 'landscape', unit: 'mm', format: 'a3' });
+    const imgData = canvas.toDataURL('image/jpeg', 0.95);
+    for (let i = 0; i < pageCount; i++) {
+      if (i > 0) pdf.addPage([420, 297], 'landscape');
+      pdf.addImage(imgData, 'JPEG', 0, -(i * pdfH), pdfW, scaledH);
+    }
+    pdf.save('Altcoin_Momentum_Futures_Tear_Sheet.pdf');
+    label.textContent = 'Saved ✓';
+    setTimeout(() => { label.textContent = 'Save as PDF'; }, 2500);
+  } catch(err) {
+    console.error(err);
+    label.textContent = 'Error — retry';
+    setTimeout(() => { label.textContent = 'Save as PDF'; }, 3000);
+  } finally {
+    btn.disabled = false;
+    icon.style.display = 'block';
+    spinner.style.display = 'none';
+    btn.style.visibility = 'visible';
+  }
+}
+</script>
+
+</body>
+</html>

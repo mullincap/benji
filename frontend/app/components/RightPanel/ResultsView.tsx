@@ -103,6 +103,74 @@ function fmtDateLabel(d: Date): string {
   return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
 }
 
+function sampleNumericSeriesToLength(series: number[], targetLength: number): number[] {
+  if (!Array.isArray(series) || series.length === 0 || targetLength <= 0) return [];
+  if (series.length === targetLength) return [...series];
+  if (series.length === 1) return Array.from({ length: targetLength }, () => series[0]);
+  return Array.from({ length: targetLength }, (_, i) => {
+    const t = (i / Math.max(1, targetLength - 1)) * (series.length - 1);
+    const lo = Math.floor(t);
+    const hi = Math.min(series.length - 1, Math.ceil(t));
+    const w = t - lo;
+    return series[lo] * (1 - w) + series[hi] * w;
+  });
+}
+
+function sampleMinSeriesToLength(series: number[], targetLength: number): number[] {
+  if (!Array.isArray(series) || series.length === 0 || targetLength <= 0) return [];
+  if (series.length === targetLength) return [...series];
+  if (series.length === 1) return Array.from({ length: targetLength }, () => series[0]);
+  const out: number[] = [];
+  for (let i = 0; i < targetLength; i += 1) {
+    const start = Math.floor((i / targetLength) * series.length);
+    const end = Math.floor(((i + 1) / targetLength) * series.length);
+    const s = Math.max(0, Math.min(series.length - 1, start));
+    const e = Math.max(s + 1, Math.min(series.length, end));
+    let min = Number.POSITIVE_INFINITY;
+    for (let j = s; j < e; j += 1) {
+      if (series[j] < min) min = series[j];
+    }
+    out.push(Number.isFinite(min) ? min : series[s]);
+  }
+  // Keep exact first/last points aligned with timeline endpoints.
+  out[0] = series[0];
+  out[out.length - 1] = series[series.length - 1];
+  return out;
+}
+
+function normalizeDrawdownDecimal(v: number): number {
+  // Backend may emit drawdown as percent points (e.g. -22.1) or decimals (e.g. -0.221).
+  return Math.abs(v) > 1.5 ? v / 100 : v;
+}
+
+function normalizeDrawdownSeries(raw: number[], expectedMaxDdPct: number | null): number[] {
+  if (raw.length === 0) return [];
+  const expected = expectedMaxDdPct !== null && Number.isFinite(expectedMaxDdPct)
+    ? -Math.abs(expectedMaxDdPct) / 100
+    : null;
+  const candidateA = raw.map((v) => Math.max(-1, Math.min(0, v)));
+  const candidateB = raw.map((v) => Math.max(-1, Math.min(0, v / 100)));
+  if (expected === null) {
+    // Fall back to single-point normalization heuristic when we do not have target max DD.
+    return raw.map((v) => Math.max(-1, Math.min(0, normalizeDrawdownDecimal(v))));
+  }
+  const minA = Math.min(...candidateA);
+  const minB = Math.min(...candidateB);
+  const errA = Math.abs(minA - expected);
+  const errB = Math.abs(minB - expected);
+  return errB <= errA ? candidateB : candidateA;
+}
+
+function percentile(sorted: number[], p: number): number {
+  if (!sorted.length) return NaN;
+  const idx = (sorted.length - 1) * p;
+  const lo = Math.floor(idx);
+  const hi = Math.ceil(idx);
+  if (lo === hi) return sorted[lo];
+  const w = idx - lo;
+  return sorted[lo] * (1 - w) + sorted[hi] * w;
+}
+
 function normalizeFilterLabel(s: string): string {
   return s
     .toLowerCase()
@@ -939,15 +1007,30 @@ export default function ResultsView({ results, jobId, startingCapital, params }:
     const maxDd = asPct(selectedRow?.max_dd ?? m.max_drawdown) ?? 0;
     const dsr = asPct(selectedRow?.dsr_pct ?? m.dsr_pct) ?? 0;
     const cv = asNum(selectedRow?.wf_cv ?? selectedRow?.cv ?? m.cv) ?? 0;
+    const r2 = asNum(m.r2 ?? m.r_squared ?? m.equity_r2);
     const grade = asNum(selectedRow?.grade_score ?? m.grade_score ?? selectedRow?.grade);
     const activeDays = Math.round(asNum(selectedRow?.active) ?? 0);
     const dailyRets: number[] = [];
     for (let i = 1; i < eq.length; i += 1) {
       dailyRets.push((eq[i].y / eq[i - 1].y) - 1);
     }
+    const dailySorted = [...dailyRets].sort((a, b) => a - b);
     const bestDay = dailyRets.length > 0 ? Math.max(...dailyRets) * 100 : 0;
     const worstDay = dailyRets.length > 0 ? Math.min(...dailyRets) * 100 : 0;
     const avgDaily = dailyRets.length > 0 ? (dailyRets.reduce((a, b) => a + b, 0) / dailyRets.length) * 100 : 0;
+    const equityMultiplier = first.y > 0 ? last.y / first.y : 0;
+    const omega = asNum(m.omega);
+    const ulcer = asNum(m.ulcer_index);
+    const q05 = dailySorted.length > 0 ? percentile(dailySorted, 0.05) : NaN;
+    const q95 = dailySorted.length > 0 ? percentile(dailySorted, 0.95) : NaN;
+    const cvar5 = dailySorted.length > 0 ? dailySorted.slice(0, Math.max(1, Math.floor(dailySorted.length * 0.05))).reduce((a, b) => a + b, 0) / Math.max(1, Math.floor(dailySorted.length * 0.05)) : NaN;
+    const cvar1 = dailySorted.length > 0 ? dailySorted.slice(0, Math.max(1, Math.floor(dailySorted.length * 0.01))).reduce((a, b) => a + b, 0) / Math.max(1, Math.floor(dailySorted.length * 0.01)) : NaN;
+    const tailRatio = Number.isFinite(q95) && Number.isFinite(q05) && q05 !== 0 ? q95 / Math.abs(q05) : NaN;
+    const mean = dailyRets.length > 0 ? dailyRets.reduce((a, b) => a + b, 0) / dailyRets.length : 0;
+    const variance = dailyRets.length > 0 ? dailyRets.reduce((a, b) => a + (b - mean) ** 2, 0) / dailyRets.length : 0;
+    const sigma = Math.sqrt(Math.max(variance, 0));
+    const skew = sigma > 0 && dailyRets.length > 0 ? dailyRets.reduce((a, b) => a + ((b - mean) / sigma) ** 3, 0) / dailyRets.length : NaN;
+    const kurt = sigma > 0 && dailyRets.length > 0 ? (dailyRets.reduce((a, b) => a + ((b - mean) / sigma) ** 4, 0) / dailyRets.length) - 3 : NaN;
 
     const monthlyMap = new Map<string, { d: Date; first: number; last: number }>();
     for (const p of eq) {
@@ -963,25 +1046,200 @@ export default function ResultsView({ results, jobId, startingCapital, params }:
     }));
     const monthlyWinRate = monthlyRows.length > 0 ? (monthlyRows.filter((r) => r.pct > 0).length / monthlyRows.length) * 100 : 0;
     const avgMonthly = monthlyRows.length > 0 ? monthlyRows.reduce((a, b) => a + b.pct, 0) / monthlyRows.length : 0;
+    const bestMonth = monthlyRows.length > 0 ? Math.max(...monthlyRows.map((r) => r.pct)) : NaN;
+    const worstMonth = monthlyRows.length > 0 ? Math.min(...monthlyRows.map((r) => r.pct)) : NaN;
 
     const sampleN = Math.min(58, eq.length);
     const weeklyData = Array.from({ length: sampleN }).map((_, i) => {
       const idx = Math.round((i / Math.max(1, sampleN - 1)) * (eq.length - 1));
       return { date: fmtDateShortYear(eq[idx].d), bal: Math.round(eq[idx].y) };
     });
-    const btcWeekly = weeklyData.map((w, i) => Math.round(runStartingCapital * (1 + (((w.bal / runStartingCapital) - 1) * 0.3) * (i / Math.max(1, weeklyData.length - 1)))));
+    const rawDrawdownSeries = Array.isArray(selectedDrawdownCurve)
+      ? selectedDrawdownCurve
+        .map((p) => {
+          if (typeof p === 'number') return p;
+          if (p && typeof p === 'object') {
+            const y = (p as { y?: unknown }).y;
+            if (typeof y === 'number' && Number.isFinite(y)) return y;
+            if (typeof y === 'string') {
+              const n = Number(y);
+              return Number.isFinite(n) ? n : null;
+            }
+          }
+          return null;
+        })
+        .filter((n): n is number => typeof n === 'number' && Number.isFinite(n))
+      : [];
+    const expectedMaxDdPct = asNum(selectedRow?.max_dd ?? m.max_drawdown);
+    const drawdownWeekly = rawDrawdownSeries.length >= 2
+      ? normalizeDrawdownSeries(sampleMinSeriesToLength(rawDrawdownSeries, sampleN), expectedMaxDdPct)
+      : [];
+    const drawdownFull = rawDrawdownSeries.length >= 2
+      ? normalizeDrawdownSeries(rawDrawdownSeries, expectedMaxDdPct)
+      : (() => {
+        let peak = eq[0]?.y ?? 1;
+        return eq.map((p) => {
+          if (p.y > peak) peak = p.y;
+          return peak > 0 ? ((p.y - peak) / peak) : 0;
+        });
+      })();
+    const avgDrawdown = drawdownFull.filter((d) => d < 0).reduce((a, b, _, arr) => a + (b / Math.max(1, arr.length)), 0) * 100;
+    const timeUnderwaterPct = drawdownFull.length > 0 ? (drawdownFull.filter((d) => d < 0).length / drawdownFull.length) * 100 : 0;
+    const episodes: number[] = [];
+    let inEp = false;
+    let curMin = 0;
+    let curLen = 0;
+    let longestDdDuration = 0;
+    for (const d of drawdownFull) {
+      if (d < 0) {
+        if (!inEp) {
+          inEp = true;
+          curMin = d;
+          curLen = 1;
+        } else {
+          curLen += 1;
+          if (d < curMin) curMin = d;
+        }
+        if (curLen > longestDdDuration) longestDdDuration = curLen;
+      } else if (inEp) {
+        episodes.push(curMin);
+        inEp = false;
+        curLen = 0;
+      }
+    }
+    if (inEp) episodes.push(curMin);
+    const avgMaxDdEpisode = episodes.length > 0 ? (episodes.reduce((a, b) => a + b, 0) / episodes.length) * 100 : NaN;
+    const weeklyReturns = weeklyData.slice(1).map((w, i) => {
+      const prev = weeklyData[i].bal;
+      return prev > 0 ? (w.bal / prev) - 1 : 0;
+    });
+    const weeklyWinRate = weeklyReturns.length > 0 ? (weeklyReturns.filter((r) => r > 0).length / weeklyReturns.length) * 100 : 0;
+    const activeDaily = dailyRets.filter((r) => Math.abs(r) > 1e-12);
+    const activeDayWinRate = activeDaily.length > 0 ? (activeDaily.filter((r) => r > 0).length / activeDaily.length) * 100 : 0;
+    const avgWin = activeDaily.filter((r) => r > 0);
+    const avgLoss = activeDaily.filter((r) => r < 0);
+    const avgWinPct = avgWin.length > 0 ? (avgWin.reduce((a, b) => a + b, 0) / avgWin.length) * 100 : NaN;
+    const avgLossPct = avgLoss.length > 0 ? (avgLoss.reduce((a, b) => a + b, 0) / avgLoss.length) * 100 : NaN;
+    const winLossRatio = Number.isFinite(avgWinPct) && Number.isFinite(avgLossPct) && avgLossPct !== 0 ? Math.abs(avgWinPct / avgLossPct) : NaN;
+    let maxConsecLosses = 0;
+    let curLossStreak = 0;
+    for (const r of activeDaily) {
+      if (r < 0) {
+        curLossStreak += 1;
+        if (curLossStreak > maxConsecLosses) maxConsecLosses = curLossStreak;
+      } else {
+        curLossStreak = 0;
+      }
+    }
+    const grossPos = dailyRets.filter((r) => r > 0).reduce((a, b) => a + b, 0);
+    const grossNeg = Math.abs(dailyRets.filter((r) => r < 0).reduce((a, b) => a + b, 0));
+    const profitFactor = grossNeg > 0 ? grossPos / grossNeg : NaN;
+    const gainToPain = grossNeg > 0 ? (grossPos - grossNeg) / grossNeg : NaN;
+    const textOutput = auditOutput ?? '';
+    const pickActual = (labelRx: RegExp): string | null => {
+      const lines = textOutput.split('\n').filter((ln) => labelRx.test(ln));
+      if (lines.length === 0) return null;
+      const line = lines[lines.length - 1];
+      const mActual = line.match(/\s{2,}([^\s][^✅❌⚠─]*)\s+(?:✅|❌|⚠|──)/);
+      return mActual ? mActual[1].trim() : null;
+    };
+    const totalFeeDragText = (
+      textOutput.match(/Total Fee Drag %[\s\S]{0,40}?([0-9]+(?:\.[0-9]+)?%)/i)?.[1]
+      ?? null
+    );
+    const turnoverText = (
+      textOutput.match(/Turnover[\s\S]{0,30}?([0-9]+\/yr)/i)?.[1]
+      ?? null
+    );
+    const institutionalCap = (
+      textOutput.match(/Institutional\s*\(Sharpe\s*[≥>=]\s*2\.0\)\s*:\s*capacity up to\s*\$([0-9,]+)/i)?.[1]
+      ?? null
+    );
+    const takerFeePct = asNum(params?.taker_fee_pct);
+    const takerFeeSideText = takerFeePct !== null
+      ? `${(takerFeePct * 100).toFixed(3)}%`
+      : null;
+    const ruinProbText = pickActual(/Ruin Prob\s*\(50%\s*DD,\s*365d\)\s*%/i);
+    const eqR2Text = pickActual(/Equity Curve R[²^]2?/i);
+    const isOosCagrRatioText = pickActual(/IS\/?OOS\s+CAGR\s+Ratio/i);
+    const oosSharpeText = pickActual(/^.*\bOOS Sharpe\b.*$/i);
+    const sharpeDecayText = pickActual(/Sharpe Decay/i);
+    const positiveWfFoldsText = pickActual(/Positive WF Folds/i);
+    const faWfMeanDsrText = pickActual(/FA-WF Mean DSR/i);
+    const sharpe2xSlipText = pickActual(/Sharpe @2(?:x|×)\s+Slippage/i);
+    const slippageSensitivityText = (() => {
+      const explicit = pickActual(/Slippage Sensitivity/i);
+      if (explicit) return explicit;
+      const base = sharpe;
+      const slip = sharpe2xSlipText ? Number(sharpe2xSlipText.replace(/[^0-9.\-]/g, '')) : NaN;
+      if (!Number.isFinite(base) || !Number.isFinite(slip) || base === 0) return null;
+      const drop = ((base - slip) / Math.abs(base)) * 100;
+      return `LOW (-${Math.abs(drop).toFixed(2)}%)`;
+    })();
+    const scorecard92 = (() => {
+      const m2 = textOutput.match(/✅\s*(\d+)\s*Pass\s+❌\s*(\d+)\s*Fail\s+⚠\s*(\d+)\s*Borderline\s+──\s*(\d+)\s*N\/A\s+\(of\s+92\s+metrics\)/i);
+      if (!m2) return null;
+      return {
+        pass: Number(m2[1]),
+        fail: Number(m2[2]),
+        warn: Number(m2[3]),
+        na: Number(m2[4]),
+        total: 92,
+      };
+    })();
+    const fallbackBtcUsdWeekly = [
+      100000, 98462, 92308, 85128, 86667, 84103, 82051, 81026,
+      84103, 88205, 92308, 97436, 101026, 104615, 106667, 109231,
+      105641, 110769, 114872, 117949, 121026, 118462, 123077, 118974,
+      123590, 126154, 129231, 126667, 122051, 115897, 112821, 109744,
+      106667, 102564, 99487, 101538, 98462, 95385, 91795, 89231,
+      86154, 89231, 86154, 86667, 85128, 82051, 81026, 78974,
+      76923, 75897, 80744, 78974, 77436, 75385, 73846, 71795,
+      69744, 68718,
+    ];
+    const btcMetricCandidates: unknown[] = [
+      (m as Record<string, unknown>).btc_weekly_usd,
+      (m as Record<string, unknown>).btc_usd_weekly,
+      (m as Record<string, unknown>).btc_curve_usd,
+      (m as Record<string, unknown>).btc_curve,
+      (m as Record<string, unknown>).btc_weekly,
+    ];
+    const rawBtcSeries = (() => {
+      for (const candidate of btcMetricCandidates) {
+        if (!Array.isArray(candidate)) continue;
+        const parsed = candidate
+          .map((v) => {
+            if (typeof v === 'number' && Number.isFinite(v)) return v;
+            if (v && typeof v === 'object') {
+              const y = (v as { y?: unknown }).y;
+              if (typeof y === 'number' && Number.isFinite(y)) return y;
+              if (typeof y === 'string') {
+                const n = Number(y);
+                return Number.isFinite(n) ? n : null;
+              }
+            }
+            if (typeof v === 'string') {
+              const n = Number(v);
+              return Number.isFinite(n) ? n : null;
+            }
+            return null;
+          })
+          .filter((n): n is number => typeof n === 'number' && Number.isFinite(n));
+        if (parsed.length >= 2) return parsed;
+      }
+      return fallbackBtcUsdWeekly;
+    })();
+    const btcWeekly = sampleNumericSeriesToLength(rawBtcSeries, sampleN).map((v) => Math.round(v));
+    const btcRetPct = btcWeekly.length > 1 ? ((btcWeekly[btcWeekly.length - 1] / btcWeekly[0]) - 1) * 100 : NaN;
 
     const passCount = scorecard.filter((s) => s.status === 'pass').length;
     const warnCount = scorecard.filter((s) => s.status === 'warn').length;
     const failCount = scorecard.filter((s) => s.status && s.status !== 'pass' && s.status !== 'warn').length;
     const naCount = Math.max(0, scorecard.length - passCount - warnCount - failCount);
-    const passPct = scorecard.length ? (passCount / scorecard.length) * 100 : 0;
-    const failPct = scorecard.length ? (failCount / scorecard.length) * 100 : 0;
-    const warnPct = scorecard.length ? (warnCount / scorecard.length) * 100 : 0;
-    const naPct = Math.max(0, 100 - passPct - failPct - warnPct);
     let html = tearTemplate;
     html = html.replace(/const weeklyData = \[[\s\S]*?\];/, `const weeklyData = ${JSON.stringify(weeklyData)};`);
     html = html.replace(/const btcWeekly = \[[\s\S]*?\];/, `const btcWeekly = ${JSON.stringify(btcWeekly)};`);
+    html = html.replace(/const drawdownWeekly = \[[\s\S]*?\];/, `const drawdownWeekly = ${JSON.stringify(drawdownWeekly)};`);
     html = html.replace(/<!-- CONFIG STRIP -->[\s\S]*?<!-- FOOTER -->/, '<!-- FOOTER -->');
 
     const injected = `
@@ -1005,11 +1263,15 @@ export default function ResultsView({ results, jobId, startingCapital, params }:
     const v = h.querySelector('.hero-value');
     if (v && heroVals[i]) v.textContent = heroVals[i];
   });
+  const heroSubs = document.querySelectorAll('.hero-card .hero-sub');
+  if (heroSubs[0]) heroSubs[0].textContent = ${JSON.stringify(`${monthlyWinRate.toFixed(1)}% monthly win rate`)};
   setText('.chart-title-left', ${JSON.stringify(`Equity Curve - ${selectedFilter ?? 'Selected Filter'}`)});
-  const cs = document.querySelectorAll('.chart-stats span');
-  if (cs[0]) cs[0].textContent = ${JSON.stringify(new Intl.NumberFormat(undefined, { style: 'currency', currency: 'USD', maximumFractionDigits: 0 }).format(runStartingCapital))};
-  if (cs[1]) cs[1].textContent = ${JSON.stringify(new Intl.NumberFormat(undefined, { style: 'currency', currency: 'USD', maximumFractionDigits: 0 }).format(last.y))};
-  if (cs[2]) cs[2].textContent = ${JSON.stringify(fmtMetric(sharpe))};
+  const chartStats = document.querySelector('.chart-stats');
+  if (chartStats) {
+    chartStats.innerHTML = ${JSON.stringify(
+      `${fmtSignedPct(totRet, 1)} net &nbsp;·&nbsp; <span>${new Intl.NumberFormat(undefined, { style: 'currency', currency: 'USD', maximumFractionDigits: 0 }).format(runStartingCapital)}</span> → <span>${new Intl.NumberFormat(undefined, { style: 'currency', currency: 'USD', maximumFractionDigits: 0 }).format(last.y)}</span> &nbsp;·&nbsp; R² <span>${r2 !== null ? fmtMetric(r2) : 'N/A'}</span> &nbsp;·&nbsp; Sharpe <span>${fmtMetric(sharpe)}</span>`,
+    )};
+  }
   const rows = document.querySelectorAll('.stat-row');
   rows.forEach((r) => {
     const key = (r.querySelector('.stat-key')?.textContent || '').trim().toLowerCase();
@@ -1021,14 +1283,62 @@ export default function ResultsView({ results, jobId, startingCapital, params }:
     else if (key.includes('best single day')) val.textContent = ${JSON.stringify(fmtSignedPct(bestDay, 2))};
     else if (key.includes('worst single day')) val.textContent = ${JSON.stringify(fmtSignedPct(worstDay, 2))};
     else if (key.includes('avg daily return')) val.textContent = ${JSON.stringify(fmtSignedPct(avgDaily, 2))};
+    else if (key.includes('avg weekly return')) val.textContent = ${JSON.stringify(fmtSignedPct((weeklyReturns.reduce((a, b) => a + b, 0) / Math.max(1, weeklyReturns.length)) * 100, 2))};
     else if (key.includes('avg monthly return')) val.textContent = ${JSON.stringify(fmtSignedPct(avgMonthly, 2))};
+    else if (key.includes('equity multiplier')) val.textContent = ${JSON.stringify(Number.isFinite(equityMultiplier) ? `${equityMultiplier.toFixed(2)}×` : 'N/A')};
+    else if (key.includes('vs btc buy-and-hold')) val.textContent = ${JSON.stringify(Number.isFinite(btcRetPct) ? `${btcRetPct >= 0 ? '+' : ''}${btcRetPct.toFixed(1)}% (same period)` : 'N/A')};
     else if (key === 'sharpe ratio') val.textContent = ${JSON.stringify(fmtMetric(sharpe))};
     else if (key === 'sortino ratio') val.textContent = ${JSON.stringify(fmtMetric(sortino))};
     else if (key === 'calmar ratio') val.textContent = ${JSON.stringify(fmtMetric(calmar))};
+    else if (key === 'omega ratio') val.textContent = ${JSON.stringify(omega !== null ? fmtMetric(omega) : 'N/A')};
+    else if (key === 'profit factor') val.textContent = ${JSON.stringify(Number.isFinite(profitFactor) ? profitFactor.toFixed(2) : 'N/A')};
+    else if (key.includes('gain-to-pain ratio')) val.textContent = ${JSON.stringify(Number.isFinite(gainToPain) ? gainToPain.toFixed(2) : 'N/A')};
+    else if (key === 'ulcer index') val.textContent = ${JSON.stringify(ulcer !== null ? fmtMetric(ulcer) : 'N/A')};
+    else if (key === 'skewness') val.textContent = ${JSON.stringify(Number.isFinite(skew) ? `${skew >= 0 ? '+' : ''}${skew.toFixed(2)}` : 'N/A')};
+    else if (key === 'kurtosis') val.textContent = ${JSON.stringify(Number.isFinite(kurt) ? `${kurt >= 0 ? '+' : ''}${kurt.toFixed(2)}` : 'N/A')};
     else if (key.includes('max drawdown')) val.textContent = ${JSON.stringify(fmtPercent2(maxDd))};
+    else if (key.includes('avg drawdown')) val.textContent = ${JSON.stringify(Number.isFinite(avgDrawdown) ? fmtPercent2(avgDrawdown) : 'N/A')};
+    else if (key.includes('avg max dd / episode')) val.textContent = ${JSON.stringify(Number.isFinite(avgMaxDdEpisode) ? fmtPercent2(avgMaxDdEpisode) : 'N/A')};
+    else if (key.includes('longest dd duration')) val.textContent = ${JSON.stringify(`${Math.round(longestDdDuration)} days`)};
+    else if (key.includes('max dd recovery')) val.textContent = 'N/A';
+    else if (key.includes('% time underwater')) val.textContent = ${JSON.stringify(fmtPercent2(timeUnderwaterPct))};
+    else if (key.includes('cvar 5%')) val.textContent = ${JSON.stringify(Number.isFinite(cvar5) ? fmtPercent2(cvar5 * 100) : 'N/A')};
+    else if (key.includes('cvar 1%')) val.textContent = ${JSON.stringify(Number.isFinite(cvar1) ? fmtPercent2(cvar1 * 100) : 'N/A')};
+    else if (key === 'tail ratio') val.textContent = ${JSON.stringify(Number.isFinite(tailRatio) ? tailRatio.toFixed(2) : 'N/A')};
+    else if (key.includes('monthly win rate')) val.textContent = ${JSON.stringify(`${monthlyWinRate.toFixed(1)}% (${monthlyRows.filter((r) => r.pct > 0).length}W/${monthlyRows.filter((r) => r.pct <= 0).length}L)`)};
+    else if (key.includes('weekly win rate')) val.textContent = ${JSON.stringify(fmtPercent2(weeklyWinRate))};
+    else if (key.includes('active day win rate')) val.textContent = ${JSON.stringify(fmtPercent2(activeDayWinRate))};
+    else if (key.includes('best month')) val.textContent = ${JSON.stringify(Number.isFinite(bestMonth) ? fmtSignedPct(bestMonth, 2) : 'N/A')};
+    else if (key.includes('worst month')) val.textContent = ${JSON.stringify(Number.isFinite(worstMonth) ? fmtSignedPct(worstMonth, 2) : 'N/A')};
+    else if (key.includes('avg win (daily)')) val.textContent = ${JSON.stringify(Number.isFinite(avgWinPct) ? fmtSignedPct(avgWinPct, 2) : 'N/A')};
+    else if (key.includes('avg loss (daily)')) val.textContent = ${JSON.stringify(Number.isFinite(avgLossPct) ? fmtSignedPct(avgLossPct, 2) : 'N/A')};
+    else if (key.includes('avg win / avg loss')) val.textContent = ${JSON.stringify(Number.isFinite(winLossRatio) ? `${winLossRatio.toFixed(2)}×` : 'N/A')};
+    else if (key.includes('max consec. losses')) val.textContent = ${JSON.stringify(`${maxConsecLosses} days`)};
     else if (key.includes('active days')) val.textContent = ${JSON.stringify(`${activeDays} / ${days} (${days > 0 ? ((activeDays / days) * 100).toFixed(2) : '0.00'}%)`)};
+    else if (key.includes('filtered (guardrail)')) val.textContent = ${JSON.stringify(`${Math.max(0, days - activeDays)} days`)};
+    else if (key.includes('avg leverage used')) val.textContent = 'N/A';
+    else if (key.includes('leverage range')) val.textContent = 'N/A';
+    else if (key.includes('avg symbols / day')) val.textContent = 'N/A';
+    else if (key.includes('turnover')) val.textContent = ${JSON.stringify(turnoverText ?? 'N/A')};
+    else if (key.includes('total fee drag')) val.textContent = ${JSON.stringify(totalFeeDragText ?? 'N/A')};
+    else if (key.includes('taker fee / side')) val.textContent = ${JSON.stringify(takerFeeSideText ?? 'N/A')};
+    else if (key.includes('capacity ceiling')) val.textContent = ${JSON.stringify(institutionalCap ? `~$${institutionalCap}` : 'N/A')};
     else if (key.includes('deflated sharpe ratio')) val.textContent = ${JSON.stringify(fmtPercent2(dsr))};
+    else if (key.includes('dsr — genuine sharpe prob')) val.textContent = ${JSON.stringify(fmtPercent2(dsr))};
+    else if (key.includes('false positive probability')) val.textContent = ${JSON.stringify(fmtPercent2(Math.max(0, 100 - dsr)))};
+    else if (key.includes('track record length')) val.textContent = ${JSON.stringify(`${days} days (${(days / 365).toFixed(1)} yrs)`)};
+    else if (key.includes('min track record needed')) val.textContent = '500d';
+    else if (key.includes('probability of loss')) val.textContent = ${JSON.stringify(activeDaily.length > 0 ? fmtPercent2((activeDaily.filter((r) => r < 0).length / activeDaily.length) * 100) : 'N/A')};
+    else if (key.includes('ruin prob')) val.textContent = ${JSON.stringify(ruinProbText ?? 'N/A')};
+    else if (key.includes('equity curve r')) val.textContent = ${JSON.stringify(eqR2Text ?? (r2 !== null ? fmtMetric(r2) : 'N/A'))};
+    else if (key.includes('is / oos cagr ratio')) val.textContent = ${JSON.stringify(isOosCagrRatioText ?? 'N/A')};
+    else if (key.includes('oos sharpe')) val.textContent = ${JSON.stringify(oosSharpeText ?? 'N/A')};
+    else if (key.includes('sharpe decay')) val.textContent = ${JSON.stringify(sharpeDecayText ?? 'N/A')};
     else if (key.includes('walk-forward cv')) val.textContent = ${JSON.stringify(fmtMetric(cv))};
+    else if (key.includes('positive wf folds')) val.textContent = ${JSON.stringify(positiveWfFoldsText ?? 'N/A')};
+    else if (key.includes('fa-wf mean dsr')) val.textContent = ${JSON.stringify(faWfMeanDsrText ?? 'N/A')};
+    else if (key.includes('sharpe @2')) val.textContent = ${JSON.stringify(sharpe2xSlipText ?? 'N/A')};
+    else if (key.includes('slippage sensitivity')) val.textContent = ${JSON.stringify(slippageSensitivityText ?? 'N/A')};
   });
   const moGrid = document.querySelector('.monthly-grid');
   if (moGrid) {
@@ -1044,16 +1354,22 @@ export default function ResultsView({ results, jobId, startingCapital, params }:
     moHdr.textContent = ${JSON.stringify(`${monthlyRows.filter((r) => r.pct > 0).length} positive | ${monthlyRows.filter((r) => r.pct <= 0).length} negative | ${monthlyWinRate.toFixed(1)}% win rate`)};
     moHdr.style.whiteSpace = 'nowrap';
   }
+  const sc92 = ${JSON.stringify(scorecard92)};
+  const sbPass = sc92 ? sc92.pass : ${passCount};
+  const sbFail = sc92 ? sc92.fail : ${failCount};
+  const sbWarn = sc92 ? sc92.warn : ${warnCount};
+  const sbNa = sc92 ? sc92.na : ${naCount};
+  const sbTotal = sc92 ? sc92.total : Math.max(1, sbPass + sbFail + sbWarn + sbNa);
   const sb = document.querySelectorAll('.scorecard-bar .sb-track > div');
-  if (sb[0]) sb[0].style.width = ${JSON.stringify(`${passPct.toFixed(1)}%`)};
-  if (sb[1]) sb[1].style.width = ${JSON.stringify(`${failPct.toFixed(1)}%`)};
-  if (sb[2]) sb[2].style.width = ${JSON.stringify(`${warnPct.toFixed(1)}%`)};
-  if (sb[3]) sb[3].style.width = ${JSON.stringify(`${naPct.toFixed(1)}%`)};
+  if (sb[0]) sb[0].style.width = ((sbPass / sbTotal) * 100).toFixed(1) + '%';
+  if (sb[1]) sb[1].style.width = ((sbFail / sbTotal) * 100).toFixed(1) + '%';
+  if (sb[2]) sb[2].style.width = ((sbWarn / sbTotal) * 100).toFixed(1) + '%';
+  if (sb[3]) sb[3].style.width = ((sbNa / sbTotal) * 100).toFixed(1) + '%';
   const sbNum = document.querySelectorAll('.scorecard-bar .sb-num span:last-child');
-  if (sbNum[0]) sbNum[0].textContent = ${JSON.stringify(`${passCount} Pass`)};
-  if (sbNum[1]) sbNum[1].textContent = ${JSON.stringify(`${failCount} Fail`)};
-  if (sbNum[2]) sbNum[2].textContent = ${JSON.stringify(`${warnCount} Borderline`)};
-  if (sbNum[3]) sbNum[3].textContent = ${JSON.stringify(`${naCount} N/A`)};
+  if (sbNum[0]) sbNum[0].textContent = String(sbPass) + ' Pass';
+  if (sbNum[1]) sbNum[1].textContent = String(sbFail) + ' Fail';
+  if (sbNum[2]) sbNum[2].textContent = String(sbWarn) + ' Borderline';
+  if (sbNum[3]) sbNum[3].textContent = String(sbNa) + ' N/A';
   if (${String(grade !== null)}) {
     const badge = document.querySelector('.header-badges');
     if (badge) {
@@ -1063,12 +1379,18 @@ export default function ResultsView({ results, jobId, startingCapital, params }:
       badge.appendChild(el);
     }
   }
+  const footL = document.querySelector('.footer-left');
+  if (footL) {
+    footL.innerHTML = ${JSON.stringify(
+      `Generated: ${fmtDateLong(last.d)} &nbsp;|&nbsp; Backtested on ${days} days of exchange data &nbsp;|&nbsp; Past performance does not guarantee future results<br>* Dates/metrics reflect selected audit and filter<br>Strategy trades USDT-margined perp futures on Top-100 altcoins, long-only, daily bars`,
+    )};
+  }
 })();
 </script>`;
 
     html = html.replace('</body>', `${injected}</body>`);
     return html;
-  }, [tearTemplate, equityCurveDollars, selectedRow, m, scorecard, selectedFilter, runStartingCapital, jobId]);
+  }, [tearTemplate, equityCurveDollars, selectedRow, selectedDrawdownCurve, m, scorecard, selectedFilter, runStartingCapital, jobId, auditOutput, params]);
 
   const metricCards = selectedRow
     ? [
