@@ -440,9 +440,6 @@ export default function ParamForm({ params, onChange, onSubmit }: ParamFormProps
         <Row label="funding_rate_daily_pct">
           <NumInput value={p.funding_rate_daily_pct} onChange={(v) => set('funding_rate_daily_pct', v)} />
         </Row>
-        <div style={{ fontSize: 8, color: 'var(--t3)', marginTop: 2, marginBottom: 4 }}>
-          Round-trip cost per symbol applied to all filter modes
-        </div>
       </CollapsibleSection>
 
       {/* ── EXECUTION CONFIG ── */}

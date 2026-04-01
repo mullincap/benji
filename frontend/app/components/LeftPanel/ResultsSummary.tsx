@@ -498,8 +498,6 @@ export default function ResultsSummary({
                       marginBottom: sectionIdx === allSections.length - 1 ? 0 : 4,
                       borderBottom: sectionIdx === allSections.length - 1 ? 'none' : '1px solid var(--line)',
                       paddingBottom: 4,
-                      background: sectionOpen ? 'rgba(255,255,255,0.03)' : 'transparent',
-                      boxShadow: sectionOpen ? 'inset 2px 0 0 var(--green-mid)' : 'none',
                     }}
                   >
                     <summary

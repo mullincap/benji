@@ -30,16 +30,6 @@ export default function MetricCard({
     >
       <div
         style={{
-          position: 'absolute',
-          bottom: 0,
-          left: 0,
-          right: 0,
-          height: 2,
-          background: color,
-        }}
-      />
-      <div
-        style={{
           fontSize: 9,
           textTransform: 'uppercase',
           color: 'var(--t3)',

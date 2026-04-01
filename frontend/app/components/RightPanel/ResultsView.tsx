@@ -2051,6 +2051,8 @@ function CurveCard({
   baselineValue = null,
   compactCurrencyTicks = false,
   statsBar,
+  backgroundColor = 'var(--bg0)',
+  showBorder = true,
 }: {
   title: string;
   data: Point[] | null | undefined;
@@ -2069,6 +2071,8 @@ function CurveCard({
   baselineValue?: number | null;
   compactCurrencyTicks?: boolean;
   statsBar?: Array<{ label: string; value: string; color: string }>;
+  backgroundColor?: string;
+  showBorder?: boolean;
 }) {
   const rows = useMemo(() => {
     const src = data ?? [];
@@ -2148,8 +2152,8 @@ function CurveCard({
   return (
     <div
       style={{
-        background: 'var(--bg0)',
-        border: '1px solid var(--line)',
+        background: backgroundColor,
+        border: showBorder ? '1px solid var(--line)' : 'none',
         borderRadius: 3,
         padding: 12,
         flex: 1,
@@ -2429,6 +2433,7 @@ export default function ResultsView({ results, jobId, startingCapital, params }:
   ));
   const [openFullReportSectionKeys, setOpenFullReportSectionKeys] = useState<Record<string, boolean>>({});
   const filterComparisonRef = useRef<HTMLDetailsElement | null>(null);
+  const monthlyHeatmapRailRef = useRef<HTMLDivElement | null>(null);
   const defaultSelectedFilter = (() => {
     if (mergedFilters.length === 0) return null;
     const candidates = mergedFilters.filter((r) => !r.not_run);
@@ -3265,6 +3270,12 @@ export default function ResultsView({ results, jobId, startingCapital, params }:
       filterComparisonRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
     });
   }
+  function scrollMonthlyHeatmap(direction: 'left' | 'right') {
+    const el = monthlyHeatmapRailRef.current;
+    if (!el) return;
+    const delta = Math.max(180, Math.floor(el.clientWidth * 0.65));
+    el.scrollBy({ left: direction === 'left' ? -delta : delta, behavior: 'smooth' });
+  }
 
   return (
     <div style={{ padding: '0 16px 16px 16px', display: 'flex', flexDirection: 'column', gap: 16 }}>
@@ -3351,7 +3362,7 @@ export default function ResultsView({ results, jobId, startingCapital, params }:
 
           {/* Full-width stacked charts */}
           <div style={{ display: 'flex', flexDirection: 'column', gap: 0 }}>
-            <details open style={{ background: 'var(--bg2)', border: '1px solid var(--line)', borderRadius: 3, padding: '8px 10px' }}>
+            <details open style={{ background: 'transparent', border: '1px solid var(--line)', borderRadius: 3, padding: '8px 10px' }}>
               <summary style={{ cursor: 'pointer', fontSize: 9, color: 'var(--t3)', textTransform: 'uppercase', letterSpacing: '0.12em', fontWeight: 700 }}>
                 Equity Curve ($)
               </summary>
@@ -3361,6 +3372,8 @@ export default function ResultsView({ results, jobId, startingCapital, params }:
                   data={equityCurveDollars}
                   color="#00c896"
                   gradientId="equity-gradient"
+                  backgroundColor="var(--bg0)"
+                  showBorder={false}
                   height={480}
                   showMonthlyGridlines
                   showAthLine
@@ -3377,6 +3390,7 @@ export default function ResultsView({ results, jobId, startingCapital, params }:
                   data={selectedDrawdownCurve}
                   color="#ff4d4d"
                   gradientId="drawdown-gradient"
+                  showBorder={false}
                   height={100}
                   fillAbove
                   valueFormatter={fmtPercent2}
@@ -3386,7 +3400,7 @@ export default function ResultsView({ results, jobId, startingCapital, params }:
                 />
               </div>
             </details>
-            <details open style={{ background: 'var(--bg2)', border: '1px solid var(--line)', borderRadius: 3, padding: '8px 10px' }}>
+            <details open style={{ marginTop: 16, background: 'var(--bg2)', border: '1px solid var(--line)', borderRadius: 3, padding: '8px 10px' }}>
               <summary
                 style={{
                   cursor: 'pointer',
@@ -3404,6 +3418,9 @@ export default function ResultsView({ results, jobId, startingCapital, params }:
                 <span>Monthly Returns Heat Map</span>
                 <span
                   style={{
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    gap: 8,
                     fontSize: 9,
                     color: 'var(--t3)',
                     letterSpacing: '0.12em',
@@ -3412,7 +3429,57 @@ export default function ResultsView({ results, jobId, startingCapital, params }:
                     whiteSpace: 'nowrap',
                   }}
                 >
-                  {monthlyHeatmap.positive} positive&nbsp; | &nbsp;{monthlyHeatmap.negative} negative&nbsp; | &nbsp;{monthlyHeatmap.winRate.toFixed(1)}% win rate&nbsp; | &nbsp;mean {monthlyHeatmap.mean >= 0 ? '+' : ''}{monthlyHeatmap.mean.toFixed(2)}%
+                  <span>
+                    {monthlyHeatmap.positive} positive&nbsp; | &nbsp;{monthlyHeatmap.negative} negative&nbsp; | &nbsp;{monthlyHeatmap.winRate.toFixed(1)}% win rate&nbsp; | &nbsp;mean {monthlyHeatmap.mean >= 0 ? '+' : ''}{monthlyHeatmap.mean.toFixed(2)}%
+                  </span>
+                  <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+                    <button
+                      type="button"
+                      onClick={(e) => {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        scrollMonthlyHeatmap('left');
+                      }}
+                      aria-label="Scroll monthly heatmap left"
+                      style={{
+                        height: 22,
+                        width: 22,
+                        borderRadius: 3,
+                        border: '1px solid var(--line2)',
+                        background: 'var(--bg1)',
+                        color: 'var(--t2)',
+                        cursor: 'pointer',
+                        lineHeight: 1,
+                        padding: 0,
+                        fontSize: 11,
+                      }}
+                    >
+                      ‹
+                    </button>
+                    <button
+                      type="button"
+                      onClick={(e) => {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        scrollMonthlyHeatmap('right');
+                      }}
+                      aria-label="Scroll monthly heatmap right"
+                      style={{
+                        height: 22,
+                        width: 22,
+                        borderRadius: 3,
+                        border: '1px solid var(--line2)',
+                        background: 'var(--bg1)',
+                        color: 'var(--t2)',
+                        cursor: 'pointer',
+                        lineHeight: 1,
+                        padding: 0,
+                        fontSize: 11,
+                      }}
+                    >
+                      ›
+                    </button>
+                  </span>
                 </span>
               </summary>
               <div style={{ marginTop: 8 }}>
@@ -3425,10 +3492,11 @@ export default function ResultsView({ results, jobId, startingCapital, params }:
                   }}
                 >
                   <div
+                    ref={monthlyHeatmapRailRef}
                     style={{
                       display: 'flex',
                       gap: 6,
-                      overflowX: 'auto',
+                      overflowX: 'hidden',
                       paddingBottom: 2,
                     }}
                   >
@@ -4078,7 +4146,7 @@ export default function ResultsView({ results, jobId, startingCapital, params }:
               <div style={{ fontSize: 9, color: 'var(--t3)', textTransform: 'uppercase', letterSpacing: '0.1em', marginBottom: 8 }}>
                 Risk Audit Tests • {selectedFilter ?? 'Selected Filter'}
               </div>
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
                 {advancedSections.map((section) => (
                   <details key={section.title} style={{ border: '1px solid var(--line)', borderRadius: 3, padding: '6px 8px', background: 'var(--bg1)' }}>
                     <summary style={{ cursor: 'pointer', fontSize: 10, color: 'var(--t1)', fontWeight: 600 }}>
