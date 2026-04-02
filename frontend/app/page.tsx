@@ -502,7 +502,7 @@ export default function Home() {
                 display: 'flex',
                 alignItems: 'center',
                 justifyContent: leftCollapsed ? 'center' : 'space-between',
-                padding: leftCollapsed ? 0 : '0 8px',
+                padding: leftCollapsed ? 0 : '0 8px 0 16px',
                 flexShrink: 0,
               }}
             >

@@ -11,7 +11,12 @@
       "Bash(python3 -c \"from app.core.config import settings; print\\(''PARQUET_PATH:'', repr\\(settings.PARQUET_PATH\\)\\); print\\(''PIPELINE_PYTHON:'', repr\\(settings.PIPELINE_PYTHON\\)\\)\")",
       "Bash(python3 -c \":*)",
       "Read(//private/tmp/**)",
-      "Bash(ls /Users/johnmullin/Desktop/desk/benji3m/*.csv)"
+      "Bash(ls /Users/johnmullin/Desktop/desk/benji3m/*.csv)",
+      "Bash(python3)",
+      "Bash(python3 -c \"import json; j=json.load\\(open\\('/Users/johnmullin/Projects/benji3m/backend/jobs/1a9880f8-8b7a-490c-a655-dd5a765bea4e/job.json'\\)\\); r=j.get\\('results',{}\\); print\\('intraday_bars' in r, list\\(r.keys\\(\\)\\)[:15]\\)\")",
+      "Bash(python3 -c \"import json; j=json.load\\(open\\('/Users/johnmullin/Projects/benji3m/backend/jobs/1a9880f8-8b7a-490c-a655-dd5a765bea4e/job.json'\\)\\); m=j.get\\('results',{}\\).get\\('metrics',{}\\); print\\('intraday_bars' in m, list\\(m.keys\\(\\)\\)[:15]\\)\")",
+      "Bash(/opt/homebrew/Caskroom/miniforge/base/bin/python -c ':*)",
+      "Bash(npx tsc:*)"
     ]
   }
 }

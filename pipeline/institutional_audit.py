@@ -2341,8 +2341,10 @@ def run_institutional_audit(
     # ── 2. Drawdown Episodes ──────────────────────────────────
     print()
     print("┌─ DRAWDOWN EPISODE ANALYSIS ─────────────────────────")
+    avg_dur = float(ep_df["total_days"].mean()) if not ep_df.empty else 0.0
     print(f"│  Distinct episodes:      {len(ep_df):>10d}")
     print(f"│  Avg drawdown depth:     {avg_dw*100:>9.2f}%")
+    print(f"│  Avg drawdown duration:  {avg_dur:>10.2f} days")
     print(f"│  % time underwater:      {pct_uw*100:>9.2f}%")
 
     if not ep_df.empty:

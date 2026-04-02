@@ -1,6 +1,7 @@
 @import "tailwindcss";
 
 :root {
+  --font-space-mono: "Space Mono";
   --bg0: #080809;
   --bg1: #0e0e10;
   --bg2: #141416;

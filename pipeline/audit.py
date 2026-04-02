@@ -811,7 +811,9 @@ TOP_N_REMOVAL_NS         = [1, 3, 5, 10]
 LUCKY_STREAK_WINDOW      = 30   # days per block
 
 # ── Deflated Sharpe Ratio + Minimum Track Record Length ──────────────
-DSR_N_TRIALS             = 1010   # total configurations tested across all sweeps
+# DSR_N_TRIALS holds the number of trials for Deflated Sharpe Ratio.
+# DEPRECATED: N_TRIALS is now the single source of truth for all report-level calculations.
+# DSR_N_TRIALS             = 1010   # total configurations tested across all sweeps
 DSR_TARGET_SHARPE        = 1.0    # H0 threshold for MTL calculation
 
 # ── Shock Injection Test ──────────────────────────────────────────────
@@ -16122,7 +16124,7 @@ def build_scorecards(results_map: dict, run_dir: Path,
         ("Avg Drawdown",               "<-15%",         avg_drawdown,       "gt", -15.0),
         ("Avg Max DD per Episode",     "<-10%",         avg_episode_dd,     "gt", -10.0),
         ("Longest Drawdown (days)",    "<120d",         max_dd_dur,         "lt", 120.0),
-        ("Drawdown Recovery",          "<90d",          dd_recovery,        "lt",  90.0),
+        ("Avg DD Duration",            "<90d",          dd_recovery,        "lt",  90.0),
         ("Max DD Duration",            "<180d",         max_dd_dur,         "lt", 180.0),
         ("% Time Underwater",          "<70%",          pct_time_underwater,"lt",  70.0),
         ("Ulcer Index",                "<10",           ulcer_index,        "lt",  10.0),
@@ -18458,7 +18460,7 @@ def main():
             run_dsr_mtl(
                 daily_returns   = np.array(_dsr_daily, dtype=float),
                 observed_sharpe = _dsr_sh,
-                n_trials        = DSR_N_TRIALS,
+                n_trials        = N_TRIALS,
                 filter_label    = _dsr_label,
                 out_dir         = sweep_dir,
                 target_sharpe   = DSR_TARGET_SHARPE,

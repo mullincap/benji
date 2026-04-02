@@ -773,9 +773,9 @@ function DistributionCard({
       )}
       {(chips && chips.length > 0) && (
         <div style={{ marginTop: 8, display: 'flex', gap: 6, flexWrap: 'wrap' }}>
-          {chips.map((chip) => (
+          {chips.map((chip, idx) => (
             <span
-              key={`${chip.label}-${chip.value}`}
+              key={`${chip.label}-${chip.value}-${idx}`}
               style={{
                 border: '1px solid var(--line2)',
                 background: 'var(--bg1)',
@@ -2358,8 +2358,8 @@ function CurveCard({
             textTransform: 'uppercase',
           }}
         >
-          {statsBar.map((s) => (
-            <span key={`s-${s.label}`} style={{ color: 'var(--t2)' }}>
+          {statsBar.map((s, idx) => (
+            <span key={`s-${s.label}-${idx}`} style={{ color: 'var(--t2)' }}>
               {s.label}: <span style={{ color: s.color, fontWeight: 700 }}>{s.value}</span>
             </span>
           ))}
@@ -2645,7 +2645,7 @@ function FilterEquityCurveOverlay({
               .filter(Boolean)
               .join(' ');
             return (
-              <g key={label} style={{ cursor: 'pointer' }}
+              <g key={`${label}-${ci}`} style={{ cursor: 'pointer' }}
                 onClick={() => onSelectFilter(label)}
                 onMouseEnter={() => setHoveredFilter(label)}
               >
@@ -2682,7 +2682,7 @@ function FilterEquityCurveOverlay({
             const sharpe = typeof row.sharpe === 'number' && Number.isFinite(row.sharpe) ? row.sharpe.toFixed(2) : null;
             return (
               <button
-                key={label}
+                key={`${label}-${ci}`}
                 onClick={() => onSelectFilter(label)}
                 onMouseEnter={() => setHoveredFilter(label)}
                 onMouseLeave={() => setHoveredFilter(null)}
@@ -3280,20 +3280,15 @@ function SectionHBarChart({ items, colorFn }: {
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 3 }}>
-      {items.map((item) => {
+      {items.map((item, idx) => {
         const frac = Math.abs(item.value) / maxAbs;
-        // zero-baseline: negative bars go left from center, positive bars go right
-        const barLeft = hasNeg && hasPos
-          ? (item.value < 0 ? `${(0.5 - frac * 0.5) * 100}%` : '50%')
-          : '0%';
-        const barWidth = hasNeg && hasPos ? `${frac * 50}%` : `${frac * 100}%`;
+        const barLeft = item.value < 0 ? `${(0.5 - frac * 0.5) * 100}%` : '50%';
+        const barWidth = `${frac * 50}%`;
         return (
-          <div key={item.label} style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 9, ...MONO }}>
+          <div key={`${item.label}-${item.raw ?? item.value}-${idx}`} style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 9, ...MONO }}>
             <div style={{ width: labelW, color: 'var(--t2)', flexShrink: 0, textAlign: 'right', paddingRight: 4, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={item.label}>{item.label}</div>
             <div style={{ flex: 1, height: 9, background: 'var(--bg3)', borderRadius: 1, position: 'relative', minWidth: 60 }}>
-              {hasNeg && hasPos && (
-                <div style={{ position: 'absolute', left: '50%', top: 0, width: 1, height: '100%', background: 'var(--line2)' }} />
-              )}
+              <div style={{ position: 'absolute', left: '50%', top: 0, width: 1, height: '100%', background: 'var(--line2)' }} />
               <div style={{ position: 'absolute', left: barLeft, top: 0, height: '100%', width: barWidth, background: color(item.value), borderRadius: 1 }} />
             </div>
             <div style={{ width: valueW, color: color(item.value), textAlign: 'right', flexShrink: 0 }}>{item.raw ?? item.value.toFixed(3)}</div>
@@ -3471,33 +3466,828 @@ function renderRollingMaxDrawdown(body: string) {
 }
 
 function renderDrawdownEpisodes(body: string) {
-  return <PreFallback body={body} />;
+  const lines = body.split('\n');
+  const metrics: { label: string; valueRaw: string }[] = [];
+  const episodes: { num: string; depth: string; dur: string; rec: string; total: string; recovered: string }[] = [];
+  
+  let inTable = false;
+  for (const line of lines) {
+    if (/^[┌└─=═]{5,}/.test(line)) continue;
+    
+    if (/TOP \d+ WORST DRAWDOWN EPISODES/i.test(line)) {
+      inTable = true;
+      continue;
+    }
+    if (inTable && (/(Depth\s+Dur|----)/i.test(line))) continue;
+
+    if (!inTable) {
+      const match = line.match(/^\s*│?\s*([A-Za-z0-9 %]+?):\s+([+-]?\d+(?:\.\d+)?[%]?|NaN|N\/A|n\/a)\s*$/i);
+      if (match) {
+        metrics.push({
+          label: match[1].trim(),
+          valueRaw: match[2].trim(),
+        });
+      }
+    } else {
+      const t = line.replace(/^[│|]\s*/, '').trim();
+      if (!t) continue;
+      
+      const parts = t.split(/\s{2,}/);
+      if (parts.length >= 6) {
+        episodes.push({
+          num: parts[0],
+          depth: parts[1],
+          dur: parts[2],
+          rec: parts[3],
+          total: parts[4],
+          recovered: parts[5],
+        });
+      }
+    }
+  }
+
+  if (metrics.length === 0 && episodes.length === 0) return <PreFallback body={body} />;
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+      {sectionLabel('Drawdown Episode Analysis')}
+      
+      {metrics.length > 0 && (
+        <div style={{ 
+          display: 'grid', 
+          gridTemplateColumns: 'repeat(auto-fit, minmax(130px, 1fr))', 
+          gap: 12,
+        }}>
+          {metrics.map((m, idx) => {
+            let color = 'var(--t1)';
+            const valNum = Number(m.valueRaw.replace(/[%]/g, ''));
+            
+            if (Number.isFinite(valNum)) {
+              if (m.label.toLowerCase().includes('depth')) {
+                if (valNum < -30) color = 'var(--red)';
+                else if (valNum < -10) color = 'var(--orange)';
+              } else if (m.label.toLowerCase().includes('underwater')) {
+                if (valNum > 50) color = 'var(--red)';
+                else if (valNum > 20) color = 'var(--orange)';
+                else color = 'var(--green)';
+              }
+            }
+
+            return (
+              <div key={idx} style={{
+                background: 'var(--bg2)',
+                border: '1px solid var(--line1)',
+                borderRadius: 6,
+                padding: '12px 16px',
+                display: 'flex',
+                flexDirection: 'column',
+                gap: 4,
+                boxShadow: 'inset 0 1px 0 rgba(255,255,255,0.02)',
+              }}>
+                <div style={{ fontSize: 9.5, color: 'var(--t3)', textTransform: 'uppercase', letterSpacing: 0.5, ...MONO }}>
+                  {m.label}
+                </div>
+                <div style={{ fontSize: 18, color, fontWeight: 500, letterSpacing: -0.5, ...MONO }}>
+                  {m.valueRaw}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {episodes.length > 0 && (
+        <div style={{ 
+          background: 'var(--bg1)', 
+          border: '1px solid var(--line2)', 
+          borderRadius: 6, 
+          overflow: 'hidden' 
+        }}>
+          <div style={{ 
+            display: 'grid', 
+            gridTemplateColumns: '40px 1fr 1fr 1fr 1fr 80px', 
+            background: 'var(--bg2)', 
+            padding: '8px 12px',
+            borderBottom: '1px solid var(--line2)',
+            fontSize: 9.5,
+            color: 'var(--t3)',
+            textTransform: 'uppercase',
+            letterSpacing: 0.5,
+            ...MONO
+          }}>
+            <div>#</div>
+            <div>Depth</div>
+            <div>Dur(d)</div>
+            <div>Rec(d)</div>
+            <div>Total(d)</div>
+            <div style={{ textAlign: 'center' }}>Status</div>
+          </div>
+          
+          <div style={{ display: 'flex', flexDirection: 'column' }}>
+            {episodes.map((ep, idx) => {
+              const isNo = ep.recovered.toUpperCase() === 'NO';
+              const isYes = ep.recovered.toUpperCase() === 'YES';
+              return (
+                <div key={idx} style={{ 
+                  display: 'grid', 
+                  gridTemplateColumns: '40px 1fr 1fr 1fr 1fr 80px', 
+                  padding: '10px 12px',
+                  borderBottom: idx === episodes.length - 1 ? 'none' : '1px solid var(--line1)',
+                  fontSize: 11,
+                  color: 'var(--t2)',
+                  alignItems: 'center',
+                  ...MONO
+                }}>
+                  <div style={{ color: 'var(--t4)' }}>{ep.num}</div>
+                  <div style={{ color: 'var(--red)', fontWeight: 500 }}>{ep.depth}</div>
+                  <div>{ep.dur}</div>
+                  <div style={{ color: ep.rec.toLowerCase().includes('open') ? 'var(--t4)' : 'inherit', fontStyle: ep.rec.toLowerCase().includes('open') ? 'italic' : 'normal' }}>
+                    {ep.rec}
+                  </div>
+                  <div>{ep.total}</div>
+                  <div style={{ display: 'flex', justifyContent: 'center' }}>
+                    <div style={{
+                      padding: '2px 8px',
+                      borderRadius: 12,
+                      fontSize: 8.5,
+                      fontWeight: 600,
+                      background: isNo ? 'rgba(255, 60, 60, 0.15)' : isYes ? 'rgba(60, 255, 100, 0.15)' : 'var(--bg3)',
+                      color: isNo ? 'var(--red)' : isYes ? 'var(--green)' : 'var(--t2)',
+                    }}>
+                      {ep.recovered}
+                    </div>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+    </div>
+  );
 }
 
 function renderRiskAdjustedQuality(body: string) {
-  return <PreFallback body={body} />;
+  const lines = body.split('\n');
+  const metrics = [];
+  for (const line of lines) {
+    const match = line.match(/^\s*│?\s*([A-Za-z0-9 -]+?):\s+([+-]?\d+(?:\.\d+)?|NaN|N\/A|n\/a|inf|-inf)\s*(.*)?$/i);
+    if (match) {
+      metrics.push({
+        label: match[1].trim(),
+        valueRaw: match[2].trim(),
+        value: Number(match[2].replace(/,/g, '')),
+        note: match[3]?.replace(/[()│\\]/g, '').replace(/lower\s*=\s*better/i, '').trim() || '',
+      });
+    }
+  }
+
+  if (metrics.length === 0) return <PreFallback body={body} />;
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+      {sectionLabel('Risk-Adjusted Return Quality')}
+      <div style={{ 
+        display: 'grid', 
+        gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))', 
+        gap: 12,
+        paddingBottom: 8
+      }}>
+        {metrics.map((m, idx) => {
+          let color = 'var(--t1)';
+          let bgColor = 'var(--bg2)';
+          let borderColor = 'var(--line1)';
+          
+          const isNum = Number.isFinite(m.value);
+
+          if (isNum) {
+            if (m.label.toLowerCase().includes('ulcer')) {
+              if (m.value > 20) color = 'var(--red)';
+              else if (m.value > 5) color = 'var(--orange)';
+              else color = 'var(--green)';
+            } else if (m.label.toLowerCase().includes('profit') || m.label.toLowerCase().includes('omega')) {
+              if (m.value > 1) color = 'var(--green)';
+              else if (m.value < 1) color = 'var(--red)';
+            } else {
+              if (m.value >= 0.5) color = 'var(--green)';
+              else if (m.value <= 0) color = 'var(--red)';
+            }
+          }
+
+          const hasPlus = isNum && m.value > 0 && !m.label.toLowerCase().includes('ulcer') && !m.label.toLowerCase().includes('profit') && !m.label.toLowerCase().includes('omega');
+
+          return (
+            <div key={idx} style={{
+              background: bgColor,
+              border: `1px solid ${borderColor}`,
+              borderRadius: 6,
+              padding: '14px 18px',
+              display: 'flex',
+              flexDirection: 'column',
+              gap: 6,
+              boxShadow: 'inset 0 1px 0 rgba(255,255,255,0.02)',
+              transition: 'all 0.2s ease',
+            }}
+            onMouseEnter={(e) => {
+              e.currentTarget.style.borderColor = 'var(--t3)';
+              e.currentTarget.style.background = 'var(--bg3)';
+            }}
+            onMouseLeave={(e) => {
+              e.currentTarget.style.borderColor = borderColor;
+              e.currentTarget.style.background = bgColor;
+            }}
+            >
+              <div style={{ fontSize: 9.5, color: 'var(--t3)', textTransform: 'uppercase', letterSpacing: 0.5, ...MONO }}>
+                {m.label}
+              </div>
+              <div style={{ fontSize: 20, color, fontWeight: 500, letterSpacing: -0.5, ...MONO }}>
+                {hasPlus ? '+' : ''}{isNum ? m.value.toFixed(3) : m.valueRaw}
+              </div>
+              {m.note && (
+                <div style={{ fontSize: 8.5, color: 'var(--t4)', fontStyle: 'italic', ...MONO }}>
+                  {m.note}
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
 }
 
 function renderDailyVarCvar(body: string) {
-  const table = parseColumnarTable(body);
-  if (table && table.rows.length > 0) return <SectionTable headers={table.headers} rows={table.rows} />;
-  return renderKVSection(body, 'VaR / CVaR', () => 'var(--red)');
-}
+  const lines = body.split('\n');
+  const items: { label: string; pct: string; value: string }[] = [];
 
-// eslint-disable-next-line @typescript-eslint/no-unused-vars
-function renderSignalPredictiveness(body: string) {
-  const table = parseColumnarTable(body);
-  if (table && table.rows.length > 0) return <SectionTable headers={table.headers} rows={table.rows} />;
-  const kv = parseKV(body);
-  if (kv.length > 0) {
+  for (const line of lines) {
+    if (/^[┌└─=═]{5,}/.test(line)) continue;
+    const regex = /([A-Za-z]+)\(\s*(\d+%)\s*\):\s*([+-]?\d+(?:\.\d+)?[%]?|NaN|N\/A|n\/a|inf|-inf)/gi;
+    let match;
+    while ((match = regex.exec(line)) !== null) {
+      items.push({
+        label: match[1],
+        pct: match[2],
+        value: match[3],
+      });
+    }
+  }
+
+  if (items.length > 0) {
     return (
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-        {sectionLabel('IC Summary')}
-        <SectionHBarChart items={kv.map((k) => ({ label: k.key, value: k.num, raw: k.raw }))} colorFn={(v) => Math.abs(v) > 0.05 ? 'var(--green)' : 'var(--amber)'} />
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+        {sectionLabel('Daily VaR / CVaR')}
+        <div style={{ 
+          display: 'grid', 
+          gridTemplateColumns: 'repeat(auto-fit, minmax(130px, 1fr))', 
+          gap: 12,
+          paddingBottom: 8
+        }}>
+          {items.map((m, idx) => (
+            <div key={idx} style={{
+              background: 'var(--bg2)',
+              border: '1px solid rgba(255, 60, 60, 0.15)',
+              borderRadius: 6,
+              padding: '14px 18px',
+              display: 'flex',
+              flexDirection: 'column',
+              gap: 6,
+              boxShadow: 'inset 0 1px 0 rgba(255,255,255,0.02)',
+              transition: 'all 0.2s ease',
+            }}
+            onMouseEnter={(e) => {
+              e.currentTarget.style.borderColor = 'rgba(255, 60, 60, 0.4)';
+              e.currentTarget.style.background = 'var(--bg3)';
+            }}
+            onMouseLeave={(e) => {
+              e.currentTarget.style.borderColor = 'rgba(255, 60, 60, 0.15)';
+              e.currentTarget.style.background = 'var(--bg2)';
+            }}
+            >
+              <div style={{ display: 'flex', alignItems: 'baseline', gap: 6 }}>
+                <span style={{ fontSize: 10, color: 'var(--t2)', textTransform: 'uppercase', letterSpacing: 0.5, fontWeight: 500, ...MONO }}>
+                  {m.label}
+                </span>
+                <span style={{ fontSize: 8.5, color: 'var(--red)', opacity: 0.7, ...MONO }}>
+                  {m.pct}
+                </span>
+              </div>
+              <div style={{ fontSize: 20, color: 'var(--red)', fontWeight: 500, letterSpacing: -0.5, ...MONO }}>
+                {m.value}
+              </div>
+            </div>
+          ))}
+        </div>
       </div>
     );
   }
+
+  const table = parseColumnarTable(body);
+  if (table && table.rows.length > 0) return <SectionTable headers={table.headers} rows={table.rows} />;
   return <PreFallback body={body} />;
+}
+
+function renderRuinProbability(body: string) {
+  const lines = body.split('\n');
+  const metadata: { label: string; value: string }[] = [];
+  const rows: { threshold: string; pruin: string; onein: string; verdict: string }[] = [];
+
+  for (const line of lines) {
+    if (/[=─_]{5,}/.test(line)) continue;
+    if (/Threshold\s+P\(ruin\)/i.test(line)) continue;
+    if (/RUIN PROBABILITY/i.test(line)) continue;
+
+    const metaMatch = line.match(/^\s*([A-Za-z0-9 ]+?)\s*:\s*(.+)$/);
+    if (metaMatch && !line.includes('1-in-') && !line.includes('%')) { 
+      metadata.push({ label: metaMatch[1].trim(), value: metaMatch[2].trim() });
+      continue;
+    }
+
+    const t = line.trim();
+    if (!t) continue;
+
+    const parts = t.split(/\s{2,}/);
+    if (parts.length >= 4) {
+      rows.push({
+        threshold: parts[0],
+        pruin: parts[1],
+        onein: parts[2],
+        verdict: parts.slice(3).join(' ').trim(),
+      });
+    }
+  }
+
+  if (metadata.length === 0 && rows.length === 0) return <PreFallback body={body} />;
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+      {sectionLabel('Ruin Probability')}
+      
+      {metadata.length > 0 && (
+        <div style={{ display: 'flex', gap: 24, padding: '8px 12px', background: 'var(--bg2)', borderRadius: 6, border: '1px solid var(--line1)' }}>
+          {metadata.map((m, idx) => (
+            <div key={idx} style={{ display: 'flex', gap: 6, fontSize: 11, ...MONO }}>
+              <span style={{ color: 'var(--t3)' }}>{m.label}:</span>
+              <span style={{ color: 'var(--t1)' }}>{m.value}</span>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {rows.length > 0 && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+          {rows.map((r, idx) => {
+            const isHigh = r.verdict.toUpperCase().includes('HIGH');
+            const isWarn = r.verdict.toUpperCase().includes('WARN') || r.verdict.toUpperCase().includes('MODERATE');
+            
+            let borderColor = 'var(--line1)';
+            let bgColor = 'var(--bg2)';
+            let accentColor = 'var(--t1)';
+            
+            if (isHigh) {
+              borderColor = 'rgba(255, 60, 60, 0.3)';
+              bgColor = 'rgba(255, 60, 60, 0.05)';
+              accentColor = 'var(--red)';
+            } else if (isWarn) {
+              borderColor = 'rgba(255, 160, 60, 0.3)';
+              bgColor = 'rgba(255, 160, 60, 0.05)';
+              accentColor = 'var(--orange)';
+            } else {
+              borderColor = 'rgba(60, 255, 100, 0.3)';
+              bgColor = 'rgba(60, 255, 100, 0.05)';
+              accentColor = 'var(--green)';
+            }
+
+            return (
+              <div key={idx} style={{
+                display: 'grid',
+                gridTemplateColumns: 'minmax(80px, 1fr) 1fr 1fr 2fr',
+                gap: 16,
+                padding: '12px 16px',
+                background: bgColor,
+                border: `1px solid ${borderColor}`,
+                borderRadius: 6,
+                alignItems: 'center',
+                ...MONO
+              }}>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+                  <span style={{ fontSize: 9, color: 'var(--t3)', textTransform: 'uppercase' }}>Threshold</span>
+                  <span style={{ fontSize: 16, color: accentColor, fontWeight: 600 }}>{r.threshold}</span>
+                </div>
+                
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+                  <span style={{ fontSize: 9, color: 'var(--t3)', textTransform: 'uppercase' }}>P(ruin)</span>
+                  <span style={{ fontSize: 14, color: 'var(--t1)' }}>{r.pruin}</span>
+                </div>
+
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+                  <span style={{ fontSize: 9, color: 'var(--t3)', textTransform: 'uppercase' }}>Frequency</span>
+                  <span style={{ fontSize: 14, color: 'var(--t2)' }}>{r.onein}</span>
+                </div>
+
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 2, alignItems: 'flex-end', textAlign: 'right' }}>
+                  <span style={{ fontSize: 9, color: 'var(--t3)', textTransform: 'uppercase' }}>Verdict</span>
+                  <span style={{ fontSize: 11, color: accentColor, fontWeight: 600 }}>{r.verdict}</span>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function renderDeflatedSharpe(body: string) {
+  const lines = body.split('\n');
+  const groups: { title: string; items: { label: string; value: string; note: string }[] }[] = [];
+  let currentGroup = null;
+
+  for (const line of lines) {
+    if (/[=─_]{5,}/.test(line)) continue;
+    if (line.includes('DEFLATED SHARPE RATIO + MINIMUM TRACK RECORD LENGTH')) continue;
+    if (line.includes('Filter:')) continue;
+    if (/Results saved/i.test(line)) continue;
+    
+    const groupMatch = line.match(/^  ([A-Za-z0-9()@%,. +=-]+):\s*$/);
+    if (groupMatch) {
+      currentGroup = { title: groupMatch[1].trim(), items: [] };
+      groups.push(currentGroup);
+      continue;
+    }
+    
+    if (currentGroup && line.includes(':')) {
+      const parts = line.split(':');
+      if (parts.length >= 2) {
+        const label = parts[0].trim();
+        const rest = parts.slice(1).join(':').trim();
+        let val = rest;
+        let note = '';
+        
+        const bracketIdx = rest.indexOf('(');
+        if (bracketIdx !== -1 && !label.toLowerCase().includes('verdict')) {
+           val = rest.slice(0, bracketIdx).trim();
+           note = rest.slice(bracketIdx).trim();
+        }
+
+        currentGroup.items.push({ label, value: val, note });
+      }
+    }
+  }
+
+  if (groups.length === 0) return <PreFallback body={body} />;
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
+      {sectionLabel('Deflated Sharpe Ratio (DSR)')}
+      
+      {groups.map((g, gIdx) => (
+        <div key={gIdx} style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+          <div style={{ fontSize: 11, color: 'var(--t3)', textTransform: 'uppercase', letterSpacing: 0.5, borderBottom: '1px solid var(--line1)', paddingBottom: 6, ...MONO }}>
+            {g.title}
+          </div>
+          <div style={{ 
+            display: 'grid', 
+            gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', 
+            gap: 12 
+          }}>
+            {g.items.map((item, idx) => {
+              const isVerdict = item.label.toLowerCase().includes('verdict');
+              let valColor = 'var(--t1)';
+              
+              if (isVerdict) {
+                if (item.value.toUpperCase().includes('FAIL') || item.value.toUpperCase().includes('HIGH')) valColor = 'var(--red)';
+                else if (item.value.toUpperCase().includes('WARN')) valColor = 'var(--orange)';
+                else valColor = 'var(--green)';
+              }
+
+              return (
+                <div key={idx} style={{
+                  background: 'var(--bg2)',
+                  border: isVerdict && valColor === 'var(--red)' ? '1px solid rgba(255, 60, 60, 0.4)' : '1px solid var(--line1)',
+                  borderRadius: 6,
+                  padding: '12px 16px',
+                  display: 'flex',
+                  flexDirection: 'column',
+                  gap: 4,
+                  boxShadow: 'inset 0 1px 0 rgba(255,255,255,0.02)',
+                }}>
+                  <div style={{ fontSize: 9.5, color: 'var(--t3)', textTransform: 'uppercase', letterSpacing: 0.5, ...MONO }}>
+                    {item.label}
+                  </div>
+                  <div style={{ fontSize: 16, color: valColor, fontWeight: 500, letterSpacing: -0.5, ...MONO }}>
+                    {item.value}
+                  </div>
+                  {item.note && (
+                    <div style={{ fontSize: 9, color: 'var(--t4)', fontStyle: 'italic', paddingTop: 2, ...MONO }}>
+                      {item.note.replace(/[()]/g, '').trim()}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function renderSignalPredictiveness(body: string) {
+  const lines = body.split('\n');
+  const consumedIdx = new Set<number>();
+  const markLine = (re: RegExp): string => {
+    const idx = lines.findIndex((l) => re.test(l));
+    if (idx >= 0) {
+      consumedIdx.add(idx);
+      return lines[idx].trim();
+    }
+    return '';
+  };
+  const fwdMeta = markLine(/Forward horizons:/i);
+  const guideMeta = markLine(/IC guide:/i);
+  const csvLine = markLine(/\[predictiveness\]\s*CSV saved:/i);
+
+  const headerIdx = lines.findIndex(
+    (l) => /^\s*Signal\s+Kind\s+Fwd\s+Pearson r\s+Spearman IC\s+p-val\s+N\s+\*\s+Bar\s*$/i.test(l.trim())
+      || /^\s*Signal\s+Kind\s+Fwd\s+Pearson\s+r\s+Spearman\s+IC\s+p-?val\s+N\s+\*\s+Bar\s*$/i.test(l.trim()),
+  );
+  if (headerIdx >= 0) consumedIdx.add(headerIdx);
+
+  type SignalRow = {
+    signal: string;
+    kind: string;
+    fwd: string;
+    pearson: number | null;
+    ic: number | null;
+    pval: string;
+    n: string;
+    sig: string;
+    bar: string;
+  };
+  const parsedRows: SignalRow[] = [];
+  const unparsedTableLines: string[] = [];
+  const isStopLine = (t: string) =>
+    /^Top predictive signals/i.test(t)
+    || /^\[predictiveness\]/i.test(t)
+    || /^[-=─═]{20,}$/.test(t);
+
+  const parseNum = (v: string): number | null => {
+    const n = Number(v.replace(/,/g, ''));
+    return Number.isFinite(n) ? n : null;
+  };
+  const normalizeFwd = (rawFwd: string): string => {
+    const t = rawFwd.trim().toLowerCase();
+    const m = t.match(/^fwd(\d+)(?:d)?$/);
+    if (m) return `fwd${m[1]}`;
+    if (/^\d+$/.test(t)) return `fwd${t}`;
+    return rawFwd.trim();
+  };
+
+  if (headerIdx >= 0) {
+    let started = false;
+    for (let i = headerIdx + 1; i < lines.length; i += 1) {
+      const raw = lines[i];
+      const t = raw.trim();
+      if (!t) {
+        if (started) break;
+        continue;
+      }
+      if (isStopLine(t)) {
+        consumedIdx.add(i);
+        if (started) break;
+        continue;
+      }
+
+      const parts = raw.trim().split(/\s{2,}/).filter(Boolean);
+      if (parts.length >= 8) {
+        const signal = parts[0] ?? '';
+        const kind = parts[1] ?? '—';
+        const fwd = normalizeFwd(parts[2] ?? '—');
+        const pearsonRaw = parts[3] ?? 'n/a';
+        const icRaw = parts[4] ?? 'n/a';
+        const pval = parts[5] ?? 'n/a';
+        const n = parts[6] ?? 'n/a';
+        const sig = (parts[7] ?? '').trim() || '—';
+        const bar = parts.slice(8).join(' ').trim() || '—';
+        const pearson = /^n\/a$/i.test(pearsonRaw) ? null : parseNum(pearsonRaw);
+        const ic = /^n\/a$/i.test(icRaw) ? null : parseNum(icRaw);
+        parsedRows.push({ signal, kind, fwd, pearson, ic, pval, n, sig, bar });
+        consumedIdx.add(i);
+        started = true;
+      } else {
+        unparsedTableLines.push(raw);
+      }
+    }
+  }
+
+  // Parse the full forward-horizon blocks so the full section is visualized,
+  // not only the condensed "top" table.
+  let currentForwardDays: string | null = null;
+  for (let i = 0; i < lines.length; i += 1) {
+    const raw = lines[i];
+    const t = raw.trim();
+    const forwardMatch = t.match(/^--\s*Forward\s+(\d+)d/i);
+    if (forwardMatch) {
+      currentForwardDays = forwardMatch[1];
+      consumedIdx.add(i);
+      continue;
+    }
+    if (!currentForwardDays || !t || /^[-=─═]{12,}$/.test(t)) continue;
+
+    const parts = t.split(/\s+/);
+    if (parts.length >= 7 && (parts[1].toLowerCase() === 'level' || parts[1].toLowerCase() === 'delta') && /^\d+$/.test(parts[2])) {
+      const signal = parts[0];
+      const kind = parts[1].toLowerCase();
+      const fwdDays = parts[2];
+      const pearson = parseNum(parts[3]);
+      const ic = parseNum(parts[4]);
+      const pval = parts[5];
+      const n = parts[6].replace(/,/g, '');
+      const sig = parts[7] ?? '—';
+      parsedRows.push({
+        signal,
+        kind,
+        fwd: `fwd${fwdDays}`,
+        pearson,
+        ic,
+        pval,
+        n,
+        sig,
+        bar: '—',
+      });
+      consumedIdx.add(i);
+      continue;
+    }
+  }
+
+  const uniqueParsedRows = parsedRows.filter((row, idx, arr) => {
+    const key = `${row.signal}|${row.kind}|${row.fwd}|${row.pearson ?? 'na'}|${row.ic ?? 'na'}|${row.pval}|${row.n}|${row.sig}`;
+    return idx === arr.findIndex((x) => {
+      const xKey = `${x.signal}|${x.kind}|${x.fwd}|${x.pearson ?? 'na'}|${x.ic ?? 'na'}|${x.pval}|${x.n}|${x.sig}`;
+      return xKey === key;
+    });
+  });
+
+  const topPredictive = lines
+    .map((l, idx) => ({ line: l.trim(), idx }))
+    .filter(({ line }) => /^#\d+\s+.+\s+->\s+fwd\d+d\s+IC=[+-]?\d+(?:\.\d+)?/i.test(line))
+    .map(({ line, idx }) => {
+      consumedIdx.add(idx);
+      const m = line.match(/^#(\d+)\s+(.+?)\s+->\s+(fwd\d+d)\s+IC=([+-]?\d+(?:\.\d+)?)(?:\s+\[(.+)\])?/i);
+      if (!m) return null;
+      return {
+        rank: Number(m[1]),
+        signal: m[2],
+        fwd: normalizeFwd(m[3]),
+        ic: Number(m[4]),
+        tag: m[5] ?? '',
+      };
+    })
+    .filter((v): v is { rank: number; signal: string; fwd: string; ic: number; tag: string } => v !== null);
+  const topLabelIdx = lines.findIndex((l) => /^Top predictive signals/i.test(l.trim()));
+  if (topLabelIdx >= 0) consumedIdx.add(topLabelIdx);
+
+  const rawDetails = lines
+    .map((line, idx) => ({ line: line.trimEnd(), idx }))
+    .filter(({ line, idx }) => !consumedIdx.has(idx) && line.trim() && !/^[-=─═]{12,}$/.test(line.trim()))
+    .map(({ line }) => line);
+
+  const uniqueTopPredictive = topPredictive
+    .sort((a, b) => a.rank - b.rank)
+    .filter((row, idx, arr) => idx === arr.findIndex((x) => x.rank === row.rank && x.signal === row.signal && x.fwd === row.fwd));
+
+  if (uniqueParsedRows.length === 0 && uniqueTopPredictive.length === 0 && rawDetails.length === 0) {
+    return <PreFallback body={body} />;
+  }
+
+  const allFwds = new Set<string>();
+  uniqueParsedRows.forEach((r) => allFwds.add(normalizeFwd(r.fwd)));
+  uniqueTopPredictive.forEach((r) => allFwds.add(normalizeFwd(r.fwd)));
+  const fwdGroups = Array.from(allFwds).sort((a, b) => {
+    const numA = parseInt(a.replace(/\D/g, ''), 10) || 0;
+    const numB = parseInt(b.replace(/\D/g, ''), 10) || 0;
+    return numA - numB;
+  });
+  const icRowsForViz = (uniqueParsedRows.length > 0
+    ? uniqueParsedRows
+      .filter((r) => r.ic !== null)
+      .map((r) => ({ signal: r.signal, kind: r.kind, fwd: normalizeFwd(r.fwd), ic: r.ic as number }))
+    : uniqueTopPredictive.map((r) => ({ signal: r.signal, kind: 'ranked', fwd: normalizeFwd(r.fwd), ic: r.ic })));
+  const groupedIcItems = fwdGroups.map((fwd) => ({
+    fwd,
+    items: icRowsForViz
+      .filter((r) => r.fwd === fwd)
+      .map((r) => ({
+        label: `${r.signal} (${r.kind})`,
+        value: r.ic,
+        raw: `${r.ic >= 0 ? '+' : ''}${r.ic.toFixed(4)}`,
+      }))
+      .sort((a, b) => b.value - a.value),
+  }));
+  const totalGroupedBars = groupedIcItems.reduce((acc, g) => acc + g.items.length, 0);
+
+  const tableHeaders = ['Signal', 'Kind', 'Fwd', 'Pearson r', 'Spearman IC', 'p-val', 'N', '*', 'Bar'];
+  const sortSignalRows = (a: SignalRow, b: SignalRow) => {
+    const aAbs = a.ic === null ? -1 : Math.abs(a.ic);
+    const bAbs = b.ic === null ? -1 : Math.abs(b.ic);
+    if (bAbs !== aAbs) return bAbs - aAbs;
+    const aP = Number(a.pval);
+    const bP = Number(b.pval);
+    const aPN = Number.isFinite(aP) ? aP : Number.POSITIVE_INFINITY;
+    const bPN = Number.isFinite(bP) ? bP : Number.POSITIVE_INFINITY;
+    if (aPN !== bPN) return aPN - bPN;
+    return a.signal.localeCompare(b.signal);
+  };
+  const tableRowsByFwd = fwdGroups.map((fwd) => ({
+    fwd,
+    rows: uniqueParsedRows
+      .filter((r) => normalizeFwd(r.fwd) === fwd)
+      .sort(sortSignalRows)
+      .map((r) => ({
+        label: r.signal,
+        values: [
+          r.kind,
+          r.fwd,
+          r.pearson === null ? 'n/a' : r.pearson.toFixed(4),
+          r.ic === null ? 'n/a' : r.ic.toFixed(4),
+          r.pval,
+          r.n,
+          r.sig,
+          r.bar,
+        ],
+      })),
+  }));
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+      {(fwdMeta || guideMeta) && (
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+          {fwdMeta && (
+            <span style={{ border: '1px solid var(--line2)', background: 'var(--bg1)', borderRadius: 3, padding: '2px 6px', fontSize: 8.5, color: 'var(--t2)', ...MONO }}>
+              {fwdMeta}
+            </span>
+          )}
+          {guideMeta && (
+            <span style={{ border: '1px solid var(--line2)', background: 'var(--bg1)', borderRadius: 3, padding: '2px 6px', fontSize: 8.5, color: 'var(--t2)', ...MONO }}>
+              {guideMeta}
+            </span>
+          )}
+        </div>
+      )}
+
+      {totalGroupedBars > 0 && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+          {sectionLabel(`Top |IC| Signals (${totalGroupedBars})`)}
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+            {groupedIcItems.map((group) => (
+              group.items.length > 0 ? (
+                <div key={group.fwd} style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                  {sectionLabel(group.fwd.toUpperCase())}
+                  <SectionHBarChart
+                    items={group.items}
+                    colorFn={(v) => (Math.abs(v) >= 0.2 ? 'var(--green)' : Math.abs(v) >= 0.1 ? 'var(--amber)' : 'var(--red)')}
+                  />
+                </div>
+              ) : null
+            ))}
+          </div>
+        </div>
+      )}
+
+      {tableRowsByFwd.some((g) => g.rows.length > 0) && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+          {tableRowsByFwd.map((group) => (
+            group.rows.length > 0 ? (
+              <div key={`tbl-${group.fwd}`} style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                {sectionLabel(`${group.fwd.toUpperCase()} Table`)}
+                <SectionTable headers={tableHeaders} rows={group.rows} />
+              </div>
+            ) : null
+          ))}
+        </div>
+      )}
+
+      {uniqueTopPredictive.length > 0 && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+          {sectionLabel(`Significant Rankings (${uniqueTopPredictive.length})`)}
+          {uniqueTopPredictive.map((r) => (
+            <div key={`${r.rank}-${r.signal}-${r.fwd}`} style={{ fontSize: 9, color: 'var(--t1)', ...MONO }}>
+              #{r.rank} {r.signal} → {r.fwd} | IC {r.ic >= 0 ? '+' : ''}{r.ic.toFixed(4)}{r.tag ? ` [${r.tag}]` : ''}
+            </div>
+          ))}
+        </div>
+      )}
+
+
+
+      {csvLine && (
+        <div style={{ fontSize: 8.5, color: 'var(--t3)', ...MONO }}>
+          {csvLine}
+        </div>
+      )}
+    </div>
+  );
 }
 
 // eslint-disable-next-line @typescript-eslint/no-unused-vars
@@ -4758,6 +5548,682 @@ function renderScorecardTable(body: string) {
   );
 }
 
+function renderTailGuardrailGridSweep(body: string) {
+  const lines = body.split('\n');
+
+  let baselineDrop = '';
+  let baselineVol = '';
+  let gridSpec = '';
+
+  interface TailGridCell {
+    drop: string;
+    vol: string;
+    sharpe: number;
+    cagr: number;
+    maxdd: number;
+    active: number;
+    wfcv: number;
+    isBaseline: boolean;
+    flaggedDays: number;
+    dropDays: number;
+    volDays: number;
+    bothDays: number;
+  }
+
+  const cells: TailGridCell[] = [];
+  let pendingGuardrail: { flaggedDays: number; dropDays: number; volDays: number; bothDays: number } | null = null;
+
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed || /^[═─]+$/.test(trimmed)) continue;
+
+    const baseM = trimmed.match(/^Baseline:\s*drop=([\d.]+)%\s+vol=([\d.]+)/i);
+    if (baseM) { baselineDrop = baseM[1]; baselineVol = baseM[2]; continue; }
+
+    const gridM = trimmed.match(/^Grid:\s*(.+)$/i);
+    if (gridM) { gridSpec = gridM[1]; continue; }
+
+    const guardrailM = trimmed.match(/drop[^=]+=(\d+)d\s+vol[^=]+=(\d+)d\s+both=(\d+)d\s+total=(\d+)d/i);
+    if (guardrailM && trimmed.startsWith('Tail guardrail')) {
+      pendingGuardrail = {
+        dropDays: parseInt(guardrailM[1]),
+        volDays: parseInt(guardrailM[2]),
+        bothDays: parseInt(guardrailM[3]),
+        flaggedDays: parseInt(guardrailM[4]),
+      };
+      continue;
+    }
+
+    const metricsM = trimmed.match(/^drop=([\d.]+)%\s+vol=([\d.]+)x\s+[│|]\s+Sharpe=\s*([-\d.]+)\s+CAGR=\s*([-\d.]+)%\s+MaxDD=\s*([-\d.]+)%\s+Active=\s*(\d+)\s+WF_CV=\s*([-\d.]+)(.*)?/);
+    if (metricsM) {
+      cells.push({
+        drop: metricsM[1],
+        vol: metricsM[2],
+        sharpe: parseFloat(metricsM[3]),
+        cagr: parseFloat(metricsM[4]),
+        maxdd: parseFloat(metricsM[5]),
+        active: parseInt(metricsM[6]),
+        wfcv: parseFloat(metricsM[7]),
+        isBaseline: /BASELINE/i.test(metricsM[8] ?? ''),
+        flaggedDays: pendingGuardrail?.flaggedDays ?? 0,
+        dropDays: pendingGuardrail?.dropDays ?? 0,
+        volDays: pendingGuardrail?.volDays ?? 0,
+        bothDays: pendingGuardrail?.bothDays ?? 0,
+      });
+      pendingGuardrail = null;
+      continue;
+    }
+  }
+
+  if (cells.length === 0) return <PreFallback body={body} />;
+
+  const allSharpes = cells.map((c) => c.sharpe).filter((s) => isFinite(s));
+  const maxSharpe = Math.max(...allSharpes);
+  const minSharpe = Math.min(...allSharpes);
+
+  const sharpeColor = (s: number) => {
+    if (!isFinite(s)) return 'var(--t3)';
+    if (s >= 3.0) return 'var(--green)';
+    if (s >= 2.0) return 'var(--amber)';
+    return 'var(--red)';
+  };
+
+  const maxddColor = (v: number) => {
+    if (Math.abs(v) <= 20) return 'var(--green)';
+    if (Math.abs(v) <= 35) return 'var(--amber)';
+    return 'var(--red)';
+  };
+
+  const thS: React.CSSProperties = {
+    padding: '3px 10px 3px 6px', textAlign: 'right', fontWeight: 700,
+    textTransform: 'uppercase', letterSpacing: '0.08em', fontSize: 8.5,
+    color: 'var(--t3)', borderBottom: '1px solid var(--line2)', whiteSpace: 'nowrap',
+  };
+
+  const baselineCell = cells.find((c) => c.isBaseline);
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 12, fontSize: 9, ...MONO }}>
+      {/* Metadata bar */}
+      <div style={{ display: 'flex', gap: 16, flexWrap: 'wrap', alignItems: 'center', paddingBottom: 8, borderBottom: '1px solid var(--line)' }}>
+        {baselineDrop && (
+          <span style={{ color: 'var(--t2)' }}>
+            Baseline: <span style={{ color: 'var(--green)' }}>drop={baselineDrop}%</span>
+            {baselineVol && <span> &nbsp;vol=<span style={{ color: 'var(--green)' }}>{baselineVol}×</span></span>}
+          </span>
+        )}
+        {gridSpec && <span style={{ color: 'var(--t3)' }}>{gridSpec}</span>}
+      </div>
+
+      {/* Baseline guardrail summary */}
+      {baselineCell && (
+        <div style={{ display: 'flex', gap: 16, flexWrap: 'wrap', padding: '5px 8px', background: 'var(--bg0)', border: '1px solid var(--line)', borderRadius: 3 }}>
+          <span style={{ color: 'var(--t3)', fontSize: 8.5, textTransform: 'uppercase', letterSpacing: '0.1em' }}>Baseline guardrail</span>
+          <span style={{ color: 'var(--t2)' }}>drop trigger: <span style={{ color: 'var(--t1)' }}>{baselineCell.dropDays}d</span></span>
+          <span style={{ color: 'var(--t2)' }}>vol trigger: <span style={{ color: 'var(--t1)' }}>{baselineCell.volDays}d</span></span>
+          <span style={{ color: 'var(--t2)' }}>both: <span style={{ color: 'var(--t1)' }}>{baselineCell.bothDays}d</span></span>
+          <span style={{ color: 'var(--t2)' }}>total flagged: <span style={{ color: 'var(--amber)' }}>{baselineCell.flaggedDays}d</span></span>
+        </div>
+      )}
+
+      {/* Main grid table */}
+      <div style={{ overflowX: 'auto' }}>
+        <table style={{ borderCollapse: 'collapse', fontSize: 9, tableLayout: 'auto', ...MONO }}>
+          <thead>
+            <tr>
+              <th style={{ ...thS, textAlign: 'left' }}>Drop%</th>
+              <th style={{ ...thS }}>Vol×</th>
+              <th style={{ ...thS }}>Sharpe</th>
+              <th style={{ ...thS }}>CAGR%</th>
+              <th style={{ ...thS }}>MaxDD</th>
+              <th style={{ ...thS }}>Active</th>
+              <th style={{ ...thS }}>WF-CV</th>
+              <th style={{ ...thS }}>Flagged</th>
+            </tr>
+          </thead>
+          <tbody>
+            {cells.map((cell, i) => {
+              const sharpeFrac = maxSharpe > minSharpe ? (cell.sharpe - minSharpe) / (maxSharpe - minSharpe) : 1;
+              const isBase = cell.isBaseline;
+              return (
+                <tr
+                  key={i}
+                  style={{
+                    background: isBase ? 'var(--green-dim)' : i % 2 === 1 ? 'rgba(255,255,255,0.015)' : 'transparent',
+                    outline: isBase ? '1px solid var(--green-mid)' : undefined,
+                  }}
+                >
+                  <td style={{ padding: '3px 10px 3px 6px', color: 'var(--t1)', whiteSpace: 'nowrap' }}>
+                    {cell.drop}%
+                    {isBase && <span style={{ marginLeft: 5, fontSize: 7.5, color: 'var(--green)', letterSpacing: '0.06em', textTransform: 'uppercase' }}>◄ base</span>}
+                  </td>
+                  <td style={{ padding: '3px 10px 3px 6px', textAlign: 'right', color: 'var(--t2)' }}>{cell.vol}×</td>
+                  <td style={{ padding: '3px 10px 3px 6px', textAlign: 'right' }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 5, justifyContent: 'flex-end' }}>
+                      <div style={{ width: 36, height: 3, background: 'var(--bg3)', borderRadius: 1, flexShrink: 0 }}>
+                        <div style={{ width: `${Math.round(sharpeFrac * 100)}%`, height: '100%', background: sharpeColor(cell.sharpe), borderRadius: 1 }} />
+                      </div>
+                      <span style={{ color: sharpeColor(cell.sharpe), fontWeight: isBase ? 700 : 400 }}>{cell.sharpe.toFixed(3)}</span>
+                    </div>
+                  </td>
+                  <td style={{ padding: '3px 10px 3px 6px', textAlign: 'right', color: 'var(--t1)' }}>{cell.cagr.toFixed(1)}%</td>
+                  <td style={{ padding: '3px 10px 3px 6px', textAlign: 'right', color: maxddColor(cell.maxdd) }}>{cell.maxdd.toFixed(2)}%</td>
+                  <td style={{ padding: '3px 10px 3px 6px', textAlign: 'right', color: 'var(--t2)' }}>{cell.active}</td>
+                  <td style={{ padding: '3px 10px 3px 6px', textAlign: 'right', color: cell.wfcv >= 0.7 ? 'var(--green)' : cell.wfcv >= 0.5 ? 'var(--amber)' : 'var(--red)' }}>{cell.wfcv.toFixed(3)}</td>
+                  <td style={{ padding: '3px 10px 3px 6px', textAlign: 'right', color: 'var(--t2)' }}>{cell.flaggedDays}d</td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+// ── L_HIGH SURFACE — RANKED BY SHARPE ────────────────────────────────────────
+function renderLHighRanked(body: string): React.ReactNode {
+  interface LHighRankedRow {
+    lhigh: number; sharpe: number; cagr: number; maxdd: number;
+    isSh: number; oosSh: number | null; decay: number | null;
+    wfcv: number; meanOos: number; f5: number; f8: number; unstbl: number;
+    isBaseline: boolean;
+  }
+
+  const rows: LHighRankedRow[] = [];
+  let inData = false;
+  for (const line of body.split('\n')) {
+    const t = line.trim();
+    if (/^L_HIGH\s+Sharpe/i.test(t)) { inData = true; continue; }
+    if (/^[─═]+$/.test(t)) continue;
+    if (!inData || !t) continue;
+    // stop at CSV/Chart lines
+    if (/^(CSV|Chart):/i.test(t)) break;
+    const tok = t.replace(/\s*◄.*$/, '').trim().split(/\s+/);
+    if (tok.length < 11) continue;
+    const pf = (s: string) => parseFloat(s);
+    const nanOrNum = (s: string) => (s.toLowerCase() === 'nan' ? null : pf(s));
+    rows.push({
+      lhigh: pf(tok[0]), sharpe: pf(tok[1]), cagr: pf(tok[2]),
+      maxdd: pf(tok[3]), isSh: pf(tok[4]),
+      oosSh: nanOrNum(tok[5]), decay: nanOrNum(tok[6]),
+      wfcv: pf(tok[7]), meanOos: pf(tok[8]), f5: pf(tok[9]), f8: pf(tok[10]),
+      unstbl: tok[11] ? pf(tok[11]) : 0,
+      isBaseline: /◄/.test(line),
+    });
+  }
+  if (rows.length === 0) return <PreFallback body={body} />;
+
+  const allSharpes = rows.map((r) => r.sharpe).filter((s) => isFinite(s));
+  const maxSharpe = Math.max(...allSharpes);
+  const minSharpe = Math.min(...allSharpes);
+  const sharpeFrac = (s: number) => maxSharpe > minSharpe ? (s - minSharpe) / (maxSharpe - minSharpe) : 1;
+  const sharpeColor = (s: number) => s >= 3.0 ? 'var(--green)' : s >= 2.0 ? 'var(--amber)' : 'var(--red)';
+  const maxddColor = (v: number) => Math.abs(v) <= 20 ? 'var(--green)' : Math.abs(v) <= 35 ? 'var(--amber)' : 'var(--red)';
+  const wfcvColor = (v: number) => v >= 0.7 ? 'var(--green)' : v >= 0.5 ? 'var(--amber)' : 'var(--red)';
+  const unstblColor = (v: number) => v === 0 ? 'var(--t3)' : v <= 1 ? 'var(--amber)' : 'var(--red)';
+  const fmt = (v: number | null, digits: number, suffix = '') =>
+    v === null || !isFinite(v) ? <span style={{ color: 'var(--t4)' }}>—</span> : <>{v.toFixed(digits)}{suffix}</>;
+
+  const thS: React.CSSProperties = {
+    padding: '3px 8px 3px 6px', textAlign: 'right', fontWeight: 700,
+    textTransform: 'uppercase', letterSpacing: '0.08em', fontSize: 8,
+    color: 'var(--t3)', borderBottom: '1px solid var(--line2)', whiteSpace: 'nowrap',
+  };
+
+  const baselineRow = rows.find((r) => r.isBaseline);
+  const peakRow = rows.reduce((a, b) => a.sharpe >= b.sharpe ? a : b, rows[0]);
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 10, fontSize: 9, ...MONO }}>
+      {/* Meta bar */}
+      <div style={{ display: 'flex', gap: 16, flexWrap: 'wrap', alignItems: 'center', paddingBottom: 8, borderBottom: '1px solid var(--line)' }}>
+        <span style={{ color: 'var(--t2)' }}>
+          Peak Sharpe: <span style={{ color: 'var(--green)', fontWeight: 700 }}>{peakRow.sharpe.toFixed(3)}</span>
+          <span style={{ color: 'var(--t3)' }}> @ L_HIGH={peakRow.lhigh.toFixed(1)}</span>
+        </span>
+        {baselineRow && (
+          <span style={{ color: 'var(--t2)' }}>
+            Baseline: <span style={{ color: 'var(--green)' }}>{baselineRow.sharpe.toFixed(3)}</span>
+            <span style={{ color: 'var(--t3)' }}> @ L_HIGH={baselineRow.lhigh.toFixed(1)}</span>
+          </span>
+        )}
+        <span style={{ marginLeft: 'auto', color: 'var(--t3)' }}>{rows.length} values</span>
+      </div>
+
+      {/* Table */}
+      <div style={{ overflowX: 'auto' }}>
+        <table style={{ borderCollapse: 'collapse', fontSize: 9, tableLayout: 'auto', ...MONO }}>
+          <thead>
+            <tr>
+              <th style={{ ...thS, textAlign: 'left' }}>L_HIGH</th>
+              <th style={{ ...thS, minWidth: 80 }}>Sharpe</th>
+              <th style={{ ...thS }}>CAGR%</th>
+              <th style={{ ...thS }}>MaxDD%</th>
+              <th style={{ ...thS }}>IS Sh</th>
+              <th style={{ ...thS }}>OOS Sh</th>
+              <th style={{ ...thS }}>Decay%</th>
+              <th style={{ ...thS }}>WF-CV</th>
+              <th style={{ ...thS }}>MeanOOS</th>
+              <th style={{ ...thS }}>F5 Sh</th>
+              <th style={{ ...thS }}>F8 Sh</th>
+              <th style={{ ...thS }}>Unstbl</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((row, i) => {
+              const frac = sharpeFrac(row.sharpe);
+              const isBase = row.isBaseline;
+              const isPeak = row.sharpe === maxSharpe && !isBase;
+              return (
+                <tr
+                  key={i}
+                  style={{
+                    background: isBase ? 'var(--green-dim)' : isPeak ? 'rgba(255,255,255,0.03)' : i % 2 === 1 ? 'rgba(255,255,255,0.012)' : 'transparent',
+                    outline: isBase ? '1px solid var(--green-mid)' : undefined,
+                  }}
+                >
+                  <td style={{ padding: '3px 10px 3px 6px', color: 'var(--t1)', whiteSpace: 'nowrap' }}>
+                    {row.lhigh.toFixed(1)}
+                    {isBase && <span style={{ marginLeft: 5, fontSize: 7.5, color: 'var(--green)', letterSpacing: '0.06em', textTransform: 'uppercase' }}>◄ base</span>}
+                    {isPeak && <span style={{ marginLeft: 5, fontSize: 7.5, color: 'var(--green)', opacity: 0.7, letterSpacing: '0.06em' }}>★</span>}
+                  </td>
+                  <td style={{ padding: '3px 8px 3px 6px', textAlign: 'right' }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 5, justifyContent: 'flex-end' }}>
+                      <div style={{ width: 40, height: 3, background: 'var(--bg3)', borderRadius: 1, flexShrink: 0 }}>
+                        <div style={{ width: `${Math.round(frac * 100)}%`, height: '100%', background: sharpeColor(row.sharpe), borderRadius: 1 }} />
+                      </div>
+                      <span style={{ color: sharpeColor(row.sharpe), fontWeight: isBase || isPeak ? 700 : 400 }}>{row.sharpe.toFixed(3)}</span>
+                    </div>
+                  </td>
+                  <td style={{ padding: '3px 8px 3px 6px', textAlign: 'right', color: 'var(--t2)' }}>{fmt(row.cagr, 0)}</td>
+                  <td style={{ padding: '3px 8px 3px 6px', textAlign: 'right', color: maxddColor(row.maxdd) }}>{fmt(row.maxdd, 2, '%')}</td>
+                  <td style={{ padding: '3px 8px 3px 6px', textAlign: 'right', color: sharpeColor(row.isSh) }}>{fmt(row.isSh, 3)}</td>
+                  <td style={{ padding: '3px 8px 3px 6px', textAlign: 'right', color: row.oosSh !== null ? sharpeColor(row.oosSh) : 'var(--t4)' }}>{fmt(row.oosSh, 3)}</td>
+                  <td style={{ padding: '3px 8px 3px 6px', textAlign: 'right', color: 'var(--t2)' }}>{fmt(row.decay, 1, '%')}</td>
+                  <td style={{ padding: '3px 8px 3px 6px', textAlign: 'right', color: wfcvColor(row.wfcv) }}>{fmt(row.wfcv, 3)}</td>
+                  <td style={{ padding: '3px 8px 3px 6px', textAlign: 'right', color: sharpeColor(row.meanOos) }}>{fmt(row.meanOos, 3)}</td>
+                  <td style={{ padding: '3px 8px 3px 6px', textAlign: 'right', color: sharpeColor(row.f5) }}>{fmt(row.f5, 3)}</td>
+                  <td style={{ padding: '3px 8px 3px 6px', textAlign: 'right', color: sharpeColor(row.f8) }}>{fmt(row.f8, 3)}</td>
+                  <td style={{ padding: '3px 8px 3px 6px', textAlign: 'right', color: unstblColor(row.unstbl) }}>{row.unstbl.toFixed(1)}</td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+// ── PARAMETER SWEEP — L_HIGH SURFACE ─────────────────────────────────────────
+function renderLHighSweep(body: string, title: string): React.ReactNode {
+  interface LHighRow {
+    lhigh: number; sharpe: number; maxdd: number; wfcv: number; f5: number; f8: number; isBaseline: boolean;
+  }
+  const rows: LHighRow[] = [];
+  for (const line of body.split('\n')) {
+    const m = line.match(/L_HIGH=([\d.]+)\s+Sharpe=([-\d.]+)\s+MaxDD=([-\d.]+)%\s+WF_CV=([\d.]+)\s+F5=([-\d.]+)\s+F8=([-\d.]+)/i);
+    if (!m) continue;
+    rows.push({ lhigh: parseFloat(m[1]), sharpe: parseFloat(m[2]), maxdd: parseFloat(m[3]), wfcv: parseFloat(m[4]), f5: parseFloat(m[5]), f8: parseFloat(m[6]), isBaseline: /◄/.test(line) });
+  }
+  if (rows.length === 0) return <PreFallback body={body} />;
+
+  const filterM = title.match(/\(([^)]+)\)\s*$/);
+  const filterCtx = filterM ? filterM[1] : '';
+  const allSharpes = rows.map((r) => r.sharpe).filter((s) => isFinite(s));
+  const maxSharpe = Math.max(...allSharpes);
+  const minSharpe = Math.min(...allSharpes);
+  const sharpeColor = (s: number) => s >= 3.0 ? 'var(--green)' : s >= 2.0 ? 'var(--amber)' : 'var(--red)';
+  const maxddColor = (v: number) => Math.abs(v) <= 20 ? 'var(--green)' : Math.abs(v) <= 35 ? 'var(--amber)' : 'var(--red)';
+  const wfcvColor = (v: number) => v >= 0.7 ? 'var(--green)' : v >= 0.5 ? 'var(--amber)' : 'var(--red)';
+  const thS: React.CSSProperties = { padding: '3px 10px 3px 6px', textAlign: 'right', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.08em', fontSize: 8.5, color: 'var(--t3)', borderBottom: '1px solid var(--line2)', whiteSpace: 'nowrap' };
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 12, fontSize: 9, ...MONO }}>
+      <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', alignItems: 'center', paddingBottom: 8, borderBottom: '1px solid var(--line)' }}>
+        {filterCtx && <span style={{ color: 'var(--t2)' }}>{filterCtx}</span>}
+        <span style={{ marginLeft: 'auto', color: 'var(--t3)' }}>{rows.length} L_HIGH values</span>
+      </div>
+      <div style={{ overflowX: 'auto' }}>
+        <table style={{ borderCollapse: 'collapse', fontSize: 9, tableLayout: 'auto', ...MONO }}>
+          <thead>
+            <tr>
+              <th style={{ ...thS, textAlign: 'left' }}>L_HIGH</th>
+              <th style={{ ...thS }}>Sharpe</th>
+              <th style={{ ...thS }}>MaxDD%</th>
+              <th style={{ ...thS }}>WF_CV</th>
+              <th style={{ ...thS }}>F5 Sh</th>
+              <th style={{ ...thS }}>F8 Sh</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((row, i) => {
+              const frac = maxSharpe > minSharpe ? (row.sharpe - minSharpe) / (maxSharpe - minSharpe) : 1;
+              return (
+                <tr key={i} style={{ background: row.isBaseline ? 'var(--green-dim)' : i % 2 === 1 ? 'rgba(255,255,255,0.015)' : 'transparent', outline: row.isBaseline ? '1px solid var(--green-mid)' : undefined }}>
+                  <td style={{ padding: '3px 10px 3px 6px', color: 'var(--t1)', whiteSpace: 'nowrap' }}>
+                    {row.lhigh.toFixed(1)}
+                    {row.isBaseline && <span style={{ marginLeft: 5, fontSize: 7.5, color: 'var(--green)', letterSpacing: '0.06em', textTransform: 'uppercase' }}>◄ base</span>}
+                  </td>
+                  <td style={{ padding: '3px 10px 3px 6px', textAlign: 'right' }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 5, justifyContent: 'flex-end' }}>
+                      <div style={{ width: 36, height: 3, background: 'var(--bg3)', borderRadius: 1, flexShrink: 0 }}>
+                        <div style={{ width: `${Math.round(frac * 100)}%`, height: '100%', background: sharpeColor(row.sharpe), borderRadius: 1 }} />
+                      </div>
+                      <span style={{ color: sharpeColor(row.sharpe), fontWeight: row.isBaseline ? 700 : 400 }}>{row.sharpe.toFixed(3)}</span>
+                    </div>
+                  </td>
+                  <td style={{ padding: '3px 10px 3px 6px', textAlign: 'right', color: maxddColor(row.maxdd) }}>{row.maxdd.toFixed(1)}%</td>
+                  <td style={{ padding: '3px 10px 3px 6px', textAlign: 'right', color: wfcvColor(row.wfcv) }}>{row.wfcv.toFixed(3)}</td>
+                  <td style={{ padding: '3px 10px 3px 6px', textAlign: 'right', color: 'var(--t2)' }}>{row.f5.toFixed(3)}</td>
+                  <td style={{ padding: '3px 10px 3px 6px', textAlign: 'right', color: 'var(--t2)' }}>{row.f8.toFixed(3)}</td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+// ── PARAMETER SWEEP — TRAIL_DD × EARLY_X (WIDE / NARROW) ─────────────────────
+function renderTrailSweep(body: string, title: string): React.ReactNode {
+  interface TrailRow { trail: number; earlyX: number; sharpe: number; maxdd: number; wfcv: number; f5: number; f8: number; }
+  interface RankedSection { label: string; rows: TrailRow[]; }
+
+  const lines = body.split('\n');
+  let gridSpec = '';
+  let totalCombos = 0;
+  let ranCombos = 0;
+
+  for (const line of lines) {
+    const gm = line.match(/Grid:\s*(\d+)\s+TRAIL_DD\s*[×x]\s*(\d+)\s+EARLY_X\s*=\s*(\d+)/i);
+    if (gm) { gridSpec = `${gm[1]} TRAIL_DD × ${gm[2]} EARLY_X`; totalCombos = parseInt(gm[3]); continue; }
+    const cm = line.match(/\[\s*(\d+)\/(\d+)\]/);
+    if (cm) { ranCombos = parseInt(cm[1]); if (!totalCombos) totalCombos = parseInt(cm[2]); }
+  }
+
+  const rankedSections: RankedSection[] = [];
+  let curSection: RankedSection | null = null;
+  let inTable = false;
+
+  for (const line of lines) {
+    const t = line.trim();
+    const topM = t.match(/^TOP\s+(\d+)\s+-\s+(\w+)\s+-\s+RANKED\s+BY\s+(.+)/i);
+    if (topM) {
+      if (curSection && curSection.rows.length > 0) rankedSections.push(curSection);
+      const rankBy = topM[3].replace(/\s*\(.*\)/, '').trim();
+      curSection = { label: `Top ${topM[1]} · ${topM[2]} · by ${rankBy}`, rows: [] };
+      inTable = false;
+      continue;
+    }
+    if (/Trail\s+EarlyX\s+Sharpe/i.test(t)) { inTable = true; continue; }
+    if (/^[-─]+$/.test(t)) continue;
+    if (inTable && curSection) {
+      const rm = t.match(/^([\d.]+)\s+(\d+)\s+([-\d.]+)\s+([-\d.]+)\s+([\d.]+)\s+([-\d.]+)\s+([-\d.]+)/);
+      if (rm) {
+        curSection.rows.push({ trail: parseFloat(rm[1]), earlyX: parseInt(rm[2]), sharpe: parseFloat(rm[3]), maxdd: parseFloat(rm[4]), wfcv: parseFloat(rm[5]), f5: parseFloat(rm[6]), f8: parseFloat(rm[7]) });
+      } else if (t && !/^(CSV|Chart):/i.test(t)) {
+        inTable = false;
+      }
+    }
+  }
+  if (curSection && curSection.rows.length > 0) rankedSections.push(curSection);
+  if (rankedSections.length === 0) return <PreFallback body={body} />;
+
+  const sharpeColor = (s: number) => s >= 3.0 ? 'var(--green)' : s >= 2.0 ? 'var(--amber)' : 'var(--red)';
+  const maxddColor = (v: number) => Math.abs(v) <= 20 ? 'var(--green)' : Math.abs(v) <= 35 ? 'var(--amber)' : 'var(--red)';
+  const wfcvColor = (v: number) => v >= 0.7 ? 'var(--green)' : v >= 0.5 ? 'var(--amber)' : 'var(--red)';
+  const filterM = title.match(/\(([^)]+filter[^)]*)\)/i);
+  const filterCtx = filterM ? filterM[1] : '';
+  const thS: React.CSSProperties = { padding: '3px 10px 3px 6px', textAlign: 'right', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.08em', fontSize: 8.5, color: 'var(--t3)', borderBottom: '1px solid var(--line2)', whiteSpace: 'nowrap' };
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 16, fontSize: 9, ...MONO }}>
+      {/* Metadata bar */}
+      <div style={{ display: 'flex', gap: 16, flexWrap: 'wrap', alignItems: 'center', paddingBottom: 8, borderBottom: '1px solid var(--line)' }}>
+        {gridSpec && (
+          <span style={{ color: 'var(--t2)' }}>
+            Grid: <span style={{ color: 'var(--t1)' }}>{gridSpec}</span>
+            {totalCombos > 0 && <span style={{ color: 'var(--t3)' }}> = {totalCombos} combinations</span>}
+          </span>
+        )}
+        {totalCombos > 0 && ranCombos >= totalCombos && (
+          <span style={{ color: 'var(--green)', fontSize: 8 }}>✓ complete</span>
+        )}
+        {filterCtx && <span style={{ marginLeft: 'auto', color: 'var(--t3)' }}>{filterCtx}</span>}
+      </div>
+      {/* Ranked tables */}
+      {rankedSections.map((sec, si) => {
+        const allS = sec.rows.map((r) => r.sharpe).filter((s) => isFinite(s));
+        const maxS = Math.max(...allS);
+        const minS = Math.min(...allS);
+        return (
+          <div key={si} style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+            {sectionLabel(sec.label)}
+            <div style={{ overflowX: 'auto' }}>
+              <table style={{ borderCollapse: 'collapse', fontSize: 9, tableLayout: 'auto', ...MONO }}>
+                <thead>
+                  <tr>
+                    <th style={{ ...thS, textAlign: 'left' }}>Trail</th>
+                    <th style={{ ...thS }}>Early X</th>
+                    <th style={{ ...thS }}>Sharpe</th>
+                    <th style={{ ...thS }}>MaxDD%</th>
+                    <th style={{ ...thS }}>WF_CV</th>
+                    <th style={{ ...thS }}>F5 Sh</th>
+                    <th style={{ ...thS }}>F8 Sh</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {sec.rows.map((row, i) => {
+                    const frac = maxS > minS ? (row.sharpe - minS) / (maxS - minS) : 1;
+                    return (
+                      <tr key={i} style={{ background: i % 2 === 1 ? 'rgba(255,255,255,0.015)' : 'transparent' }}>
+                        <td style={{ padding: '3px 10px 3px 6px', color: 'var(--t1)', whiteSpace: 'nowrap' }}>{row.trail.toFixed(3)}</td>
+                        <td style={{ padding: '3px 10px 3px 6px', textAlign: 'right', color: 'var(--t2)' }}>{row.earlyX}</td>
+                        <td style={{ padding: '3px 10px 3px 6px', textAlign: 'right' }}>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: 5, justifyContent: 'flex-end' }}>
+                            <div style={{ width: 36, height: 3, background: 'var(--bg3)', borderRadius: 1, flexShrink: 0 }}>
+                              <div style={{ width: `${Math.round(frac * 100)}%`, height: '100%', background: sharpeColor(row.sharpe), borderRadius: 1 }} />
+                            </div>
+                            <span style={{ color: sharpeColor(row.sharpe) }}>{row.sharpe.toFixed(3)}</span>
+                          </div>
+                        </td>
+                        <td style={{ padding: '3px 10px 3px 6px', textAlign: 'right', color: maxddColor(row.maxdd) }}>{row.maxdd.toFixed(2)}%</td>
+                        <td style={{ padding: '3px 10px 3px 6px', textAlign: 'right', color: wfcvColor(row.wfcv) }}>{row.wfcv.toFixed(3)}</td>
+                        <td style={{ padding: '3px 10px 3px 6px', textAlign: 'right', color: 'var(--t2)' }}>{row.f5.toFixed(3)}</td>
+                        <td style={{ padding: '3px 10px 3px 6px', textAlign: 'right', color: 'var(--t2)' }}>{row.f8.toFixed(3)}</td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+// ── PARAMETER SURFACE MAP (2-D HEAT MAP) ─────────────────────────────────────
+function renderParamSurfaceMap(title: string, body: string): React.ReactNode {
+  // Extract the two param names from title: "... -- PARAM_X x PARAM_Y"
+  const axisM = title.match(/--\s*(\w+)\s+x\s+(\w+)/i);
+  if (!axisM) return <PreFallback body={body} />;
+  const [, paramX, paramY] = axisM;
+
+  interface SurfaceCell {
+    xVal: string; yVal: string;
+    sharpe: number; cagr: number; maxdd: number; worst1d: number; wfcv: number;
+    isBaseline: boolean;
+  }
+
+  let filter = '';
+  let gridSpec = '';
+  let baselineXStr = '';
+  let baselineYStr = '';
+  const cells: SurfaceCell[] = [];
+
+  for (const line of body.split('\n')) {
+    const t = line.trim();
+    if (!t || /^[=─]+$/.test(t)) continue;
+    if (/^--\s+Sharpe surface/i.test(t)) break; // stop at ASCII matrix block
+
+    const fgm = t.match(/^Filter:\s*(.+?)\s*\|\s*Grid:\s*(.+)$/i);
+    if (fgm) { filter = fgm[1].trim(); gridSpec = fgm[2].trim(); continue; }
+
+    const bm = t.match(/^Baseline:\s*\S+=(\S+)\s+\S+=(\S+)/i);
+    if (bm) { baselineXStr = bm[1]; baselineYStr = bm[2]; continue; }
+
+    // Data row: PARAM_X=val  PARAM_Y=val  |  Sharpe= val  CAGR= val%  MaxDD= val%  Worst1D= val%  WF_CV= val
+    const dm = t.match(/^\S+=(\S+)\s+\S+=(\S+)\s*\|\s*Sharpe=\s*([-\d.]+)\s+CAGR=\s*([-\d.]+)%\s+MaxDD=\s*([-\d.]+)%\s+Worst1D=\s*([-\d.]+)%\s+WF_CV=\s*([-\d.]+)/i);
+    if (dm) {
+      cells.push({
+        xVal: dm[1], yVal: dm[2],
+        sharpe: parseFloat(dm[3]), cagr: parseFloat(dm[4]),
+        maxdd: parseFloat(dm[5]), worst1d: parseFloat(dm[6]), wfcv: parseFloat(dm[7]),
+        isBaseline: /<-- BASELINE/i.test(t),
+      });
+      continue;
+    }
+  }
+
+  if (cells.length === 0) return <PreFallback body={body} />;
+
+  // Mark baseline by value match if not already flagged inline
+  if (baselineXStr && baselineYStr && !cells.some((c) => c.isBaseline)) {
+    for (const c of cells) {
+      if (c.xVal === baselineXStr && c.yVal === baselineYStr) c.isBaseline = true;
+    }
+  }
+
+  const xVals = [...new Set(cells.map((c) => c.xVal))];
+  const yVals = [...new Set(cells.map((c) => c.yVal))];
+  const cellMap = new Map(cells.map((c) => [`${c.xVal}|${c.yVal}`, c]));
+
+  const allSharpes = cells.map((c) => c.sharpe).filter((s) => isFinite(s));
+  const maxSharpe = Math.max(...allSharpes);
+  const minSharpe = Math.min(...allSharpes);
+  const baselineCell = cells.find((c) => c.isBaseline);
+
+  const sharpeTextColor = (s: number) => s >= 3.0 ? 'var(--green)' : s >= 2.0 ? 'var(--amber)' : 'var(--red)';
+
+  // Background heat: smooth interpolation red→amber→green
+  const heatBg = (s: number): string => {
+    if (!isFinite(s)) return 'transparent';
+    const norm = maxSharpe > minSharpe ? (s - minSharpe) / (maxSharpe - minSharpe) : 0.5;
+    let r: number, g: number, b: number;
+    if (norm < 0.5) {
+      const f = norm * 2;
+      r = Math.round(160 + (180 - 160) * (1 - f));
+      g = Math.round(50 * (1 - f) + 120 * f);
+      b = Math.round(40 * (1 - f));
+    } else {
+      const f = (norm - 0.5) * 2;
+      r = Math.round(180 * (1 - f) + 30 * f);
+      g = Math.round(120 * (1 - f) + 160 * f);
+      b = Math.round(0 + 60 * f);
+    }
+    const alpha = 0.06 + norm * 0.18;
+    return `rgba(${r},${g},${b},${alpha.toFixed(2)})`;
+  };
+
+  const thS: React.CSSProperties = {
+    padding: '3px 5px', fontSize: 7.5, fontWeight: 700, textTransform: 'uppercase',
+    letterSpacing: '0.07em', color: 'var(--t3)', borderBottom: '1px solid var(--line2)',
+    whiteSpace: 'nowrap', textAlign: 'center',
+  };
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 10, fontSize: 9, ...MONO }}>
+      {/* Meta bar */}
+      <div style={{ display: 'flex', gap: 16, flexWrap: 'wrap', alignItems: 'center', paddingBottom: 8, borderBottom: '1px solid var(--line)' }}>
+        {filter && <span style={{ color: 'var(--t2)' }}>{filter}</span>}
+        {gridSpec && <span style={{ color: 'var(--t3)' }}>{gridSpec}</span>}
+        {baselineCell && (
+          <span style={{ color: 'var(--t2)' }}>
+            Baseline: <span style={{ color: 'var(--green)' }}>{paramX}={baselineXStr}</span>
+            {' '}<span style={{ color: 'var(--green)' }}>{paramY}={baselineYStr}</span>
+            <span style={{ color: 'var(--t3)' }}> · SR {baselineCell.sharpe.toFixed(3)}</span>
+          </span>
+        )}
+        <span style={{ marginLeft: 'auto', color: 'var(--t3)' }}>
+          peak SR: <span style={{ color: 'var(--green)', fontWeight: 700 }}>{maxSharpe.toFixed(3)}</span>
+        </span>
+      </div>
+
+      {/* Heat map */}
+      <div style={{ overflowX: 'auto' }}>
+        <table style={{ borderCollapse: 'collapse', tableLayout: 'auto', ...MONO }}>
+          <thead>
+            <tr>
+              <th style={{ ...thS, textAlign: 'left', paddingLeft: 6, minWidth: 60, borderRight: '1px solid var(--line2)' }}>
+                {paramX} ↓ / {paramY} →
+              </th>
+              {yVals.map((y) => (
+                <th key={y} style={{ ...thS, minWidth: 40 }}>{y}</th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {xVals.map((x) => (
+              <tr key={x}>
+                <td style={{ padding: '2px 8px 2px 6px', color: 'var(--t2)', fontWeight: 700, fontSize: 8, whiteSpace: 'nowrap', borderRight: '1px solid var(--line2)' }}>
+                  {x}
+                </td>
+                {yVals.map((y) => {
+                  const cell = cellMap.get(`${x}|${y}`);
+                  if (!cell) return <td key={y} style={{ padding: '3px 5px', textAlign: 'center', color: 'var(--t4)', fontSize: 8 }}>—</td>;
+                  const isBase = cell.isBaseline;
+                  const isPeak = cell.sharpe === maxSharpe && !isBase;
+                  return (
+                    <td
+                      key={y}
+                      title={`${paramX}=${x}  ${paramY}=${y}\nSharpe ${cell.sharpe.toFixed(3)}  CAGR ${cell.cagr.toFixed(1)}%  MaxDD ${cell.maxdd.toFixed(2)}%  Worst1D ${cell.worst1d.toFixed(2)}%  WF_CV ${cell.wfcv.toFixed(3)}`}
+                      style={{
+                        padding: '4px 5px',
+                        textAlign: 'center',
+                        background: isBase ? 'var(--green-dim)' : heatBg(cell.sharpe),
+                        outline: isBase ? '1px solid var(--green-mid)' : undefined,
+                        color: isBase ? 'var(--green)' : sharpeTextColor(cell.sharpe),
+                        fontWeight: isBase || isPeak ? 700 : 400,
+                        fontSize: 8.5,
+                        whiteSpace: 'nowrap',
+                      }}
+                    >
+                      {cell.sharpe.toFixed(2)}
+                      {isBase && <span style={{ marginLeft: 2, fontSize: 6.5, opacity: 0.8 }}>◄</span>}
+                      {isPeak && <span style={{ marginLeft: 2, fontSize: 6.5, color: 'var(--green)', opacity: 0.7 }}>★</span>}
+                    </td>
+                  );
+                })}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+
+      {/* Legend */}
+      <div style={{ display: 'flex', gap: 14, alignItems: 'center', paddingTop: 2 }}>
+        <span style={{ color: 'var(--t3)', fontSize: 7.5, textTransform: 'uppercase', letterSpacing: '0.08em' }}>Sharpe</span>
+        <span style={{ color: 'var(--red)', fontSize: 8 }}>▪ &lt;2.0</span>
+        <span style={{ color: 'var(--amber)', fontSize: 8 }}>▪ 2.0–3.0</span>
+        <span style={{ color: 'var(--green)', fontSize: 8 }}>▪ ≥3.0</span>
+        <span style={{ color: 'var(--t4)', fontSize: 7.5, marginLeft: 'auto' }}>hover cells for full metrics</span>
+      </div>
+    </div>
+  );
+}
+
+function renderParameterSweep(title: string, body: string): React.ReactNode {
+  const tu = title.toUpperCase();
+  if (tu.includes('L_HIGH SURFACE')) return renderLHighSweep(body, title);
+  return renderTrailSweep(body, title);
+}
+
 function renderSectionViz(title: string, body: string): React.ReactNode {
   const t = title.toUpperCase();
 
@@ -4770,7 +6236,7 @@ function renderSectionViz(title: string, body: string): React.ReactNode {
   if (t.includes('DRAWDOWN EPISODE ANALYSIS')) return renderDrawdownEpisodes(body);
   if (t.includes('RISK-ADJUSTED RETURN QUALITY')) return renderRiskAdjustedQuality(body);
   if (t.includes('DAILY VAR') || t.includes('CVAR')) return renderDailyVarCvar(body);
-  if (t.includes('SIGNAL PREDICTIVENESS')) return <PreFallback body={body} />;
+  if (t.includes('SIGNAL PREDICTIVENESS')) return renderSignalPredictiveness(body);
   if (t.includes('SLIPPAGE IMPACT SWEEP')) return <PreFallback body={body} />;
   if (t.includes('NOISE PERTURBATION STABILITY TEST')) return <PreFallback body={body} />;
   if (t.includes('PARAM JITTER')) return <PreFallback body={body} />;
@@ -4781,17 +6247,20 @@ function renderSectionViz(title: string, body: string): React.ReactNode {
   if (t.includes('MINIMUM CUMULATIVE RETURN')) return renderMinCumReturn(body);
   if (t.includes('LIQUIDITY CAPACITY CURVE')) return renderLiquidityCapacityCurve(body);
   if (t.includes('MARKET CAP DIAGNOSTIC')) return renderMarketCapDiagnostic(body);
+  if (/^RUIN PROBABILITY/i.test(t)) return renderRuinProbability(body);
+  if (t.includes('DEFLATED SHARPE RATIO')) return renderDeflatedSharpe(body);
 
-  if (t.includes('TAIL GUARDRAIL GRID SWEEP')) return <PreFallback body={body} />;
-  if (t.includes('PARAMETER SURFACE MAP')) return <PreFallback body={body} />;
+  if (t.includes('TAIL GUARDRAIL GRID SWEEP')) return renderTailGuardrailGridSweep(body);
+  if (t.includes('PARAMETER SURFACE MAP')) return renderParamSurfaceMap(title, body);
   if (t.includes('SHARPE RIDGE MAP')) return <PreFallback body={body} />;
   if (t.includes('SHARPE PLATEAU DETECTOR')) return <PreFallback body={body} />;
   if (t.includes('PARAMETRIC STABILITY CUBE')) return renderStabilityCube(body);
   if (t.includes('RISK THROTTLE STABILITY CUBE')) return renderStabilityCube(body);
   if (t.includes('EXIT ARCHITECTURE STABILITY CUBE')) return renderStabilityCube(body);
 
-  if (t.includes('PARAMETER SWEEP')) return <PreFallback body={body} />;
-  if (t.includes('L_HIGH SURFACE')) return <PreFallback body={body} />;
+  if (t.includes('PARAMETER SWEEP')) return renderParameterSweep(title, body);
+  if (t.includes('L_HIGH SURFACE') && t.includes('RANKED BY SHARPE')) return renderLHighRanked(body);
+  if (t.includes('L_HIGH SURFACE')) return renderLHighSweep(body, title);
 
   return <PreFallback body={body} />;
 }
@@ -6024,8 +7493,8 @@ export default function ResultsView({ results, jobId, startingCapital, params }:
                 <span>Equity Curve ($)</span>
                 {equityStatsBar && (
                   <span style={{ display: 'flex', alignItems: 'center', gap: 12, fontSize: 9, color: 'var(--t2)', fontFamily: 'var(--font-space-mono), Space Mono, monospace', textTransform: 'none', letterSpacing: '0.06em', fontWeight: 400 }}>
-                    {equityStatsBar.map((s) => (
-                      <span key={s.label}>
+                    {equityStatsBar.map((s, idx) => (
+                      <span key={`${s.label}-${idx}`}>
                         {s.label}: <span style={{ color: s.color, fontWeight: 700 }}>{s.value}</span>
                       </span>
                     ))}
