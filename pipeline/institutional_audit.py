@@ -895,19 +895,16 @@ def _apply_hybrid_day_param(
     enable_adaptive_lev: bool = True,
     early_fill_max_minutes: int = 9 * 60,
     trial_purchases: bool = False,
+    return_exit_bar: bool = False,
 ) -> tuple:
     """
     Compact re-implementation of apply_best_hybrid_day.
     trial_purchases=False: flat during trial, enter fresh at x_idx if passes.
     trial_purchases=True:  enter at 1x at open, adjust leverage at x_idx.
 
-    Returns (r, lev_used) where:
-      r        -- day return in 1x-equivalent space (adaptive leverage already applied)
-      lev_used -- the adaptive leverage scalar actually applied (L_BASE or L_HIGH).
-                  0.0 if no trade was taken (early_kill fired with trial_purchases=False).
-                  For trial_purchases=True the blended effective leverage is returned:
-                  trial period runs at 1x, post-trial at lev, so
-                  lev_used = (trial_bars * 1.0 + post_bars * lev) / total_bars.
+    Returns (r, lev_used) by default, or (r, lev_used, exit_bar_idx) when
+    return_exit_bar=True.  exit_bar_idx is the bar index where the position
+    was closed (stop, fill, or end-of-day).  -1 means no trade was taken.
     """
     n = len(path_1x)
 
@@ -924,28 +921,29 @@ def _apply_hybrid_day_param(
     # ── TRIAL_PURCHASES = False: flat during trial, enter fresh if passes ──
     if not trial_purchases:
         if enable_early_kill and roi_x < early_y_1x:
-            return 0.0, 0.0  # no trade -- no fees
+            return (0.0, 0.0, -1) if return_exit_bar else (0.0, 0.0)
         lev = l_high if (enable_adaptive_lev and roi_x >= strong_thr_1x) else l_base
         entry_1x = float(path_1x[x_idx])
         peak = 0.0
+        exit_i = n - 1
         exit_roi_incr = (float(path_1x[-1]) if np.isfinite(path_1x[-1]) else entry_1x) - entry_1x
         for i in range(x_idx + 1, n):
             v = float(path_1x[i])
             if not np.isfinite(v): continue
             incr = v - entry_1x
             if enable_portfolio_stop and incr <= port_stop_1x:
-                exit_roi_incr = incr; break
+                exit_roi_incr = incr; exit_i = i; break
             if incr > peak: peak = incr
             if enable_trailing_stop and (incr - peak) <= -abs(trail_dd_1x):
-                exit_roi_incr = incr; break
+                exit_roi_incr = incr; exit_i = i; break
             if enable_early_fill and i <= fill_max_idx and v >= early_fill_threshold_1x:
-                exit_roi_incr = incr; break
-        return float(exit_roi_incr * lev), lev
+                exit_roi_incr = incr; exit_i = i; break
+        r_out = float(exit_roi_incr * lev)
+        return (r_out, lev, exit_i) if return_exit_bar else (r_out, lev)
 
     # ── TRIAL_PURCHASES = True: enter at 1x at open, adjust at trial bar ──
     if enable_early_kill and roi_x < early_y_1x:
-        # Held at 1x through trial only -- no post-trial position
-        return float(roi_x), 1.0
+        return (float(roi_x), 1.0, x_idx) if return_exit_bar else (float(roi_x), 1.0)
     lev = l_high if (enable_adaptive_lev and roi_x >= strong_thr_1x) else l_base
     trial_return = roi_x
     peak     = roi_x
@@ -967,7 +965,8 @@ def _apply_hybrid_day_param(
     post_bars   = max(exit_bar - x_idx, 0)
     total_bars  = trial_bars + post_bars
     blended_lev = (trial_bars * 1.0 + post_bars * lev) / total_bars if total_bars > 0 else lev
-    return float(trial_return + post_trial_incremental * lev), blended_lev
+    r_out = float(trial_return + post_trial_incremental * lev)
+    return (r_out, blended_lev, exit_bar) if return_exit_bar else (r_out, blended_lev)
 
 
 

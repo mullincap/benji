@@ -1,7 +1,7 @@
 'use client';
 
 interface FilterRow {
-  filter: string;
+  filter?: string;
   sharpe?: number | null;
   max_dd?: number | null;
   active?: number | null;
@@ -180,7 +180,9 @@ export default function FilterTable({ rows, selectedFilter, onSelectFilter }: Fi
               <td style={{ padding: '6px 4px', textAlign: 'right', color: metricColor('cagr', row.cagr) }}>{fmtPercent2(row.cagr)}</td>
               <td style={{ padding: '6px 4px', textAlign: 'right', color: metricColor('cv', (row.wf_cv ?? row.cv) as number) }}>{fmt((row.wf_cv ?? row.cv) as number)}</td>
               <td style={{ padding: '6px 4px', textAlign: 'right', color: metricColor('dsr_pct', row.dsr_pct as number) }}>{fmt(row.dsr_pct as number, 1)}</td>
-              <td style={{ padding: '6px 4px', textAlign: 'right', color: metricColor('grade', row.grade_score ?? row.grade) }}>{row.grade_score ?? row.grade ?? 'N/A'}</td>
+              <td style={{ padding: '6px 4px', textAlign: 'right', color: metricColor('grade', row.grade_score ?? row.grade) }}>
+                {String(row.grade_score ?? row.grade ?? 'N/A')}
+              </td>
             </tr>
           );
         })}

@@ -665,6 +665,22 @@ export default function ParamForm({ params, onChange, onSubmit }: ParamFormProps
             <Row label="vol_lev_dd_threshold">
               <NumInput value={p.vol_lev_dd_threshold} onChange={(v) => set('vol_lev_dd_threshold', v)} />
             </Row>
+            <Row label="lev_quantization_mode">
+              <SelInput
+                value={p.lev_quantization_mode}
+                onChange={(v) => set('lev_quantization_mode', v)}
+                options={[
+                  { value: 'off', label: 'off' },
+                  { value: 'binary', label: 'binary (1x/cap)' },
+                  { value: 'stepped', label: 'stepped' },
+                ]}
+              />
+            </Row>
+            <ConditionalParams show={String(p.lev_quantization_mode ?? 'off') === 'stepped'}>
+              <Row label="lev_quantization_step">
+                <NumInput value={p.lev_quantization_step} onChange={(v) => set('lev_quantization_step', v)} />
+              </Row>
+            </ConditionalParams>
           </ConditionalParams>
 
           <Row label="enable_contra_lev_scaling">

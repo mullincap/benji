@@ -154,6 +154,8 @@ class JobRequest(BaseModel):
     vol_lev_target_vol:         float = 0.02
     vol_lev_max_boost:          float = 2.0
     vol_lev_dd_threshold:       float = -0.06
+    lev_quantization_mode:      str   = "off"   # off | binary | stepped
+    lev_quantization_step:      float = 0.1
 
     enable_contra_lev_scaling:  bool  = False
     contra_lev_window:          int   = 30

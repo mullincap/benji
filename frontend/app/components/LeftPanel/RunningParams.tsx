@@ -8,7 +8,7 @@ const KEY_PARAMS: { key: string; label: string }[] = [
   { key: 'leaderboard_index', label: 'leaderboard_index' },
   { key: 'sort_by', label: 'sort_by' },
   { key: 'mode', label: 'mode' },
-  { key: 'leverage', label: 'leverage' },
+  { key: 'l_high', label: 'l_high' },
   { key: 'stop_raw_pct', label: 'stop_raw_pct' },
   { key: 'starting_capital', label: 'starting_capital' },
 ];

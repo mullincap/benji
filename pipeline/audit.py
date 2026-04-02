@@ -531,11 +531,15 @@ PERF_LEV_MAX_BOOST        = float(os.environ.get("PERF_LEV_MAX_BOOST", "1.5"))  
 # VOL_LEV_DD_THRESHOLD  drawdown level that suppresses all boost
 # VOL_LEV_DD_SCALE      multiplier during DD guard (1.0 = no boost)
 # VOL_LEV_MAX_BOOST     ceiling on the boost scalar
+# LEV_QUANTIZATION_MODE off|binary|stepped quantization on vol-lev scalar
+# LEV_QUANTIZATION_STEP step size for stepped mode
 VOL_LEV_WINDOW            = int(os.environ.get("VOL_LEV_WINDOW", "30"))      # rolling window (days)
 VOL_LEV_TARGET_VOL        = float(os.environ.get("VOL_LEV_TARGET_VOL", "0.02"))    # target daily vol (2% — boost when vol < this)
 VOL_LEV_SHARPE_REF        = 3.0     # Sharpe at which Sharpe scalar = 1.0
 
 VOL_LEV_MAX_BOOST         = float(os.environ.get("VOL_LEV_MAX_BOOST", "2.0"))     # max boost multiplier on static leverage
+LEV_QUANTIZATION_MODE     = os.environ.get("LEV_QUANTIZATION_MODE", "off").strip().lower()  # off | binary | stepped
+LEV_QUANTIZATION_STEP     = float(os.environ.get("LEV_QUANTIZATION_STEP", "0.1"))            # scalar step for stepped mode
 
 
 
@@ -6877,6 +6881,8 @@ def simulate(df_4x: pd.DataFrame,
     _vlev_dd_thr   = float(vol_lev_params['dd_threshold']) if _vlev_on else -0.15
     _vlev_dd_scale = float(vol_lev_params['dd_scale'])     if _vlev_on else 1.0
     _vlev_max_b    = float(vol_lev_params['max_boost'])    if _vlev_on else 2.0
+    _lev_q_mode    = LEV_QUANTIZATION_MODE if _vlev_on else "off"
+    _lev_q_step    = max(float(LEV_QUANTIZATION_STEP), 1e-9) if _vlev_on else 0.1
     _vlev_ret_buf: list  = []   # rolling return buffer (same lag discipline as plev)
     _vlev_eq_peak: float = 1.0  # running equity peak (for drawdown tracking)
     _vlev_scalar_history: list = []  # (date_str, final_lev) for dashboard panel
@@ -6909,6 +6915,7 @@ def simulate(df_4x: pd.DataFrame,
     parse_fail = 0
     parse_ok   = 0
     trade_days     = 0
+    _exit_bars: dict = {}  # date_str -> bar index where position was closed
     total_gross    = 0.0
     total_fees     = 0.0
     equity_running = 1.0   # compound equity multiplier (1.0 = starting capital)
@@ -7043,6 +7050,13 @@ def simulate(df_4x: pd.DataFrame,
                 _dg    = _vlev_dd_scale if _dd < _vlev_dd_thr else 1.0
                 # Final boost scalar: floor at 1.0 (never reduce below static)
                 _vlev_boost = float(np.clip(_vc * _sc * _dg, 1.0, _vlev_max_b))
+            if _lev_q_mode == "binary":
+                _mid = 1.0 + ((_vlev_max_b - 1.0) * 0.5)
+                _vlev_boost = _vlev_max_b if _vlev_boost >= _mid else 1.0
+            elif _lev_q_mode == "stepped":
+                _steps = round((_vlev_boost - 1.0) / _lev_q_step)
+                _vlev_boost = 1.0 + (_steps * _lev_q_step)
+                _vlev_boost = float(np.clip(_vlev_boost, 1.0, _vlev_max_b))
             _col_ts_v = str(_col_to_timestamp(col_str) or col_str)[:10]
             _vlev_scalar_history.append((_col_ts_v, _vlev_boost))
             # Multiply static params — ratio between L_BASE and L_HIGH preserved
@@ -7206,7 +7220,7 @@ def simulate(df_4x: pd.DataFrame,
                 # _clev_eq_lvl unchanged
             continue
 
-        r, lev_used = _apply_hybrid_day_param(
+        r, lev_used, _day_exit_bar = _apply_hybrid_day_param(
             path_1x,
             early_x_minutes          = int(round(params["EARLY_KILL_X"])),
             early_y_1x               = early_y_1x,
@@ -7220,7 +7234,11 @@ def simulate(df_4x: pd.DataFrame,
             enable_early_fill        = en_ef,
             early_fill_max_minutes   = efx_val,
             trial_purchases          = TRIAL_PURCHASES,
+            return_exit_bar          = True,
         )
+        _eb_ts = _col_to_timestamp(col_str)
+        if _eb_ts is not None:
+            _exit_bars[_eb_ts.strftime("%Y-%m-%d")] = int(_day_exit_bar)
         # ── Deduct transaction costs (fees + funding) ──────────────────────
         # Capital is split evenly across N symbols, so total notional = 1x of capital
         # regardless of symbol count. Fees are therefore a fixed % of capital per
@@ -7528,6 +7546,7 @@ def simulate(df_4x: pd.DataFrame,
         ratchet_summary           = ratchet.summary() if ratchet is not None else None,
         adaptive_ratchet_summary  = adaptive_ratchet.summary() if adaptive_ratchet is not None else None,
         fees_rows                 = list(_fees_rows),   # for weekly/monthly milestone tables
+        exit_bars                 = _exit_bars,          # {YYYY-MM-DD: bar_idx} for intraday chart
     )
 
 # ══════════════════════════════════════════════════════════════════════
@@ -16683,6 +16702,8 @@ def main():
         print(f"    [ON]  VOL_LEV    window={VOL_LEV_WINDOW}d  "
               f"target_vol={VOL_LEV_TARGET_VOL*100:.1f}%  sharpe_ref={VOL_LEV_SHARPE_REF}  "
               f"dd_thr={VOL_LEV_DD_THRESHOLD*100:.0f}%  max_boost={VOL_LEV_MAX_BOOST}x  "
+              f"quant={LEV_QUANTIZATION_MODE}"
+              f"{(f' step={LEV_QUANTIZATION_STEP:g}' if LEV_QUANTIZATION_MODE == 'stepped' else '')}  "
               f"[contrarian: boosts when vol LOW + Sharpe LOW]")
     else:
         print("    [OFF] VOL_LEV")
@@ -16975,7 +16996,7 @@ def main():
 
     # ── BTC Trend (Moving Average) Filter ─────────────────────────────
     results_map = {}
-
+    _exit_bars_by_filter: dict = {}  # {label: {YYYY-MM-DD: bar_idx}}
 
     for cfg_name, cfg_params in CANDIDATE_CONFIGS:
       for label, mode, v3 in FILTER_MODES:
@@ -17107,6 +17128,7 @@ def main():
         _sim_vol_lev_history     = _sim_out.get("vol_lev_scalar_history",   [])
         _sim_contra_lev_history  = _sim_out.get("contra_lev_scalar_history", [])
         _sim_fees_rows           = _sim_out.get("fees_rows", [])
+        _exit_bars_by_filter[run_key] = _sim_out.get("exit_bars", {})
 
         # ── Weekly / Monthly milestone tables ─────────────────────────
         if ENABLE_WEEKLY_MILESTONES and _sim_fees_rows:
@@ -18803,6 +18825,31 @@ def main():
             print(f"FINAL_EQUITY_SERIES({_tag}): {_json.dumps([round(float(x), 4) for x in _eq_norm.tolist()])}")
             print(f"FINAL_DD_SERIES({_tag}): {_json.dumps([round(float(x), 4) for x in _dd.tolist()])}")
     print("=" * 70)
+
+    # ── INTRADAY BAR PATHS (raw 1x% cumulative return from open per bar) ─────
+    # Emitted once (filter-agnostic) so the frontend can draw actual intraday
+    # paths for each day rather than straight-line approximations.
+    # Values are: df_4x[col][i] / PIVOT_LEVERAGE * 100  (1x pct from open).
+    # Flat/NaN bars are stored as null.
+    try:
+        import json as _json_id
+        import numpy as _np_id
+        _intraday_dict: dict = {}
+        for _id_col in df_4x.columns:
+            _ts = _col_to_timestamp(str(_id_col))
+            _id_key = _ts.strftime("%Y-%m-%d") if _ts is not None else str(_id_col)[:10]
+            _id_raw  = df_4x[_id_col].to_numpy(dtype=float)
+            # df_4x already stores the CUMULATIVE return from session open as a
+            # decimal (e.g. -0.016 = -1.6%).  Just scale to % — no cumsum needed.
+            _id_arr  = _id_raw * 100.0
+            _intraday_dict[_id_key] = [
+                round(float(v), 3) if _np_id.isfinite(v) else None
+                for v in _id_arr.tolist()
+            ]
+        print(f"FINAL_INTRADAY_BARS: {_json_id.dumps(_intraday_dict)}")
+        print(f"FINAL_INTRADAY_EXIT_BARS: {_json_id.dumps(_exit_bars_by_filter)}")
+    except Exception:
+        pass
 
     # ── MARKET CAP SUMMARY PANEL ──────────────────────────────────────
     # Printed at the very end so it's visible alongside the performance

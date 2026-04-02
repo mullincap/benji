@@ -9,7 +9,7 @@ export default function Topbar() {
     { key: 'compiler', icon: '</>' },
     { key: 'indexer', icon: '⌕' },
     { key: 'simulator', icon: '◴' },
-    { key: 'manager', icon: '⚙' },
+    { key: 'traders', icon: '⚙' },
     { key: 'projector', icon: '▣' },
   ];
 

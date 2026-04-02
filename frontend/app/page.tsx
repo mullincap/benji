@@ -108,6 +108,8 @@ const DEFAULT_PARAMS: Record<string, unknown> = {
   vol_lev_target_vol: 0.02,
   vol_lev_max_boost: 2.0,
   vol_lev_dd_threshold: -0.06,
+  lev_quantization_mode: 'off',
+  lev_quantization_step: 0.1,
   enable_contra_lev_scaling: false,
   contra_lev_window: 30,
   contra_lev_max_boost: 2.0,
@@ -645,7 +647,15 @@ export default function Home() {
               </div>
             )}
             {appState === 'results' && (
-              <div style={{ flex: 1, overflowY: 'auto' }}>
+              <div
+                style={{
+                  flex: 1,
+                  width: '100%',
+                  minWidth: 0,
+                  overflowY: 'auto',
+                  scrollbarGutter: 'stable both-edges',
+                }}
+              >
                 <ResultsView
                   key={jobId ?? 'results-none'}
                   results={results}

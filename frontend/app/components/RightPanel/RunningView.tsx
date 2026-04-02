@@ -86,7 +86,7 @@ export default function RunningView({
   // Auto-scroll to bottom
   useEffect(() => {
     if (logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight;
-  }, [verbose ? rawLines : logLines]);
+  }, [verbose, rawLines, logLines]);
 
   const displayLines = verbose ? rawLines : logLines;
 
@@ -181,7 +181,7 @@ export default function RunningView({
 
       {/* Live log card — fills remaining height, collapses to header strip */}
       <div style={{
-        background: 'var(--bg2)',
+        background: '#000',
         border: '1px solid var(--line)',
         borderRadius: 3,
         display: 'flex',

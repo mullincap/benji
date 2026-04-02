@@ -156,7 +156,9 @@ function getInactiveChildKeys(params: Record<string, unknown>): Set<string> {
     hide(['perf_lev_window', 'perf_lev_sortino_target', 'perf_lev_max_boost']);
   }
   if (!params.enable_vol_lev_scaling) {
-    hide(['vol_lev_window', 'vol_lev_target_vol', 'vol_lev_max_boost', 'vol_lev_dd_threshold']);
+    hide(['vol_lev_window', 'vol_lev_target_vol', 'vol_lev_max_boost', 'vol_lev_dd_threshold', 'lev_quantization_mode', 'lev_quantization_step']);
+  } else if (String(params.lev_quantization_mode ?? 'off') !== 'stepped') {
+    hide(['lev_quantization_step']);
   }
   if (!params.enable_contra_lev_scaling) {
     hide(['contra_lev_window', 'contra_lev_max_boost', 'contra_lev_dd_threshold']);
@@ -252,6 +254,7 @@ const CONFIG_SECTIONS: ConfigSection[] = [
     keys: [
       'enable_perf_lev_scaling', 'perf_lev_window', 'perf_lev_sortino_target', 'perf_lev_max_boost',
       'enable_vol_lev_scaling', 'vol_lev_window', 'vol_lev_target_vol', 'vol_lev_max_boost', 'vol_lev_dd_threshold',
+      'lev_quantization_mode', 'lev_quantization_step',
       'enable_contra_lev_scaling', 'contra_lev_window', 'contra_lev_max_boost', 'contra_lev_dd_threshold',
     ],
   },

@@ -1220,7 +1220,6 @@ function ReturnBoxPlotCard({
   const zeroInside = 0 >= minVal && 0 <= maxVal;
   const tickCount = 5;
   const tickValues = Array.from({ length: tickCount }, (_, i) => {
-    if (tickCount === 1) return minVal;
     return minVal + ((maxVal - minVal) * i) / (tickCount - 1);
   });
 
@@ -1369,6 +1368,12 @@ function normalizeFilterLabel(s: string): string {
     .replace(/\+/g, 'p')
     .replace(/[^a-z0-9]+/g, ' ')
     .trim();
+}
+
+function normalizeFilterLabelCore(s: string): string {
+  const base = normalizeFilterLabel(s);
+  // Strip leading scorecard prefix patterns like "A -", "B+", etc.
+  return base.replace(/^[a-f](?:\s*[\+\-])?\s+/, '').trim();
 }
 
 function extractAlerts(text: string): string[] {
@@ -1577,7 +1582,12 @@ function extractSelectedFilterAdvancedSections(text: string, selectedFilter: str
   const nextFeesIdx = headings.find((h) => h.idx > stressRef.idx && h.title.includes('FEES PANEL'))?.idx;
   const nextDailyAuditIdx = headings.find((h) => h.idx > stressRef.idx && h.title.includes('DAILY SERIES AUDIT'))?.idx;
   const runSummaryIdx = lines.findIndex((l, i) => i > blockStart && l.includes('RUN SUMMARY'));
-  const endCandidates = [nextFeesIdx, nextDailyAuditIdx, runSummaryIdx >= 0 ? runSummaryIdx : undefined]
+  // Also stop at the first special section title (milestones, scorecards, sweeps) after stressRef
+  let firstSpecialIdx: number | undefined;
+  for (let i = stressRef.idx + 1; i < lines.length; i += 1) {
+    if (isSpecialSectionTitleLine(lines[i].trim())) { firstSpecialIdx = i; break; }
+  }
+  const endCandidates = [nextFeesIdx, nextDailyAuditIdx, runSummaryIdx >= 0 ? runSummaryIdx : undefined, firstSpecialIdx]
     .filter((v): v is number => typeof v === 'number' && v > blockStart)
     .sort((a, b) => a - b);
   const blockEnd = endCandidates[0] ?? lines.length;
@@ -1719,6 +1729,10 @@ function isSpecialSectionTitleLine(line: string): boolean {
     || t.includes('SIGNAL PREDICTIVENESS')
     || t.includes('ALLOCATOR VIEW SCORECARD')
     || t.includes('TECHNICAL APPENDIX SCORECARD')
+    || /^WHAT YOU HAVE\b/i.test(t)
+    || /^WHAT YOU STILL NEED\b/i.test(t)
+    || /^BOTTOM LINE\b/i.test(t)
+    || /^RUN SUMMARY\b/i.test(t)
     || /^TAIL GUARDRAIL GRID SWEEP\b/i.test(t)
     || /^PARAMETER SWEEP\b/i.test(t)
     || /^L_HIGH SURFACE - RANKED BY SHARPE\b/i.test(t)
@@ -1772,11 +1786,17 @@ function extractSpecialFullReportSections(text: string, selectedFilter: string |
     const line = lines[start].trim().replace(/\s{2,}/g, ' ');
     const filterName = parseSignalFilterName(line);
     if (!matchesSelectedFilter(filterName, selectedFilter)) continue;
+    const dividerEnd = findDividerBoundedEnd(lines, start);
+    const allocatorIdx = lines.findIndex((l, j) => j > start && l.includes('ALLOCATOR VIEW SCORECARD'));
+    let nextHeadingIdx = lines.length;
+    for (let j = start + 1; j < lines.length; j += 1) {
+      if (parseHeadingLine(lines[j].trim())) { nextHeadingIdx = j; break; }
+    }
     const end = Math.min(
       nextSignal,
-      lines.findIndex((l, idx) => idx > start && l.includes('ALLOCATOR VIEW SCORECARD')) > -1
-        ? lines.findIndex((l, idx) => idx > start && l.includes('ALLOCATOR VIEW SCORECARD'))
-        : lines.length,
+      dividerEnd,
+      nextHeadingIdx,
+      allocatorIdx > -1 ? allocatorIdx : lines.length,
     );
     const body = lines.slice(start + 1, end).join('\n').trim();
     if (!body) continue;
@@ -1794,9 +1814,18 @@ function extractSpecialFullReportSections(text: string, selectedFilter: string |
         end = i;
         break;
       }
+      if (parseHeadingLine(t)) {
+        end = i;
+        break;
+      }
       if (isDividerLine(t)) {
         const next = (lines[i + 1] ?? '').trim();
-        if (/^OUTPUT FILES$/i.test(next) || /^RUN INPUTS SUMMARY$/i.test(next)) {
+        if (
+          /^OUTPUT FILES$/i.test(next)
+          || /^RUN INPUTS SUMMARY$/i.test(next)
+          || isSpecialSectionTitleLine(next)
+          || parseHeadingLine(next)
+        ) {
           end = i;
           break;
         }
@@ -1820,7 +1849,20 @@ function extractSpecialFullReportSections(text: string, selectedFilter: string |
       const isMatch = matchesSelectedFilter(filterName, selectedFilter);
       if (!isMatch) continue;
       matchedForSelected += 1;
-      const end = findDividerBoundedEnd(lines, start);
+      let nextMilestoneOrHeading = lines.length;
+      for (let j = start + 1; j < lines.length; j += 1) {
+        const tl = lines[j].trim();
+        if (
+          parseHeadingLine(tl)
+          || tl.includes('WEEKLY MILESTONES')
+          || tl.includes('MONTHLY MILESTONES')
+          || tl.includes('ALLOCATOR VIEW SCORECARD')
+          || tl.includes('TECHNICAL APPENDIX SCORECARD')
+          || tl.includes('RUN INPUTS SUMMARY')
+          || tl.includes('OUTPUT FILES')
+        ) { nextMilestoneOrHeading = j; break; }
+      }
+      const end = Math.min(findDividerBoundedEnd(lines, start), nextMilestoneOrHeading);
       const body = lines.slice(start + 1, end).join('\n').trim();
       if (!body) continue;
       sections.push({ title: titleLine, body });
@@ -1860,7 +1902,33 @@ function extractSpecialFullReportSections(text: string, selectedFilter: string |
     const familyIdx = sweepTitleMatchers.findIndex((rx) => rx.test(line));
     if (familyIdx < 0) continue;
     const titleLine = line.replace(/\s{2,}/g, ' ');
-    const end = findDividerBoundedEnd(lines, i);
+    let nextSectionIdx = lines.length;
+    for (let j = i + 1; j < lines.length; j += 1) {
+      const tl = lines[j].trim();
+      if (parseHeadingLine(tl) || sweepTitleMatchers.some((rx) => rx.test(tl))) {
+        nextSectionIdx = j;
+        break;
+      }
+    }
+    let end = Math.min(findDividerBoundedEnd(lines, i), nextSectionIdx);
+    if (/^MARKET CAP DIAGNOSTIC\b/i.test(line)) {
+      let sawMissingRowsLine = false;
+      let forcedEnd: number | null = null;
+      for (let j = i + 1; j < nextSectionIdx; j += 1) {
+        const tl = lines[j].trim();
+        if (/^MCAP_STATS_MISSING_ROWS\s*:/i.test(tl)) {
+          sawMissingRowsLine = true;
+          continue;
+        }
+        if (sawMissingRowsLine && /^[-─═]{20,}$/.test(tl)) {
+          forcedEnd = j + 1; // include trailing divider line, and stop there
+          break;
+        }
+      }
+      if (forcedEnd !== null) {
+        end = Math.min(forcedEnd, nextSectionIdx);
+      }
+    }
     const body = lines.slice(i + 1, end).join('\n').trim();
     if (!body) continue;
     const parsed: ParsedSection = { title: titleLine, body };
@@ -2026,6 +2094,95 @@ function buildFullReportSections(text: string, selectedFilter: string | null): P
   return sortSections(filterSectionsForSelectedFilter(all, selectedFilter));
 }
 
+function parseNumberToken(token: string | undefined): number | null {
+  if (!token) return null;
+  const n = Number(token.replace(/,/g, ''));
+  return Number.isFinite(n) ? n : null;
+}
+
+function parsePercentToken(token: string | undefined): number | null {
+  if (!token) return null;
+  const n = Number(token.replace('%', ''));
+  return Number.isFinite(n) ? n : null;
+}
+
+function parseFeesTablesFromAuditOutput(text: string): Record<string, FeesRow[]> {
+  if (!text) return {};
+  const lines = text.split('\n');
+  const out: Record<string, FeesRow[]> = {};
+  const activeRe = /^\s*(\d{4}-\d{2}-\d{2})\s+([+-]?\d[\d,]*\.\d+)\s+([+-]?\d[\d,]*\.\d+)\s+([+-]?\d[\d,]*\.\d+)\s+([+-]?\d[\d,]*\.\d+)\s+([+-]?\d[\d,]*\.\d+)\s+([+-]?\d[\d,]*\.\d+)\s+([+-]?\d[\d,]*\.\d+)\s+([+-]?\d[\d,]*\.\d+)\s+([+-]?\d+\.\d+)%\s+([+-]?\d+\.\d+)%\s+([+-]?\d[\d,]*\.\d+)\s*$/;
+  const noEntryRe = /^\s*(\d{4}-\d{2}-\d{2})\s+([+-]?\d[\d,]*\.\d+)\s+(?:—\s*(NO ENTRY|FILTERED)\s*—|-+\s*(NO ENTRY|FILTERED)\s*-+)\s+([+-]?\d[\d,]*\.\d+)\s+([+-]?\d+\.\d+)%\s+([+-]?\d+\.\d+)%\s+([+-]?\d[\d,]*\.\d+)\s*$/;
+  let currentFilter = '';
+
+  for (let i = 0; i < lines.length; i += 1) {
+    const line = lines[i].trim();
+    const sim = line.match(/^SIMULATING:\s*(.+)$/i);
+    if (sim) {
+      currentFilter = sim[1].trim();
+      continue;
+    }
+    if (!/^FEES PANEL\b/i.test(line)) continue;
+
+    const key = currentFilter || `fees_panel_${Object.keys(out).length + 1}`;
+    const rows: FeesRow[] = [];
+    let headerSeen = false;
+    for (let j = i + 1; j < lines.length; j += 1) {
+      const raw = lines[j];
+      const t = raw.trim();
+      if (!t) continue;
+      if (/^SIMULATING:\s*/i.test(t) || /^FEES PANEL\b/i.test(t)) break;
+      if (!headerSeen) {
+        if (/^Date\s+Start\s+\(\$\)\s+Margin\s+\(\$\)\s+Lev\s+Invested\s+\(\$\)\s+Trade Vol\s+\(\$\)\s+Taker Fee\s+\(\$\)\s+Funding\s+\(\$\)\s+End\s+\(\$\)\s+Ret Gross%\s+Ret Net%\s+Net P&L\s+\(\$\)\s*$/i.test(t)) {
+          headerSeen = true;
+        }
+        continue;
+      }
+      if (!/^\d{4}-\d{2}-\d{2}\b/.test(t)) continue;
+      const mNo = t.match(noEntryRe);
+      if (mNo) {
+        const reason = (mNo[3] || mNo[4] || '').toUpperCase();
+        rows.push({
+          date: mNo[1],
+          start: parseNumberToken(mNo[2]),
+          margin: null,
+          lev: null,
+          invested: null,
+          trade_vol: null,
+          taker_fee: null,
+          funding: null,
+          end: parseNumberToken(mNo[5]),
+          ret_gross: parsePercentToken(mNo[6]),
+          ret_net: parsePercentToken(mNo[7]),
+          net_pnl: parseNumberToken(mNo[8]),
+          no_entry: true,
+          no_entry_reason: reason === 'FILTERED' ? 'filter' : 'conviction_gate',
+        });
+        continue;
+      }
+      const mAct = t.match(activeRe);
+      if (mAct) {
+        rows.push({
+          date: mAct[1],
+          start: parseNumberToken(mAct[2]),
+          margin: parseNumberToken(mAct[3]),
+          lev: parseNumberToken(mAct[4]),
+          invested: parseNumberToken(mAct[5]),
+          trade_vol: parseNumberToken(mAct[6]),
+          taker_fee: parseNumberToken(mAct[7]),
+          funding: parseNumberToken(mAct[8]),
+          end: parseNumberToken(mAct[9]),
+          ret_gross: parsePercentToken(mAct[10]),
+          ret_net: parsePercentToken(mAct[11]),
+          net_pnl: parseNumberToken(mAct[12]),
+          no_entry: false,
+        });
+      }
+    }
+    if (rows.length > 0) out[key] = rows;
+  }
+  return out;
+}
+
 function syntheticDateAt(index: number, total: number): Date {
   const d = new Date();
   d.setHours(0, 0, 0, 0);
@@ -2053,6 +2210,7 @@ function CurveCard({
   statsBar,
   backgroundColor = 'var(--bg0)',
   showBorder = true,
+  logScale = false,
 }: {
   title: string;
   data: Point[] | null | undefined;
@@ -2073,6 +2231,7 @@ function CurveCard({
   statsBar?: Array<{ label: string; value: string; color: string }>;
   backgroundColor?: string;
   showBorder?: boolean;
+  logScale?: boolean;
 }) {
   const rows = useMemo(() => {
     const src = data ?? [];
@@ -2102,6 +2261,7 @@ function CurveCard({
       dailyRetPct: number | null;
       ath?: number;
       ma?: number | null;
+      trend?: number | null;
     }>;
     const out = rows.map((r, i) => {
       const prev = i > 0 ? rows[i - 1].y : null;
@@ -2112,6 +2272,7 @@ function CurveCard({
         dailyRetPct,
         ath,
         ma: null as number | null,
+        trend: null as number | null,
       };
     });
     if (showMovingAverage) {
@@ -2123,8 +2284,32 @@ function CurveCard({
         if (i >= w - 1) out[i].ma = sum / w;
       }
     }
+    // OLS trendline: linear on y (linear view) or on log(y) (log view), fit over index
+    const n = out.length;
+    if (n >= 2) {
+      const ys = logScale
+        ? out.map((r) => (r.y > 0 ? Math.log(r.y) : null))
+        : out.map((r) => r.y);
+      const validPairs = out.map((_, i) => ({ i, lv: ys[i] })).filter((p): p is { i: number; lv: number } => p.lv !== null);
+      if (validPairs.length >= 2) {
+        const vn = validPairs.length;
+        const sumX = validPairs.reduce((a, p) => a + p.i, 0);
+        const sumY = validPairs.reduce((a, p) => a + p.lv, 0);
+        const sumXY = validPairs.reduce((a, p) => a + p.i * p.lv, 0);
+        const sumX2 = validPairs.reduce((a, p) => a + p.i * p.i, 0);
+        const denom = vn * sumX2 - sumX * sumX;
+        if (denom !== 0) {
+          const slope = (vn * sumXY - sumX * sumY) / denom;
+          const intercept = (sumY - slope * sumX) / vn;
+          for (let i = 0; i < n; i += 1) {
+            const predicted = slope * i + intercept;
+            out[i].trend = logScale ? Math.exp(predicted) : predicted;
+          }
+        }
+      }
+    }
     return out;
-  }, [rows, showAthLine, showMovingAverage, movingAverageWindow]);
+  }, [rows, showAthLine, showMovingAverage, movingAverageWindow, logScale]);
   const monthRefs = useMemo(() => {
     if (!showMonthlyGridlines || withSeries.length < 2) return [] as number[];
     const out: number[] = [];
@@ -2215,6 +2400,9 @@ function CurveCard({
                 tickLine={{ stroke: 'var(--line)', strokeOpacity: 0.35 }}
               />
               <YAxis
+                scale={logScale ? 'log' : 'auto'}
+                domain={logScale ? ['auto', 'auto'] : undefined}
+                allowDataOverflow={logScale}
                 tickFormatter={(v) => yTickFmt(Number(v))}
                 tick={{ fill: 'var(--t2)', fontSize: 9, fontFamily: 'var(--font-space-mono), Space Mono, monospace' }}
                 axisLine={{ stroke: 'var(--line)', strokeOpacity: 0.35 }}
@@ -2296,6 +2484,19 @@ function CurveCard({
                   isAnimationActive={false}
                 />
               )}
+              {!isDrawdownPanel && (
+                <Line
+                  type="monotone"
+                  dataKey="trend"
+                  stroke="var(--amber)"
+                  strokeOpacity={0.5}
+                  strokeDasharray="4 4"
+                  strokeWidth={1}
+                  dot={false}
+                  connectNulls
+                  isAnimationActive={false}
+                />
+              )}
               {minPointInfo && (
                 <ReferenceDot
                   x={minPointInfo.ts}
@@ -2341,6 +2542,614 @@ type FilterRow = Record<string, unknown> & {
   equity_curve?: Point[];
   drawdown_curve?: Point[];
 };
+type FeesRow = {
+  date: string;
+  start: number | null;
+  margin: number | null;
+  lev: number | null;
+  invested: number | null;
+  trade_vol: number | null;
+  taker_fee: number | null;
+  funding: number | null;
+  end: number | null;
+  ret_gross: number | null;
+  ret_net: number | null;
+  net_pnl: number | null;
+  no_entry?: boolean;
+  no_entry_reason?: 'filter' | 'conviction_gate';
+};
+
+// ── Filter Equity Curve Overlay ──────────────────────────────────────────────
+const FILTER_PALETTE = [
+  '#00c896', '#378ADD', '#f0a500', '#cc66ff', '#ff6b6b',
+  '#00d4ff', '#ffd166', '#ff9f43', '#a29bfe', '#55efc4',
+];
+
+function FilterEquityCurveOverlay({
+  filters,
+  selectedFilter,
+  onSelectFilter,
+}: {
+  filters: FilterRow[];
+  selectedFilter: string | null;
+  onSelectFilter: (f: string) => void;
+}) {
+  const [hoveredFilter, setHoveredFilter] = useState<string | null>(null);
+
+  const active = filters.filter(
+    (r) => r.equity_curve && (r.equity_curve as Point[]).length > 0 && !r.not_run,
+  );
+  if (active.length === 0) return null;
+
+  const maxLen = Math.max(...active.map((r) => (r.equity_curve as Point[]).length));
+
+  let globalMin = Infinity;
+  let globalMax = -Infinity;
+  for (const row of active) {
+    for (const p of row.equity_curve as Point[]) {
+      const v = typeof p === 'number' ? p : (p as { y: number }).y;
+      if (Number.isFinite(v)) { globalMin = Math.min(globalMin, v); globalMax = Math.max(globalMax, v); }
+    }
+  }
+  if (!Number.isFinite(globalMin)) return null;
+  const rangePad = (globalMax - globalMin) * 0.08 || 0.05;
+  const yMin = globalMin - rangePad;
+  const yMax = globalMax + rangePad;
+
+  const W = 600; const H = 140;
+  const padL = 52; const padR = 12; const padT = 10; const padB = 22;
+  const plotW = W - padL - padR;
+  const plotH = H - padT - padB;
+
+  const toX = (i: number) => padL + (i / Math.max(maxLen - 1, 1)) * plotW;
+  const toY = (v: number) => padT + plotH - ((v - yMin) / (yMax - yMin)) * plotH;
+  const yBase = toY(1.0);
+
+  const yTicks: number[] = [0, 1, 2, 3, 4].map((t) => yMin + t * (yMax - yMin) / 4);
+  const fmtPct = (v: number) => { const p = (v - 1) * 100; return `${p >= 0 ? '+' : ''}${p.toFixed(0)}%`; };
+
+  return (
+    <div style={{ marginTop: 8, border: '1px solid var(--line)', borderRadius: 3, background: 'var(--bg1)', overflow: 'hidden' }}>
+      <div style={{ padding: '6px 10px', borderBottom: '1px solid var(--line)', display: 'flex', justifyContent: 'flex-end' }}>
+        <span style={{ fontSize: 9, color: 'var(--t2)', fontFamily: 'var(--font-space-mono), Space Mono, monospace' }}>
+          {active.length} filter{active.length !== 1 ? 's' : ''} · normalized returns
+        </span>
+      </div>
+      <div style={{ padding: '8px 10px 6px 10px' }}>
+        <svg
+          viewBox={`0 0 ${W} ${H}`}
+          style={{ width: '100%', display: 'block' }}
+          onMouseLeave={() => setHoveredFilter(null)}
+        >
+          {yTicks.map((v, i) => (
+            <line key={`yg-${i}`} x1={padL} y1={toY(v)} x2={W - padR} y2={toY(v)} stroke="rgba(255,255,255,0.04)" />
+          ))}
+          {yBase >= padT && yBase <= H - padB && (
+            <line x1={padL} y1={yBase} x2={W - padR} y2={yBase} stroke="rgba(255,255,255,0.18)" strokeDasharray="3 3" />
+          )}
+          {active.map((row, ci) => {
+            const label = String(row.filter ?? '');
+            const color = FILTER_PALETTE[ci % FILTER_PALETTE.length];
+            const isSel = selectedFilter != null && normalizeFilterLabel(label) === normalizeFilterLabel(selectedFilter);
+            const isHov = hoveredFilter != null && normalizeFilterLabel(label) === normalizeFilterLabel(hoveredFilter);
+            const hasHighlight = selectedFilter != null || hoveredFilter != null;
+            const opacity = hasHighlight ? (isSel || isHov ? 1 : 0.12) : 0.65;
+            const sw = isSel || isHov ? 1.5 : 0.75;
+            const curve = row.equity_curve as Point[];
+            const pts = curve
+              .map((p, i) => {
+                const v = typeof p === 'number' ? p : (p as { y: number }).y;
+                if (!Number.isFinite(v)) return null;
+                return `${toX(i).toFixed(1)},${toY(v).toFixed(1)}`;
+              })
+              .filter(Boolean)
+              .join(' ');
+            return (
+              <g key={label} style={{ cursor: 'pointer' }}
+                onClick={() => onSelectFilter(label)}
+                onMouseEnter={() => setHoveredFilter(label)}
+              >
+                <polyline points={pts} stroke={color} strokeWidth={sw} fill="none" opacity={opacity} />
+              </g>
+            );
+          })}
+          <line x1={padL} y1={padT} x2={padL} y2={H - padB} stroke="var(--line2)" />
+          {yTicks.map((v, i) => (
+            <text key={`yt-${i}`} x={padL - 4} y={toY(v) + 3} textAnchor="end" fontSize={7} fill="var(--t3)" fontFamily="var(--font-space-mono), Space Mono, monospace">
+              {fmtPct(v)}
+            </text>
+          ))}
+          {[0, 0.25, 0.5, 0.75, 1].map((frac) => {
+            const x = padL + frac * plotW;
+            const day = Math.round(frac * (maxLen - 1));
+            return (
+              <g key={`xt-${frac}`}>
+                <line x1={x} y1={H - padB} x2={x} y2={H - padB + 3} stroke="var(--line2)" />
+                <text x={x} y={H - padB + 11} textAnchor="middle" fontSize={7} fill="var(--t3)" fontFamily="var(--font-space-mono), Space Mono, monospace">
+                  Day {day}
+                </text>
+              </g>
+            );
+          })}
+        </svg>
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: '4px 12px', marginTop: 6, paddingLeft: padL }}>
+          {active.map((row, ci) => {
+            const label = String(row.filter ?? '');
+            const color = FILTER_PALETTE[ci % FILTER_PALETTE.length];
+            const isSel = selectedFilter != null && normalizeFilterLabel(label) === normalizeFilterLabel(selectedFilter);
+            const isHov = hoveredFilter != null && normalizeFilterLabel(label) === normalizeFilterLabel(hoveredFilter);
+            const shortLabel = label.replace(/^A\s*-\s*/i, '');
+            const sharpe = typeof row.sharpe === 'number' && Number.isFinite(row.sharpe) ? row.sharpe.toFixed(2) : null;
+            return (
+              <button
+                key={label}
+                onClick={() => onSelectFilter(label)}
+                onMouseEnter={() => setHoveredFilter(label)}
+                onMouseLeave={() => setHoveredFilter(null)}
+                style={{
+                  display: 'flex', alignItems: 'center', gap: 5,
+                  background: 'none', border: 'none', cursor: 'pointer', padding: 0,
+                  opacity: (selectedFilter || hoveredFilter) ? (isSel || isHov ? 1 : 0.35) : 1,
+                }}
+              >
+                <span style={{ width: 14, height: 2, background: color, display: 'inline-block', borderRadius: 1, flexShrink: 0 }} />
+                <span style={{ fontSize: 8, color: isSel || isHov ? 'var(--t0)' : 'var(--t2)', fontFamily: 'var(--font-space-mono), Space Mono, monospace' }}>
+                  {shortLabel}{sharpe ? ` · SR ${sharpe}` : ''}
+                </span>
+              </button>
+            );
+          })}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+type FeesRowWithCumulative = FeesRow & {
+  cum_trade_vol: number;
+  cum_fees: number;
+  cum_pnl: number;
+};
+
+function normalizeIntradaySeriesToDayReturn(
+  bars: Array<number | null>,
+  targetReturnPct: number | null | undefined,
+  exitBar: number | null | undefined,
+): Array<number | null> {
+  if (!Array.isArray(bars) || bars.length === 0) return [];
+  const finiteVals = bars.filter((v): v is number => v !== null && Number.isFinite(v));
+  if (finiteVals.length === 0) return bars.map(() => null);
+  const idx = typeof exitBar === 'number' && Number.isFinite(exitBar)
+    ? Math.max(0, Math.min(bars.length - 1, Math.floor(exitBar)))
+    : bars.length - 1;
+  let endpoint: number | null = null;
+  for (let i = idx; i >= 0; i -= 1) {
+    const v = bars[i];
+    if (v !== null && Number.isFinite(v)) {
+      endpoint = v;
+      break;
+    }
+  }
+  if (!Number.isFinite(endpoint) || endpoint === null || Math.abs(endpoint) < 1e-12 || targetReturnPct === null || targetReturnPct === undefined || !Number.isFinite(targetReturnPct)) {
+    return bars;
+  }
+  // Intraday payload units can vary by run (e.g., pct points vs centi-pct).
+  // Pick the scale that best matches the day's realized return endpoint.
+  const candidates = [1, 0.1, 0.01, 0.001, 0.0001, 10, 100, 1000];
+  let bestScale = 1;
+  let bestErr = Number.POSITIVE_INFINITY;
+  for (const s of candidates) {
+    const err = Math.abs((endpoint * s) - targetReturnPct);
+    if (err < bestErr) {
+      bestErr = err;
+      bestScale = s;
+    }
+  }
+  return bars.map((v) => (v === null || !Number.isFinite(v) ? null : v * bestScale));
+}
+
+function DailyReturnOverlapChart({
+  rows,
+  intradayBars,
+  intradayExitBars,
+}: {
+  rows: FeesRow[];
+  intradayBars?: Record<string, (number | null)[]> | null;
+  intradayExitBars?: Record<string, number> | null;
+}) {
+  const [hovered, setHovered] = useState<{ date: string; ret: number; cx: number; cy: number } | null>(null);
+  const [mode, setMode] = useState<'poly' | 'linear'>('poly');
+  const [isOpen, setIsOpen] = useState(true);
+  const [zoomLevel, setZoomLevel] = useState(5); // 1=zoomed out, 10=zoomed in
+  const [fullscreen, setFullscreen] = useState(false);
+  const [sliderTrackH, setSliderTrackH] = useState(90);
+  const sliderContainerRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!fullscreen) return;
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setFullscreen(false); };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [fullscreen]);
+
+  useEffect(() => {
+    const el = sliderContainerRef.current;
+    if (!el) return;
+    const ro = new ResizeObserver(() => {
+      // subtract button heights (~8px each) + gaps (5px each) + padding (4px total)
+      const h = Math.max(20, el.getBoundingClientRect().height - 8 - 8 - 10 - 4);
+      setSliderTrackH(h);
+    });
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+
+  const activeDays = rows.filter((r) => !r.no_entry && r.ret_net !== null && Number.isFinite(r.ret_net));
+  if (activeDays.length === 0) return null;
+
+  const hasBarData = intradayBars != null && Object.keys(intradayBars).length > 0;
+  const returns = activeDays.map((r) => r.ret_net as number);
+  const intradayByDate: Record<string, Array<number | null>> = {};
+  if (hasBarData && intradayBars) {
+    for (const day of activeDays) {
+      const raw = intradayBars[day.date];
+      if (!raw || raw.length < 2) continue;
+      const target = (typeof day.ret_gross === 'number' && Number.isFinite(day.ret_gross))
+        ? day.ret_gross
+        : day.ret_net;
+      const exitBar = intradayExitBars?.[day.date];
+      intradayByDate[day.date] = normalizeIntradaySeriesToDayReturn(raw, target, exitBar);
+    }
+  }
+  const intradayMatchedDays = Object.keys(intradayByDate).length;
+  const usePolylines = mode === 'poly' && intradayMatchedDays > 0;
+
+  // Scale y-axis to the 98th percentile of absolute values to avoid outliers
+  // dominating the range. Outlier paths are still drawn but clipped at the edge.
+  let absMax = 0.5;
+  {
+    const allVals: number[] = [];
+    if (usePolylines) {
+      for (const day of activeDays) {
+        const bars = intradayByDate[day.date];
+        if (!bars) continue;
+        for (const v of bars) {
+          if (v !== null && Number.isFinite(v)) allVals.push(Math.abs(v));
+        }
+      }
+    } else {
+      for (const r of returns) {
+        if (Number.isFinite(r)) allVals.push(Math.abs(r));
+      }
+    }
+    if (allVals.length > 0) {
+      allVals.sort((a, b) => a - b);
+      const p98idx = Math.floor(allVals.length * 0.98);
+      absMax = Math.max(allVals[p98idx] ?? allVals[allVals.length - 1], 0.5);
+    }
+  }
+  const mean = returns.reduce((a, b) => a + b, 0) / returns.length;
+  const winDays = returns.filter((r) => r > 0).length;
+  const lossDays = returns.filter((r) => r <= 0).length;
+
+  const W = 600; const H = 160;
+  const padL = 44; const padR = 12; const padT = 12; const padB = 26;
+  const plotW = W - padL - padR;
+  const plotH = H - padT - padB;
+  // zoomLevel 1–10: equal steps from 1× (factor 1.0) to 4× (factor 0.25)
+  const zoomFactor = 1 - (zoomLevel - 1) * (0.75 / 9); // 1→1.0, 2→0.917, …, 10→0.25
+  const yRange = absMax * 1.2 * zoomFactor;
+
+  const toX = (h: number) => padL + (h / 18) * plotW;
+  const toY = (pct: number) => padT + plotH / 2 - (pct / yRange) * (plotH / 2);
+  const yZero = toY(0);
+
+  const xTicks = [0, 3, 6, 9, 12, 15, 18];
+  const xLabels = ['06:00', '09:00', '12:00', '15:00', '18:00', '21:00', '00:00'];
+  const yTickVals = [-yRange * 0.75, -yRange * 0.25, 0, yRange * 0.25, yRange * 0.75];
+
+  const fsOverlay: React.CSSProperties = fullscreen ? {
+    position: 'fixed', inset: 0, zIndex: 200,
+    background: '#000',
+    display: 'flex', flexDirection: 'column',
+  } : {};
+
+  return (
+    <>
+    {fullscreen && <div style={{ position: 'fixed', inset: 0, zIndex: 199, background: 'rgba(0,0,0,0.75)' }} onClick={() => setFullscreen(false)} />}
+    <div style={{ border: '1px solid var(--line)', borderRadius: fullscreen ? 0 : 3, overflow: 'hidden', background: '#000', flexShrink: 0, ...fsOverlay }}>
+      <div
+        onClick={() => setIsOpen((v) => !v)}
+        style={{
+          padding: '8px 10px',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'space-between',
+          cursor: 'pointer',
+          userSelect: 'none',
+          background: '#000',
+        }}
+      >
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+          <span
+            style={{
+              fontSize: 10,
+              color: 'var(--t2)',
+              fontFamily: 'var(--font-space-mono), Space Mono, monospace',
+              width: 10,
+              display: 'inline-block',
+            }}
+          >
+            {isOpen ? '▾' : '▸'}
+          </span>
+          <span style={{ fontSize: 9, color: 'var(--t3)', textTransform: 'uppercase', letterSpacing: '0.12em', fontWeight: 700 }}>
+            Daily Return Overlay — 06:00 → 00:00 UTC
+          </span>
+          {!hasBarData
+            ? <span style={{ fontSize: 9, color: 'var(--t3)', fontWeight: 400 }}>· straight-line approx — re-run for intraday paths</span>
+            : (
+              <div style={{ display: 'flex', border: '1px solid var(--line2)', borderRadius: 3, overflow: 'hidden' }}>
+                {(['poly', 'linear'] as const).map((m) => (
+                  <button
+                    key={m}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setMode(m);
+                    }}
+                    style={{
+                      padding: '2px 7px',
+                      fontSize: 8,
+                      fontFamily: 'var(--font-space-mono), Space Mono, monospace',
+                      letterSpacing: '0.08em',
+                      textTransform: 'uppercase',
+                      background: mode === m ? 'var(--bg4)' : 'transparent',
+                      color: mode === m ? 'var(--t0)' : 'var(--t3)',
+                      border: 'none',
+                      cursor: 'pointer',
+                      borderRight: m === 'poly' ? '1px solid var(--line2)' : 'none',
+                    }}
+                  >
+                    {m}
+                  </button>
+                ))}
+              </div>
+            )
+          }
+          {hasBarData && mode === 'poly' && intradayMatchedDays === 0 && (
+            <span style={{ fontSize: 9, color: 'var(--amber)', fontWeight: 400 }}>
+              · no intraday/day-date matches for selected filter — falling back to linear
+            </span>
+          )}
+        </div>
+        <span style={{ display: 'flex', alignItems: 'center', gap: 12, fontSize: 9, color: 'var(--t2)', fontFamily: 'var(--font-space-mono), Space Mono, monospace' }}>
+          <span style={{ color: 'var(--green)' }}>{winDays}W</span>
+          <span style={{ color: 'var(--red)' }}>{lossDays}L</span>
+          <span>{((winDays / returns.length) * 100).toFixed(1)}% win</span>
+          <span>μ {mean >= 0 ? '+' : ''}{mean.toFixed(3)}%</span>
+          <span style={{ color: 'var(--t3)' }}>{activeDays.length} days</span>
+          <button
+            onClick={(e) => { e.stopPropagation(); setFullscreen((v) => !v); }}
+            title="Fullscreen"
+            style={{
+              background: 'none', border: 'none', cursor: 'pointer', padding: '0 2px',
+              color: 'var(--t2)', display: 'flex', alignItems: 'center',
+            }}
+          >
+            <svg width="11" height="11" viewBox="0 0 11 11" fill="none" xmlns="http://www.w3.org/2000/svg">
+              <path d="M1 4V1H4M7 1H10V4M10 7V10H7M4 10H1V7" stroke="currentColor" strokeWidth="1.2" strokeLinecap="square"/>
+            </svg>
+          </button>
+        </span>
+      </div>
+      {(isOpen || fullscreen) && (
+      <div style={{ padding: '10px 10px 6px 10px', position: 'relative', background: '#000', display: 'flex', alignItems: 'stretch', gap: 6, ...(fullscreen ? { flex: 1 } : {}) }}>
+        <svg
+          viewBox={`0 0 ${W} ${H}`}
+          style={{ width: '100%', display: 'block', flex: 1, overflow: 'hidden', ...(fullscreen ? { height: '100%' } : {}) }}
+          onMouseLeave={() => setHovered(null)}
+          preserveAspectRatio={fullscreen ? 'none' : 'xMidYMid meet'}
+        >
+          {xTicks.map((h) => (
+            <line
+              key={`xg-${h}`}
+              x1={toX(h)} y1={padT} x2={toX(h)} y2={H - padB}
+              stroke={h === 0 ? 'var(--line2)' : 'rgba(255,255,255,0.04)'}
+              strokeDasharray={h === 0 ? undefined : '2 3'}
+            />
+          ))}
+          <line x1={padL} y1={padT} x2={padL} y2={H - padB} stroke="var(--line2)" />
+          <line x1={padL} y1={yZero} x2={W - padR} y2={yZero} stroke="rgba(255,255,255,0.2)" strokeDasharray="3 3" />
+          {activeDays.map((row, i) => {
+            const ret = row.ret_net as number;
+            const isHov = hovered?.date === row.date;
+            const col = ret >= 0
+              ? `rgba(0,200,150,${isHov ? 0.9 : 0.28})`
+              : `rgba(255,77,77,${isHov ? 0.9 : 0.28})`;
+            const bars = usePolylines ? intradayByDate[row.date] : null;
+            if (bars && bars.length > 1) {
+              const rawExitBar = intradayExitBars?.[row.date];
+              // exitBar === -1 means early-kill fired before entry (no trade placed).
+              // exitBar >= 0 means position was opened and closed at that bar.
+              // undefined means exit bars not loaded yet — show full path.
+              const noTrade = rawExitBar === -1;
+              const exitBar = (rawExitBar === undefined || rawExitBar === null) ? (bars.length - 1) : Math.max(rawExitBar, 0);
+              const activeBars = noTrade ? [] : bars.slice(0, exitBar + 1);
+              const n = bars.length;
+              // No-trade day: early kill fired before entry — show flat 0% dashed line
+              if (noTrade) {
+                return (
+                  <line
+                    key={`d-${row.date}-${i}`}
+                    x1={toX(0)} y1={toY(0)}
+                    x2={toX(18)} y2={toY(0)}
+                    stroke="rgba(255,255,255,0.10)"
+                    strokeWidth={0.5}
+                    strokeDasharray="2 3"
+                    style={{ cursor: 'crosshair' }}
+                    onMouseEnter={(e) => setHovered({ date: row.date, ret, cx: e.clientX, cy: e.clientY })}
+                  />
+                );
+              }
+              const pts = activeBars
+                .map((v, bi) => {
+                  if (v === null || !Number.isFinite(v)) return null;
+                  return `${toX((bi / (n - 1)) * 18).toFixed(1)},${toY(v).toFixed(1)}`;
+                })
+                .filter(Boolean)
+                .join(' ');
+              // Find the last valid exit value for the flat tail
+              const exitVal = (() => {
+                for (let k = activeBars.length - 1; k >= 0; k--) {
+                  const v = activeBars[k];
+                  if (v !== null && Number.isFinite(v)) return v;
+                }
+                return null;
+              })();
+              const hasEarlyExit = exitBar < n - 1 && exitVal !== null;
+              return (
+                <g key={`d-${row.date}-${i}`}
+                  style={{ cursor: 'crosshair' }}
+                  onMouseEnter={(e) => setHovered({ date: row.date, ret, cx: e.clientX, cy: e.clientY })}
+                >
+                  <polyline points={pts} stroke={col} strokeWidth={isHov ? 1.5 : 0.75} fill="none" />
+                  {hasEarlyExit && (
+                    <line
+                      x1={toX((exitBar / (n - 1)) * 18)}
+                      y1={toY(exitVal!)}
+                      x2={toX(18)}
+                      y2={toY(exitVal!)}
+                      stroke={col}
+                      strokeWidth={isHov ? 1 : 0.5}
+                      strokeDasharray="2 3"
+                    />
+                  )}
+                </g>
+              );
+            }
+            return (
+              <line
+                key={`d-${row.date}-${i}`}
+                x1={toX(0)} y1={yZero}
+                x2={toX(18)} y2={toY(ret)}
+                stroke={col}
+                strokeWidth={isHov ? 1.5 : 0.75}
+                style={{ cursor: 'crosshair' }}
+                onMouseEnter={(e) => setHovered({ date: row.date, ret, cx: e.clientX, cy: e.clientY })}
+              />
+            );
+          })}
+          <line
+            x1={toX(0)} y1={yZero}
+            x2={toX(18)} y2={toY(mean)}
+            stroke="rgba(255,255,255,0.45)"
+            strokeWidth={1}
+            strokeDasharray="5 3"
+          />
+          {xTicks.map((h, i) => (
+            <g key={`xt-${h}`}>
+              <line x1={toX(h)} y1={H - padB} x2={toX(h)} y2={H - padB + 3} stroke="var(--line2)" />
+              <text x={toX(h)} y={H - padB + 12} textAnchor="middle" fontSize={7.5} fill="var(--t3)" fontFamily="var(--font-space-mono), Space Mono, monospace">
+                {xLabels[i]}
+              </text>
+            </g>
+          ))}
+          {yTickVals.map((v) => (
+            <text key={`yt-${v}`} x={padL - 4} y={toY(v) + 3} textAnchor="end" fontSize={7.5} fill="var(--t3)" fontFamily="var(--font-space-mono), Space Mono, monospace">
+              {v === 0 ? '0%' : `${v >= 0 ? '+' : ''}${Math.round(v)}%`}
+            </text>
+          ))}
+        </svg>
+        {/* Custom vertical zoom slider */}
+        {(() => {
+          const trackH = sliderTrackH;
+          const pip = 1 - (zoomLevel - 1) / 9; // 0 = bottom (zoom out), 1 = top (zoom in)
+          const pipY = Math.round(pip * trackH);
+          return (
+            <div
+              ref={sliderContainerRef}
+              style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 5, flexShrink: 0, paddingTop: 2, paddingBottom: 2, userSelect: 'none', alignSelf: 'stretch' }}
+              title={`Zoom: ${zoomLevel}/10`}
+            >
+              <button
+                onClick={() => setZoomLevel((v) => Math.min(10, v + 1))}
+                style={{ background: 'none', border: 'none', padding: 0, cursor: 'pointer', color: 'var(--t3)', lineHeight: 1, fontSize: 9, display: 'flex' }}
+              >
+                <svg width="8" height="8" viewBox="0 0 8 8" fill="none"><path d="M4 1V7M1 4H7" stroke="currentColor" strokeWidth="1.2" strokeLinecap="square"/></svg>
+              </button>
+              <div
+                style={{ position: 'relative', width: 14, flex: 1, cursor: 'ns-resize' }}
+                onMouseDown={(e) => {
+                  e.preventDefault();
+                  const rect = e.currentTarget.getBoundingClientRect();
+                  const move = (ev: MouseEvent) => {
+                    const frac = Math.max(0, Math.min(1, (ev.clientY - rect.top) / trackH));
+                    const level = Math.round(10 - frac * 9);
+                    setZoomLevel(level);
+                  };
+                  const up = () => { window.removeEventListener('mousemove', move); window.removeEventListener('mouseup', up); };
+                  window.addEventListener('mousemove', move);
+                  window.addEventListener('mouseup', up);
+                }}
+              >
+                {/* Track */}
+                <div style={{ position: 'absolute', left: '50%', top: 0, transform: 'translateX(-50%)', width: 1, height: trackH, background: 'var(--line2)' }} />
+                {/* Tick marks */}
+                {[0, 0.25, 0.5, 0.75, 1].map((f) => (
+                  <div key={f} style={{ position: 'absolute', left: '50%', top: Math.round(f * trackH), transform: 'translate(-50%, -50%)', width: 4, height: 1, background: 'var(--line2)' }} />
+                ))}
+                {/* Active fill above pip */}
+                <div style={{ position: 'absolute', left: '50%', top: 0, transform: 'translateX(-50%)', width: 1, height: pipY, background: 'var(--green)', opacity: 0.5 }} />
+                {/* Pip */}
+                <div style={{
+                  position: 'absolute',
+                  left: '50%', top: pipY,
+                  transform: 'translate(-50%, -50%)',
+                  width: 5, height: 5,
+                  background: 'var(--bg1)',
+                  border: '1px solid var(--green)',
+                  borderRadius: 0,
+                }} />
+              </div>
+              <button
+                onClick={() => setZoomLevel((v) => Math.max(1, v - 1))}
+                style={{ background: 'none', border: 'none', padding: 0, cursor: 'pointer', color: 'var(--t3)', lineHeight: 1, fontSize: 9, display: 'flex' }}
+              >
+                <svg width="8" height="8" viewBox="0 0 8 8" fill="none"><path d="M1 4H7" stroke="currentColor" strokeWidth="1.2" strokeLinecap="square"/></svg>
+              </button>
+            </div>
+          );
+        })()}
+        {hovered && (
+          <div
+            style={{
+              position: 'fixed',
+              left: hovered.cx + 10,
+              top: hovered.cy + 10,
+              zIndex: 80,
+              background: 'var(--bg1)',
+              border: '1px solid var(--line2)',
+              borderRadius: 3,
+              padding: '4px 8px',
+              fontSize: 9,
+              color: 'var(--t1)',
+              pointerEvents: 'none',
+              whiteSpace: 'nowrap',
+              fontFamily: 'var(--font-space-mono), Space Mono, monospace',
+            }}
+          >
+            <span style={{ color: 'var(--t3)', marginRight: 6 }}>{hovered.date}</span>
+            <span style={{ color: hovered.ret >= 0 ? 'var(--green)' : 'var(--red)' }}>
+              {hovered.ret >= 0 ? '+' : ''}{hovered.ret.toFixed(3)}%
+            </span>
+          </div>
+        )}
+      </div>
+      )}
+    </div>
+    </>
+  );
+}
+
 type ReportTab = 'summary' | 'breakdown' | 'stress_tests' | 'raw_output' | 'tear_sheet' | 'full_report';
 
 function asNum(v: unknown): number | null {
@@ -2350,6 +3159,1641 @@ function asNum(v: unknown): number | null {
     if (Number.isFinite(n)) return n;
   }
   return null;
+}
+
+// ── Full Report Section Visualizations ───────────────────────────────────────
+
+const MONO: React.CSSProperties = { fontFamily: 'var(--font-space-mono), Space Mono, monospace' };
+
+function sectionLabel(text: string): React.ReactNode {
+  return (
+    <div style={{ fontSize: 9, color: 'var(--t3)', textTransform: 'uppercase', letterSpacing: '0.12em', fontWeight: 700, marginBottom: 6, ...MONO }}>
+      {text}
+    </div>
+  );
+}
+
+// ── Generic parsers ───────────────────────────────────────────────────────────
+
+// Column-position aware table parser — anchors each column to the position where
+// the header token starts, then slices data lines at those positions.
+function parseColumnarTable(body: string): { headers: string[]; rows: Array<{ label: string; values: string[] }> } | null {
+  const rawLines = body.split('\n');
+  const lines = rawLines.filter((l) => l.trim() && !/^[-=─═┌┐└┘│]+$/.test(l.trim()));
+  if (lines.length < 2) return null;
+
+  // Find the first line that has ≥3 tokens when split by 2+ spaces — that's our header
+  let headerIdx = -1;
+  let headerLine = '';
+  for (let i = 0; i < Math.min(lines.length, 15); i += 1) {
+    const tokens = lines[i].split(/\s{2,}/);
+    if (tokens.length >= 3) { headerIdx = i; headerLine = lines[i]; break; }
+  }
+  if (headerIdx < 0) return null;
+
+  // Record start position of each header token
+  const headers = headerLine.split(/\s{2,}/).map((h) => h.trim()).filter(Boolean);
+  const colStarts: number[] = [];
+  let searchFrom = 0;
+  for (const h of headers) {
+    const idx = headerLine.indexOf(h, searchFrom);
+    if (idx < 0) return null;
+    colStarts.push(idx);
+    searchFrom = idx + h.length;
+  }
+
+  const rows: Array<{ label: string; values: string[] }> = [];
+  for (let i = headerIdx + 1; i < lines.length; i += 1) {
+    const line = lines[i];
+    const trimmed = line.trim();
+    if (!trimmed || /^[-=─═]+$/.test(trimmed)) continue;
+    // Slice at column positions
+    const slices: string[] = [];
+    for (let ci = 0; ci < colStarts.length; ci += 1) {
+      const start = colStarts[ci];
+      const end = ci + 1 < colStarts.length ? colStarts[ci + 1] : undefined;
+      slices.push((end !== undefined ? line.slice(start, end) : line.slice(start)).trim());
+    }
+    if (slices.filter(Boolean).length < 2) continue;
+    rows.push({ label: slices[0], values: slices.slice(1) });
+  }
+  return rows.length > 0 ? { headers, rows } : null;
+}
+
+// Key-value parser: only picks up lines of the form "Label: numeric_value [optional_suffix]"
+function parseKV(body: string): Array<{ key: string; raw: string; num: number }> {
+  const out: Array<{ key: string; raw: string; num: number }> = [];
+  for (const line of body.split('\n')) {
+    const m = line.match(/^[ \t]*([A-Za-z][^:]{1,50}):\s*([+-]?\d[\d.,% ]+)$/);
+    if (!m) continue;
+    const key = m[1].trim();
+    const raw = m[2].trim();
+    const num = parseFloat(raw.replace(/[, ]/g, '').replace(/%$/, ''));
+    if (!Number.isFinite(num)) continue;
+    out.push({ key, raw, num });
+  }
+  return out;
+}
+
+// Numeric grid parser — expects a header row then data rows, all 2+-space separated
+function parseNumericGrid(body: string): { rowLabels: string[]; colLabels: string[]; data: (number | null)[][] } | null {
+  const lines = body.split('\n').filter((l) => l.trim() && !/^[-=─═┌┐└┘│]+$/.test(l.trim()));
+  if (lines.length < 3) return null;
+  const colLabels = lines[0].trim().split(/\s{2,}/).map((s) => s.trim());
+  if (colLabels.length < 2) return null;
+  const rowLabels: string[] = [];
+  const data: (number | null)[][] = [];
+  for (let i = 1; i < lines.length; i += 1) {
+    const tokens = lines[i].trim().split(/\s{2,}/);
+    if (tokens.length < 2) continue;
+    rowLabels.push(tokens[0]);
+    data.push(tokens.slice(1).map((tok) => {
+      const n = parseFloat(tok.replace(/[,%]/g, ''));
+      return Number.isFinite(n) ? n : null;
+    }));
+  }
+  return data.length > 0 ? { rowLabels, colLabels, data } : null;
+}
+
+// ── Generic viz components ────────────────────────────────────────────────────
+
+function PreFallback({ body }: { body: string }) {
+  return (
+    <pre style={{ margin: 0, whiteSpace: 'pre-wrap', fontSize: 9.5, lineHeight: 1.5, color: 'var(--t1)', ...MONO }}>
+      {body}
+    </pre>
+  );
+}
+
+// Horizontal bar chart with auto label width and a zero-baseline for mixed +/−
+function SectionHBarChart({ items, colorFn }: {
+  items: Array<{ label: string; value: number; raw?: string }>;
+  colorFn?: (v: number) => string;
+}) {
+  if (items.length === 0) return null;
+  const color = colorFn ?? ((v: number) => v >= 0 ? 'var(--green)' : 'var(--red)');
+  const maxAbs = Math.max(...items.map((i) => Math.abs(i.value)), 1e-9);
+  const hasNeg = items.some((i) => i.value < 0);
+  const hasPos = items.some((i) => i.value > 0);
+  const labelW = Math.min(Math.max(...items.map((i) => i.label.length)) * 7 + 8, 240);
+  const valueW = Math.max(...items.map((i) => (i.raw ?? i.value.toFixed(3)).length)) * 7 + 4;
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 3 }}>
+      {items.map((item) => {
+        const frac = Math.abs(item.value) / maxAbs;
+        // zero-baseline: negative bars go left from center, positive bars go right
+        const barLeft = hasNeg && hasPos
+          ? (item.value < 0 ? `${(0.5 - frac * 0.5) * 100}%` : '50%')
+          : '0%';
+        const barWidth = hasNeg && hasPos ? `${frac * 50}%` : `${frac * 100}%`;
+        return (
+          <div key={item.label} style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 9, ...MONO }}>
+            <div style={{ width: labelW, color: 'var(--t2)', flexShrink: 0, textAlign: 'right', paddingRight: 4, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={item.label}>{item.label}</div>
+            <div style={{ flex: 1, height: 9, background: 'var(--bg3)', borderRadius: 1, position: 'relative', minWidth: 60 }}>
+              {hasNeg && hasPos && (
+                <div style={{ position: 'absolute', left: '50%', top: 0, width: 1, height: '100%', background: 'var(--line2)' }} />
+              )}
+              <div style={{ position: 'absolute', left: barLeft, top: 0, height: '100%', width: barWidth, background: color(item.value), borderRadius: 1 }} />
+            </div>
+            <div style={{ width: valueW, color: color(item.value), textAlign: 'right', flexShrink: 0 }}>{item.raw ?? item.value.toFixed(3)}</div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+// Clean table with position-parsed columns
+function SectionTable({ headers, rows }: { headers: string[]; rows: Array<{ label: string; values: string[] }> }) {
+  return (
+    <div style={{ overflowX: 'auto' }}>
+      <table style={{ borderCollapse: 'collapse', fontSize: 9, tableLayout: 'auto', ...MONO }}>
+        <thead>
+          <tr>
+            {headers.map((h, i) => (
+              <th key={i} style={{ padding: '3px 10px 3px 6px', textAlign: i === 0 ? 'left' : 'right', color: 'var(--t3)', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.08em', borderBottom: '1px solid var(--line2)', whiteSpace: 'nowrap' }}>{h}</th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((row, ri) => (
+            <tr key={ri} style={{ background: ri % 2 === 1 ? 'rgba(255,255,255,0.015)' : 'transparent' }}>
+              <td style={{ padding: '3px 10px 3px 6px', color: 'var(--t2)', whiteSpace: 'nowrap' }}>{row.label}</td>
+              {row.values.map((v, ci) => {
+                const stripped = v.replace(/[,%$x]/g, '');
+                const n = parseFloat(stripped);
+                const isNum = Number.isFinite(n);
+                const isNeg = isNum && n < 0;
+                const isPos = isNum && n > 0;
+                const clr = isNeg ? 'var(--red)' : (isPos && (v.includes('%') || v.includes('x'))) ? 'var(--green)' : 'var(--t1)';
+                return (
+                  <td key={ci} style={{ padding: '3px 10px 3px 6px', textAlign: 'right', color: clr, whiteSpace: 'nowrap' }}>{v || '—'}</td>
+                );
+              })}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+// Heatmap grid with correct green=high, red=low coloring
+function HeatmapGrid({ rowLabels, colLabels, data }: {
+  rowLabels: string[]; colLabels: string[]; data: (number | null)[][];
+}) {
+  const allVals = data.flat().filter((v): v is number => v !== null);
+  if (allVals.length === 0) return null;
+  const min = Math.min(...allVals);
+  const max = Math.max(...allVals);
+
+  function cellBg(v: number | null): string {
+    if (v === null) return 'transparent';
+    const t = max === min ? 0.5 : (v - min) / (max - min); // 0=low(bad), 1=high(good)
+    // low → red (#ff4d4d), mid → amber (#f0a500), high → green (#00c896)
+    let r: number, g: number, b: number;
+    if (t < 0.5) {
+      const s = t * 2; // 0→1
+      r = Math.round(255 + s * (240 - 255));   // 255→240
+      g = Math.round(77  + s * (165 - 77));    // 77→165
+      b = Math.round(77  + s * (0   - 77));    // 77→0
+    } else {
+      const s = (t - 0.5) * 2; // 0→1
+      r = Math.round(240 + s * (0   - 240));   // 240→0
+      g = Math.round(165 + s * (200 - 165));   // 165→200
+      b = Math.round(0   + s * (150 - 0));     // 0→150
+    }
+    return `rgba(${r},${g},${b},0.55)`;
+  }
+
+  function cellText(v: number | null): string {
+    if (v === null) return '—';
+    return Math.abs(v) >= 10 ? v.toFixed(1) : v.toFixed(2);
+  }
+
+  return (
+    <div style={{ overflowX: 'auto' }}>
+      <table style={{ borderCollapse: 'separate', borderSpacing: 2, fontSize: 8.5, ...MONO }}>
+        <thead>
+          <tr>
+            <th style={{ padding: '2px 8px', color: 'var(--t3)', fontWeight: 400 }} />
+            {colLabels.map((c, i) => (
+              <th key={i} style={{ padding: '2px 8px', color: 'var(--t2)', fontWeight: 400, textAlign: 'center', whiteSpace: 'nowrap' }}>{c}</th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {rowLabels.map((rl, ri) => (
+            <tr key={ri}>
+              <td style={{ padding: '2px 8px', color: 'var(--t2)', whiteSpace: 'nowrap', textAlign: 'right' }}>{rl}</td>
+              {(data[ri] ?? []).map((v, ci) => (
+                <td key={ci} style={{ padding: '3px 8px', textAlign: 'center', background: cellBg(v), borderRadius: 2, color: v !== null ? 'rgba(255,255,255,0.9)' : 'var(--t3)', fontWeight: v !== null && Math.abs(v) === Math.max(...allVals.map(Math.abs)) ? 700 : 400 }}>
+                  {cellText(v)}
+                </td>
+              ))}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+// Pure SVG sparkline — no recharts overhead, handles simple series cleanly
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
+function Sparkline({ series, color = 'var(--green)', height = 80, showZero = false }: {
+  series: Array<{ x: number; y: number }>; color?: string; height?: number; showZero?: boolean;
+}) {
+  if (series.length < 2) return null;
+  const W = 600; const H = height;
+  const pad = { t: 6, r: 4, b: 4, l: 4 };
+  const ys = series.map((p) => p.y);
+  const yMin = Math.min(...ys);
+  const yMax = Math.max(...ys);
+  const yRange = yMax - yMin || 1;
+  const toX = (i: number) => pad.l + (i / (series.length - 1)) * (W - pad.l - pad.r);
+  const toY = (v: number) => pad.t + (1 - (v - yMin) / yRange) * (H - pad.t - pad.b);
+  const pts = series.map((p, i) => `${toX(i).toFixed(1)},${toY(p.y).toFixed(1)}`).join(' ');
+  const zeroY = toY(0);
+  return (
+    <svg viewBox={`0 0 ${W} ${H}`} style={{ width: '100%', height, display: 'block' }}>
+      {showZero && yMin < 0 && yMax > 0 && (
+        <line x1={pad.l} y1={zeroY} x2={W - pad.r} y2={zeroY} stroke="var(--line2)" strokeWidth={0.8} />
+      )}
+      <polyline points={pts} fill="none" stroke={color} strokeWidth={1.5} strokeLinejoin="round" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+// ── Per-section renderers ─────────────────────────────────────────────────────
+
+function renderTableSection(body: string, label?: string) {
+  const table = parseColumnarTable(body);
+  if (!table || table.rows.length === 0) return <PreFallback body={body} />;
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+      {label && sectionLabel(label)}
+      <SectionTable headers={table.headers} rows={table.rows} />
+    </div>
+  );
+}
+
+function renderKVSection(body: string, label: string, colorFn?: (v: number) => string) {
+  const kv = parseKV(body);
+  if (kv.length === 0) return renderTableSection(body, label);
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+      {sectionLabel(label)}
+      <SectionHBarChart items={kv.map((k) => ({ label: k.key, value: k.num, raw: k.raw }))} colorFn={colorFn} />
+    </div>
+  );
+}
+
+function renderReturnRatesByPeriod(body: string) {
+  return <PreFallback body={body} />;
+}
+
+function renderReturnDistribution(body: string) {
+  const table = parseColumnarTable(body);
+  if (table && table.rows.length > 0) return <SectionTable headers={table.headers} rows={table.rows} />;
+  return renderKVSection(body, 'Distribution Stats', (v) => v >= 0 ? 'var(--green)' : 'var(--red)');
+}
+
+function renderReturnConditional(body: string) {
+  return renderTableSection(body);
+}
+
+function renderRollingMaxDrawdown(body: string) {
+  const table = parseColumnarTable(body);
+  if (table && table.rows.length > 0) return <SectionTable headers={table.headers} rows={table.rows} />;
+  return <PreFallback body={body} />;
+}
+
+function renderDrawdownEpisodes(body: string) {
+  return <PreFallback body={body} />;
+}
+
+function renderRiskAdjustedQuality(body: string) {
+  return <PreFallback body={body} />;
+}
+
+function renderDailyVarCvar(body: string) {
+  const table = parseColumnarTable(body);
+  if (table && table.rows.length > 0) return <SectionTable headers={table.headers} rows={table.rows} />;
+  return renderKVSection(body, 'VaR / CVaR', () => 'var(--red)');
+}
+
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
+function renderSignalPredictiveness(body: string) {
+  const table = parseColumnarTable(body);
+  if (table && table.rows.length > 0) return <SectionTable headers={table.headers} rows={table.rows} />;
+  const kv = parseKV(body);
+  if (kv.length > 0) {
+    return (
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+        {sectionLabel('IC Summary')}
+        <SectionHBarChart items={kv.map((k) => ({ label: k.key, value: k.num, raw: k.raw }))} colorFn={(v) => Math.abs(v) > 0.05 ? 'var(--green)' : 'var(--amber)'} />
+      </div>
+    );
+  }
+  return <PreFallback body={body} />;
+}
+
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
+function renderSlippageSweep(body: string) {
+  const table = parseColumnarTable(body);
+  if (!table || table.rows.length === 0) return <PreFallback body={body} />;
+  const sharpeIdx = table.headers.findIndex((h) => /sharpe/i.test(h));
+  if (sharpeIdx >= 1) {
+    const items = table.rows.flatMap((r) => {
+      const raw = r.values[sharpeIdx - 1];
+      if (!raw) return [];
+      const num = parseFloat(raw.replace(/[,%]/g, ''));
+      if (!Number.isFinite(num)) return [];
+      return [{ label: r.label, value: num, raw }];
+    });
+    if (items.length >= 2) {
+      return (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+          {sectionLabel('Sharpe vs Slippage')}
+          <SectionHBarChart items={items} colorFn={(v) => v >= 1.5 ? 'var(--green)' : v >= 0.5 ? 'var(--amber)' : 'var(--red)'} />
+          <SectionTable headers={table.headers} rows={table.rows} />
+        </div>
+      );
+    }
+  }
+  return <SectionTable headers={table.headers} rows={table.rows} />;
+}
+
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
+function renderNoisePerturbation(body: string) {
+  const table = parseColumnarTable(body);
+  if (table && table.rows.length > 0) return <SectionTable headers={table.headers} rows={table.rows} />;
+  return renderKVSection(body, 'Noise Stability', (v) => v > 0 ? 'var(--green)' : 'var(--amber)');
+}
+
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
+function renderParamJitter(body: string) {
+  const table = parseColumnarTable(body);
+  if (table && table.rows.length > 0) return <SectionTable headers={table.headers} rows={table.rows} />;
+  return renderKVSection(body, 'Param Jitter — Sharpe Stability', (v) => v > 0 ? 'var(--green)' : 'var(--amber)');
+}
+
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
+function renderReturnConcentration(body: string) {
+  const table = parseColumnarTable(body);
+  if (table && table.rows.length > 0) return <SectionTable headers={table.headers} rows={table.rows} />;
+  return renderKVSection(body, 'Concentration Metrics', (v) => v >= 0 ? 'var(--green)' : 'var(--amber)');
+}
+
+function renderPeriodicBreakdown(body: string) {
+  return <PreFallback body={body} />;
+}
+
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
+function renderShockInjection(body: string) {
+  const table = parseColumnarTable(body);
+  if (table && table.rows.length > 0) return <SectionTable headers={table.headers} rows={table.rows} />;
+  return renderKVSection(body, 'Shock Impact', (v) => v >= 0 ? 'var(--green)' : 'var(--red)');
+}
+
+interface StabCubeRow { params: Record<string, number>; sharpe: number; cagr: number; maxdd: number; }
+
+function renderStabilityCube(body: string) {
+  const lines = body.split('\n');
+  let filter = '';
+  let gridSpec = '';
+  const baseline: Record<string, number> = {};
+  const peakAt: Record<string, number> = {};
+  const summaryKV: Array<{ label: string; value: string }> = [];
+  const rows: StabCubeRow[] = [];
+  let paramKeys: string[] | null = null;
+  let inSummary = false;
+
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed || /^[=─]+$/.test(trimmed)) continue;
+
+    if (/STABILITY CUBE SUMMARY/i.test(trimmed)) { inSummary = true; continue; }
+
+    if (inSummary) {
+      if (/saved:/i.test(trimmed)) continue;
+      const sm = trimmed.match(/^(.+?)\s*:\s*(.+)$/);
+      if (sm) {
+        const peakM = sm[2].match(/at\s+(.+)/i);
+        if (peakM) {
+          const re = /(\w+)=([-\d.]+)/g; let pm;
+          while ((pm = re.exec(peakM[1])) !== null) peakAt[pm[1]] = parseFloat(pm[2]);
+        }
+        summaryKV.push({ label: sm[1].trim(), value: sm[2].trim() });
+      }
+      continue;
+    }
+
+    const filterM = trimmed.match(/^Filter\s*:\s*(.+?)\s*\|\s*Grid:\s*(.+)$/);
+    if (filterM) { filter = filterM[1].trim(); gridSpec = filterM[2].trim(); continue; }
+
+    const baselineM = trimmed.match(/^Baseline:\s*(.+)$/);
+    if (baselineM) {
+      const re = /(\w+)=([-\d.]+)/g; let bm;
+      while ((bm = re.exec(baselineM[1])) !== null) baseline[bm[1]] = parseFloat(bm[2]);
+      continue;
+    }
+
+    const dataM = trimmed.match(/^\[\s*\d+\/\d+\]\s+(.+?)\s*\|\s*Sharpe=\s*([-\d.]+)\s+CAGR=\s*([-\d.]+)%\s+MaxDD=\s*([-\d.]+)%/);
+    if (dataM) {
+      const params: Record<string, number> = {};
+      const re = /(\w+)=([-\d.]+)/g; let dm;
+      while ((dm = re.exec(dataM[1])) !== null) params[dm[1]] = parseFloat(dm[2]);
+      if (!paramKeys) paramKeys = Object.keys(params);
+      rows.push({ params, sharpe: parseFloat(dataM[2]), cagr: parseFloat(dataM[3]), maxdd: parseFloat(dataM[4]) });
+    }
+  }
+
+  if (rows.length === 0 || !paramKeys || paramKeys.length < 3) return <PreFallback body={body} />;
+
+  // Detect dimensions: fewest unique = outer slice, middle = cols, most = rows
+  const uniq: Record<string, number[]> = {};
+  for (const k of paramKeys) {
+    uniq[k] = [...new Set(rows.map(r => r.params[k]))].sort((a, b) => a - b);
+  }
+  const sorted = [...paramKeys].sort((a, b) => uniq[a].length - uniq[b].length);
+  const [outerKey, colKey, rowKey] = sorted;
+  const outerVals = uniq[outerKey];
+  const colVals = uniq[colKey];
+  const rowVals = uniq[rowKey];
+
+  const lookup = new Map<string, StabCubeRow>();
+  for (const r of rows) {
+    lookup.set(paramKeys.map(k => r.params[k]).join('|'), r);
+  }
+  const getCell = (o: number, c: number, r: number) => {
+    const p: Record<string, number> = { [outerKey]: o, [colKey]: c, [rowKey]: r };
+    return lookup.get(paramKeys!.map(k => p[k]).join('|'));
+  };
+
+  const allSharpes = rows.map(r => r.sharpe).filter(s => isFinite(s));
+  const maxSharpe = Math.max(...allSharpes);
+
+  const sharpeColor = (s: number) => {
+    if (!isFinite(s)) return 'var(--t3)';
+    if (s >= 3.0) return 'var(--green)';
+    if (s >= 2.0) return 'var(--amber)';
+    return 'var(--red)';
+  };
+
+  const isBase = (o: number, c: number, r: number) =>
+    baseline[outerKey] === o && baseline[colKey] === c && baseline[rowKey] === r;
+  const isPeak = (o: number, c: number, r: number) =>
+    Object.keys(peakAt).length > 0 &&
+    peakAt[outerKey] === o && peakAt[colKey] === c && peakAt[rowKey] === r;
+
+  const verdictEntry = summaryKV.find(kv => /verdict/i.test(kv.label));
+  const verdictColor = !verdictEntry ? 'var(--t1)'
+    : /low.sensitivity|stable|robust/i.test(verdictEntry.value) ? 'var(--green)'
+    : /moderate/i.test(verdictEntry.value) ? 'var(--amber)'
+    : 'var(--red)';
+
+  const thStyle: React.CSSProperties = {
+    padding: '3px 10px', textAlign: 'center', fontWeight: 700,
+    textTransform: 'uppercase', letterSpacing: '0.06em',
+    borderBottom: '1px solid var(--line2)', whiteSpace: 'nowrap', fontSize: 8.5,
+  };
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 12, fontSize: 9, ...MONO }}>
+      {/* Metadata */}
+      <div style={{ display: 'flex', gap: 16, flexWrap: 'wrap', color: 'var(--t2)', paddingBottom: 8, borderBottom: '1px solid var(--line)' }}>
+        {filter && <span>Filter: <span style={{ color: 'var(--t1)' }}>{filter}</span></span>}
+        {gridSpec && <span>Grid: <span style={{ color: 'var(--t1)' }}>{gridSpec}</span></span>}
+        {Object.entries(baseline).map(([k, v]) => (
+          <span key={k}>{k} baseline: <span style={{ color: 'var(--green)' }}>{v}</span></span>
+        ))}
+      </div>
+
+      {/* Summary cards */}
+      {summaryKV.length > 0 && (
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(155px, 1fr))', gap: 6 }}>
+          {summaryKV.map((kv, i) => {
+            const isVerdict = /verdict/i.test(kv.label);
+            return (
+              <div key={i} style={{
+                border: `1px solid ${isVerdict ? verdictColor : 'var(--line)'}`,
+                borderRadius: 3, background: 'var(--bg1)', padding: '5px 8px',
+                display: 'flex', flexDirection: 'column', gap: 3,
+              }}>
+                <span style={{ fontSize: 8, color: 'var(--t3)', textTransform: 'uppercase', letterSpacing: '0.08em' }}>{kv.label}</span>
+                <span style={{ fontSize: isVerdict ? 10 : 11, fontWeight: 700, color: isVerdict ? verdictColor : 'var(--t0)' }}>{kv.value}</span>
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {/* Legend */}
+      <div style={{ display: 'flex', gap: 14, fontSize: 8.5, color: 'var(--t2)' }}>
+        <span><span style={{ color: 'var(--green)' }}>■</span> ≥ 3.0</span>
+        <span><span style={{ color: 'var(--amber)' }}>■</span> ≥ 2.0</span>
+        <span><span style={{ color: 'var(--red)' }}>■</span> &lt; 2.0</span>
+        <span style={{ color: 'var(--t3)' }}>◆ baseline  ★ peak  — not run</span>
+        <span style={{ color: 'var(--t3)' }}>hover cell for CAGR / MaxDD</span>
+      </div>
+
+      {/* One table per outer-slice value */}
+      {outerVals.map(ov => {
+        const isBaseSlice = baseline[outerKey] === ov;
+        return (
+          <div key={ov} style={{ display: 'flex', flexDirection: 'column', gap: 5 }}>
+            <div style={{
+              fontSize: 9, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.08em',
+              color: isBaseSlice ? 'var(--green)' : 'var(--t2)',
+              paddingBottom: 4, borderBottom: '1px solid var(--line)',
+              display: 'flex', alignItems: 'center', gap: 8,
+            }}>
+              {outerKey} = {ov}
+              {isBaseSlice && <span style={{ color: 'var(--green)', fontWeight: 400, fontSize: 8, letterSpacing: '0.06em' }}>◆ BASELINE SLICE</span>}
+            </div>
+            <div style={{ overflowX: 'auto' }}>
+              <table style={{ borderCollapse: 'collapse', fontSize: 9, tableLayout: 'auto', ...MONO }}>
+                <thead>
+                  <tr>
+                    <th style={{ ...thStyle, textAlign: 'left', color: 'var(--t3)', paddingLeft: 0, paddingRight: 12 }}>
+                      {rowKey} ╲ {colKey}
+                    </th>
+                    {colVals.map(cv => (
+                      <th key={cv} style={{
+                        ...thStyle,
+                        color: baseline[colKey] === cv ? 'var(--green)' : 'var(--t3)',
+                      }}>
+                        {cv}
+                      </th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {rowVals.map(rv => {
+                    const isBaseRow = baseline[rowKey] === rv;
+                    return (
+                      <tr key={rv} style={{ background: isBaseRow ? 'rgba(0,200,150,0.03)' : 'transparent' }}>
+                        <td style={{
+                          padding: '2px 12px 2px 0', color: isBaseRow ? 'var(--green)' : 'var(--t2)',
+                          fontWeight: isBaseRow ? 700 : 400, whiteSpace: 'nowrap', fontSize: 9,
+                          borderBottom: '1px solid var(--line)', borderRight: '1px solid var(--line2)',
+                        }}>
+                          {rv}
+                        </td>
+                        {colVals.map(cv => {
+                          const cell = getCell(ov, cv, rv);
+                          const bl = isBase(ov, cv, rv);
+                          const pk = cell ? (cell.sharpe === maxSharpe) : isPeak(ov, cv, rv);
+                          return (
+                            <td
+                              key={cv}
+                              style={{
+                                padding: '2px 10px', textAlign: 'center',
+                                color: cell ? sharpeColor(cell.sharpe) : 'var(--t3)',
+                                background: bl ? 'var(--green-dim)' : 'transparent',
+                                boxShadow: bl ? 'inset 0 0 0 1px var(--green-mid)' : 'none',
+                                fontWeight: bl || pk ? 700 : 400,
+                                whiteSpace: 'nowrap', fontSize: 9,
+                                borderBottom: '1px solid var(--line)',
+                              }}
+                              title={cell ? `CAGR ${cell.cagr.toFixed(1)}%  MaxDD ${cell.maxdd.toFixed(2)}%` : undefined}
+                            >
+                              {cell ? `${cell.sharpe.toFixed(3)}${pk ? ' ★' : bl ? ' ◆' : ''}` : '—'}
+                            </td>
+                          );
+                        })}
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function renderMinCumReturn(body: string) {
+  interface MCRRow { window: string; minCumRet: number; worstStart: number; worstEnd: number; raw: string; }
+  const rows: MCRRow[] = [];
+
+  for (const line of body.split('\n')) {
+    const trimmed = line.trim();
+    if (!trimmed || /^[-=─═╔╠═]+/.test(trimmed)) continue;
+    // Data row: "  1d   -23.51%   200   200"
+    const m = trimmed.match(/^(\d+d)\s+([-+]?[\d.]+%)\s+(\d+)\s+(\d+)$/);
+    if (!m) continue;
+    rows.push({
+      window: m[1],
+      minCumRet: parseFloat(m[2]),
+      worstStart: parseInt(m[3], 10),
+      worstEnd: parseInt(m[4], 10),
+      raw: m[2],
+    });
+  }
+
+  if (rows.length === 0) return <PreFallback body={body} />;
+
+  const vals = rows.map(r => r.minCumRet);
+  const minVal = Math.min(...vals);   // most negative
+  const maxVal = Math.max(...vals);   // most positive
+  const absMax = Math.max(Math.abs(minVal), Math.abs(maxVal));
+  const BAR_MAX = 56; // px
+
+  const retColor = (v: number) => v >= 0 ? 'var(--green)' : 'var(--red)';
+  const barColor = (v: number) => v >= 0 ? 'var(--green)' : 'var(--red)';
+
+  const thStyle: React.CSSProperties = {
+    padding: '3px 8px', fontWeight: 700, textTransform: 'uppercase',
+    letterSpacing: '0.08em', borderBottom: '1px solid var(--line2)',
+    whiteSpace: 'nowrap', fontSize: 9, color: 'var(--t3)',
+  };
+
+  return (
+    <div style={{ overflowX: 'auto', ...MONO }}>
+      <table style={{ borderCollapse: 'collapse', fontSize: 9, tableLayout: 'auto', ...MONO }}>
+        <thead>
+          <tr>
+            <th style={{ ...thStyle, textAlign: 'left' }}>Window</th>
+            <th style={{ ...thStyle, textAlign: 'right' }}>Min Cum Ret</th>
+            <th style={{ ...thStyle, textAlign: 'left', paddingLeft: 10 }}>Bar</th>
+            <th style={{ ...thStyle, textAlign: 'right' }}>Worst Start</th>
+            <th style={{ ...thStyle, textAlign: 'right' }}>Worst End</th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((row, ri) => {
+            const barW = Math.round((Math.abs(row.minCumRet) / absMax) * BAR_MAX);
+            const isWorst = row.minCumRet === minVal;
+            return (
+              <tr key={ri} style={{ background: isWorst ? 'var(--red-dim)' : ri % 2 === 1 ? 'rgba(255,255,255,0.015)' : 'transparent' }}>
+                <td style={{ padding: '2px 8px', color: 'var(--t2)', whiteSpace: 'nowrap', borderBottom: '1px solid var(--line)', fontWeight: isWorst ? 700 : 400 }}>
+                  {row.window}
+                </td>
+                <td style={{ padding: '2px 8px', textAlign: 'right', color: retColor(row.minCumRet), whiteSpace: 'nowrap', borderBottom: '1px solid var(--line)', fontWeight: isWorst ? 700 : 400 }}>
+                  {row.raw}
+                </td>
+                <td style={{ padding: '2px 4px 2px 10px', borderBottom: '1px solid var(--line)', verticalAlign: 'middle' }}>
+                  <div style={{ width: BAR_MAX, display: 'flex', alignItems: 'center' }}>
+                    <div style={{ width: barW, height: 4, borderRadius: 1, background: barColor(row.minCumRet), opacity: isWorst ? 1 : 0.7 }} />
+                  </div>
+                </td>
+                <td style={{ padding: '2px 8px', textAlign: 'right', color: 'var(--t2)', whiteSpace: 'nowrap', borderBottom: '1px solid var(--line)' }}>
+                  {row.worstStart}
+                </td>
+                <td style={{ padding: '2px 8px', textAlign: 'right', color: 'var(--t2)', whiteSpace: 'nowrap', borderBottom: '1px solid var(--line)' }}>
+                  {row.worstEnd}
+                </td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function renderMilestones(body: string) {
+  const lines = body.split('\n');
+  const headers = ['Period', 'Balance ($)', 'Net PnL ($)', 'Period ROI', 'Cum ROI'];
+  const dataRows: string[][] = [];
+  let totalRow: string[] | null = null;
+  let statsLine = '';
+
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed || /^[-=─]+$/.test(trimmed)) continue;
+    // Collapse "+ spaces" → "+" so the sign stays attached to its value
+    const norm = line.replace(/\+\s+/g, '+');
+    if (/^\d{4}-\d{2}-\d{2}/.test(trimmed)) {
+      const tokens = norm.split(/\s{2,}/).filter(Boolean);
+      if (tokens.length >= 3) dataRows.push(tokens);
+    } else if (/^TOTAL\b/i.test(trimmed)) {
+      totalRow = norm.split(/\s{2,}/).filter(Boolean);
+    } else if (/\bperiods?\b.*\bpositive\b/i.test(trimmed)) {
+      statsLine = trimmed;
+    }
+  }
+
+  const valColor = (val: string) => {
+    if (!val || val === '—') return 'var(--t1)';
+    if (val.startsWith('+')) return 'var(--green)';
+    if (val.startsWith('-')) return 'var(--red)';
+    return 'var(--t1)';
+  };
+
+  const renderCells = (row: string[], isTotal = false) =>
+    headers.map((_, ci) => {
+      const val = row[ci] ?? '';
+      return (
+        <td
+          key={ci}
+          style={{
+            padding: '2px 8px',
+            textAlign: ci === 0 ? 'left' : 'right',
+            color: ci === 0 ? (isTotal ? 'var(--t1)' : 'var(--t2)') : valColor(val),
+            whiteSpace: 'nowrap',
+            fontSize: 9,
+            fontWeight: isTotal ? 700 : 400,
+            borderTop: isTotal ? '1px solid var(--line)' : undefined,
+          }}
+        >
+          {val || '—'}
+        </td>
+      );
+    });
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 8, ...MONO }}>
+      <div style={{ overflowX: 'auto' }}>
+        <table style={{ borderCollapse: 'collapse', fontSize: 9, tableLayout: 'auto', ...MONO }}>
+          <thead>
+            <tr>
+              {headers.map((h, i) => (
+                <th
+                  key={i}
+                  style={{
+                    padding: '3px 8px',
+                    textAlign: i === 0 ? 'left' : 'right',
+                    color: 'var(--t3)',
+                    fontWeight: 700,
+                    textTransform: 'uppercase',
+                    letterSpacing: '0.08em',
+                    borderBottom: '1px solid var(--line2)',
+                    whiteSpace: 'nowrap',
+                    fontSize: 9,
+                  }}
+                >
+                  {h}
+                </th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {dataRows.map((row, ri) => (
+              <tr key={ri} style={{ background: ri % 2 === 1 ? 'rgba(255,255,255,0.015)' : 'transparent' }}>
+                {renderCells(row)}
+              </tr>
+            ))}
+            {totalRow && <tr>{renderCells(totalRow, true)}</tr>}
+          </tbody>
+        </table>
+      </div>
+      {statsLine && (
+        <div style={{ fontSize: 9, color: 'var(--t2)', paddingTop: 2 }}>{statsLine}</div>
+      )}
+    </div>
+  );
+}
+
+function renderLiquidityCapacityCurve(body: string) {
+  const lines = body.split('\n');
+
+  // Find the actual table header line (contains both "AUM" and "Impact%")
+  const headerLineIdx = lines.findIndex((l) => /\bAUM\b/.test(l) && /Impact%/.test(l));
+  if (headerLineIdx < 0) return <PreFallback body={body} />;
+
+  // KV metadata lines before the table header
+  const kvLines = lines
+    .slice(0, headerLineIdx)
+    .filter((l) => l.trim() && !/^[─=\s]+$/.test(l.trim()));
+
+  // Parse headers from the header line
+  const headerLine = lines[headerLineIdx];
+  const headers = headerLine.trim().split(/\s{2,}/).filter(Boolean);
+
+  // Find the divider line right after the header
+  const dividerIdx = lines.findIndex(
+    (l, i) => i > headerLineIdx && /^[\s─]+$/.test(l) && l.trim().length > 5,
+  );
+  const tableStartIdx = dividerIdx >= 0 ? dividerIdx + 1 : headerLineIdx + 1;
+
+  // Find where the break-even section starts
+  const breakEvenIdx = lines.findIndex((l) => /Break-even AUM/i.test(l));
+  const tableEndIdx = breakEvenIdx >= 0 ? breakEvenIdx : lines.length;
+
+  // Parse table rows using token splitting.
+  // The AUM column is right-aligned so position-based slicing fails — the "$" and
+  // the number are separated by many spaces and always tokenise as two pieces.
+  // We detect this by checking whether the first token is exactly "$", and if so
+  // merge it with the second token to reconstruct the full AUM value.
+  const rows: string[][] = [];
+  for (let i = tableStartIdx; i < tableEndIdx; i += 1) {
+    const line = lines[i];
+    if (!line.trim() || /^[─=]+$/.test(line.trim())) continue;
+    const tokens = line.split(/\s{2,}/).filter(Boolean);
+    if (tokens.length === 0) continue;
+    let row: string[];
+    if (tokens[0] === '$') {
+      // Merge "$" and the number into a single AUM token
+      row = [`$${tokens[1]}`, ...tokens.slice(2)];
+    } else {
+      row = tokens;
+    }
+    if (row.length >= 2) rows.push(row);
+  }
+
+  // Break-even footer lines
+  const breakEvenLines = breakEvenIdx >= 0
+    ? lines.slice(breakEvenIdx).filter((l) => l.trim() && !/^[=─]+$/.test(l.trim()))
+    : [];
+
+  const gradeIdx = headers.findIndex((h) => /^grade$/i.test(h));
+  const sharpeIdx = headers.findIndex((h) => /^sharpe$/i.test(h));
+
+  const gradeColor = (g: string) => {
+    if (/excellent/i.test(g)) return 'var(--green)';
+    if (/institutional/i.test(g)) return '#60a5fa';
+    if (/survival/i.test(g)) return 'var(--amber)';
+    if (/marginal/i.test(g)) return '#f97316';
+    if (/unusable/i.test(g)) return 'var(--red)';
+    return 'var(--t1)';
+  };
+
+  const sharpeColor = (v: string) => {
+    const n = parseFloat(v);
+    if (!Number.isFinite(n)) return 'var(--t1)';
+    if (n >= 2.0) return 'var(--green)';
+    if (n >= 1.5) return 'var(--amber)';
+    return 'var(--red)';
+  };
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 10, fontSize: 9, ...MONO }}>
+      {/* KV metadata */}
+      {kvLines.length > 0 && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 3 }}>
+          {kvLines.map((line, i) => {
+            const m = line.match(/^[\s]*(.+?):\s+(.+)$/);
+            if (!m) return null;
+            return (
+              <div key={i} style={{ display: 'flex', gap: 8 }}>
+                <span style={{ color: 'var(--t2)', minWidth: 160 }}>{m[1].trim()}</span>
+                <span style={{ color: 'var(--t1)' }}>{m[2].trim()}</span>
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {/* Capacity table */}
+      {rows.length > 0 && (
+        <div style={{ overflowX: 'auto' }}>
+          <table style={{ borderCollapse: 'collapse', fontSize: 9, tableLayout: 'auto', ...MONO }}>
+            <thead>
+              <tr>
+                {headers.map((h, i) => (
+                  <th
+                    key={i}
+                    style={{
+                      padding: '3px 10px 3px 6px',
+                      textAlign: i === 0 ? 'left' : 'right',
+                      color: 'var(--t3)',
+                      fontWeight: 700,
+                      textTransform: 'uppercase',
+                      letterSpacing: '0.08em',
+                      borderBottom: '1px solid var(--line2)',
+                      whiteSpace: 'nowrap',
+                    }}
+                  >
+                    {h}
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((row, ri) => {
+                const gradeVal = gradeIdx >= 0 ? row[gradeIdx] : '';
+                const isFloor = /inst\.\s*floor/i.test(gradeVal);
+                return (
+                  <tr
+                    key={ri}
+                    style={{
+                      background: isFloor
+                        ? 'var(--amber-dim)'
+                        : ri % 2 === 1
+                          ? 'rgba(255,255,255,0.015)'
+                          : 'transparent',
+                    }}
+                  >
+                    {row.map((cell, ci) => {
+                      let color = 'var(--t1)';
+                      if (ci === gradeIdx) color = gradeColor(cell);
+                      else if (ci === sharpeIdx) color = sharpeColor(cell);
+                      else {
+                        const n = parseFloat(cell.replace(/[,%$]/g, ''));
+                        if (Number.isFinite(n)) {
+                          color = n < 0 ? 'var(--red)' : cell.includes('%') ? 'var(--t1)' : 'var(--t1)';
+                        }
+                      }
+                      return (
+                        <td
+                          key={ci}
+                          style={{
+                            padding: '3px 10px 3px 6px',
+                            textAlign: ci === 0 ? 'left' : 'right',
+                            color,
+                            whiteSpace: 'nowrap',
+                          }}
+                        >
+                          {cell || '—'}
+                        </td>
+                      );
+                    })}
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      {/* Break-even footer */}
+      {breakEvenLines.length > 0 && (
+        <div
+          style={{
+            display: 'flex',
+            flexDirection: 'column',
+            gap: 3,
+            paddingTop: 6,
+            borderTop: '1px solid var(--line)',
+          }}
+        >
+          {breakEvenLines.map((line, i) => {
+            const isHeader = /Break-even AUM/i.test(line);
+            return (
+              <div
+                key={i}
+                style={{
+                  color: isHeader ? 'var(--t2)' : 'var(--t1)',
+                  fontWeight: isHeader ? 700 : 400,
+                  paddingLeft: isHeader ? 0 : 12,
+                  fontSize: 9,
+                }}
+              >
+                {line.trim()}
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
+function renderHeatmapSection(body: string, label: string) {
+  const grid = parseNumericGrid(body);
+  if (grid && grid.data.length >= 2 && grid.colLabels.length >= 2) {
+    return (
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+        {sectionLabel(label)}
+        <HeatmapGrid rowLabels={grid.rowLabels} colLabels={grid.colLabels} data={grid.data} />
+      </div>
+    );
+  }
+  const table = parseColumnarTable(body);
+  if (table && table.rows.length > 0) {
+    return (
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+        {sectionLabel(label)}
+        <SectionTable headers={table.headers} rows={table.rows} />
+      </div>
+    );
+  }
+  return <PreFallback body={body} />;
+}
+
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
+function renderRankedSection(body: string, label: string) {
+  const table = parseColumnarTable(body);
+  if (!table || table.rows.length === 0) return <PreFallback body={body} />;
+  const sharpeIdx = table.headers.findIndex((h) => /sharpe/i.test(h));
+  if (sharpeIdx >= 1) {
+    const items = table.rows.flatMap((r) => {
+      const raw = r.values[sharpeIdx - 1];
+      if (!raw) return [];
+      const num = parseFloat(raw.replace(/[,%]/g, ''));
+      if (!Number.isFinite(num)) return [];
+      return [{ label: r.label, value: num, raw }];
+    });
+    if (items.length >= 2) {
+      return (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+          {sectionLabel(label + ' — Sharpe')}
+          <SectionHBarChart items={items} colorFn={(v) => v >= 1.5 ? 'var(--green)' : v >= 0.5 ? 'var(--amber)' : 'var(--red)'} />
+          <SectionTable headers={table.headers} rows={table.rows} />
+        </div>
+      );
+    }
+  }
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+      {sectionLabel(label)}
+      <SectionTable headers={table.headers} rows={table.rows} />
+    </div>
+  );
+}
+
+// ── Main dispatcher ───────────────────────────────────────────────────────────
+
+function renderMarketCapDiagnostic(body: string) {
+  const lines = body.split('\n');
+
+  // --- metadata KV (Symbol src / Mcap file) ---
+  const metaKV: { label: string; value: string }[] = [];
+  for (const line of lines) {
+    const m = line.match(/^\s{2}(Symbol src|Mcap file)\s*:\s*(.+)$/);
+    if (m) metaKV.push({ label: m[1].trim(), value: m[2].trim() });
+  }
+
+  // --- Section 1: Symbol-level coverage ---
+  let symTotal = 0, symMatched = 0, symMatchedPct = '', symUnmatched = 0, symUnmatchedPct = '';
+  let unmatchedSymbols: string[] = [];
+  for (const line of lines) {
+    let m: RegExpMatchArray | null;
+    m = line.match(/Unique symbols.*?:\s*([\d,]+)/i);
+    if (m) symTotal = parseInt(m[1].replace(/,/g, ''), 10);
+    m = line.match(/Matched in mcap.*?:\s*([\d,]+)\s*\(([^)]+)\)/i);
+    if (m) { symMatched = parseInt(m[1].replace(/,/g, ''), 10); symMatchedPct = m[2]; }
+    m = line.match(/Unmatched.*?:\s*([\d,]+)\s*\(([^)]+)\)/i);
+    if (m) { symUnmatched = parseInt(m[1].replace(/,/g, ''), 10); symUnmatchedPct = m[2]; }
+    m = line.match(/Unmatched symbols:\s*\[(.+)\]/);
+    if (m) {
+      unmatchedSymbols = m[1].split(',').map(s => s.trim().replace(/^'|'$/g, '').replace(/"/g, ''));
+    }
+  }
+
+  // --- Section 2: Row-level match rate ---
+  let rowTotal = 0, rowMatched = 0, rowMatchedPct = '', rowMissing = 0, rowMissingPct = '';
+  for (const line of lines) {
+    let m: RegExpMatchArray | null;
+    m = line.match(/Total rows\s*:\s*([\d,]+)/i);
+    if (m) rowTotal = parseInt(m[1].replace(/,/g, ''), 10);
+    m = line.match(/Matched rows\s*:\s*([\d,]+)\s*\(([^)]+)\)/i);
+    if (m) { rowMatched = parseInt(m[1].replace(/,/g, ''), 10); rowMatchedPct = m[2]; }
+    m = line.match(/Missing mcap\s*:\s*([\d,]+)\s*\(([^)]+)\)/i);
+    if (m) { rowMissing = parseInt(m[1].replace(/,/g, ''), 10); rowMissingPct = m[2]; }
+  }
+
+  // --- Section 2b: Missing mcap breakdown ---
+  interface MCRow { symbol: string; missingDays: number; dates: string; }
+  const mcRows: MCRow[] = [];
+  let inBreakdown = false;
+  for (const line of lines) {
+    if (/Missing mcap breakdown/i.test(line)) { inBreakdown = true; continue; }
+    if (!inBreakdown) continue;
+    if (/^[\s─\-=]+$/.test(line) || /Symbol\s+Missing days/i.test(line)) continue;
+    // data row: "  SYMBOL                       15  dates..."
+    const m = line.match(/^\s{2}(\S+)\s+([\d]+)\s+(.+)$/);
+    if (m) {
+      mcRows.push({ symbol: m[1], missingDays: parseInt(m[2], 10), dates: m[3].trim() });
+    }
+  }
+
+  const maxMissing = mcRows.length > 0 ? Math.max(...mcRows.map(r => r.missingDays)) : 1;
+  const BAR_MAX = 60;
+
+  const covColor = (pct: string) => {
+    const n = parseFloat(pct);
+    if (n >= 90) return 'var(--green)';
+    if (n >= 75) return 'var(--amber)';
+    return 'var(--red)';
+  };
+
+  const thStyle: React.CSSProperties = {
+    padding: '3px 8px', fontWeight: 700, textTransform: 'uppercase',
+    letterSpacing: '0.08em', borderBottom: '1px solid var(--line2)',
+    whiteSpace: 'nowrap', fontSize: 9, color: 'var(--t3)',
+  };
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 16, ...MONO }}>
+      {/* Metadata KV */}
+      {metaKV.length > 0 && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 3 }}>
+          {metaKV.map((kv, i) => (
+            <div key={i} style={{ display: 'flex', gap: 6, fontSize: 9 }}>
+              <span style={{ color: 'var(--t2)', minWidth: 80 }}>{kv.label}</span>
+              <span style={{ color: 'var(--t1)' }}>{kv.value}</span>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* Symbol-level coverage */}
+      {symTotal > 0 && (
+        <div>
+          <div style={{ fontSize: 9, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.12em', color: 'var(--t3)', marginBottom: 8 }}>
+            1. Symbol-level coverage
+          </div>
+          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 10 }}>
+            {[
+              { label: 'Total symbols', value: symTotal.toLocaleString(), color: 'var(--t0)' },
+              { label: 'Matched', value: `${symMatched.toLocaleString()} (${symMatchedPct})`, color: covColor(symMatchedPct) },
+              { label: 'Unmatched', value: `${symUnmatched.toLocaleString()} (${symUnmatchedPct})`, color: symUnmatched === 0 ? 'var(--green)' : 'var(--red)' },
+            ].map((card, i) => (
+              <div key={i} style={{ background: 'var(--bg2)', border: '1px solid var(--line)', borderRadius: 3, padding: '8px 12px', minWidth: 120 }}>
+                <div style={{ fontSize: 9, color: 'var(--t2)', textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: 4 }}>{card.label}</div>
+                <div style={{ fontSize: 13, fontWeight: 700, color: card.color }}>{card.value}</div>
+              </div>
+            ))}
+          </div>
+          {/* Coverage bar */}
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 9 }}>
+            <span style={{ color: 'var(--t2)', minWidth: 90 }}>Symbol coverage</span>
+            <div style={{ flex: 1, maxWidth: 180, height: 4, background: 'var(--bg4)', borderRadius: 2, overflow: 'hidden' }}>
+              <div style={{ height: '100%', width: `${(symMatched / symTotal) * 100}%`, background: covColor(symMatchedPct), borderRadius: 2 }} />
+            </div>
+            <span style={{ color: covColor(symMatchedPct), fontWeight: 700 }}>{symMatchedPct}</span>
+          </div>
+          {/* Unmatched chips */}
+          {unmatchedSymbols.length > 0 && (
+            <div style={{ marginTop: 8 }}>
+              <div style={{ fontSize: 9, color: 'var(--t2)', marginBottom: 5 }}>Unmatched symbols ({unmatchedSymbols.length})</div>
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
+                {unmatchedSymbols.map((sym, i) => (
+                  <span key={i} style={{
+                    background: 'var(--red-dim)', border: '1px solid var(--red)', borderRadius: 2,
+                    padding: '1px 5px', fontSize: 9, color: 'var(--red)',
+                  }}>{sym}</span>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Row-level match rate */}
+      {rowTotal > 0 && (
+        <div>
+          <div style={{ fontSize: 9, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.12em', color: 'var(--t3)', marginBottom: 8 }}>
+            2. Row-level match rate
+          </div>
+          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 10 }}>
+            {[
+              { label: 'Total rows', value: rowTotal.toLocaleString(), color: 'var(--t0)' },
+              { label: 'Matched', value: `${rowMatched.toLocaleString()} (${rowMatchedPct})`, color: covColor(rowMatchedPct) },
+              { label: 'Missing', value: `${rowMissing.toLocaleString()} (${rowMissingPct})`, color: rowMissing === 0 ? 'var(--green)' : parseFloat(rowMissingPct) > 25 ? 'var(--amber)' : 'var(--t1)' },
+            ].map((card, i) => (
+              <div key={i} style={{ background: 'var(--bg2)', border: '1px solid var(--line)', borderRadius: 3, padding: '8px 12px', minWidth: 120 }}>
+                <div style={{ fontSize: 9, color: 'var(--t2)', textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: 4 }}>{card.label}</div>
+                <div style={{ fontSize: 13, fontWeight: 700, color: card.color }}>{card.value}</div>
+              </div>
+            ))}
+          </div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 9 }}>
+            <span style={{ color: 'var(--t2)', minWidth: 90 }}>Row coverage</span>
+            <div style={{ flex: 1, maxWidth: 180, height: 4, background: 'var(--bg4)', borderRadius: 2, overflow: 'hidden' }}>
+              <div style={{ height: '100%', width: `${(rowMatched / rowTotal) * 100}%`, background: covColor(rowMatchedPct), borderRadius: 2 }} />
+            </div>
+            <span style={{ color: covColor(rowMatchedPct), fontWeight: 700 }}>{rowMatchedPct}</span>
+          </div>
+        </div>
+      )}
+
+      {/* Missing breakdown table */}
+      {mcRows.length > 0 && (
+        <div>
+          <div style={{ fontSize: 9, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.12em', color: 'var(--t3)', marginBottom: 8 }}>
+            Missing mcap breakdown by symbol
+          </div>
+          <div style={{ overflowX: 'auto' }}>
+            <table style={{ borderCollapse: 'collapse', fontSize: 9, tableLayout: 'auto', ...MONO, width: '100%' }}>
+              <thead>
+                <tr>
+                  <th style={{ ...thStyle, textAlign: 'left' }}>Symbol</th>
+                  <th style={{ ...thStyle, textAlign: 'right' }}>Missing days</th>
+                  <th style={{ ...thStyle, textAlign: 'left', paddingLeft: 10 }}></th>
+                  <th style={{ ...thStyle, textAlign: 'left' }}>Dates</th>
+                </tr>
+              </thead>
+              <tbody>
+                {mcRows.map((row, ri) => {
+                  const barW = Math.round((row.missingDays / maxMissing) * BAR_MAX);
+                  const barColor = row.missingDays >= 10 ? 'var(--red)' : row.missingDays >= 5 ? 'var(--amber)' : 'var(--t2)';
+                  return (
+                    <tr key={ri} style={{ background: ri % 2 === 1 ? 'rgba(255,255,255,0.012)' : 'transparent' }}>
+                      <td style={{ padding: '2px 8px', color: 'var(--t0)', whiteSpace: 'nowrap', borderBottom: '1px solid var(--line)', fontWeight: row.missingDays >= 10 ? 700 : 400 }}>
+                        {row.symbol}
+                      </td>
+                      <td style={{ padding: '2px 8px', textAlign: 'right', color: barColor, whiteSpace: 'nowrap', borderBottom: '1px solid var(--line)', fontWeight: row.missingDays >= 10 ? 700 : 400 }}>
+                        {row.missingDays}
+                      </td>
+                      <td style={{ padding: '2px 4px 2px 10px', borderBottom: '1px solid var(--line)', verticalAlign: 'middle', width: BAR_MAX + 8 }}>
+                        <div style={{ width: BAR_MAX, display: 'flex', alignItems: 'center' }}>
+                          <div style={{ width: barW, height: 3, borderRadius: 1, background: barColor, opacity: 0.8 }} />
+                        </div>
+                      </td>
+                      <td style={{ padding: '2px 8px', color: 'var(--t2)', borderBottom: '1px solid var(--line)', maxWidth: 320, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                        {row.dates}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function renderRunSummary(body: string) {
+  interface RunRow {
+    filter: string; sharpe: number; cagr: number; maxdd: number; active: number;
+    wfcv: number; totret: number; eq: number; wst1d: number; wst1w: number;
+    wst1m: number; dsr: number; grd: number; isBest: boolean;
+  }
+  const rows: RunRow[] = [];
+  const metaKV: { label: string; value: string }[] = [];
+  let inTable = false;
+
+  for (const line of body.split('\n')) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+
+    // Dividers / block headers
+    if (/^[═─=\-█]+$/.test(trimmed)) continue;
+
+    // Column header line
+    if (/^Filter\s/.test(trimmed) && /Sharpe/.test(trimmed)) { inTable = true; continue; }
+
+    if (!inTable) {
+      // Metadata KV before the table
+      const m = trimmed.match(/^(.+?)\s*:\s*(.+)$/);
+      if (m) metaKV.push({ label: m[1].trim(), value: m[2].trim() });
+      continue;
+    }
+
+    // Data rows
+    const isBest = trimmed.endsWith('◄');
+    const cleanLine = isBest ? trimmed.slice(0, -1).trim() : trimmed;
+    const tokens = cleanLine.split(/\s{2,}/).filter(Boolean);
+    if (tokens.length < 12) continue;
+
+    const p = (s: string) => parseFloat(s.replace(/[%×,]/g, '')) || 0;
+    rows.push({
+      filter: tokens[0],
+      sharpe: p(tokens[1]),
+      cagr: p(tokens[2]),
+      maxdd: p(tokens[3]),
+      active: parseInt(tokens[4], 10) || 0,
+      wfcv: p(tokens[5]),
+      totret: p(tokens[6]),
+      eq: p(tokens[7]),
+      wst1d: p(tokens[8]),
+      wst1w: p(tokens[9]),
+      wst1m: p(tokens[10]),
+      dsr: p(tokens[11]),
+      grd: parseInt(tokens[12] || tokens[11], 10) || 0,
+      isBest,
+    });
+  }
+
+  if (rows.length === 0) return <PreFallback body={body} />;
+
+  const maxSharpe = Math.max(...rows.map(r => r.sharpe));
+  const BAR_MAX = 48;
+
+  const sharpeColor = (v: number) => v >= 3 ? 'var(--green)' : v >= 2 ? 'var(--amber)' : 'var(--red)';
+  const ddColor = (v: number) => v >= -30 ? 'var(--green)' : v >= -50 ? 'var(--amber)' : 'var(--red)';
+  const wfcvColor = (v: number) => v <= 0.3 ? 'var(--green)' : v <= 0.5 ? 'var(--amber)' : 'var(--red)';
+  const dsrColor = (v: number) => v >= 90 ? 'var(--green)' : v >= 80 ? 'var(--amber)' : 'var(--red)';
+  const pctFmt = (v: number) => `${v >= 0 ? '+' : ''}${v.toFixed(2)}%`;
+
+  const thStyle: React.CSSProperties = {
+    padding: '3px 8px', fontWeight: 700, textTransform: 'uppercase',
+    letterSpacing: '0.08em', borderBottom: '1px solid var(--line2)',
+    whiteSpace: 'nowrap', fontSize: 9, color: 'var(--t3)',
+  };
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 14, ...MONO }}>
+      {/* Metadata KV */}
+      {metaKV.length > 0 && (
+        <div style={{ display: 'flex', gap: 16, flexWrap: 'wrap' }}>
+          {metaKV.map((kv, i) => (
+            <div key={i} style={{ display: 'flex', gap: 5, fontSize: 9 }}>
+              <span style={{ color: 'var(--t2)', textTransform: 'uppercase', letterSpacing: '0.08em' }}>{kv.label}</span>
+              <span style={{ color: 'var(--t1)', fontWeight: 700 }}>{kv.value}</span>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* Filter comparison table */}
+      <div style={{ overflowX: 'auto' }}>
+        <table style={{ borderCollapse: 'collapse', fontSize: 9, tableLayout: 'auto', ...MONO, width: '100%' }}>
+          <thead>
+            <tr>
+              <th style={{ ...thStyle, textAlign: 'left' }}>Filter</th>
+              <th style={{ ...thStyle, textAlign: 'left', paddingLeft: 4, paddingRight: 4 }}></th>
+              <th style={{ ...thStyle, textAlign: 'right' }}>Sharpe</th>
+              <th style={{ ...thStyle, textAlign: 'right' }}>CAGR%</th>
+              <th style={{ ...thStyle, textAlign: 'right' }}>MaxDD%</th>
+              <th style={{ ...thStyle, textAlign: 'right' }}>Active</th>
+              <th style={{ ...thStyle, textAlign: 'right' }}>WF-CV</th>
+              <th style={{ ...thStyle, textAlign: 'right' }}>TotRet%</th>
+              <th style={{ ...thStyle, textAlign: 'right' }}>Eq</th>
+              <th style={{ ...thStyle, textAlign: 'right' }}>Wst 1D</th>
+              <th style={{ ...thStyle, textAlign: 'right' }}>Wst 1W</th>
+              <th style={{ ...thStyle, textAlign: 'right' }}>Wst 1M</th>
+              <th style={{ ...thStyle, textAlign: 'right' }}>DSR%</th>
+              <th style={{ ...thStyle, textAlign: 'right' }}>Grd</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((row, ri) => {
+              const barW = Math.round((row.sharpe / maxSharpe) * BAR_MAX);
+              return (
+                <tr key={ri} style={{ background: row.isBest ? 'var(--green-dim)' : ri % 2 === 1 ? 'rgba(255,255,255,0.012)' : 'transparent' }}>
+                  <td style={{
+                    padding: '3px 8px', color: row.isBest ? 'var(--green)' : 'var(--t1)',
+                    whiteSpace: 'nowrap', borderBottom: '1px solid var(--line)',
+                    fontWeight: row.isBest ? 700 : 400,
+                  }}>
+                    {row.isBest && <span style={{ marginRight: 4, fontSize: 8 }}>★</span>}
+                    {row.filter}
+                  </td>
+                  {/* Sharpe bar */}
+                  <td style={{ padding: '3px 4px', borderBottom: '1px solid var(--line)', verticalAlign: 'middle' }}>
+                    <div style={{ width: BAR_MAX, display: 'flex', alignItems: 'center' }}>
+                      <div style={{ width: barW, height: 3, borderRadius: 1, background: sharpeColor(row.sharpe), opacity: row.isBest ? 1 : 0.7 }} />
+                    </div>
+                  </td>
+                  <td style={{ padding: '3px 8px', textAlign: 'right', color: sharpeColor(row.sharpe), fontWeight: row.isBest ? 700 : 400, whiteSpace: 'nowrap', borderBottom: '1px solid var(--line)' }}>
+                    {row.sharpe.toFixed(3)}
+                  </td>
+                  <td style={{ padding: '3px 8px', textAlign: 'right', color: 'var(--green)', fontWeight: row.isBest ? 700 : 400, whiteSpace: 'nowrap', borderBottom: '1px solid var(--line)' }}>
+                    {row.cagr.toLocaleString(undefined, { maximumFractionDigits: 1 })}%
+                  </td>
+                  <td style={{ padding: '3px 8px', textAlign: 'right', color: ddColor(row.maxdd), fontWeight: row.isBest ? 700 : 400, whiteSpace: 'nowrap', borderBottom: '1px solid var(--line)' }}>
+                    {pctFmt(row.maxdd)}
+                  </td>
+                  <td style={{ padding: '3px 8px', textAlign: 'right', color: 'var(--t2)', whiteSpace: 'nowrap', borderBottom: '1px solid var(--line)' }}>
+                    {row.active}
+                  </td>
+                  <td style={{ padding: '3px 8px', textAlign: 'right', color: wfcvColor(row.wfcv), fontWeight: row.isBest ? 700 : 400, whiteSpace: 'nowrap', borderBottom: '1px solid var(--line)' }}>
+                    {row.wfcv.toFixed(3)}
+                  </td>
+                  <td style={{ padding: '3px 8px', textAlign: 'right', color: 'var(--t1)', whiteSpace: 'nowrap', borderBottom: '1px solid var(--line)' }}>
+                    {row.totret.toLocaleString(undefined, { maximumFractionDigits: 1 })}%
+                  </td>
+                  <td style={{ padding: '3px 8px', textAlign: 'right', color: 'var(--t1)', whiteSpace: 'nowrap', borderBottom: '1px solid var(--line)' }}>
+                    {row.eq.toFixed(2)}×
+                  </td>
+                  <td style={{ padding: '3px 8px', textAlign: 'right', color: ddColor(row.wst1d), whiteSpace: 'nowrap', borderBottom: '1px solid var(--line)' }}>
+                    {pctFmt(row.wst1d)}
+                  </td>
+                  <td style={{ padding: '3px 8px', textAlign: 'right', color: ddColor(row.wst1w), whiteSpace: 'nowrap', borderBottom: '1px solid var(--line)' }}>
+                    {pctFmt(row.wst1w)}
+                  </td>
+                  <td style={{ padding: '3px 8px', textAlign: 'right', color: ddColor(row.wst1m), whiteSpace: 'nowrap', borderBottom: '1px solid var(--line)' }}>
+                    {pctFmt(row.wst1m)}
+                  </td>
+                  <td style={{ padding: '3px 8px', textAlign: 'right', color: dsrColor(row.dsr), fontWeight: row.isBest ? 700 : 400, whiteSpace: 'nowrap', borderBottom: '1px solid var(--line)' }}>
+                    {row.dsr.toFixed(1)}%
+                  </td>
+                  <td style={{ padding: '3px 8px', textAlign: 'right', color: row.isBest ? 'var(--green)' : 'var(--t1)', fontWeight: row.isBest ? 700 : 400, whiteSpace: 'nowrap', borderBottom: '1px solid var(--line)' }}>
+                    {row.grd}
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+function renderScorecardTable(body: string) {
+  interface ScorecardRow { metric: string; goal: string; actual: string; status: 'pass' | 'fail' | 'borderline' | 'na'; }
+  const rows: ScorecardRow[] = [];
+  let bestFilter = '';
+  let summaryLine = '';
+
+  for (const line of body.split('\n')) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    if (/^[═─=\-]+$/.test(trimmed)) continue;
+
+    // Best filter header
+    const bfm = trimmed.match(/^Best filter:\s*(.+)$/i);
+    if (bfm) { bestFilter = bfm[1].trim(); continue; }
+
+    // Summary line: "✅ 53 Pass   ❌ 8 Fail ..."
+    if (/✅.*Pass.*❌.*Fail/i.test(trimmed)) { summaryLine = trimmed; continue; }
+
+    // Saved → ... line
+    if (/^Saved\s*→/.test(trimmed)) continue;
+
+    // Column header line
+    if (/^Metric\s/.test(trimmed) && /Goal/.test(trimmed) && /Status/.test(trimmed)) continue;
+
+    // Data rows: split on 2+ spaces, strip empty first token from leading indent
+    const tokens = trimmed.split(/\s{2,}/).filter(Boolean);
+    if (tokens.length < 3) continue;
+
+    const metric = tokens[0];
+    const goal = tokens[1];
+    const actual = tokens[2];
+    const statusRaw = tokens.slice(3).join(' ').trim();
+
+    let status: ScorecardRow['status'] = 'na';
+    if (statusRaw.startsWith('✅')) status = 'pass';
+    else if (statusRaw.startsWith('❌')) status = 'fail';
+    else if (statusRaw.startsWith('⚠')) status = 'borderline';
+    else if (statusRaw.startsWith('──')) status = 'na';
+    else continue; // not a data row
+
+    rows.push({ metric, goal, actual, status });
+  }
+
+  if (rows.length === 0) return <PreFallback body={body} />;
+
+  // Parse summary counts
+  let passCount = 0, failCount = 0, borderlineCount = 0, naCount = 0, totalCount = 0;
+  if (summaryLine) {
+    const pm = summaryLine.match(/✅\s*(\d+)\s*Pass/); if (pm) passCount = parseInt(pm[1], 10);
+    const fm = summaryLine.match(/❌\s*(\d+)\s*Fail/); if (fm) failCount = parseInt(fm[1], 10);
+    const bm = summaryLine.match(/⚠\s*(\d+)\s*Borderline/); if (bm) borderlineCount = parseInt(bm[1], 10);
+    const nm = summaryLine.match(/──\s*(\d+)\s*N\/A/); if (nm) naCount = parseInt(nm[1], 10);
+    const tm = summaryLine.match(/of\s*(\d+)\s*metrics/); if (tm) totalCount = parseInt(tm[1], 10);
+  }
+  const scoredCount = passCount + failCount + borderlineCount;
+  const passRate = scoredCount > 0 ? (passCount / scoredCount) * 100 : 0;
+
+  const statusColor = (s: ScorecardRow['status']) => {
+    if (s === 'pass') return 'var(--green)';
+    if (s === 'fail') return 'var(--red)';
+    if (s === 'borderline') return 'var(--amber)';
+    return 'var(--t2)';
+  };
+  const rowBg = (s: ScorecardRow['status']) => {
+    if (s === 'fail') return 'var(--red-dim)';
+    if (s === 'borderline') return 'var(--amber-dim)';
+    return 'transparent';
+  };
+  const statusLabel = (s: ScorecardRow['status']) => {
+    if (s === 'pass') return 'Pass';
+    if (s === 'fail') return 'Fail';
+    if (s === 'borderline') return 'Borderline';
+    return 'N/A';
+  };
+  const statusDot = (s: ScorecardRow['status']) => {
+    if (s === 'pass') return '✓';
+    if (s === 'fail') return '✗';
+    if (s === 'borderline') return '⚠';
+    return '—';
+  };
+
+  const thStyle: React.CSSProperties = {
+    padding: '3px 8px', fontWeight: 700, textTransform: 'uppercase',
+    letterSpacing: '0.08em', borderBottom: '1px solid var(--line2)',
+    whiteSpace: 'nowrap', fontSize: 9, color: 'var(--t3)',
+  };
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 14, ...MONO }}>
+      {/* Best filter */}
+      {bestFilter && (
+        <div style={{ display: 'flex', gap: 6, fontSize: 9, alignItems: 'center' }}>
+          <span style={{ color: 'var(--t2)', textTransform: 'uppercase', letterSpacing: '0.08em' }}>Best filter</span>
+          <span style={{ color: 'var(--t0)', fontWeight: 700 }}>{bestFilter}</span>
+        </div>
+      )}
+
+      {/* Summary cards + pass-rate bar */}
+      {scoredCount > 0 && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+            {[
+              { label: 'Pass', count: passCount, color: 'var(--green)' },
+              { label: 'Fail', count: failCount, color: 'var(--red)' },
+              { label: 'Borderline', count: borderlineCount, color: 'var(--amber)' },
+              { label: 'N/A', count: naCount, color: 'var(--t2)' },
+              ...(totalCount > 0 ? [{ label: 'Total metrics', count: totalCount, color: 'var(--t1)' }] : []),
+            ].map((card, i) => (
+              <div key={i} style={{ background: 'var(--bg2)', border: '1px solid var(--line)', borderRadius: 3, padding: '6px 10px', minWidth: 72 }}>
+                <div style={{ fontSize: 9, color: 'var(--t2)', textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: 3 }}>{card.label}</div>
+                <div style={{ fontSize: 15, fontWeight: 700, color: card.color }}>{card.count}</div>
+              </div>
+            ))}
+          </div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 9 }}>
+            <span style={{ color: 'var(--t2)', minWidth: 70 }}>Pass rate</span>
+            <div style={{ flex: 1, maxWidth: 200, height: 4, background: 'var(--bg4)', borderRadius: 2, overflow: 'hidden' }}>
+              <div style={{ height: '100%', width: `${passRate}%`, background: passRate >= 80 ? 'var(--green)' : passRate >= 60 ? 'var(--amber)' : 'var(--red)', borderRadius: 2 }} />
+            </div>
+            <span style={{ color: passRate >= 80 ? 'var(--green)' : passRate >= 60 ? 'var(--amber)' : 'var(--red)', fontWeight: 700 }}>{passRate.toFixed(0)}%</span>
+          </div>
+        </div>
+      )}
+
+      {/* Scorecard table */}
+      <div style={{ overflowX: 'auto' }}>
+        <table style={{ borderCollapse: 'collapse', fontSize: 9, tableLayout: 'auto', ...MONO, width: '100%' }}>
+          <thead>
+            <tr>
+              <th style={{ ...thStyle, textAlign: 'left' }}>Metric</th>
+              <th style={{ ...thStyle, textAlign: 'left' }}>Goal</th>
+              <th style={{ ...thStyle, textAlign: 'right' }}>Actual</th>
+              <th style={{ ...thStyle, textAlign: 'center' }}>Status</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((row, ri) => (
+              <tr key={ri} style={{ background: rowBg(row.status) }}>
+                <td style={{
+                  padding: '2px 8px', color: row.status === 'na' ? 'var(--t2)' : 'var(--t1)',
+                  whiteSpace: 'nowrap', borderBottom: '1px solid var(--line)',
+                  opacity: row.status === 'na' ? 0.6 : 1,
+                }}>
+                  {row.metric}
+                </td>
+                <td style={{
+                  padding: '2px 8px', color: 'var(--t2)',
+                  whiteSpace: 'nowrap', borderBottom: '1px solid var(--line)',
+                  opacity: row.status === 'na' ? 0.6 : 1,
+                }}>
+                  {row.goal}
+                </td>
+                <td style={{
+                  padding: '2px 8px', textAlign: 'right',
+                  color: statusColor(row.status),
+                  whiteSpace: 'nowrap', borderBottom: '1px solid var(--line)',
+                  fontWeight: row.status === 'fail' || row.status === 'borderline' ? 700 : 400,
+                  opacity: row.status === 'na' ? 0.5 : 1,
+                }}>
+                  {row.actual}
+                </td>
+                <td style={{
+                  padding: '2px 8px', textAlign: 'center',
+                  borderBottom: '1px solid var(--line)', whiteSpace: 'nowrap',
+                }}>
+                  <span style={{
+                    display: 'inline-flex', alignItems: 'center', gap: 3,
+                    color: statusColor(row.status),
+                    fontSize: 9, fontWeight: row.status !== 'na' ? 700 : 400,
+                    opacity: row.status === 'na' ? 0.45 : 1,
+                  }}>
+                    <span>{statusDot(row.status)}</span>
+                    <span>{statusLabel(row.status)}</span>
+                  </span>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+function renderSectionViz(title: string, body: string): React.ReactNode {
+  const t = title.toUpperCase();
+
+  if (t.includes('RUN SUMMARY')) return renderRunSummary(body);
+  if (t.includes('ALLOCATOR VIEW SCORECARD') || t.includes('TECHNICAL APPENDIX SCORECARD')) return renderScorecardTable(body);
+  if (t.includes('RETURN RATES BY PERIOD')) return renderReturnRatesByPeriod(body);
+  if (t.includes('RETURN DISTRIBUTION')) return renderReturnDistribution(body);
+  if (t.includes('RETURN + CONDITIONAL ANALYSIS') || t.includes('RETURN+CONDITIONAL')) return renderReturnConditional(body);
+  if (t.includes('ROLLING MAX DRAWDOWN')) return renderRollingMaxDrawdown(body);
+  if (t.includes('DRAWDOWN EPISODE ANALYSIS')) return renderDrawdownEpisodes(body);
+  if (t.includes('RISK-ADJUSTED RETURN QUALITY')) return renderRiskAdjustedQuality(body);
+  if (t.includes('DAILY VAR') || t.includes('CVAR')) return renderDailyVarCvar(body);
+  if (t.includes('SIGNAL PREDICTIVENESS')) return <PreFallback body={body} />;
+  if (t.includes('SLIPPAGE IMPACT SWEEP')) return <PreFallback body={body} />;
+  if (t.includes('NOISE PERTURBATION STABILITY TEST')) return <PreFallback body={body} />;
+  if (t.includes('PARAM JITTER')) return <PreFallback body={body} />;
+  if (t.includes('RETURN CONCENTRATION ANALYSIS')) return <PreFallback body={body} />;
+  if (t.includes('PERIODIC RETURN BREAKDOWN')) return renderPeriodicBreakdown(body);
+  if (t.includes('SHOCK INJECTION TEST')) return <PreFallback body={body} />;
+  if (t.includes('WEEKLY MILESTONES') || t.includes('MONTHLY MILESTONES')) return renderMilestones(body);
+  if (t.includes('MINIMUM CUMULATIVE RETURN')) return renderMinCumReturn(body);
+  if (t.includes('LIQUIDITY CAPACITY CURVE')) return renderLiquidityCapacityCurve(body);
+  if (t.includes('MARKET CAP DIAGNOSTIC')) return renderMarketCapDiagnostic(body);
+
+  if (t.includes('TAIL GUARDRAIL GRID SWEEP')) return <PreFallback body={body} />;
+  if (t.includes('PARAMETER SURFACE MAP')) return <PreFallback body={body} />;
+  if (t.includes('SHARPE RIDGE MAP')) return <PreFallback body={body} />;
+  if (t.includes('SHARPE PLATEAU DETECTOR')) return <PreFallback body={body} />;
+  if (t.includes('PARAMETRIC STABILITY CUBE')) return renderStabilityCube(body);
+  if (t.includes('RISK THROTTLE STABILITY CUBE')) return renderStabilityCube(body);
+  if (t.includes('EXIT ARCHITECTURE STABILITY CUBE')) return renderStabilityCube(body);
+
+  if (t.includes('PARAMETER SWEEP')) return <PreFallback body={body} />;
+  if (t.includes('L_HIGH SURFACE')) return <PreFallback body={body} />;
+
+  return <PreFallback body={body} />;
 }
 
 export default function ResultsView({ results, jobId, startingCapital, params }: ResultsViewProps) {
@@ -2411,6 +4855,7 @@ export default function ResultsView({ results, jobId, startingCapital, params }:
     });
   })();
 
+  const [equityLogScale, setEquityLogScale] = useState(false);
   const [manualSelectedFilter, setManualSelectedFilter] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<ReportTab>('summary');
   const [auditOutput, setAuditOutput] = useState<string>('');
@@ -2419,6 +4864,11 @@ export default function ResultsView({ results, jobId, startingCapital, params }:
   const [copyState, setCopyState] = useState<'idle' | 'copied' | 'error'>('idle');
   const [tearTemplate, setTearTemplate] = useState('');
   const [calendarHover, setCalendarHover] = useState<{
+    x: number;
+    y: number;
+    text: string;
+  } | null>(null);
+  const [levHistHover, setLevHistHover] = useState<{
     x: number;
     y: number;
     text: string;
@@ -2457,6 +4907,201 @@ export default function ResultsView({ results, jobId, startingCapital, params }:
     () => extractSelectedFilterAdvancedSections(auditOutput, selectedFilter),
     [auditOutput, selectedFilter],
   );
+  const feesTablesByFilter = useMemo(
+    () => ((m.fees_tables_by_filter ?? results?.fees_tables_by_filter ?? {}) as Record<string, FeesRow[]>),
+    [m, results],
+  );
+  const feesTablesFromOutput = useMemo(
+    () => parseFeesTablesFromAuditOutput(auditOutput),
+    [auditOutput],
+  );
+  const selectedFeesTableRows = useMemo(() => {
+    const primary = Object.keys(feesTablesByFilter).length > 0 ? feesTablesByFilter : feesTablesFromOutput;
+    const entries = Object.entries(primary);
+    if (selectedFilter && entries.length > 0) {
+      const norm = normalizeFilterLabel(selectedFilter);
+      const normCore = normalizeFilterLabelCore(selectedFilter);
+      const matched = entries.find(([k]) => {
+        const nk = normalizeFilterLabel(k);
+        const nkCore = normalizeFilterLabelCore(k);
+        return nk === norm || nkCore === normCore || nkCore === norm || nk === normCore;
+      });
+      if (matched) return matched[1];
+    }
+    const topLevel = (results?.fees_table ?? m.fees_table) as FeesRow[] | null | undefined;
+    if (Array.isArray(topLevel) && topLevel.length > 0) return topLevel;
+    if (entries.length > 0) return entries[0][1];
+    return [] as FeesRow[];
+  }, [feesTablesByFilter, feesTablesFromOutput, selectedFilter, results, m]);
+  const feesBreakdownKpis = useMemo(() => {
+    const rows = selectedFeesTableRows;
+    const activeRows = rows.filter((r) => !r.no_entry && typeof r.ret_net === 'number' && Number.isFinite(r.ret_net));
+    const totalCalendarDays = rows.length;
+    const totalActiveDays = rows.filter((r) => !r.no_entry).length;
+    const totalNoEntries = rows.filter((r) => r.no_entry).length;
+    const totalNoEntriesFilter = rows.filter((r) => r.no_entry && r.no_entry_reason === 'filter').length;
+    const totalNoEntriesConviction = rows.filter((r) => r.no_entry && r.no_entry_reason !== 'filter').length;
+    const dailyWinratePct = activeRows.length > 0
+      ? (activeRows.filter((r) => (r.ret_net as number) > 0).length / activeRows.length) * 100
+      : null;
+    const aggregatePeriodWinratePct = (period: 'week' | 'month'): number | null => {
+      const buckets = new Map<string, number>();
+      for (const r of activeRows) {
+        const d = new Date(`${r.date}T00:00:00Z`);
+        if (Number.isNaN(d.getTime())) continue;
+        let key: string;
+        if (period === 'month') {
+          key = `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}`;
+        } else {
+          // Week bucket by UTC Sunday start.
+          const start = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()));
+          start.setUTCDate(start.getUTCDate() - start.getUTCDay());
+          key = start.toISOString().slice(0, 10);
+        }
+        const prevFactor = buckets.get(key) ?? 1;
+        const dayRet = (r.ret_net as number) / 100;
+        buckets.set(key, prevFactor * (1 + dayRet));
+      }
+      const vals = [...buckets.values()].map((factor) => (factor - 1) * 100);
+      if (vals.length === 0) return null;
+      return (vals.filter((v) => v > 0).length / vals.length) * 100;
+    };
+    const weeklyWinratePct = aggregatePeriodWinratePct('week');
+    const monthlyWinratePct = aggregatePeriodWinratePct('month');
+    const endingCapital = [...rows]
+      .reverse()
+      .find((r) => typeof r.end === 'number' && Number.isFinite(r.end))?.end ?? null;
+    const totalFees = rows.reduce((acc, r) => {
+      const taker = typeof r.taker_fee === 'number' && Number.isFinite(r.taker_fee) ? r.taker_fee : 0;
+      const funding = typeof r.funding === 'number' && Number.isFinite(r.funding) ? r.funding : 0;
+      return acc + taker + funding;
+    }, 0);
+    const netFeeDragPct = (endingCapital && endingCapital > 0) ? (totalFees / endingCapital) * 100 : null;
+    const netFeeDragPerActiveDayPct = (netFeeDragPct !== null && totalActiveDays > 0)
+      ? (netFeeDragPct / totalActiveDays)
+      : null;
+    const netFeeDragPerCalendarDayPct = (netFeeDragPct !== null && totalCalendarDays > 0)
+      ? (netFeeDragPct / totalCalendarDays)
+      : null;
+    return {
+      totalCalendarDays,
+      totalActiveDays,
+      totalNoEntries,
+      totalNoEntriesFilter,
+      totalNoEntriesConviction,
+      dailyWinratePct,
+      weeklyWinratePct,
+      monthlyWinratePct,
+      netFeeDragPct,
+      netFeeDragPerActiveDayPct,
+      netFeeDragPerCalendarDayPct,
+    };
+  }, [selectedFeesTableRows]);
+  const selectedFeesTableRowsWithCumulative = useMemo<FeesRowWithCumulative[]>(() => {
+    let cumTradeVol = 0;
+    let cumFees = 0;
+    let cumPnl = 0;
+    return selectedFeesTableRows.map((row) => {
+      const tradeVol = Number.isFinite(row.trade_vol ?? NaN) ? (row.trade_vol as number) : 0;
+      const taker = Number.isFinite(row.taker_fee ?? NaN) ? (row.taker_fee as number) : 0;
+      const funding = Number.isFinite(row.funding ?? NaN) ? (row.funding as number) : 0;
+      const netPnl = Number.isFinite(row.net_pnl ?? NaN) ? (row.net_pnl as number) : 0;
+      cumTradeVol += tradeVol;
+      cumFees += (taker + funding);
+      cumPnl += netPnl;
+      return {
+        ...row,
+        cum_trade_vol: cumTradeVol,
+        cum_fees: cumFees,
+        cum_pnl: cumPnl,
+      };
+    });
+  }, [selectedFeesTableRows]);
+  const feesKeyValues = useMemo(() => {
+    const rows = selectedFeesTableRowsWithCumulative;
+    const last = rows[rows.length - 1] ?? null;
+    const entryDays = rows.filter((r) => !r.no_entry).length;
+    const noEntryDays = rows.filter((r) => r.no_entry).length;
+    const activeLeverages = rows
+      .filter((r) => !r.no_entry && typeof r.lev === 'number' && Number.isFinite(r.lev))
+      .map((r) => r.lev as number);
+    const avgLeverageActive = activeLeverages.length > 0
+      ? (activeLeverages.reduce((acc, v) => acc + v, 0) / activeLeverages.length)
+      : null;
+    const start = rows[0]?.start ?? null;
+    const end = last?.end ?? null;
+    const netReturnPct = (start && end && start !== 0) ? ((end / start) - 1) * 100 : null;
+    return {
+      entryDays,
+      noEntryDays,
+      avgLeverageActive,
+      cumulativeVolume: last?.cum_trade_vol ?? 0,
+      cumulativeFees: last?.cum_fees ?? 0,
+      cumulativePnl: last?.cum_pnl ?? 0,
+      netReturnPct,
+    };
+  }, [selectedFeesTableRowsWithCumulative]);
+  const feesLeverageDiagnostics = useMemo(() => {
+    const activeLevs = selectedFeesTableRowsWithCumulative
+      .filter((r) => !r.no_entry && typeof r.lev === 'number' && Number.isFinite(r.lev))
+      .map((r) => r.lev as number);
+    if (activeLevs.length === 0) {
+      return {
+        activeDays: 0,
+        min: null as number | null,
+        avg: null as number | null,
+        max: null as number | null,
+        cap: null as number | null,
+        capHitDays: 0,
+        capHitPct: null as number | null,
+        histogram: [] as Array<{ x0: number; x1: number; count: number }>,
+      };
+    }
+    const min = Math.min(...activeLevs);
+    const max = Math.max(...activeLevs);
+    const avg = activeLevs.reduce((acc, v) => acc + v, 0) / activeLevs.length;
+    const volLevEnabled = !!params?.enable_vol_lev_scaling;
+    const lHigh = asNum(params?.l_high);
+    const volLevMaxBoost = asNum(params?.vol_lev_max_boost);
+    const cap = (volLevEnabled && lHigh !== null && volLevMaxBoost !== null)
+      ? (lHigh * volLevMaxBoost)
+      : null;
+    const capTol = 1e-6;
+    const capHitDays = cap !== null
+      ? activeLevs.filter((v) => v >= (cap - capTol)).length
+      : 0;
+    const capHitPct = cap !== null && activeLevs.length > 0
+      ? (capHitDays / activeLevs.length) * 100
+      : null;
+
+    const bins = 10;
+    const histogram: Array<{ x0: number; x1: number; count: number }> = [];
+    if (max - min < 1e-9) {
+      histogram.push({ x0: min, x1: max, count: activeLevs.length });
+    } else {
+      const bw = (max - min) / bins;
+      const counts = new Array(bins).fill(0);
+      for (const v of activeLevs) {
+        const idx = Math.min(bins - 1, Math.max(0, Math.floor((v - min) / bw)));
+        counts[idx] += 1;
+      }
+      for (let i = 0; i < bins; i += 1) {
+        const x0 = min + i * bw;
+        const x1 = i === bins - 1 ? max : (x0 + bw);
+        histogram.push({ x0, x1, count: counts[i] });
+      }
+    }
+    return {
+      activeDays: activeLevs.length,
+      min,
+      avg,
+      max,
+      cap,
+      capHitDays,
+      capHitPct,
+      histogram,
+    };
+  }, [selectedFeesTableRowsWithCumulative, params]);
   const fullReportSectionsSelected = useMemo(() => {
     return buildFullReportSections(auditOutput, selectedFilter);
   }, [auditOutput, selectedFilter]);
@@ -2561,7 +5206,7 @@ export default function ResultsView({ results, jobId, startingCapital, params }:
     selectedActiveDays !== null
     && Number.isFinite(selectedActiveDays)
     && selectedTotalDays > 0
-  ) ? `/${selectedTotalDays} days` : undefined;
+  ) ? `/${selectedTotalDays}` : undefined;
   const selectedActivePct = (
     selectedActiveDays !== null
     && Number.isFinite(selectedActiveDays)
@@ -2574,11 +5219,17 @@ export default function ResultsView({ results, jobId, startingCapital, params }:
   ));
   const equitySeriesDated = useMemo(() => {
     const src = equityCurveDollars ?? [];
+    const feeDates = selectedFeesTableRows
+      .map((r) => parseDateLike(r.date))
+      .filter((d): d is Date => d instanceof Date && !Number.isNaN(d.getTime()));
+    const canMapByFees = feeDates.length >= src.length && src.length > 0;
     return src.map((p, idx) => {
-      if (typeof p === 'number') return { d: syntheticDateAt(idx, src.length), y: p };
-      return { d: parseDateLike(p.x) ?? syntheticDateAt(idx, src.length), y: p.y };
+      const parsedPointDate = typeof p === 'number' ? null : parseDateLike(p.x);
+      const mappedFeeDate = canMapByFees ? feeDates[feeDates.length - src.length + idx] : null;
+      if (typeof p === 'number') return { d: mappedFeeDate ?? syntheticDateAt(idx, src.length), y: p };
+      return { d: parsedPointDate ?? mappedFeeDate ?? syntheticDateAt(idx, src.length), y: p.y };
     }).filter((p) => Number.isFinite(p.y));
-  }, [equityCurveDollars]);
+  }, [equityCurveDollars, selectedFeesTableRows]);
   const returnProfile = useMemo(() => {
     if (equitySeriesDated.length < 2) {
       return {
@@ -2748,9 +5399,15 @@ export default function ResultsView({ results, jobId, startingCapital, params }:
 
   const tearSheetHtml = useMemo(() => {
     if (!tearTemplate) return '';
-    const eq = (equityCurveDollars ?? []).map((p, idx) => {
-      if (typeof p === 'number') return { d: syntheticDateAt(idx, (equityCurveDollars ?? []).length), y: p };
-      return { d: parseDateLike(p.x) ?? syntheticDateAt(idx, (equityCurveDollars ?? []).length), y: p.y };
+    const eqSrc = equityCurveDollars ?? [];
+    const feeDates = selectedFeesTableRows
+      .map((r) => parseDateLike(r.date))
+      .filter((d): d is Date => d instanceof Date && !Number.isNaN(d.getTime()));
+    const canMapByFees = feeDates.length >= eqSrc.length && eqSrc.length > 0;
+    const eq = eqSrc.map((p, idx) => {
+      const mappedFeeDate = canMapByFees ? feeDates[feeDates.length - eqSrc.length + idx] : null;
+      if (typeof p === 'number') return { d: mappedFeeDate ?? syntheticDateAt(idx, eqSrc.length), y: p };
+      return { d: parseDateLike(p.x) ?? mappedFeeDate ?? syntheticDateAt(idx, eqSrc.length), y: p.y };
     }).filter((p) => Number.isFinite(p.y));
     if (eq.length < 2) return tearTemplate;
 
@@ -3148,9 +5805,9 @@ export default function ResultsView({ results, jobId, startingCapital, params }:
 
     html = html.replace('</body>', `${injected}</body>`);
     return html;
-  }, [tearTemplate, equityCurveDollars, selectedRow, selectedDrawdownCurve, m, scorecard, selectedFilter, runStartingCapital, jobId, auditOutput, params]);
+  }, [tearTemplate, equityCurveDollars, selectedFeesTableRows, selectedRow, selectedDrawdownCurve, m, scorecard, selectedFilter, runStartingCapital, jobId, auditOutput, params]);
 
-  const metricCards = selectedRow
+  const metricCards: Array<{ label: string; key: string; value: string; colorValue: unknown; secondary?: string; unit?: string; unitColor?: string }> = selectedRow
     ? [
       { label: 'Sharpe', key: 'sharpe', value: fmtMetric(selectedRow.sharpe), colorValue: selectedRow.sharpe },
       { label: 'CAGR %', key: 'cagr', value: fmtPercent2(selectedRow.cagr), colorValue: selectedRow.cagr },
@@ -3308,15 +5965,15 @@ export default function ResultsView({ results, jobId, startingCapital, params }:
           {([
             ['summary', 'SUMMARY'],
             ['breakdown', 'Breakdown'],
-            ['tear_sheet', 'Tear Sheet'],
             ['full_report', 'Full Report'],
+            ['tear_sheet', 'Tear Sheet'],
             ['raw_output', 'Raw Output'],
           ] as Array<[ReportTab, string]>).map(([tab, label]) => (
             <button
               key={tab}
               onClick={async () => {
                 setActiveTab(tab);
-                if (tab !== 'summary' && tab !== 'breakdown') await ensureAuditOutputLoaded();
+                if (tab !== 'summary') await ensureAuditOutputLoaded();
               }}
               style={{
                 height: 28,
@@ -3363,8 +6020,30 @@ export default function ResultsView({ results, jobId, startingCapital, params }:
           {/* Full-width stacked charts */}
           <div style={{ display: 'flex', flexDirection: 'column', gap: 0 }}>
             <details open style={{ background: 'transparent', border: '1px solid var(--line)', borderRadius: 3, padding: '8px 10px' }}>
-              <summary style={{ cursor: 'pointer', fontSize: 9, color: 'var(--t3)', textTransform: 'uppercase', letterSpacing: '0.12em', fontWeight: 700 }}>
-                Equity Curve ($)
+              <summary style={{ cursor: 'pointer', fontSize: 9, color: 'var(--t3)', textTransform: 'uppercase', letterSpacing: '0.12em', fontWeight: 700, display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
+                <span>Equity Curve ($)</span>
+                {equityStatsBar && (
+                  <span style={{ display: 'flex', alignItems: 'center', gap: 12, fontSize: 9, color: 'var(--t2)', fontFamily: 'var(--font-space-mono), Space Mono, monospace', textTransform: 'none', letterSpacing: '0.06em', fontWeight: 400 }}>
+                    {equityStatsBar.map((s) => (
+                      <span key={s.label}>
+                        {s.label}: <span style={{ color: s.color, fontWeight: 700 }}>{s.value}</span>
+                      </span>
+                    ))}
+                  </span>
+                )}
+                <button
+                  onClick={(e) => { e.preventDefault(); setEquityLogScale((v) => !v); }}
+                  style={{
+                    background: 'none', border: '1px solid var(--line2)', borderRadius: 2,
+                    padding: '1px 5px', cursor: 'pointer', fontSize: 8,
+                    fontFamily: 'var(--font-space-mono), Space Mono, monospace',
+                    letterSpacing: '0.08em', textTransform: 'uppercase',
+                    color: equityLogScale ? 'var(--green)' : 'var(--t3)',
+                    borderColor: equityLogScale ? 'var(--green)' : 'var(--line2)',
+                  }}
+                >
+                  Log
+                </button>
               </summary>
               <div style={{ marginTop: 8, display: 'flex', flexDirection: 'column', gap: 0 }}>
                 <CurveCard
@@ -3382,8 +6061,8 @@ export default function ResultsView({ results, jobId, startingCapital, params }:
                   baselineValue={100000}
                   compactCurrencyTicks
                   valueFormatter={fmtCurrency}
-                  statsBar={equityStatsBar ?? undefined}
                   showTitle={false}
+                  logScale={equityLogScale}
                 />
                 <CurveCard
                   title="Drawdown Curve"
@@ -3600,6 +6279,16 @@ export default function ResultsView({ results, jobId, startingCapital, params }:
                 selectedFilter={selectedFilter}
                 onSelectFilter={(filter) => setManualSelectedFilter(filter)}
               />
+              <details style={{ marginTop: 10 }}>
+                <summary style={{ cursor: 'pointer', fontSize: 9, color: 'var(--t3)', textTransform: 'uppercase', letterSpacing: '0.12em', fontWeight: 700, userSelect: 'none' }}>
+                  Equity Curve Overlay
+                </summary>
+                <FilterEquityCurveOverlay
+                  filters={mergedFilters}
+                  selectedFilter={selectedFilter}
+                  onSelectFilter={(filter) => setManualSelectedFilter(filter)}
+                />
+              </details>
             </div>
           </details>
 
@@ -4134,7 +6823,507 @@ export default function ResultsView({ results, jobId, startingCapital, params }:
       )}
 
       {activeTab === 'breakdown' && (
-        <div />
+        <div
+          style={{
+            display: 'flex',
+            flexDirection: 'column',
+            gap: 10,
+          }}
+        >
+          {outputLoading && <div style={{ fontSize: 10, color: 'var(--t3)' }}>Loading fees panel...</div>}
+          {outputError && <div style={{ fontSize: 10, color: 'var(--red)' }}>{outputError}</div>}
+          {!outputLoading && !outputError && (
+            <>
+            {selectedFeesTableRows.length > 0 && (
+              <div
+                style={{
+                  display: 'grid',
+                  gridTemplateColumns: 'repeat(7, minmax(0, 1fr))',
+                  gap: 8,
+                  padding: '0 0 8px 0',
+                }}
+              >
+                {[
+                  { label: 'Calendar Days', value: feesBreakdownKpis.totalCalendarDays, color: 'var(--t1)' },
+                  { label: 'Active Days', value: feesBreakdownKpis.totalActiveDays, color: 'var(--green)' },
+                  { label: 'No Entries', value: feesBreakdownKpis.totalNoEntries, color: 'var(--amber)' },
+                  { label: 'No Entry (Filter)', value: feesBreakdownKpis.totalNoEntriesFilter, color: 'var(--red)' },
+                  { label: 'No Entry (Conviction)', value: feesBreakdownKpis.totalNoEntriesConviction, color: 'var(--green)' },
+                  {
+                    label: 'Daily Winrate',
+                    value: feesBreakdownKpis.dailyWinratePct === null
+                      ? 'N/A'
+                      : `${feesBreakdownKpis.dailyWinratePct.toFixed(1)}%`,
+                    color: 'var(--green)',
+                  },
+                  {
+                    label: 'Weekly Winrate',
+                    value: feesBreakdownKpis.weeklyWinratePct === null
+                      ? 'N/A'
+                      : `${feesBreakdownKpis.weeklyWinratePct.toFixed(1)}%`,
+                    color: 'var(--green)',
+                  },
+                  {
+                    label: 'Monthly Winrate',
+                    value: feesBreakdownKpis.monthlyWinratePct === null
+                      ? 'N/A'
+                      : `${feesBreakdownKpis.monthlyWinratePct.toFixed(1)}%`,
+                    color: 'var(--green)',
+                  },
+                  {
+                    label: 'Net Fee Drag',
+                    value: feesBreakdownKpis.netFeeDragPct === null
+                      ? 'N/A'
+                      : `${feesBreakdownKpis.netFeeDragPct.toFixed(2)}%`,
+                    color: 'var(--amber)',
+                  },
+                  {
+                    label: 'Net Fee Drag / Active Day',
+                    value: feesBreakdownKpis.netFeeDragPerActiveDayPct === null
+                      ? 'N/A'
+                      : `${feesBreakdownKpis.netFeeDragPerActiveDayPct.toFixed(4)}%`,
+                    color: 'var(--amber)',
+                  },
+                  {
+                    label: 'Net Fee Drag / Calendar Day',
+                    value: feesBreakdownKpis.netFeeDragPerCalendarDayPct === null
+                      ? 'N/A'
+                      : `${feesBreakdownKpis.netFeeDragPerCalendarDayPct.toFixed(4)}%`,
+                    color: 'var(--amber)',
+                  },
+                ].map((kpi) => (
+                  <div
+                    key={`fees-kpi-${kpi.label}`}
+                    style={{
+                      border: '1px solid var(--line)',
+                      background: 'var(--bg1)',
+                      borderRadius: 3,
+                      padding: '8px 10px',
+                      display: 'flex',
+                      flexDirection: 'column',
+                      gap: 4,
+                    }}
+                  >
+                    <div
+                      style={{
+                        fontSize: 8,
+                        color: 'var(--t3)',
+                        textTransform: 'uppercase',
+                        letterSpacing: '0.08em',
+                        fontWeight: 700,
+                      }}
+                    >
+                      {kpi.label}
+                    </div>
+                    <div
+                      style={{
+                        fontSize: 13,
+                        color: kpi.color,
+                        fontWeight: 700,
+                        fontFamily: 'var(--font-space-mono), Space Mono, monospace',
+                      }}
+                    >
+                      {kpi.value}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+            <DailyReturnOverlapChart
+              rows={selectedFeesTableRows}
+              intradayBars={(m.intraday_bars ?? (results as Record<string, unknown>)?.intraday_bars) as Record<string, (number | null)[]> | null | undefined}
+              intradayExitBars={selectedFilter
+                ? ((m.intraday_exit_bars ?? (results as Record<string, unknown>)?.intraday_exit_bars) as Record<string, Record<string, number>> | null | undefined)?.[selectedFilter] ?? null
+                : null}
+            />
+            <div
+              style={{
+                display: 'flex',
+                flexDirection: 'column',
+                background: 'var(--bg0)',
+              }}
+            >
+              <div
+                style={{
+                  height: 24,
+                  display: 'flex',
+                  alignItems: 'center',
+                  borderBottom: '1px solid var(--line)',
+                  fontSize: 9,
+                  color: 'var(--t3)',
+                  textTransform: 'uppercase',
+                  letterSpacing: '0.1em',
+                  fontWeight: 700,
+                  lineHeight: 1,
+                  position: 'sticky',
+                  top: 40,
+                  zIndex: 8,
+                  background: 'var(--bg0)',
+                  boxShadow: '0 -1px 0 var(--bg0)',
+                }}
+              >
+                {`Fees Panel${selectedFilter ? ` • ${selectedFilter}` : ''}`}
+              </div>
+              {selectedFeesTableRowsWithCumulative.length > 0 ? (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+                  <table style={{ width: '100%', borderCollapse: 'separate', borderSpacing: 0, tableLayout: 'fixed' }}>
+                    <colgroup>
+                      <col style={{ width: '7%' }} />
+                      <col style={{ width: '7%' }} />
+                      <col style={{ width: '7%' }} />
+                      <col style={{ width: '4%' }} />
+                      <col style={{ width: '8%' }} />
+                      <col style={{ width: '8%' }} />
+                      <col style={{ width: '8%' }} />
+                      <col style={{ width: '7%' }} />
+                      <col style={{ width: '6%' }} />
+                      <col style={{ width: '7%' }} />
+                      <col style={{ width: '7%' }} />
+                      <col style={{ width: '6%' }} />
+                      <col style={{ width: '6%' }} />
+                      <col style={{ width: '7%' }} />
+                      <col style={{ width: '8%' }} />
+                    </colgroup>
+                    <thead
+                      style={{
+                        position: 'sticky',
+                        top: 63,
+                        zIndex: 7,
+                        background: 'var(--bg0)',
+                      }}
+                    >
+                      <tr style={{ borderBottom: '1px solid var(--line)' }}>
+                        {[
+                          'Date', 'Start ($)', 'Margin ($)', 'Lev', 'Invested ($)', 'Trade Vol ($)',
+                          'Cum Vol ($)', 'Taker Fee ($)', 'Funding ($)', 'Cum Fees ($)', 'End ($)', 'Ret Gross%', 'Ret Net%', 'Net P&L ($)', 'Cum P&L ($)',
+                        ].map((h) => (
+                          <th
+                            key={`fees-head-${h}`}
+                            style={{
+                              textAlign: h === 'Date' ? 'left' : 'right',
+                              padding: '6px 8px',
+                              fontSize: 8,
+                              color: 'var(--t3)',
+                              textTransform: 'uppercase',
+                              letterSpacing: '0.08em',
+                              fontWeight: 700,
+                              fontFamily: 'var(--font-space-mono), Space Mono, monospace',
+                              whiteSpace: 'nowrap',
+                              background: 'var(--bg0)',
+                              borderBottom: '1px solid var(--line)',
+                            }}
+                          >
+                            {h}
+                          </th>
+                        ))}
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {selectedFeesTableRowsWithCumulative.map((row, i) => {
+                        const bg = i % 2 === 0 ? 'var(--bg1)' : 'var(--bg2)';
+                        const fmtN = (v: number | null | undefined) => (v === null || v === undefined || !Number.isFinite(v) ? '—' : new Intl.NumberFormat(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(v));
+                        const fmtLev = (v: number | null | undefined) => (v === null || v === undefined || !Number.isFinite(v) ? '—' : v.toFixed(3));
+                        const fmtPct = (v: number | null | undefined) => (v === null || v === undefined || !Number.isFinite(v) ? '—' : `${v >= 0 ? '+' : ''}${v.toFixed(3)}%`);
+                        const retNetColor = row.no_entry
+                          ? 'var(--t1)'
+                          : (row.ret_net ?? 0) >= 0 ? 'var(--green)' : 'var(--red)';
+                        return (
+                          <tr
+                            key={`fees-row-${row.date}-${i}`}
+                            style={{
+                              background: bg,
+                              borderBottom: '1px solid var(--line)',
+                              opacity: row.no_entry ? 0.5 : 1,
+                            }}
+                          >
+                            <td style={{ padding: '6px 8px', fontSize: 10, color: 'var(--t2)', fontFamily: 'var(--font-space-mono), Space Mono, monospace', whiteSpace: 'nowrap' }}>{row.date}</td>
+                            <td style={{ padding: '6px 8px', fontSize: 10, color: 'var(--t1)', textAlign: 'right', fontFamily: 'var(--font-space-mono), Space Mono, monospace' }}>{fmtN(row.start)}</td>
+                            {row.no_entry ? (
+                              <>
+                                <td style={{ padding: '6px 8px', fontSize: 10, color: 'var(--t3)', textAlign: 'right', fontFamily: 'var(--font-space-mono), Space Mono, monospace' }}>—</td>
+                                <td style={{ padding: '6px 8px', fontSize: 10, color: 'var(--t3)', textAlign: 'right', fontFamily: 'var(--font-space-mono), Space Mono, monospace' }}>0.000</td>
+                                <td
+                                  colSpan={6}
+                                  style={{
+                                    padding: '6px 8px',
+                                    fontSize: 10,
+                                    color: 'var(--t3)',
+                                    textAlign: 'center',
+                                    fontFamily: 'var(--font-space-mono), Space Mono, monospace',
+                                    textTransform: 'lowercase',
+                                  }}
+                                >
+                                  {`— ${row.no_entry_reason === 'filter' ? 'filtered' : 'conviction gate'} —`}
+                                </td>
+                              </>
+                            ) : (
+                              <>
+                                <td style={{ padding: '6px 8px', fontSize: 10, color: 'var(--t1)', textAlign: 'right', fontFamily: 'var(--font-space-mono), Space Mono, monospace' }}>{fmtN(row.margin)}</td>
+                                <td style={{ padding: '6px 8px', fontSize: 10, color: 'var(--t1)', textAlign: 'right', fontFamily: 'var(--font-space-mono), Space Mono, monospace' }}>{fmtLev(row.lev)}</td>
+                                <td style={{ padding: '6px 8px', fontSize: 10, color: 'var(--t1)', textAlign: 'right', fontFamily: 'var(--font-space-mono), Space Mono, monospace' }}>{fmtN(row.invested)}</td>
+                                <td style={{ padding: '6px 8px', fontSize: 10, color: 'var(--t1)', textAlign: 'right', fontFamily: 'var(--font-space-mono), Space Mono, monospace' }}>{fmtN(row.trade_vol)}</td>
+                                <td style={{ padding: '6px 8px', fontSize: 10, color: 'var(--t1)', textAlign: 'right', fontFamily: 'var(--font-space-mono), Space Mono, monospace' }}>{fmtN(row.cum_trade_vol)}</td>
+                                <td style={{ padding: '6px 8px', fontSize: 10, color: 'var(--t1)', textAlign: 'right', fontFamily: 'var(--font-space-mono), Space Mono, monospace' }}>{fmtN(row.taker_fee)}</td>
+                                <td style={{ padding: '6px 8px', fontSize: 10, color: 'var(--t1)', textAlign: 'right', fontFamily: 'var(--font-space-mono), Space Mono, monospace' }}>{fmtN(row.funding)}</td>
+                                <td style={{ padding: '6px 8px', fontSize: 10, color: 'var(--t1)', textAlign: 'right', fontFamily: 'var(--font-space-mono), Space Mono, monospace' }}>{fmtN(row.cum_fees)}</td>
+                              </>
+                            )}
+                            <td style={{ padding: '6px 8px', fontSize: 10, color: 'var(--t1)', textAlign: 'right', fontFamily: 'var(--font-space-mono), Space Mono, monospace' }}>{fmtN(row.end)}</td>
+                            <td style={{ padding: '6px 8px', fontSize: 10, color: 'var(--t1)', textAlign: 'right', fontFamily: 'var(--font-space-mono), Space Mono, monospace' }}>{fmtPct(row.ret_gross)}</td>
+                            <td style={{ padding: '6px 8px', fontSize: 10, color: retNetColor, textAlign: 'right', fontFamily: 'var(--font-space-mono), Space Mono, monospace' }}>{fmtPct(row.ret_net)}</td>
+                            <td style={{ padding: '6px 8px', fontSize: 10, color: 'var(--t1)', textAlign: 'right', fontFamily: 'var(--font-space-mono), Space Mono, monospace' }}>{fmtN(row.net_pnl)}</td>
+                            <td style={{ padding: '6px 8px', fontSize: 10, color: 'var(--t1)', textAlign: 'right', fontFamily: 'var(--font-space-mono), Space Mono, monospace' }}>{fmtN(row.cum_pnl)}</td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                  <div
+                    style={{
+                      border: '1px solid var(--line)',
+                      borderRadius: 3,
+                      background: 'var(--bg1)',
+                      overflow: 'hidden',
+                    }}
+                  >
+                    <div
+                      style={{
+                        padding: '6px 8px',
+                        fontSize: 8,
+                        color: 'var(--t3)',
+                        textTransform: 'uppercase',
+                        letterSpacing: '0.08em',
+                        fontWeight: 700,
+                        borderBottom: '1px solid var(--line)',
+                        background: 'var(--bg0)',
+                      }}
+                    >
+                      Fees Panel Highlights
+                    </div>
+                    <div
+                      style={{
+                        display: 'grid',
+                        gridTemplateColumns: 'repeat(7, minmax(0, 1fr))',
+                        gap: 0,
+                        background: 'rgba(0,200,150,0.08)',
+                        borderTop: '1px solid rgba(0,200,150,0.35)',
+                      }}
+                    >
+                        {[
+                          { label: 'Entry Days', value: String(feesKeyValues.entryDays), color: 'var(--t1)' },
+                          { label: 'No Entry Days', value: String(feesKeyValues.noEntryDays), color: 'var(--t1)' },
+                        {
+                          label: 'Avg Lev (Active)',
+                          value: feesKeyValues.avgLeverageActive === null ? 'N/A' : `${feesKeyValues.avgLeverageActive.toFixed(3)}x`,
+                          color: 'var(--t1)',
+                        },
+                        { label: 'Cum Vol ($)', value: new Intl.NumberFormat(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(feesKeyValues.cumulativeVolume), color: 'var(--t1)' },
+                        { label: 'Cum Fees ($)', value: new Intl.NumberFormat(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(feesKeyValues.cumulativeFees), color: 'var(--amber)' },
+                        { label: 'Cum P&L ($)', value: new Intl.NumberFormat(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(feesKeyValues.cumulativePnl), color: feesKeyValues.cumulativePnl >= 0 ? 'var(--green)' : 'var(--red)' },
+                        {
+                          label: 'Net Return %',
+                          value: feesKeyValues.netReturnPct === null
+                            ? 'N/A'
+                            : `${feesKeyValues.netReturnPct >= 0 ? '+' : ''}${feesKeyValues.netReturnPct.toFixed(2)}%`,
+                          color: feesKeyValues.netReturnPct === null
+                            ? 'var(--t3)'
+                            : feesKeyValues.netReturnPct >= 0 ? 'var(--green)' : 'var(--red)',
+                          },
+                        ].map((item, idx) => (
+                        <div
+                          key={`fees-highlight-${item.label}`}
+                          style={{
+                            padding: '8px 10px',
+                            borderRight: idx === 6 ? 'none' : '1px solid var(--line)',
+                            display: 'flex',
+                            flexDirection: 'column',
+                            gap: 4,
+                          }}
+                        >
+                          <div
+                            style={{
+                              fontSize: 8,
+                              color: 'var(--t3)',
+                              textTransform: 'uppercase',
+                              letterSpacing: '0.08em',
+                              fontWeight: 700,
+                            }}
+                          >
+                            {item.label}
+                          </div>
+                          <div
+                            style={{
+                              fontSize: 11,
+                              color: item.color,
+                              fontFamily: 'var(--font-space-mono), Space Mono, monospace',
+                              fontWeight: 700,
+                            }}
+                          >
+                            {item.value}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                  <div
+                    style={{
+                      border: '1px solid var(--line)',
+                      borderRadius: 3,
+                      background: 'var(--bg1)',
+                      overflow: 'hidden',
+                    }}
+                  >
+                    <div
+                      style={{
+                        padding: '6px 8px',
+                        fontSize: 8,
+                        color: 'var(--t3)',
+                        textTransform: 'uppercase',
+                        letterSpacing: '0.08em',
+                        fontWeight: 700,
+                        borderBottom: '1px solid var(--line)',
+                        background: 'var(--bg0)',
+                      }}
+                    >
+                      Leverage Diagnostics
+                    </div>
+                    <div
+                      style={{
+                        display: 'grid',
+                        gridTemplateColumns: 'repeat(5, minmax(0, 1fr))',
+                        borderBottom: '1px solid var(--line)',
+                      }}
+                    >
+                      {[
+                        { label: 'Active Days', value: `${feesLeverageDiagnostics.activeDays}`, color: 'var(--t1)' },
+                        { label: 'Min Lev', value: feesLeverageDiagnostics.min === null ? 'N/A' : `${feesLeverageDiagnostics.min.toFixed(3)}x`, color: 'var(--t1)' },
+                        { label: 'Avg Lev', value: feesLeverageDiagnostics.avg === null ? 'N/A' : `${feesLeverageDiagnostics.avg.toFixed(3)}x`, color: 'var(--green)' },
+                        { label: 'Max Lev', value: feesLeverageDiagnostics.max === null ? 'N/A' : `${feesLeverageDiagnostics.max.toFixed(3)}x`, color: 'var(--t1)' },
+                        {
+                          label: 'Hit Boost Cap',
+                          value: feesLeverageDiagnostics.capHitPct === null
+                            ? 'N/A'
+                            : `${feesLeverageDiagnostics.capHitDays}/${feesLeverageDiagnostics.activeDays} (${feesLeverageDiagnostics.capHitPct.toFixed(1)}%)`,
+                          color: feesLeverageDiagnostics.capHitPct === null ? 'var(--t3)' : 'var(--amber)',
+                        },
+                      ].map((item, idx) => (
+                        <div
+                          key={`lev-diag-${item.label}`}
+                          style={{
+                            padding: '8px 10px',
+                            borderRight: idx === 4 ? 'none' : '1px solid var(--line)',
+                            display: 'flex',
+                            flexDirection: 'column',
+                            gap: 4,
+                          }}
+                        >
+                          <div
+                            style={{
+                              fontSize: 8,
+                              color: 'var(--t3)',
+                              textTransform: 'uppercase',
+                              letterSpacing: '0.08em',
+                              fontWeight: 700,
+                            }}
+                          >
+                            {item.label}
+                          </div>
+                          <div
+                            style={{
+                              fontSize: 11,
+                              color: item.color,
+                              fontFamily: 'var(--font-space-mono), Space Mono, monospace',
+                              fontWeight: 700,
+                            }}
+                          >
+                            {item.value}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                    <div style={{ padding: '10px' }}>
+                      <div
+                        style={{
+                          fontSize: 8,
+                          color: 'var(--t3)',
+                          textTransform: 'uppercase',
+                          letterSpacing: '0.08em',
+                          marginBottom: 6,
+                        }}
+                      >
+                        Active Leverage Distribution
+                        {feesLeverageDiagnostics.cap !== null ? ` • Cap ${feesLeverageDiagnostics.cap.toFixed(3)}x` : ''}
+                      </div>
+                      {feesLeverageDiagnostics.histogram.length > 0 ? (
+                        <div
+                          style={{ display: 'flex', alignItems: 'end', gap: 2, height: 72, position: 'relative' }}
+                          onMouseLeave={() => setLevHistHover(null)}
+                        >
+                          {(() => {
+                            const maxCount = Math.max(...feesLeverageDiagnostics.histogram.map((b) => b.count), 1);
+                            return feesLeverageDiagnostics.histogram.map((bin, i) => (
+                              <div
+                                key={`lev-hist-${i}`}
+                                style={{
+                                  flex: 1,
+                                  height: `${Math.max(4, (bin.count / maxCount) * 100)}%`,
+                                  background: 'rgba(0, 200, 150, 0.35)',
+                                  border: '1px solid rgba(0, 200, 150, 0.55)',
+                                  borderRadius: 2,
+                                }}
+                                onMouseEnter={(e) => {
+                                  const pct = feesLeverageDiagnostics.activeDays > 0
+                                    ? (bin.count / feesLeverageDiagnostics.activeDays) * 100
+                                    : 0;
+                                  setLevHistHover({
+                                    x: e.clientX,
+                                    y: e.clientY,
+                                    text: `${bin.x0.toFixed(3)}x - ${bin.x1.toFixed(3)}x • ${bin.count} day${bin.count === 1 ? '' : 's'} (${pct.toFixed(1)}%)`,
+                                  });
+                                }}
+                                onMouseMove={(e) => {
+                                  setLevHistHover((prev) => (prev ? { ...prev, x: e.clientX, y: e.clientY } : prev));
+                                }}
+                              />
+                            ));
+                          })()}
+                        </div>
+                      ) : (
+                        <div style={{ fontSize: 10, color: 'var(--t3)' }}>No active leverage samples</div>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              ) : (
+                <div style={{ padding: '10px', fontSize: 10, color: 'var(--t3)' }}>
+                  No Fees Panel rows found for the selected filter.
+                </div>
+              )}
+            </div>
+            {levHistHover && (
+              <div
+                style={{
+                  position: 'fixed',
+                  left: levHistHover.x + 10,
+                  top: levHistHover.y + 10,
+                  zIndex: 80,
+                  background: 'var(--bg1)',
+                  border: '1px solid var(--line2)',
+                  borderRadius: 3,
+                  padding: '4px 6px',
+                  fontSize: 9,
+                  color: 'var(--t1)',
+                  pointerEvents: 'none',
+                  whiteSpace: 'nowrap',
+                  fontFamily: 'var(--font-space-mono), Space Mono, monospace',
+                }}
+              >
+                {levHistHover.text}
+              </div>
+            )}
+            </>
+          )}
+        </div>
       )}
 
       {activeTab === 'stress_tests' && (
@@ -4188,7 +7377,7 @@ export default function ResultsView({ results, jobId, startingCapital, params }:
       {activeTab === 'raw_output' && (
         <div
           style={{
-            background: 'var(--bg2)',
+            background: 'transparent',
             border: '1px solid var(--line)',
             borderRadius: 3,
             padding: 12,
@@ -4211,7 +7400,7 @@ export default function ResultsView({ results, jobId, startingCapital, params }:
                   position: 'sticky',
                   top: 0,
                   zIndex: 2,
-                  background: 'var(--bg2)',
+                  background: 'transparent',
                   paddingBottom: 8,
                   borderBottom: '1px solid var(--line)',
                 }}
@@ -4251,7 +7440,7 @@ export default function ResultsView({ results, jobId, startingCapital, params }:
                   whiteSpace: 'pre-wrap',
                   fontSize: 10,
                   lineHeight: 1.45,
-                  color: 'var(--t2)',
+                  color: 'var(--t1)',
                   fontFamily: 'var(--font-space-mono), Space Mono, monospace',
                   flex: 1,
                   minHeight: 0,
@@ -4295,10 +7484,8 @@ export default function ResultsView({ results, jobId, startingCapital, params }:
             background: 'var(--bg2)',
             border: '1px solid var(--line)',
             borderRadius: 3,
-            height: 'calc(100vh - 170px)',
             display: 'flex',
             flexDirection: 'column',
-            overflow: 'hidden',
           }}
         >
           {outputLoading && <div style={{ fontSize: 10, color: 'var(--t3)' }}>Loading full report sections...</div>}
@@ -4347,7 +7534,7 @@ export default function ResultsView({ results, jobId, startingCapital, params }:
                   </button>
                 </div>
               </div>
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 8, minHeight: 0, overflowY: 'auto', padding: '0 12px 12px 12px' }}>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 8, padding: '0 12px 12px 12px' }}>
                 <div
                   style={{
                     position: 'sticky',
@@ -4523,18 +7710,9 @@ export default function ResultsView({ results, jobId, startingCapital, params }:
                           <summary style={{ cursor: 'pointer', fontSize: 10, color: 'var(--t1)', fontWeight: 600 }}>
                             {section.title}
                           </summary>
-                          <pre
-                            style={{
-                              margin: '8px 0 0 0',
-                              whiteSpace: 'pre-wrap',
-                              fontSize: 10,
-                              lineHeight: 1.45,
-                              color: 'color-mix(in srgb, var(--t1) 88%, white 12%)',
-                              fontFamily: 'var(--font-space-mono), Space Mono, monospace',
-                            }}
-                          >
-                            {section.body}
-                          </pre>
+                          <div style={{ marginTop: 8 }}>
+                            {renderSectionViz(section.title, section.body)}
+                          </div>
                         </details>
                       ))}
                     </div>

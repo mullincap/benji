@@ -77,8 +77,10 @@ _OVERALL_GRADE_RE = re.compile(r"OVERALL GRADE\s+(?P<grade>[A-F][+-]?)\s+\((?P<s
 _FINAL_CV_RE     = re.compile(r"FINAL_WF_CV\([^)]+\):\s*(?P<cv>[+-]?[\d.]+)")
 _FINAL_GRADE_RE  = re.compile(r"FINAL_GRADE\([^)]+\):\s*(?P<grade>[A-F][+-]?)")
 _FINAL_SCORE_RE  = re.compile(r"FINAL_GRADE_SCORE\([^)]+\):\s*(?P<score>[+-]?[\d.]+)")
-_FINAL_EQUITY_RE = re.compile(r"FINAL_EQUITY_SERIES\([^)]+\):\s*(\[[\d.,\s\-]+\])")
-_FINAL_DD_RE     = re.compile(r"FINAL_DD_SERIES\([^)]+\):\s*(\[[\d.,\s\-]+\])")
+_FINAL_EQUITY_RE      = re.compile(r"FINAL_EQUITY_SERIES\([^)]+\):\s*(\[[\d.,\s\-]+\])")
+_FINAL_DD_RE          = re.compile(r"FINAL_DD_SERIES\([^)]+\):\s*(\[[\d.,\s\-]+\])")
+_FINAL_INTRADAY_RE    = re.compile(r"^FINAL_INTRADAY_BARS:\s*(\{.+\})\s*$", re.MULTILINE)
+_FINAL_EXIT_BARS_RE   = re.compile(r"^FINAL_INTRADAY_EXIT_BARS:\s*(\{.+\})\s*$", re.MULTILINE)
 
 # Filter comparison table rows, e.g.:
 #   A - No Filter                             2.053    450.2%   -53.23%      398    1.206     248.9%   3.49×   -6.10%  -21.05%  -29.58%   91.8%    54 ◄
@@ -102,6 +104,169 @@ _FILTER_ROW_RE = re.compile(
 )
 
 _FINAL_FILTER_VALUE_RE = re.compile(r"^FINAL_(?P<key>[A-Z_]+)\((?P<fid>[^)]+)\):\s*(?P<val>.+?)\s*$", re.MULTILINE)
+
+_FEES_HEADING_RE = re.compile(r"FEES PANEL", re.IGNORECASE)
+_FEES_COL_HEADER_RE = re.compile(r"^\s*Date\s+Start\s+\(\$\)\s+Margin\s+\(\$\)\s+Lev\s+Invested\s+\(\$\)\s+Trade Vol\s+\(\$\)\s+Taker Fee\s+\(\$\)\s+Funding\s+\(\$\)\s+End\s+\(\$\)\s+Ret Gross%\s+Ret Net%\s+Net P&L\s+\(\$\)\s*$")
+_SIMULATING_FILTER_RE = re.compile(r"^\s*SIMULATING:\s*(?P<filter>.+?)\s*$")
+_DATE_RE = r"(?P<date>\d{4}-\d{2}-\d{2})"
+_NUM_RE = r"[+-]?\d[\d,]*\.\d+"
+_PCT_RE = r"[+-]?\d+\.\d+%"
+_ACTIVE_FEES_ROW_RE = re.compile(
+    rf"^\s*{_DATE_RE}\s+"
+    rf"(?P<start>{_NUM_RE})\s+"
+    rf"(?P<margin>{_NUM_RE})\s+"
+    rf"(?P<lev>{_NUM_RE})\s+"
+    rf"(?P<invested>{_NUM_RE})\s+"
+    rf"(?P<trade_vol>{_NUM_RE})\s+"
+    rf"(?P<taker_fee>{_NUM_RE})\s+"
+    rf"(?P<funding>{_NUM_RE})\s+"
+    rf"(?P<end>{_NUM_RE})\s+"
+    rf"(?P<ret_gross>{_PCT_RE})\s+"
+    rf"(?P<ret_net>{_PCT_RE})\s+"
+    rf"(?P<net_pnl>{_NUM_RE})\s*$"
+)
+_NO_ENTRY_FEES_ROW_RE = re.compile(
+    rf"^\s*{_DATE_RE}\s+"
+    rf"(?P<start>{_NUM_RE})\s+"
+    r"(?:—\s*(?P<reason>NO ENTRY|FILTERED)\s*—|-+\s*(?P<reason2>NO ENTRY|FILTERED)\s*-+)\s+"
+    rf"(?P<end>{_NUM_RE})\s+"
+    rf"(?P<ret_gross>{_PCT_RE})\s+"
+    rf"(?P<ret_net>{_PCT_RE})\s+"
+    rf"(?P<net_pnl>{_NUM_RE})\s*$"
+)
+
+
+def _norm_filter_label(s: str) -> str:
+    return (
+        s.lower()
+        .replace("+", "p")
+        .replace("(", " ")
+        .replace(")", " ")
+        .replace("-", " ")
+        .replace("_", " ")
+    )
+
+
+def _parse_num(s: str | None) -> float | None:
+    if s is None:
+        return None
+    try:
+        return float(s.replace(",", "").strip())
+    except Exception:
+        return None
+
+
+def _parse_pct(s: str | None) -> float | None:
+    if s is None:
+        return None
+    t = s.strip().replace("%", "")
+    try:
+        return float(t)
+    except Exception:
+        return None
+
+
+def _extract_filter_name_from_fees_heading(line: str) -> str:
+    # Prefer pipe-delimited filter labels: FEES PANEL | <filter> | ...
+    if "|" in line:
+        parts = [p.strip() for p in line.split("|") if p.strip()]
+        if len(parts) >= 2:
+            return parts[1]
+    # Fallback: FEES PANEL — <filter> ...
+    m = re.search(r"FEES PANEL\s*[—-]\s*(.+)$", line, flags=re.IGNORECASE)
+    if m:
+        tail = m.group(1).strip()
+        # drop leading descriptor if present
+        tail = re.sub(r"^\s*per active trading day\b", "", tail, flags=re.IGNORECASE).strip(" -|")
+        if "capital=" in tail.lower() or not tail:
+            return ""
+        return tail
+    return ""
+
+
+def _nearest_simulating_filter(lines: list[str], start_idx: int) -> str:
+    for i in range(start_idx, -1, -1):
+        m = _SIMULATING_FILTER_RE.match(lines[i].strip())
+        if m:
+            return m.group("filter").strip()
+    return ""
+
+
+def _extract_fees_tables(text: str) -> dict[str, list[dict]]:
+    lines = text.splitlines()
+    starts = [i for i, ln in enumerate(lines) if _FEES_HEADING_RE.search(ln)]
+    tables: dict[str, list[dict]] = {}
+    for si, start in enumerate(starts):
+        end = starts[si + 1] if si + 1 < len(starts) else len(lines)
+        block = lines[start:end]
+        heading = block[0].strip()
+        filter_name = (
+            _extract_filter_name_from_fees_heading(heading)
+            or _nearest_simulating_filter(lines, start)
+            or f"fees_panel_{si + 1}"
+        )
+        # find column header line, then parse rows below it
+        header_idx = -1
+        for j, line in enumerate(block):
+            if _FEES_COL_HEADER_RE.match(line):
+                header_idx = j
+                break
+        if header_idx < 0:
+            continue
+        rows: list[dict] = []
+        for raw in block[header_idx + 1:]:
+            line = raw.rstrip()
+            if not line.strip():
+                # allow blank lines within section
+                continue
+            if _FEES_HEADING_RE.search(line):
+                break
+            if re.match(r"^\s*[=─-]{5,}\s*$", line):
+                continue
+            m_no = _NO_ENTRY_FEES_ROW_RE.match(line)
+            if m_no:
+                g = m_no.groupdict()
+                reason = (g.get("reason") or g.get("reason2") or "").strip().upper()
+                no_entry_reason = "filter" if reason == "FILTERED" else "conviction_gate"
+                rows.append({
+                    "date": g["date"],
+                    "start": _parse_num(g["start"]),
+                    "margin": None,
+                    "lev": None,
+                    "invested": None,
+                    "trade_vol": None,
+                    "taker_fee": None,
+                    "funding": None,
+                    "end": _parse_num(g["end"]),
+                    "ret_gross": _parse_pct(g["ret_gross"]),
+                    "ret_net": _parse_pct(g["ret_net"]),
+                    "net_pnl": _parse_num(g["net_pnl"]),
+                    "no_entry": True,
+                    "no_entry_reason": no_entry_reason,
+                })
+                continue
+            m_active = _ACTIVE_FEES_ROW_RE.match(line)
+            if m_active:
+                g = m_active.groupdict()
+                rows.append({
+                    "date": g["date"],
+                    "start": _parse_num(g["start"]),
+                    "margin": _parse_num(g["margin"]),
+                    "lev": _parse_num(g["lev"]),
+                    "invested": _parse_num(g["invested"]),
+                    "trade_vol": _parse_num(g["trade_vol"]),
+                    "taker_fee": _parse_num(g["taker_fee"]),
+                    "funding": _parse_num(g["funding"]),
+                    "end": _parse_num(g["end"]),
+                    "ret_gross": _parse_pct(g["ret_gross"]),
+                    "ret_net": _parse_pct(g["ret_net"]),
+                    "net_pnl": _parse_num(g["net_pnl"]),
+                    "no_entry": False,
+                })
+                continue
+        if rows:
+            tables[filter_name] = rows
+    return tables
 
 
 def _parse_metrics(audit_output_path: Path) -> dict:
@@ -171,6 +336,18 @@ def _parse_metrics(audit_output_path: Path) -> dict:
     if m:
         try:
             metrics["drawdown_curve"] = _json.loads(m.group(1))
+        except Exception:
+            pass
+    m = _FINAL_INTRADAY_RE.search(text)
+    if m:
+        try:
+            metrics["intraday_bars"] = _json.loads(m.group(1))
+        except Exception:
+            pass
+    m = _FINAL_EXIT_BARS_RE.search(text)
+    if m:
+        try:
+            metrics["intraday_exit_bars"] = _json.loads(m.group(1))
         except Exception:
             pass
 
@@ -331,6 +508,22 @@ def _parse_metrics(audit_output_path: Path) -> dict:
                 canon_bf = by_norm.get(_norm_label(bf))
                 if canon_bf:
                     metrics["best_filter"] = canon_bf
+
+    # ── Fees panel rows by filter ────────────────────────────────────────────
+    fees_tables_by_filter = _extract_fees_tables(text)
+    if fees_tables_by_filter:
+        metrics["fees_tables_by_filter"] = fees_tables_by_filter
+        best_filter = str(metrics.get("best_filter") or "").strip()
+        selected_fees = None
+        if best_filter:
+            bf_norm = _norm_filter_label(best_filter)
+            for k, rows in fees_tables_by_filter.items():
+                if _norm_filter_label(k) == bf_norm:
+                    selected_fees = rows
+                    break
+        if selected_fees is None:
+            selected_fees = next(iter(fees_tables_by_filter.values()))
+        metrics["fees_table"] = selected_fees
 
     if "All fetches failed - dispersion filter unavailable" in text:
         hints.append("Dispersion filters could not run because Binance data fetch failed. If you are behind geo restrictions, turn on VPN and re-run.")
@@ -523,6 +716,8 @@ def run_pipeline(self, job_id: str, params: dict) -> dict:
         "VOL_LEV_TARGET_VOL":         str(params.get("vol_lev_target_vol", 0.02)),
         "VOL_LEV_MAX_BOOST":          str(params.get("vol_lev_max_boost", 2.0)),
         "VOL_LEV_DD_THRESHOLD":       str(params.get("vol_lev_dd_threshold", -0.06)),
+        "LEV_QUANTIZATION_MODE":      str(params.get("lev_quantization_mode", "off")),
+        "LEV_QUANTIZATION_STEP":      str(params.get("lev_quantization_step", 0.1)),
         "ENABLE_CONTRA_LEV_SCALING":  _boolenv(params.get("enable_contra_lev_scaling", False)),
         "CONTRA_LEV_WINDOW":          str(params.get("contra_lev_window", 30)),
         "CONTRA_LEV_MAX_BOOST":       str(params.get("contra_lev_max_boost", 2.0)),
@@ -656,6 +851,8 @@ def run_pipeline(self, job_id: str, params: dict) -> dict:
         "metrics":            metrics,
         "audit_output_path":  str(audit_output_path),
         "starting_capital":   params.get("starting_capital", 100000.0),
+        "fees_tables_by_filter": metrics.get("fees_tables_by_filter"),
+        "fees_table":         metrics.get("fees_table"),
     }
 
     update_job(job_id, status="complete", stage="done", progress=100, results=results)
