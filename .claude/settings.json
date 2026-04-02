@@ -16,7 +16,9 @@
       "Bash(python3 -c \"import json; j=json.load\\(open\\('/Users/johnmullin/Projects/benji3m/backend/jobs/1a9880f8-8b7a-490c-a655-dd5a765bea4e/job.json'\\)\\); r=j.get\\('results',{}\\); print\\('intraday_bars' in r, list\\(r.keys\\(\\)\\)[:15]\\)\")",
       "Bash(python3 -c \"import json; j=json.load\\(open\\('/Users/johnmullin/Projects/benji3m/backend/jobs/1a9880f8-8b7a-490c-a655-dd5a765bea4e/job.json'\\)\\); m=j.get\\('results',{}\\).get\\('metrics',{}\\); print\\('intraday_bars' in m, list\\(m.keys\\(\\)\\)[:15]\\)\")",
       "Bash(/opt/homebrew/Caskroom/miniforge/base/bin/python -c ':*)",
-      "Bash(npx tsc:*)"
+      "Bash(npx tsc:*)",
+      "Bash(git commit -m ':*)",
+      "Bash(git push:*)"
     ]
   }
 }

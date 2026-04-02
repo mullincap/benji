@@ -12659,16 +12659,19 @@ def run_periodic_return_breakdown(
                         win_rate=nan, avg_win=nan, avg_loss=nan,
                         n_wins=0, n_losses=0)
         wins = arr[arr > 0]; loss = arr[arr < 0]
+        n_wins = int(np.sum(arr > 0))
+        n_losses = int(np.sum(arr < 0))
+        n_decided = n_wins + n_losses
         return dict(
             n        = len(arr),
             avg      = float(np.mean(arr)),
             best     = float(np.max(arr)),
             worst    = float(np.min(arr)),
-            win_rate = float(np.mean(arr > 0)),
+            win_rate = float(n_wins / n_decided) if n_decided > 0 else float("nan"),
             avg_win  = float(np.mean(wins)) if len(wins) else float("nan"),
             avg_loss = float(np.mean(loss)) if len(loss) else float("nan"),
-            n_wins   = int(np.sum(arr > 0)),
-            n_losses = int(np.sum(arr < 0)),
+            n_wins   = n_wins,
+            n_losses = n_losses,
         )
 
     daily   = _stats(r)

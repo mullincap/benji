@@ -541,6 +541,7 @@ function parse(raw) {
     regimeRobustnessRows: [],         // raw rows
     paramJitter:      {},             // PARAM JITTER summary (if present)
     returnConcentration: {},          // RETURN CONCENTRATION (if present)
+    neighborPlateau:  {},             // NEIGHBOR PLATEAU TEST per filter
   };
 
   function norm(r) { return r.replace(/_/g," ").replace(/\s+/g," ").trim(); }
@@ -1530,6 +1531,34 @@ function parse(raw) {
         if(lines[j].includes("└─")||lines[j].match(/^={5,}/))break;
       }
       break;
+    }
+  }
+
+  // ── NEIGHBOR PLATEAU TEST (per filter, from institutional audit) ──
+  var npFilter=null;
+  for(i=0;i<lines.length;i++){
+    ln=lines[i];
+    // Track which filter we're inside
+    m=ln.match(/INSTITUTIONAL AUDIT\s+[—–-]+\s+(.+)/i);
+    if(m){npFilter=norm(m[1]);continue;}
+    m=ln.match(/SIMULATING:\s+(.+)/); if(m){npFilter=norm(m[1]);}
+    if(!ln.includes("NEIGHBOR PLATEAU TEST"))continue;
+    var np={};
+    for(var j=i;j<Math.min(i+20,lines.length);j++){
+      m=lines[j].match(/Joint\s+[±+\-](\d+)%/);                      if(m) np.perturbPct=m[1]+"%";
+      m=lines[j].match(/n_neighbors:\s+(\d+)/);                       if(m) np.nNeighbors=m[1];
+      m=lines[j].match(/baseline Sharpe:\s+([\d.]+)/);                if(m) np.baseSharpe=m[1];
+      m=lines[j].match(/Plateau ratio.*?:\s+([\d.]+)%\s+(.*)/);       if(m){np.plateauRatio=m[1]+"%";np.verdict=m[2].trim();}
+      m=lines[j].match(/Sharpe p10:\s+([\d.]+)/);                     if(m) np.p10=m[1];
+      m=lines[j].match(/Sharpe p25:\s+([\d.]+)/);                     if(m) np.p25=m[1];
+      m=lines[j].match(/Sharpe median:\s*([\d.]+)/);                  if(m) np.median=m[1];
+      m=lines[j].match(/Sharpe p75:\s+([\d.]+)/);                     if(m) np.p75=m[1];
+      m=lines[j].match(/Sharpe std:\s+([\d.]+)/);                     if(m) np.std=m[1];
+      if(lines[j].includes("└─"))break;
+    }
+    if(np.plateauRatio){
+      var key=npFilter||"_shared";
+      d.neighborPlateau[key]=np;
     }
   }
 
@@ -2660,8 +2689,44 @@ function build(d, auditDir, insights) {
 
     // ── 4.9 Sensitivity & Robustness charts (inst) ──
     kids.push(h2(sectionBase+".10 Sensitivity & Robustness Analysis"));
+
+    // ── 4.9a Neighbor Plateau Test (styled) ──
+    var npKey=Object.keys(d.neighborPlateau).find(k=>k===filt||filt.includes(k)||k.includes(filt))||filt;
+    var np=d.neighborPlateau[npKey]||d.neighborPlateau["_shared"]||null;
+    if(np && np.plateauRatio){
+      kids.push(h3("Neighbor Plateau Test"));
+      kids.push(body("Simultaneously perturbs all parameters by ±"+(np.perturbPct||"15%")+
+        " (n="+(np.nNeighbors||"200")+" random neighbors) and measures the distribution of resulting Sharpe ratios. "+
+        "A high plateau ratio indicates the strategy sits on a broad, robust plateau rather than a fragile, overfitted spike."));
+      kids.push(spacer(2));
+      // Verdict callout
+      var npPct=parseFloat(np.plateauRatio);
+      var npType=npPct>=70?"pass":"warn";
+      var npVerdict=npPct>=70
+        ? "PLATEAU — "+np.plateauRatio+" of neighbors within ±0.5 Sharpe of baseline (≥70% threshold)"
+        : "SPIKE — only "+np.plateauRatio+" of neighbors within ±0.5 Sharpe of baseline (<70% threshold)";
+      kids.push(...calloutBox(npVerdict, npType));
+      kids.push(spacer(2));
+      // Data table
+      kids.push(dataTable(["Metric","Value"],[
+        ["Baseline Sharpe",              np.baseSharpe||"—"],
+        ["Perturbation Scale",           "±"+(np.perturbPct||"15%")+" joint"],
+        ["Neighbors Sampled",            np.nNeighbors||"—"],
+        ["Plateau Ratio (±0.5 Sharpe)",  np.plateauRatio||"—"],
+        ["Neighbor Sharpe p10",          np.p10||"—"],
+        ["Neighbor Sharpe p25",          np.p25||"—"],
+        ["Neighbor Sharpe Median",       np.median||"—"],
+        ["Neighbor Sharpe p75",          np.p75||"—"],
+        ["Neighbor Sharpe Std Dev",      np.std||"—"],
+      ],[4200,3000]));
+      kids.push(spacer(2));
+    }
+    // Neighbor Plateau chart
+    var npBlk=instImg("neighbor_plateau.png",filt,620);
+    if(npBlk){kids.push(npBlk);kids.push(subtle("Neighbor Plateau — parameter robustness — "+filt));kids.push(spacer(3));}
+
+    // Remaining sensitivity & robustness charts
     var instCharts = [
-      ["neighbor_plateau.png",           "Neighbor Plateau — parameter robustness"],
       ["sensitivity_heatmap.png",        "Sensitivity Heatmap"],
       ["sensitivity_tornado.png",        "Sensitivity Tornado"],
       ["sensitivity_lines.png",          "Sensitivity Lines"],

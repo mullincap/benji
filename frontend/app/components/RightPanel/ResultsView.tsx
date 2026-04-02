@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { Fragment, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Area,
   CartesianGrid,
@@ -1438,6 +1438,7 @@ function fullReportCategoryForTitle(title: string): FullReportCategoryKey {
     || /^RETURN RATES BY PERIOD\b/.test(t)
     || /^RETURN DISTRIBUTION\b/.test(t)
     || /^RETURN \+ CONDITIONAL ANALYSIS\b/.test(t)
+    || /^REGIME & CONDITIONAL ANALYSIS\b/.test(t)
     || /^ROLLING MAX DRAWDOWN\b/.test(t)
   ) {
     return 'core_performance';
@@ -1449,6 +1450,8 @@ function fullReportCategoryForTitle(title: string): FullReportCategoryKey {
     || /^DRAWDOWN EPISODE ANALYSIS\b/.test(t)
     || /^DEFLATED SHARPE RATIO \+ MINIMUM TRACK RECORD LENGTH\b/.test(t)
     || /^RUIN PROBABILITY\b/.test(t)
+    || /^STATISTICAL VALIDITY\b/.test(t)
+    || /^TAIL RISK \(EXTENDED\)/.test(t)
   ) {
     return 'risk_profile';
   }
@@ -1470,6 +1473,12 @@ function fullReportCategoryForTitle(title: string): FullReportCategoryKey {
     || /^SHOCK INJECTION TEST\b/.test(t)
     || /^REGIME ROBUSTNESS TEST\b/.test(t)
     || /^REGIME CONSISTENCY SUMMARY\b/.test(t)
+    || /^NEIGHBOR PLATEAU TEST\b/.test(t)
+    || /^PARAMETER SENSITIVITY MAP\b/.test(t)
+    || /^LUCKY STREAK TEST\b/.test(t)
+    || /^TOP-N DAY REMOVAL TEST\b/.test(t)
+    || /^CAPPED RETURN SENSITIVITY TABLE\b/.test(t)
+    || /^SLIPPAGE SENSITIVITY TABLE\b/.test(t)
   ) {
     return 'robustness_stress';
   }
@@ -1495,9 +1504,12 @@ function fullReportCategoryForTitle(title: string): FullReportCategoryKey {
 
   if (
     /^LIQUIDITY CAPACITY CURVE\b/.test(t)
+    || /^CAPACITY CURVE TEST\b/.test(t)
+    || /^COST CURVE TEST\b/.test(t)
     || /^MINIMUM CUMULATIVE RETURN\b/.test(t)
     || /^MARKET CAP DIAGNOSTIC\b/.test(t)
     || /^MARKET CAP UNIVERSE SUMMARY\b/.test(t)
+    || /^CAPITAL & OPERATIONAL\b/.test(t)
   ) {
     return 'capacity_diagnostics';
   }
@@ -1744,7 +1756,6 @@ function isSpecialSectionTitleLine(line: string): boolean {
     || /^PERIODIC RETURN BREAKDOWN\b/i.test(t)
     || /^MINIMUM CUMULATIVE RETURN\b/i.test(t)
     || /^DEFLATED SHARPE RATIO \+ MINIMUM TRACK RECORD LENGTH\b/i.test(t)
-    || /^SHOCK INJECTION TEST\s+\|\s+Filter:/i.test(t)
     || /^RUIN PROBABILITY\s+\|\s+Filter:/i.test(t)
     || /^LIQUIDITY CAPACITY CURVE\s+\|\s+Filter:/i.test(t)
     || /^PARAMETRIC STABILITY CUBE\b/i.test(t)
@@ -1883,7 +1894,6 @@ function extractSpecialFullReportSections(text: string, selectedFilter: string |
     /^PERIODIC RETURN BREAKDOWN\b/i,
     /^MINIMUM CUMULATIVE RETURN\b/i,
     /^DEFLATED SHARPE RATIO \+ MINIMUM TRACK RECORD LENGTH\b/i,
-    /^SHOCK INJECTION TEST\s+\|\s+Filter:/i,
     /^RUIN PROBABILITY\s+\|\s+Filter:/i,
     /^LIQUIDITY CAPACITY CURVE\s+\|\s+Filter:/i,
     /^PARAMETRIC STABILITY CUBE\b/i,
@@ -1903,8 +1913,12 @@ function extractSpecialFullReportSections(text: string, selectedFilter: string |
     if (familyIdx < 0) continue;
     const titleLine = line.replace(/\s{2,}/g, ' ');
     let nextSectionIdx = lines.length;
+    // PARAM JITTER embeds a FEES PANEL inside its output — skip FEES PANEL
+    // headings when searching for the next section boundary.
+    const skipFeesPanel = /^PARAM JITTER/i.test(line);
     for (let j = i + 1; j < lines.length; j += 1) {
       const tl = lines[j].trim();
+      if (skipFeesPanel && /^FEES PANEL\b/i.test(tl)) continue;
       if (parseHeadingLine(tl) || sweepTitleMatchers.some((rx) => rx.test(tl))) {
         nextSectionIdx = j;
         break;
@@ -1994,8 +2008,11 @@ function fullReportOrderRank(title: string): number {
     [/^DRAWDOWN EPISODE ANALYSIS\b/, 50],
     [/^RETURN DISTRIBUTION\b/, 60],
     [/^RETURN \+ CONDITIONAL ANALYSIS\b/, 70],
+    [/^REGIME & CONDITIONAL ANALYSIS\b/, 72],
     [/^ROLLING MAX DRAWDOWN\b/, 80],
     [/^DAILY VAR \/ CVAR\b/, 90],
+    [/^STATISTICAL VALIDITY\b/, 95],
+    [/^TAIL RISK \(EXTENDED\)/, 97],
 
     [/^SIGNAL PREDICTIVENESS\b/, 120],
     [/^ALLOCATOR VIEW SCORECARD\b/, 130],
@@ -2018,6 +2035,12 @@ function fullReportOrderRank(title: string): number {
     [/^SLIPPAGE IMPACT SWEEP\b/, 350],
     [/^NOISE PERTURBATION STABILITY TEST\b/, 360],
     [/^PARAM JITTER \/ SHARPE STABILITY TEST\b/, 370],
+    [/^NEIGHBOR PLATEAU TEST\b/, 375],
+    [/^PARAMETER SENSITIVITY MAP\b/, 377],
+    [/^CAPPED RETURN SENSITIVITY TABLE\b/, 374],
+    [/^SLIPPAGE SENSITIVITY TABLE\b/, 373],
+    [/^TOP-N DAY REMOVAL TEST\b/, 376],
+    [/^LUCKY STREAK TEST\b/, 378],
     [/^RETURN CONCENTRATION ANALYSIS\b/, 380],
     [/^PERIODIC RETURN BREAKDOWN\b/, 390],
     [/^SHOCK INJECTION TEST\b/, 400],
@@ -2026,7 +2049,10 @@ function fullReportOrderRank(title: string): number {
     [/^REGIME CONSISTENCY SUMMARY\b/, 430],
 
     [/^LIQUIDITY CAPACITY CURVE\b/, 450],
+    [/^CAPACITY CURVE TEST\b/, 455],
+    [/^COST CURVE TEST\b/, 457],
     [/^MINIMUM CUMULATIVE RETURN\b/, 460],
+    [/^CAPITAL & OPERATIONAL\b/, 465],
     [/^MARKET CAP DIAGNOSTIC\b/, 470],
     [/^MARKET CAP UNIVERSE SUMMARY\b/, 480],
     [/^EQUITY ENSEMBLE\b/, 490],
@@ -2079,6 +2105,14 @@ function buildFullReportSections(text: string, selectedFilter: string | null): P
       prev
       && t.startsWith('EXIT ARCHITECTURE STABILITY CUBE SUMMARY')
       && prev.title.toUpperCase().startsWith('EXIT ARCHITECTURE STABILITY CUBE')
+    ) {
+      prev.body = `${prev.body}\n\n${s.title}\n${s.body}`.trim();
+      continue;
+    }
+    if (
+      prev
+      && t.startsWith('REGIME CONSISTENCY SUMMARY')
+      && prev.title.toUpperCase().includes('REGIME ROBUSTNESS TEST')
     ) {
       prev.body = `${prev.body}\n\n${s.title}\n${s.body}`.trim();
       continue;
@@ -3446,13 +3480,215 @@ function renderKVSection(body: string, label: string, colorFn?: (v: number) => s
 }
 
 function renderReturnRatesByPeriod(body: string) {
-  return <PreFallback body={body} />;
+  const lines = body.split('\n');
+
+  type PeriodGroup = {
+    period: string;
+    count: string;
+    winRate: string;
+    winLoss: string;
+    avg: string;
+    avgWin: string;
+    avgLoss: string;
+    best: string;
+    worst: string;
+  };
+
+  const groups: PeriodGroup[] = [];
+  let cur: Partial<PeriodGroup> | null = null;
+
+  for (const line of lines) {
+    if (/^[│┌┐└┘─═]+$/.test(line.trim())) continue;
+    if (/RETURN RATES BY PERIOD/i.test(line)) continue;
+
+    const clean = line.replace(/^[│\s]+/, '').replace(/[│\s]+$/, '');
+    if (!clean) continue;
+
+    // "MONTHLY  (13 months)"
+    const periodMatch = clean.match(/^(MONTHLY|WEEKLY|DAILY)\s+\((.+?)\)/i);
+    if (periodMatch) {
+      if (cur && cur.period) groups.push(cur as PeriodGroup);
+      cur = { period: periodMatch[1].toUpperCase(), count: periodMatch[2], winRate: '', winLoss: '', avg: '', avgWin: '', avgLoss: '', best: '', worst: '' };
+      continue;
+    }
+
+    if (!cur) continue;
+
+    // "Win rate:        69.2%  (9W / 4L)"
+    const wrMatch = clean.match(/Win rate\s*:\s*([0-9.]+%)\s*\((.+?)\)/i);
+    if (wrMatch) { cur.winRate = wrMatch[1]; cur.winLoss = wrMatch[2]; continue; }
+
+    // "Avg month:       +46.54%" or "Avg week:" or "Avg day:"
+    const avgMatch = clean.match(/^Avg\s+(?:month|week|day)\s*:\s*([0-9.+%-]+)/i);
+    if (avgMatch) { cur.avg = avgMatch[1]; continue; }
+
+    // "Avg win:         76.49%"
+    const awMatch = clean.match(/Avg win\s*:\s*([0-9.+%-]+)/i);
+    if (awMatch) { cur.avgWin = awMatch[1]; continue; }
+
+    // "Avg loss:        -20.85%"
+    const alMatch = clean.match(/Avg loss\s*:\s*([0-9.+%-]+)/i);
+    if (alMatch) { cur.avgLoss = alMatch[1]; continue; }
+
+    // "Best month:      202.88%   Worst:  -34.96%"
+    const bwMatch = clean.match(/Best\s+\S+\s*:\s*([0-9.+%-]+)\s+Worst\s*:\s*([0-9.+%-]+)/i);
+    if (bwMatch) { cur.best = bwMatch[1]; cur.worst = bwMatch[2]; continue; }
+  }
+  if (cur && cur.period) groups.push(cur as PeriodGroup);
+
+  if (groups.length === 0) return <PreFallback body={body} />;
+
+  const periodIcon: Record<string, string> = { MONTHLY: 'M', WEEKLY: 'W', DAILY: 'D' };
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+      {sectionLabel('Return Rates by Period')}
+
+      <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap' }}>
+        {groups.map((g, gIdx) => {
+          const wr = parseFloat(g.winRate);
+          const wrColor = wr >= 60 ? 'var(--green)' : wr >= 45 ? 'var(--orange)' : 'var(--red)';
+          const avgNum = parseFloat(g.avg);
+          const avgColor = avgNum >= 0 ? 'var(--green)' : 'var(--red)';
+
+          return (
+            <div key={gIdx} style={{
+              flex: '1 1 200px',
+              background: 'var(--bg2)',
+              border: '1px solid var(--line1)',
+              borderRadius: 8,
+              padding: '14px 16px',
+              display: 'flex',
+              flexDirection: 'column',
+              gap: 12,
+            }}>
+              {/* Period header */}
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                <div style={{
+                  width: 28, height: 28, borderRadius: 6,
+                  background: 'rgba(255,255,255,0.05)', border: '1px solid var(--line1)',
+                  display: 'flex', alignItems: 'center', justifyContent: 'center',
+                  fontSize: 14, fontWeight: 700, color: 'var(--t2)', ...MONO,
+                }}>
+                  {periodIcon[g.period] ?? g.period[0]}
+                </div>
+                <div style={{ display: 'flex', flexDirection: 'column' }}>
+                  <span style={{ fontSize: 12, fontWeight: 600, color: 'var(--t1)', ...MONO }}>{g.period}</span>
+                  <span style={{ fontSize: 9, color: 'var(--t4)', ...MONO }}>{g.count}</span>
+                </div>
+              </div>
+
+              {/* Win rate bar */}
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' }}>
+                  <span style={{ fontSize: 9, color: 'var(--t3)', textTransform: 'uppercase', letterSpacing: 0.5, ...MONO }}>Win Rate</span>
+                  <span style={{ fontSize: 14, fontWeight: 600, color: wrColor, ...MONO }}>{g.winRate}</span>
+                </div>
+                <div style={{ height: 4, borderRadius: 2, background: 'rgba(255,255,255,0.06)', overflow: 'hidden' }}>
+                  <div style={{ height: '100%', width: `${wr}%`, borderRadius: 2, background: wrColor }} />
+                </div>
+                <span style={{ fontSize: 9, color: 'var(--t4)', ...MONO, textAlign: 'right' }}>{g.winLoss}</span>
+              </div>
+
+              {/* Avg return */}
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', padding: '6px 0', borderTop: '1px solid var(--line1)' }}>
+                <span style={{ fontSize: 9, color: 'var(--t3)', textTransform: 'uppercase', letterSpacing: 0.5, ...MONO }}>Avg Return</span>
+                <span style={{ fontSize: 16, fontWeight: 600, color: avgColor, ...MONO }}>{g.avg}</span>
+              </div>
+
+              {/* Avg win / Avg loss */}
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+                  <span style={{ fontSize: 8.5, color: 'var(--t4)', textTransform: 'uppercase', letterSpacing: 0.4, ...MONO }}>Avg Win</span>
+                  <span style={{ fontSize: 12, color: 'var(--green)', fontWeight: 500, ...MONO }}>{g.avgWin}</span>
+                </div>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 2, textAlign: 'right' }}>
+                  <span style={{ fontSize: 8.5, color: 'var(--t4)', textTransform: 'uppercase', letterSpacing: 0.4, ...MONO }}>Avg Loss</span>
+                  <span style={{ fontSize: 12, color: 'var(--red)', fontWeight: 500, ...MONO }}>{g.avgLoss}</span>
+                </div>
+              </div>
+
+              {/* Best / Worst */}
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, borderTop: '1px solid var(--line1)', paddingTop: 8 }}>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+                  <span style={{ fontSize: 8.5, color: 'var(--t4)', textTransform: 'uppercase', letterSpacing: 0.4, ...MONO }}>Best</span>
+                  <span style={{ fontSize: 12, color: 'var(--green)', fontWeight: 500, ...MONO }}>{g.best}</span>
+                </div>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 2, textAlign: 'right' }}>
+                  <span style={{ fontSize: 8.5, color: 'var(--t4)', textTransform: 'uppercase', letterSpacing: 0.4, ...MONO }}>Worst</span>
+                  <span style={{ fontSize: 12, color: 'var(--red)', fontWeight: 500, ...MONO }}>{g.worst}</span>
+                </div>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
 }
 
 function renderReturnDistribution(body: string) {
-  const table = parseColumnarTable(body);
-  if (table && table.rows.length > 0) return <SectionTable headers={table.headers} rows={table.rows} />;
-  return renderKVSection(body, 'Distribution Stats', (v) => v >= 0 ? 'var(--green)' : 'var(--red)');
+  const lines = body.split('\n');
+
+  type DistItem = { label: string; value: string; note: string; status: 'ok' | 'warn' | 'none' };
+  const items: DistItem[] = [];
+
+  for (const line of lines) {
+    if (/^[│┌┐└┘─═]+$/.test(line.trim())) continue;
+    if (/RETURN DISTRIBUTION/i.test(line)) continue;
+
+    const clean = line.replace(/^[│\s]+/, '').replace(/[│\s]+$/, '');
+    if (!clean) continue;
+
+    // "Skewness:                   1.6885  OK"
+    // "Excess kurtosis:            6.0174  ⚠ fat tails"
+    // "JB p-value:                 0.0000  (NON-NORMAL ⚠)"
+    // "LB p-value:                 0.8353  (no autocorrelation)"
+    const match = clean.match(/^(.+?):\s+([0-9.+-]+)\s*(.*)/);
+    if (match) {
+      const label = match[1].trim();
+      const value = match[2].trim();
+      const rest = match[3].trim();
+
+      let status: 'ok' | 'warn' | 'none' = 'none';
+      if (/⚠/.test(rest) || /NON-NORMAL/i.test(rest)) status = 'warn';
+      else if (/OK|✅|no autocorrelation/i.test(rest)) status = 'ok';
+
+      const note = rest.replace(/[⚠✅]/g, '').replace(/[()]/g, '').trim();
+      items.push({ label, value, note, status });
+    }
+  }
+
+  if (items.length === 0) {
+    const table = parseColumnarTable(body);
+    if (table && table.rows.length > 0) return <SectionTable headers={table.headers} rows={table.rows} />;
+    return <PreFallback body={body} />;
+  }
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+      {sectionLabel('Return Distribution')}
+
+      <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
+        {items.map((item, idx) => {
+          const color = item.status === 'ok' ? 'var(--green)' : item.status === 'warn' ? 'var(--orange)' : 'var(--t1)';
+          const bg = item.status === 'warn' ? 'rgba(255,160,60,0.04)' : 'var(--bg2)';
+          const border = item.status === 'warn' ? 'rgba(255,160,60,0.2)' : item.status === 'ok' ? 'rgba(60,255,100,0.15)' : 'var(--line1)';
+
+          return (
+            <div key={idx} style={{
+              flex: '1 1 160px', background: bg, border: `1px solid ${border}`, borderRadius: 6,
+              padding: '10px 14px', display: 'flex', flexDirection: 'column', gap: 3,
+            }}>
+              <span style={{ fontSize: 9, color: 'var(--t3)', textTransform: 'uppercase', letterSpacing: 0.5, ...MONO }}>{item.label}</span>
+              <span style={{ fontSize: 16, color, fontWeight: 600, ...MONO }}>{item.value}</span>
+              {item.note && <span style={{ fontSize: 9, color: item.status === 'warn' ? 'var(--orange)' : 'var(--t4)', ...MONO }}>{item.note}</span>}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
 }
 
 function renderReturnConditional(body: string) {
@@ -3460,9 +3696,73 @@ function renderReturnConditional(body: string) {
 }
 
 function renderRollingMaxDrawdown(body: string) {
-  const table = parseColumnarTable(body);
-  if (table && table.rows.length > 0) return <SectionTable headers={table.headers} rows={table.rows} />;
-  return <PreFallback body={body} />;
+  const lines = body.split('\n');
+
+  type DDRow = { window: string; value: string; warn: boolean };
+  const rows: DDRow[] = [];
+
+  for (const line of lines) {
+    if (/^[│┌┐└┘─═]+$/.test(line.trim())) continue;
+    if (/ROLLING MAX DRAWDOWN/i.test(line)) continue;
+
+    const clean = line.replace(/^[│\s]+/, '').replace(/[│\s]+$/, '');
+    if (!clean) continue;
+
+    // "Worst  3d window:          -38.11%  ⚠"
+    const match = clean.match(/Worst\s+(\d+d)\s+window:\s+([0-9.+-]+%)\s*(⚠|✅)?/i);
+    if (match) {
+      rows.push({ window: match[1], value: match[2], warn: match[3] === '⚠' });
+    }
+  }
+
+  if (rows.length === 0) {
+    const table = parseColumnarTable(body);
+    if (table && table.rows.length > 0) return <SectionTable headers={table.headers} rows={table.rows} />;
+    return <PreFallback body={body} />;
+  }
+
+  // Find the worst value for scaling
+  const allNums = rows.map(r => Math.abs(parseFloat(r.value.replace('%', '')))).filter(Number.isFinite);
+  const maxAbs = Math.max(...allNums, 1);
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+      {sectionLabel('Rolling Max Drawdown')}
+
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+        {rows.map((r, idx) => {
+          const num = Math.abs(parseFloat(r.value.replace('%', '')));
+          const barWidth = (num / maxAbs) * 100;
+          const ddColor = num >= 50 ? 'var(--red)' : num >= 30 ? 'var(--orange)' : 'var(--green)';
+
+          return (
+            <div key={idx} style={{
+              display: 'flex', alignItems: 'center', gap: 12,
+              padding: '8px 14px', borderRadius: 4,
+              background: 'var(--bg2)', border: '1px solid var(--line1)',
+              position: 'relative', overflow: 'hidden',
+              ...MONO,
+            }}>
+              {/* Background bar */}
+              <div style={{
+                position: 'absolute', top: 0, left: 0, bottom: 0,
+                width: `${barWidth}%`, opacity: 0.06,
+                background: ddColor,
+              }} />
+              <span style={{ fontSize: 11, color: 'var(--t3)', minWidth: 50, position: 'relative' }}>{r.window}</span>
+              <div style={{ flex: 1, position: 'relative' }}>
+                <div style={{ height: 6, borderRadius: 3, background: 'rgba(255,255,255,0.04)', overflow: 'hidden' }}>
+                  <div style={{ height: '100%', width: `${barWidth}%`, borderRadius: 3, background: ddColor }} />
+                </div>
+              </div>
+              <span style={{ fontSize: 14, color: ddColor, fontWeight: 600, minWidth: 70, textAlign: 'right', position: 'relative' }}>{r.value}</span>
+              {r.warn && <span style={{ fontSize: 10, color: 'var(--orange)', position: 'relative' }}>⚠</span>}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
 }
 
 function renderDrawdownEpisodes(body: string) {
@@ -3993,6 +4293,522 @@ function renderDeflatedSharpe(body: string) {
   );
 }
 
+function renderShockInjection(body: string) {
+  const lines = body.split('\n');
+
+  // Parse baseline
+  let baselineSharpe = '';
+  let baselineMaxDD = '';
+  const rows: { shock: string; nDays: string; sharpe: string; dSharpe: string; maxdd: string; dMaxdd: string; survived: boolean }[] = [];
+
+  for (const line of lines) {
+    // Skip box-drawing / separator lines
+    if (/^[│┌┐└┘─═]+$/.test(line.trim())) continue;
+    if (/[─═]{5,}/.test(line)) continue;
+    if (/Shock\s+N\s*days/i.test(line)) continue;
+    if (/SHOCK INJECTION/i.test(line)) continue;
+
+    // Strip leading │ and whitespace
+    const clean = line.replace(/^[│\s]+/, '').replace(/[│\s]+$/, '');
+    if (!clean) continue;
+
+    // Baseline line
+    const baseMatch = clean.match(/Baseline.*?Sharpe:\s*([0-9.+-]+)\s+MaxDD:\s*([0-9.+%-]+)/i);
+    if (baseMatch) {
+      baselineSharpe = baseMatch[1];
+      baselineMaxDD = baseMatch[2];
+      continue;
+    }
+
+    // Data rows: -10%  1  2.912  +0.093  -55.86%  +1.24%  ⚠ NO / ✅ YES
+    const rowMatch = clean.match(
+      /^([+-]?\d+%?)\s+(\d+)\s+([0-9.+-]+)\s+([0-9.+-]+)\s+([0-9.+%-]+)\s+([0-9.+%-]+)\s+(.*)/
+    );
+    if (rowMatch) {
+      const status = rowMatch[7].trim();
+      rows.push({
+        shock: rowMatch[1],
+        nDays: rowMatch[2],
+        sharpe: rowMatch[3],
+        dSharpe: rowMatch[4],
+        maxdd: rowMatch[5],
+        dMaxdd: rowMatch[6],
+        survived: /YES/i.test(status),
+      });
+    }
+  }
+
+  if (rows.length === 0) return <PreFallback body={body} />;
+
+  const survivedCount = rows.filter(r => r.survived).length;
+  const survivalRate = rows.length > 0 ? Math.round((survivedCount / rows.length) * 100) : 0;
+  const overallColor = survivalRate >= 60 ? 'var(--green)' : survivalRate >= 30 ? 'var(--orange)' : 'var(--red)';
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+      {sectionLabel('Shock Injection Test')}
+
+      {/* Baseline + survival summary */}
+      <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap' }}>
+        {baselineSharpe && (
+          <div style={{ background: 'var(--bg2)', border: '1px solid var(--line1)', borderRadius: 6, padding: '10px 16px', display: 'flex', flexDirection: 'column', gap: 3, flex: '1 1 140px' }}>
+            <span style={{ fontSize: 9, color: 'var(--t3)', textTransform: 'uppercase', letterSpacing: 0.5, ...MONO }}>Baseline Sharpe</span>
+            <span style={{ fontSize: 18, color: 'var(--t1)', fontWeight: 600, ...MONO }}>{baselineSharpe}</span>
+          </div>
+        )}
+        {baselineMaxDD && (
+          <div style={{ background: 'var(--bg2)', border: '1px solid var(--line1)', borderRadius: 6, padding: '10px 16px', display: 'flex', flexDirection: 'column', gap: 3, flex: '1 1 140px' }}>
+            <span style={{ fontSize: 9, color: 'var(--t3)', textTransform: 'uppercase', letterSpacing: 0.5, ...MONO }}>Baseline MaxDD</span>
+            <span style={{ fontSize: 18, color: 'var(--red)', fontWeight: 600, ...MONO }}>{baselineMaxDD}</span>
+          </div>
+        )}
+        <div style={{
+          background: survivalRate >= 60 ? 'rgba(60,255,100,0.05)' : survivalRate >= 30 ? 'rgba(255,160,60,0.05)' : 'rgba(255,60,60,0.05)',
+          border: `1px solid ${survivalRate >= 60 ? 'rgba(60,255,100,0.3)' : survivalRate >= 30 ? 'rgba(255,160,60,0.3)' : 'rgba(255,60,60,0.3)'}`,
+          borderRadius: 6, padding: '10px 16px', display: 'flex', flexDirection: 'column', gap: 3, flex: '1 1 140px',
+        }}>
+          <span style={{ fontSize: 9, color: 'var(--t3)', textTransform: 'uppercase', letterSpacing: 0.5, ...MONO }}>Survival Rate</span>
+          <span style={{ fontSize: 18, color: overallColor, fontWeight: 600, ...MONO }}>{survivedCount}/{rows.length} ({survivalRate}%)</span>
+        </div>
+      </div>
+
+      {/* Data rows */}
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+        {/* Header */}
+        <div style={{
+          display: 'grid',
+          gridTemplateColumns: '60px 56px 1fr 1fr 1fr 1fr 72px',
+          gap: 8,
+          padding: '6px 12px',
+          borderBottom: '1px solid var(--line1)',
+        }}>
+          {['Shock', 'Days', 'Sharpe', '\u0394Sharpe', 'MaxDD%', '\u0394MaxDD%', 'Status'].map((h, i) => (
+            <span key={i} style={{ fontSize: 9, color: 'var(--t4)', textTransform: 'uppercase', letterSpacing: 0.5, textAlign: i >= 2 ? 'right' : 'left', ...MONO }}>{h}</span>
+          ))}
+        </div>
+
+        {rows.map((r, idx) => {
+          const survived = r.survived;
+          const borderColor = survived ? 'rgba(60,255,100,0.25)' : 'rgba(255,60,60,0.15)';
+          const bgColor = survived ? 'rgba(60,255,100,0.04)' : 'rgba(255,60,60,0.03)';
+          const dSharpeNum = parseFloat(r.dSharpe);
+          const dMaxddNum = parseFloat(r.dMaxdd.replace('%', ''));
+
+          return (
+            <div key={idx} style={{
+              display: 'grid',
+              gridTemplateColumns: '60px 56px 1fr 1fr 1fr 1fr 72px',
+              gap: 8,
+              padding: '8px 12px',
+              background: bgColor,
+              border: `1px solid ${borderColor}`,
+              borderRadius: 5,
+              alignItems: 'center',
+              ...MONO,
+            }}>
+              <span style={{ fontSize: 12, color: 'var(--t1)', fontWeight: 600 }}>{r.shock}</span>
+              <span style={{ fontSize: 12, color: 'var(--t2)' }}>{r.nDays}</span>
+              <span style={{ fontSize: 12, color: 'var(--t1)', textAlign: 'right' }}>{r.sharpe}</span>
+              <span style={{ fontSize: 12, color: dSharpeNum >= 0 ? 'var(--green)' : 'var(--red)', textAlign: 'right' }}>{r.dSharpe}</span>
+              <span style={{ fontSize: 12, color: 'var(--t1)', textAlign: 'right' }}>{r.maxdd}</span>
+              <span style={{ fontSize: 12, color: dMaxddNum >= 0 ? 'var(--green)' : 'var(--red)', textAlign: 'right' }}>{r.dMaxdd}</span>
+              <span style={{
+                fontSize: 10,
+                fontWeight: 600,
+                textAlign: 'center',
+                padding: '2px 6px',
+                borderRadius: 4,
+                background: survived ? 'rgba(60,255,100,0.12)' : 'rgba(255,60,60,0.12)',
+                color: survived ? 'var(--green)' : 'var(--red)',
+              }}>
+                {survived ? 'SURVIVED' : 'FAILED'}
+              </span>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function renderRegimeRobustness(body: string) {
+  const lines = body.split('\n');
+
+  // Detect format: filter variant has "[A]" section headers, IS/OOS variant has "IN-SAMPLE"
+  const isRegimeBreakdown = lines.some(l => /\[A\]\s+VOLATILITY/i.test(l));
+
+  if (isRegimeBreakdown) return renderRegimeBreakdown(body);
+  return renderRegimeISvsOOS(body);
+}
+
+// ── Filter variant: regime breakdown by volatility / momentum / trend ────────
+type RegimeRow = { label: string; n: string; sharpe: number; cagr: string; maxdd: string; calmar: string; wfcv: string };
+type RegimeGroup = { title: string; tag: string; rows: RegimeRow[] };
+
+function renderRegimeBreakdown(body: string) {
+  const lines = body.split('\n');
+  const thresholds: string[] = [];
+  const groups: RegimeGroup[] = [];
+  let currentGroup: RegimeGroup | null = null;
+
+  // Consistency summary fields (merged from REGIME CONSISTENCY SUMMARY)
+  let consistencySharpeRange = '';
+  let consistencySpread = '';
+  let consistencyVerdict = '';
+  let consistencyVerdictDetail = '';
+
+  for (const line of lines) {
+    if (/^[│┌┐└┘─═]+$/.test(line.trim())) continue;
+    if (/[─═]{5,}/.test(line)) continue;
+    if (/REGIME ROBUSTNESS/i.test(line)) continue;
+    if (/REGIME CONSISTENCY SUMMARY/i.test(line)) continue;
+
+    const clean = line.replace(/^[│\s]+/, '').replace(/[│\s]+$/, '');
+    if (!clean) continue;
+
+    // Skip "Taxonomy thresholds:" header
+    if (/^Taxonomy thresholds/i.test(clean)) continue;
+    // Skip CSV/Chart saved lines
+    if (/saved:/i.test(clean)) continue;
+
+    // Consistency summary: "Sharpe range across regimes: 1.462 – 4.174  (spread=2.712)"
+    const rangeMatch = clean.match(/Sharpe range across regimes:\s*([0-9.+-]+)\s*[–-]\s*([0-9.+-]+)\s*\(spread=([0-9.+-]+)\)/i);
+    if (rangeMatch) {
+      consistencySharpeRange = `${rangeMatch[1]} – ${rangeMatch[2]}`;
+      consistencySpread = rangeMatch[3];
+      continue;
+    }
+
+    // Consistency verdict: "Verdict: HIGH SENSITIVITY — strong regime dependence"
+    const verdictMatch = clean.match(/^Verdict:\s*(.+?)(?:\s*[—–-]\s*(.+))?$/i);
+    if (verdictMatch) {
+      consistencyVerdict = verdictMatch[1].trim();
+      consistencyVerdictDetail = verdictMatch[2]?.trim() ?? '';
+      continue;
+    }
+
+    // Threshold lines: "Rvol30 low/mid/high splits : p33=0.4615  p67=0.6719"
+    if (/p33=|p67=|bull>|bear</i.test(clean)) {
+      thresholds.push(clean);
+      continue;
+    }
+
+    // Group headers: "[A] VOLATILITY REGIMES"
+    const groupHeaderMatch = clean.match(/^\[([A-Z])\]\s+(.+)/);
+    if (groupHeaderMatch) {
+      currentGroup = { tag: groupHeaderMatch[1], title: groupHeaderMatch[2].trim(), rows: [] };
+      groups.push(currentGroup);
+      continue;
+    }
+
+    // Regime rows: "Vol: Low  (rvol30 ≤ p33)       : n=274d  Sharpe= 2.949  CAGR=  3156.3%  MaxDD= -40.69%  Calmar=  77.57  WF_CV=0.645"
+    if (currentGroup) {
+      const rowMatch = clean.match(
+        /^(.+?):\s+n=\s*(\d+)d\s+Sharpe=\s*([0-9.+-]+)\s+CAGR=\s*([0-9.+-]+%?)\s+MaxDD=\s*([0-9.+-]+%?)\s+Calmar=\s*([0-9.+-]+)\s+WF_CV=\s*([0-9.nan+-]+)/
+      );
+      if (rowMatch) {
+        currentGroup.rows.push({
+          label: rowMatch[1].trim(),
+          n: rowMatch[2],
+          sharpe: parseFloat(rowMatch[3]),
+          cagr: rowMatch[4].includes('%') ? rowMatch[4] : `${rowMatch[4]}%`,
+          maxdd: rowMatch[5].includes('%') ? rowMatch[5] : `${rowMatch[5]}%`,
+          calmar: rowMatch[6],
+          wfcv: rowMatch[7],
+        });
+      }
+    }
+  }
+
+  if (groups.length === 0) return <PreFallback body={body} />;
+
+  // Find overall Sharpe range for color gradient
+  const allSharpes = groups.flatMap(g => g.rows.map(r => r.sharpe)).filter(Number.isFinite);
+  const minSharpe = Math.min(...allSharpes);
+  const maxSharpe = Math.max(...allSharpes);
+  const sharpeRange = maxSharpe - minSharpe || 1;
+
+  function sharpeColor(s: number): string {
+    const t = (s - minSharpe) / sharpeRange;
+    if (t >= 0.66) return 'var(--green)';
+    if (t >= 0.33) return 'var(--orange)';
+    return 'var(--red)';
+  }
+
+  // Derive verdict styling
+  const isHighSensitivity = /HIGH/i.test(consistencyVerdict);
+  const isModerate = /MODERATE/i.test(consistencyVerdict);
+  const verdictColor = isHighSensitivity ? 'var(--red)' : isModerate ? 'var(--orange)' : 'var(--green)';
+  const verdictBg = isHighSensitivity ? 'rgba(255,60,60,0.05)' : isModerate ? 'rgba(255,160,60,0.05)' : 'rgba(60,255,100,0.05)';
+  const verdictBorder = isHighSensitivity ? 'rgba(255,60,60,0.3)' : isModerate ? 'rgba(255,160,60,0.3)' : 'rgba(60,255,100,0.3)';
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+      {sectionLabel('Regime Robustness Test')}
+
+      {/* Consistency summary banner (merged from REGIME CONSISTENCY SUMMARY) */}
+      {consistencyVerdict && (
+        <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap' }}>
+          <div style={{
+            background: verdictBg,
+            border: `1px solid ${verdictBorder}`,
+            borderRadius: 6,
+            padding: '10px 16px',
+            display: 'flex',
+            flexDirection: 'column',
+            gap: 3,
+            flex: '1 1 160px',
+          }}>
+            <span style={{ fontSize: 9, color: 'var(--t3)', textTransform: 'uppercase', letterSpacing: 0.5, ...MONO }}>Verdict</span>
+            <span style={{ fontSize: 14, color: verdictColor, fontWeight: 600, ...MONO }}>{consistencyVerdict}</span>
+            {consistencyVerdictDetail && (
+              <span style={{ fontSize: 9, color: 'var(--t4)', ...MONO }}>{consistencyVerdictDetail}</span>
+            )}
+          </div>
+          {consistencySharpeRange && (
+            <div style={{
+              background: 'var(--bg2)',
+              border: '1px solid var(--line1)',
+              borderRadius: 6,
+              padding: '10px 16px',
+              display: 'flex',
+              flexDirection: 'column',
+              gap: 3,
+              flex: '1 1 140px',
+            }}>
+              <span style={{ fontSize: 9, color: 'var(--t3)', textTransform: 'uppercase', letterSpacing: 0.5, ...MONO }}>Sharpe Range</span>
+              <span style={{ fontSize: 16, color: 'var(--t1)', fontWeight: 600, ...MONO }}>{consistencySharpeRange}</span>
+            </div>
+          )}
+          {consistencySpread && (
+            <div style={{
+              background: 'var(--bg2)',
+              border: '1px solid var(--line1)',
+              borderRadius: 6,
+              padding: '10px 16px',
+              display: 'flex',
+              flexDirection: 'column',
+              gap: 3,
+              flex: '1 1 100px',
+            }}>
+              <span style={{ fontSize: 9, color: 'var(--t3)', textTransform: 'uppercase', letterSpacing: 0.5, ...MONO }}>Spread</span>
+              <span style={{ fontSize: 16, color: parseFloat(consistencySpread) > 2 ? 'var(--red)' : parseFloat(consistencySpread) > 1 ? 'var(--orange)' : 'var(--green)', fontWeight: 600, ...MONO }}>{consistencySpread}</span>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Taxonomy thresholds */}
+      {thresholds.length > 0 && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 2, padding: '8px 12px', background: 'var(--bg2)', borderRadius: 6, border: '1px solid var(--line1)' }}>
+          {thresholds.map((th, i) => (
+            <div key={i} style={{ fontSize: 9.5, color: 'var(--t3)', ...MONO }}>{th}</div>
+          ))}
+        </div>
+      )}
+
+      {/* Regime groups */}
+      {groups.map((g, gIdx) => (
+        <div key={gIdx} style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+          <div style={{ fontSize: 10, color: 'var(--t3)', textTransform: 'uppercase', letterSpacing: 0.5, ...MONO, borderBottom: '1px solid var(--line1)', paddingBottom: 4 }}>
+            <span style={{ color: 'var(--t4)', marginRight: 6 }}>[{g.tag}]</span>{g.title}
+          </div>
+
+          {/* Column header */}
+          <div style={{
+            display: 'grid',
+            gridTemplateColumns: '2fr 50px 70px 90px 80px 70px 60px',
+            gap: 8,
+            padding: '4px 12px',
+          }}>
+            {['Regime', 'Days', 'Sharpe', 'CAGR', 'MaxDD', 'Calmar', 'WF CV'].map((h, i) => (
+              <span key={i} style={{ fontSize: 8.5, color: 'var(--t4)', textTransform: 'uppercase', letterSpacing: 0.4, textAlign: i >= 1 ? 'right' : 'left', ...MONO }}>{h}</span>
+            ))}
+          </div>
+
+          {g.rows.map((r, idx) => {
+            const sc = sharpeColor(r.sharpe);
+            const maxddNum = parseFloat(r.maxdd.replace('%', ''));
+
+            return (
+              <div key={idx} style={{
+                display: 'grid',
+                gridTemplateColumns: '2fr 50px 70px 90px 80px 70px 60px',
+                gap: 8,
+                padding: '7px 12px',
+                background: idx % 2 === 0 ? 'var(--bg2)' : 'transparent',
+                borderRadius: 4,
+                borderLeft: `3px solid ${sc}`,
+                ...MONO,
+              }}>
+                <span style={{ fontSize: 10.5, color: 'var(--t2)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{r.label}</span>
+                <span style={{ fontSize: 11, color: 'var(--t2)', textAlign: 'right' }}>{r.n}</span>
+                <span style={{ fontSize: 12, color: sc, textAlign: 'right', fontWeight: 600 }}>{r.sharpe.toFixed(3)}</span>
+                <span style={{ fontSize: 11, color: 'var(--t1)', textAlign: 'right' }}>{r.cagr}</span>
+                <span style={{ fontSize: 11, color: maxddNum <= -30 ? 'var(--red)' : maxddNum <= -15 ? 'var(--orange)' : 'var(--t1)', textAlign: 'right' }}>{r.maxdd}</span>
+                <span style={{ fontSize: 11, color: 'var(--t2)', textAlign: 'right' }}>{r.calmar}</span>
+                <span style={{ fontSize: 11, color: r.wfcv === 'nan' ? 'var(--t4)' : 'var(--t2)', textAlign: 'right' }}>{r.wfcv === 'nan' ? '—' : r.wfcv}</span>
+              </div>
+            );
+          })}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// ── IS vs OOS variant (box-drawn format) ─────────────────────────────────────
+function renderRegimeISvsOOS(body: string) {
+  const lines = body.split('\n');
+
+  let subtitle = '';
+  const metricRows: { metric: string; inSample: string; outOfSample: string }[] = [];
+  const verdicts: { label: string; value: string; status: 'pass' | 'warn' | 'fail'; note: string }[] = [];
+
+  let inStabilitySection = false;
+
+  for (const line of lines) {
+    if (/^[│┌┐└┘─═]+$/.test(line.trim())) continue;
+    if (/[─═]{5,}/.test(line)) continue;
+    if (/REGIME ROBUSTNESS/i.test(line)) continue;
+    if (/Metric\s+IN-SAMPLE/i.test(line)) continue;
+
+    const clean = line.replace(/^[│\s]+/, '').replace(/[│\s]+$/, '');
+    if (!clean) continue;
+
+    const subMatch = clean.match(/^First\s+\d+\s+days.*vs.*remaining/i);
+    if (subMatch) {
+      subtitle = clean;
+      continue;
+    }
+
+    if (/STABILITY SUMMARY/i.test(clean)) {
+      inStabilitySection = true;
+      continue;
+    }
+
+    if (inStabilitySection) {
+      const verdictMatch = clean.match(/^(.+?):\s+([0-9.+%-]+)\s+(✅|⚠|❌)\s*(.*)/);
+      if (verdictMatch) {
+        const statusIcon = verdictMatch[3];
+        const status: 'pass' | 'warn' | 'fail' = statusIcon === '✅' ? 'pass' : statusIcon === '⚠' ? 'warn' : 'fail';
+        let note = verdictMatch[4].trim();
+        const extraMatch = note.match(/^([A-Z]+)\s+(.*)$/);
+        if (extraMatch) {
+          note = `${extraMatch[1]} ${extraMatch[2]}`.trim();
+        }
+        verdicts.push({ label: verdictMatch[1].trim(), value: verdictMatch[2].trim(), status, note });
+        continue;
+      }
+    }
+
+    if (!inStabilitySection) {
+      const parts = clean.split(/\s{2,}/);
+      if (parts.length >= 3) {
+        metricRows.push({
+          metric: parts[0].trim(),
+          inSample: parts[1].trim(),
+          outOfSample: parts[2].trim(),
+        });
+      }
+    }
+  }
+
+  if (metricRows.length === 0 && verdicts.length === 0) return <PreFallback body={body} />;
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+      {sectionLabel('Regime Robustness Test')}
+
+      {subtitle && (
+        <div style={{ fontSize: 10.5, color: 'var(--t3)', ...MONO, padding: '6px 12px', background: 'var(--bg2)', borderRadius: 6, border: '1px solid var(--line1)' }}>
+          {subtitle}
+        </div>
+      )}
+
+      {metricRows.length > 0 && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+          <div style={{
+            display: 'grid',
+            gridTemplateColumns: '1.4fr 1fr 1fr',
+            gap: 12,
+            padding: '6px 12px',
+            borderBottom: '1px solid var(--line1)',
+          }}>
+            <span style={{ fontSize: 9, color: 'var(--t4)', textTransform: 'uppercase', letterSpacing: 0.5, ...MONO }}>Metric</span>
+            <span style={{ fontSize: 9, color: 'var(--t4)', textTransform: 'uppercase', letterSpacing: 0.5, textAlign: 'right', ...MONO }}>In-Sample</span>
+            <span style={{ fontSize: 9, color: 'var(--t4)', textTransform: 'uppercase', letterSpacing: 0.5, textAlign: 'right', ...MONO }}>Out-of-Sample</span>
+          </div>
+
+          {metricRows.map((r, idx) => {
+            let oosColor = 'var(--t1)';
+            const isNum = parseFloat(r.inSample.replace(/[x%,]/g, ''));
+            const oosNum = parseFloat(r.outOfSample.replace(/[x%,]/g, ''));
+
+            if (Number.isFinite(isNum) && Number.isFinite(oosNum)) {
+              const metricLower = r.metric.toLowerCase();
+              if (metricLower.includes('sharpe') || metricLower.includes('cagr') || metricLower.includes('final mult') || metricLower.includes('mean return') || metricLower.includes('best day')) {
+                oosColor = oosNum >= isNum ? 'var(--green)' : 'var(--red)';
+              } else if (metricLower.includes('maxdd') || metricLower.includes('worst day') || metricLower.includes('std return')) {
+                oosColor = Math.abs(oosNum) <= Math.abs(isNum) ? 'var(--green)' : 'var(--red)';
+              }
+            }
+
+            return (
+              <div key={idx} style={{
+                display: 'grid',
+                gridTemplateColumns: '1.4fr 1fr 1fr',
+                gap: 12,
+                padding: '8px 12px',
+                background: idx % 2 === 0 ? 'var(--bg2)' : 'transparent',
+                borderRadius: 4,
+                ...MONO,
+              }}>
+                <span style={{ fontSize: 11, color: 'var(--t3)' }}>{r.metric}</span>
+                <span style={{ fontSize: 12, color: 'var(--t1)', textAlign: 'right', fontWeight: 500 }}>{r.inSample}</span>
+                <span style={{ fontSize: 12, color: oosColor, textAlign: 'right', fontWeight: 500 }}>{r.outOfSample}</span>
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {verdicts.length > 0 && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+          <div style={{ fontSize: 9, color: 'var(--t4)', textTransform: 'uppercase', letterSpacing: 0.5, ...MONO, paddingBottom: 2 }}>
+            Stability Summary
+          </div>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: 10 }}>
+            {verdicts.map((v, idx) => {
+              const color = v.status === 'pass' ? 'var(--green)' : v.status === 'warn' ? 'var(--orange)' : 'var(--red)';
+              const bgAlpha = v.status === 'pass' ? 'rgba(60,255,100,0.05)' : v.status === 'warn' ? 'rgba(255,160,60,0.05)' : 'rgba(255,60,60,0.05)';
+              const borderAlpha = v.status === 'pass' ? 'rgba(60,255,100,0.25)' : v.status === 'warn' ? 'rgba(255,160,60,0.25)' : 'rgba(255,60,60,0.25)';
+
+              return (
+                <div key={idx} style={{
+                  background: bgAlpha,
+                  border: `1px solid ${borderAlpha}`,
+                  borderRadius: 6,
+                  padding: '10px 14px',
+                  display: 'flex',
+                  flexDirection: 'column',
+                  gap: 4,
+                }}>
+                  <span style={{ fontSize: 9, color: 'var(--t3)', textTransform: 'uppercase', letterSpacing: 0.5, ...MONO }}>{v.label}</span>
+                  <span style={{ fontSize: 18, color, fontWeight: 600, ...MONO }}>{v.value}</span>
+                  {v.note && (
+                    <span style={{ fontSize: 9, color: 'var(--t4)', ...MONO }}>{v.note.replace(/[()]/g, '').trim()}</span>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function renderSignalPredictiveness(body: string) {
   const lines = body.split('\n');
   const consumedIdx = new Set<number>();
@@ -4290,63 +5106,2653 @@ function renderSignalPredictiveness(body: string) {
   );
 }
 
-// eslint-disable-next-line @typescript-eslint/no-unused-vars
 function renderSlippageSweep(body: string) {
-  const table = parseColumnarTable(body);
-  if (!table || table.rows.length === 0) return <PreFallback body={body} />;
-  const sharpeIdx = table.headers.findIndex((h) => /sharpe/i.test(h));
-  if (sharpeIdx >= 1) {
-    const items = table.rows.flatMap((r) => {
-      const raw = r.values[sharpeIdx - 1];
-      if (!raw) return [];
-      const num = parseFloat(raw.replace(/[,%]/g, ''));
-      if (!Number.isFinite(num)) return [];
-      return [{ label: r.label, value: num, raw }];
-    });
-    if (items.length >= 2) {
-      return (
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-          {sectionLabel('Sharpe vs Slippage')}
-          <SectionHBarChart items={items} colorFn={(v) => v >= 1.5 ? 'var(--green)' : v >= 0.5 ? 'var(--amber)' : 'var(--red)'} />
-          <SectionTable headers={table.headers} rows={table.rows} />
-        </div>
-      );
+  const lines = body.split('\n');
+
+  // Metadata
+  let activeDays = '';
+  let takerFee = '';
+  let scalabilityNote = '';
+
+  // Sweep rows
+  type SlippageRow = { slippage: string; rtCost: string; sharpe: number; vsBase: string; cagr: string; maxdd: string; calmar: string; grade: string; isBaseline: boolean };
+  const rows: SlippageRow[] = [];
+
+  // Break-even
+  const breakEvens: { threshold: string; maxSlippage: string }[] = [];
+
+  for (const line of lines) {
+    if (/^[═]{5,}$/.test(line.trim())) continue;
+    if (/[─]{5,}/.test(line)) continue;
+    if (/SLIPPAGE IMPACT/i.test(line)) continue;
+    if (/saved:/i.test(line)) continue;
+    if (/^Slippage\s+RT Cost/i.test(line.replace(/^[│\s]+/, ''))) continue;
+
+    const clean = line.replace(/^[│\s]+/, '').replace(/[│\s]+$/, '');
+    if (!clean) continue;
+
+    // "Active days : 113 / 398  (28.4%)"
+    const adMatch = clean.match(/Active days\s*:\s*(.+)/i);
+    if (adMatch) { activeDays = adMatch[1].trim(); continue; }
+
+    // "Taker fee already baked in: 0.080% per side (0.160% round-trip)"
+    const tfMatch = clean.match(/Taker fee.*?:\s*(.+)/i);
+    if (tfMatch) { takerFee = tfMatch[1].trim(); continue; }
+
+    // "Scalability bar: Sharpe ≥ 2.0 @ 0.25% → institutional-grade"
+    const scMatch = clean.match(/Scalability bar:\s*(.+)/i);
+    if (scMatch) { scalabilityNote = scMatch[1].trim(); continue; }
+
+    // "Slippage below is ADDITIONAL..." — skip
+    if (/slippage below/i.test(clean)) continue;
+
+    // Baseline row: "Baseline     0.000%     3.462    +0.000    5914.8%    -37.95%    155.85  (taker fee...)"
+    const blMatch = clean.match(/^Baseline\s+([0-9.]+%)\s+([0-9.+-]+)\s+([0-9.+-]+)\s+([0-9.+-]+%?)\s+([0-9.+-]+%?)\s+([0-9.+-]+)\s+(.*)/i);
+    if (blMatch) {
+      rows.push({
+        slippage: 'Baseline', rtCost: blMatch[1], sharpe: parseFloat(blMatch[2]),
+        vsBase: blMatch[3], cagr: blMatch[4], maxdd: blMatch[5], calmar: blMatch[6],
+        grade: blMatch[7].replace(/[()]/g, '').trim(), isBaseline: true,
+      });
+      continue;
+    }
+
+    // Data rows: "0.050%     0.100%     3.397    -0.065    5339.7%    -38.23%    139.66  Excellent"
+    const rowMatch = clean.match(
+      /^([0-9.]+%)\s+([0-9.]+%)\s+([0-9.+-]+)\s+([0-9.+-]+)\s+([0-9.+-]+%?)\s+([0-9.+-]+%?)\s+([0-9.+-]+)\s+(.*)/
+    );
+    if (rowMatch) {
+      rows.push({
+        slippage: rowMatch[1], rtCost: rowMatch[2], sharpe: parseFloat(rowMatch[3]),
+        vsBase: rowMatch[4], cagr: rowMatch[5], maxdd: rowMatch[6], calmar: rowMatch[7],
+        grade: rowMatch[8].trim(), isBaseline: false,
+      });
+      continue;
+    }
+
+    // Break-even: "Sharpe ≥ 2.5 : survives up to 0.500% one-way slippage"
+    const beMatch = clean.match(/Sharpe\s*(≥|>=)\s*([0-9.]+)\s*:\s*survives up to\s*([0-9.]+%)/i);
+    if (beMatch) {
+      breakEvens.push({ threshold: `Sharpe ≥ ${beMatch[2]}`, maxSlippage: beMatch[3] });
+      continue;
     }
   }
-  return <SectionTable headers={table.headers} rows={table.rows} />;
+
+  if (rows.length === 0) return <PreFallback body={body} />;
+
+  // Sort: baseline first, then by slippage ascending
+  const baseline = rows.find(r => r.isBaseline);
+  const dataRows = rows.filter(r => !r.isBaseline).sort((a, b) => parseFloat(a.slippage) - parseFloat(b.slippage));
+
+  function gradeColor(grade: string): string {
+    if (/excellent/i.test(grade)) return 'var(--green)';
+    if (/strong/i.test(grade)) return '#5bc0de';
+    if (/adequate|moderate/i.test(grade)) return 'var(--orange)';
+    return 'var(--red)';
+  }
+
+  // Find the scalable row (marked with ✓)
+  const scalableIdx = dataRows.findIndex(r => /scalable/i.test(r.grade));
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+      {sectionLabel('Slippage Impact Sweep')}
+
+      {/* Metadata bar */}
+      <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
+        {baseline && (
+          <div style={{ background: 'var(--bg2)', border: '1px solid var(--line1)', borderRadius: 6, padding: '10px 16px', display: 'flex', flexDirection: 'column', gap: 3, flex: '1 1 110px' }}>
+            <span style={{ fontSize: 9, color: 'var(--t3)', textTransform: 'uppercase', letterSpacing: 0.5, ...MONO }}>Baseline Sharpe</span>
+            <span style={{ fontSize: 18, color: 'var(--t1)', fontWeight: 600, ...MONO }}>{baseline.sharpe.toFixed(3)}</span>
+          </div>
+        )}
+        {activeDays && (
+          <div style={{ background: 'var(--bg2)', border: '1px solid var(--line1)', borderRadius: 6, padding: '10px 16px', display: 'flex', flexDirection: 'column', gap: 3, flex: '1 1 130px' }}>
+            <span style={{ fontSize: 9, color: 'var(--t3)', textTransform: 'uppercase', letterSpacing: 0.5, ...MONO }}>Active Days</span>
+            <span style={{ fontSize: 14, color: 'var(--t1)', fontWeight: 500, ...MONO }}>{activeDays}</span>
+          </div>
+        )}
+        {takerFee && (
+          <div style={{ background: 'var(--bg2)', border: '1px solid var(--line1)', borderRadius: 6, padding: '10px 16px', display: 'flex', flexDirection: 'column', gap: 3, flex: '1.5 1 180px' }}>
+            <span style={{ fontSize: 9, color: 'var(--t3)', textTransform: 'uppercase', letterSpacing: 0.5, ...MONO }}>Taker Fee (baked in)</span>
+            <span style={{ fontSize: 11, color: 'var(--t2)', ...MONO }}>{takerFee}</span>
+          </div>
+        )}
+      </div>
+
+      {/* Scalability note */}
+      {scalabilityNote && (
+        <div style={{
+          fontSize: 10, color: 'var(--t3)', ...MONO, padding: '6px 12px',
+          background: 'rgba(60,255,100,0.03)', borderRadius: 6, border: '1px solid rgba(60,255,100,0.15)',
+        }}>
+          Scalability: {scalabilityNote}
+        </div>
+      )}
+
+      {/* Sweep table */}
+      <div style={{ display: 'inline-flex', flexDirection: 'column', gap: 4 }}>
+        {/* Header */}
+        <div style={{
+          display: 'grid', gridTemplateColumns: '68px 68px 70px 70px 90px 75px 70px 90px',
+          gap: 6, padding: '6px 12px', borderBottom: '1px solid var(--line1)',
+        }}>
+          {['Slippage', 'RT Cost', 'Sharpe', 'vs Base', 'CAGR', 'MaxDD', 'Calmar', 'Grade'].map((h, i) => (
+            <span key={i} style={{ fontSize: 8.5, color: 'var(--t4)', textTransform: 'uppercase', letterSpacing: 0.4, textAlign: i >= 2 ? 'right' : 'left', ...MONO }}>{h}</span>
+          ))}
+        </div>
+
+        {/* Baseline row */}
+        {baseline && (
+          <div style={{
+            display: 'grid', gridTemplateColumns: '68px 68px 70px 70px 90px 75px 70px 90px',
+            gap: 6, padding: '8px 12px', borderRadius: 4,
+            background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.08)',
+            ...MONO,
+          }}>
+            <span style={{ fontSize: 11, color: '#f0c040', fontWeight: 600 }}>Base</span>
+            <span style={{ fontSize: 11, color: 'var(--t3)' }}>{baseline.rtCost}</span>
+            <span style={{ fontSize: 12, color: '#f0c040', textAlign: 'right', fontWeight: 600 }}>{baseline.sharpe.toFixed(3)}</span>
+            <span style={{ fontSize: 11, color: 'var(--t4)', textAlign: 'right' }}>—</span>
+            <span style={{ fontSize: 11, color: 'var(--t1)', textAlign: 'right' }}>{baseline.cagr}</span>
+            <span style={{ fontSize: 11, color: 'var(--red)', textAlign: 'right' }}>{baseline.maxdd}</span>
+            <span style={{ fontSize: 11, color: 'var(--t2)', textAlign: 'right' }}>{baseline.calmar}</span>
+            <span style={{ fontSize: 10, color: 'var(--t4)', textAlign: 'right' }}>{baseline.grade}</span>
+          </div>
+        )}
+
+        {/* Data rows */}
+        {dataRows.map((r, idx) => {
+          const vsBaseNum = parseFloat(r.vsBase);
+          const isScalable = idx === scalableIdx;
+          const gc = gradeColor(r.grade);
+          const maxddNum = parseFloat(r.maxdd.replace('%', ''));
+
+          return (
+            <div key={idx} style={{
+              display: 'grid', gridTemplateColumns: '68px 68px 70px 70px 90px 75px 70px 90px',
+              gap: 6, padding: '8px 12px', borderRadius: 4,
+              background: isScalable ? 'rgba(60,255,100,0.04)' : idx % 2 === 0 ? 'var(--bg2)' : 'transparent',
+              border: isScalable ? '1px solid rgba(60,255,100,0.2)' : '1px solid transparent',
+              ...MONO,
+            }}>
+              <span style={{ fontSize: 11, color: 'var(--t1)', fontWeight: 500 }}>{r.slippage}</span>
+              <span style={{ fontSize: 11, color: 'var(--t3)' }}>{r.rtCost}</span>
+              <span style={{ fontSize: 12, color: r.sharpe >= 2.0 ? 'var(--green)' : r.sharpe >= 1.5 ? 'var(--orange)' : 'var(--red)', textAlign: 'right', fontWeight: 600 }}>{r.sharpe.toFixed(3)}</span>
+              <span style={{ fontSize: 11, color: vsBaseNum >= 0 ? 'var(--green)' : 'var(--red)', textAlign: 'right' }}>{r.vsBase}</span>
+              <span style={{ fontSize: 11, color: 'var(--t1)', textAlign: 'right' }}>{r.cagr}</span>
+              <span style={{ fontSize: 11, color: maxddNum <= -40 ? 'var(--red)' : maxddNum <= -30 ? 'var(--orange)' : 'var(--t2)', textAlign: 'right' }}>{r.maxdd}</span>
+              <span style={{ fontSize: 11, color: 'var(--t2)', textAlign: 'right' }}>{r.calmar}</span>
+              <span style={{ fontSize: 10, color: gc, textAlign: 'right', fontWeight: isScalable ? 600 : 400 }}>
+                {r.grade.replace(/[✓✗]\s*scalable/i, '').trim()}
+                {isScalable && <span style={{ marginLeft: 4, fontSize: 9, color: 'var(--green)' }}>✓ scalable</span>}
+              </span>
+            </div>
+          );
+        })}
+      </div>
+
+      {/* Sharpe degradation bar */}
+      {dataRows.length >= 2 && baseline && (() => {
+        const blSharpe = baseline.sharpe;
+        const allSharpes = [blSharpe, ...dataRows.map(r => r.sharpe)];
+        const minS = Math.min(...allSharpes);
+        const maxS = Math.max(...allSharpes);
+        // Add 5% padding on each side so edge markers don't clip
+        const pad = (maxS - minS) * 0.05 || 0.1;
+        const rangeMin = minS - pad;
+        const rangeMax = maxS + pad;
+        const range = rangeMax - rangeMin || 1;
+        const pos = (v: number) => ((v - rangeMin) / range) * 100;
+
+        return (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+            <div style={{ fontSize: 9, color: 'var(--t4)', textTransform: 'uppercase', letterSpacing: 0.5, ...MONO }}>
+              Sharpe Degradation
+            </div>
+            <div style={{
+              background: 'var(--bg2)', border: '1px solid var(--line1)', borderRadius: 6,
+              padding: '14px 20px 28px', position: 'relative',
+            }}>
+              <div style={{ position: 'relative', height: 10, background: 'rgba(255,255,255,0.03)', borderRadius: 5, overflow: 'hidden' }}>
+                {/* Sharpe ≥ 2.0 threshold zone */}
+                <div style={{
+                  position: 'absolute', top: 0, bottom: 0, borderRadius: 5,
+                  left: `${pos(2.0)}%`,
+                  width: `${pos(rangeMax) - pos(2.0)}%`,
+                  background: 'rgba(60,255,100,0.06)',
+                }} />
+                {/* Gradient fill from baseline to worst */}
+                <div style={{
+                  position: 'absolute', top: 0, bottom: 0, borderRadius: 5,
+                  left: `${pos(Math.min(...dataRows.map(r => r.sharpe)))}%`,
+                  width: `${pos(blSharpe) - pos(Math.min(...dataRows.map(r => r.sharpe)))}%`,
+                  background: 'linear-gradient(to right, rgba(255,60,60,0.2), rgba(60,255,100,0.15))',
+                }} />
+                {/* Baseline marker */}
+                <div style={{ position: 'absolute', top: -3, height: 16, width: 3, borderRadius: 1, background: '#f0c040', left: `${pos(blSharpe)}%` }} />
+                {/* Data point markers */}
+                {dataRows.map((r, i) => (
+                  <div key={i} style={{
+                    position: 'absolute', top: 1, width: 8, height: 8, borderRadius: '50%',
+                    background: r.sharpe >= 2.0 ? 'var(--green)' : r.sharpe >= 1.5 ? 'var(--orange)' : 'var(--red)',
+                    border: '1px solid rgba(0,0,0,0.3)',
+                    left: `${pos(r.sharpe)}%`, transform: 'translateX(-4px)',
+                  }} />
+                ))}
+              </div>
+              {/* Labels */}
+              <div style={{ position: 'relative', height: 34, marginTop: 6, ...MONO }}>
+                {dataRows.map((r, i) => (
+                  <div key={i} style={{
+                    position: 'absolute', left: `${pos(r.sharpe)}%`, transform: 'translateX(-50%)',
+                    display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 1,
+                  }}>
+                    <span style={{ fontSize: 8, color: 'var(--t3)' }}>{r.slippage}</span>
+                    <span style={{ fontSize: 8, color: r.sharpe >= 2.0 ? 'var(--green)' : r.sharpe >= 1.5 ? 'var(--orange)' : 'var(--red)', fontWeight: 500 }}>{r.sharpe.toFixed(3)}</span>
+                  </div>
+                ))}
+                <div style={{ position: 'absolute', left: `${pos(blSharpe)}%`, transform: 'translateX(-50%)', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 1 }}>
+                  <span style={{ fontSize: 8, color: '#f0c040' }}>Base</span>
+                  <span style={{ fontSize: 8, color: '#f0c040', fontWeight: 500 }}>{blSharpe.toFixed(3)}</span>
+                </div>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
+
+      {/* Break-even analysis */}
+      {breakEvens.length > 0 && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+          <div style={{ fontSize: 9, color: 'var(--t4)', textTransform: 'uppercase', letterSpacing: 0.5, ...MONO }}>
+            Break-Even Analysis
+          </div>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))', gap: 8 }}>
+            {breakEvens.map((be, idx) => (
+              <div key={idx} style={{
+                background: 'var(--bg2)', border: '1px solid var(--line1)', borderRadius: 6,
+                padding: '8px 14px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', ...MONO,
+              }}>
+                <span style={{ fontSize: 10, color: 'var(--t3)' }}>{be.threshold}</span>
+                <span style={{ fontSize: 12, color: 'var(--green)', fontWeight: 600 }}>{be.maxSlippage}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
 }
 
-// eslint-disable-next-line @typescript-eslint/no-unused-vars
 function renderNoisePerturbation(body: string) {
-  const table = parseColumnarTable(body);
-  if (table && table.rows.length > 0) return <SectionTable headers={table.headers} rows={table.rows} />;
-  return renderKVSection(body, 'Noise Stability', (v) => v > 0 ? 'var(--green)' : 'var(--amber)');
+  const lines = body.split('\n');
+
+  // Baseline
+  let baselineSharpe = '';
+  let baselineCAGR = '';
+  let baselineMaxDD = '';
+  let baselineCalmar = '';
+  let trialsPerLevel = '';
+
+  // Mode groups
+  type NoiseRow = { level: string; meanSharpe: string; std: string; min: string; meanCAGR: string; meanMaxDD: string; score: number; pass: boolean; worst: string };
+  type NoiseMode = { tag: string; title: string; rows: NoiseRow[] };
+  const modes: NoiseMode[] = [];
+  let currentMode: NoiseMode | null = null;
+
+  // Verdicts
+  type NoiseVerdict = { mode: string; verdict: string; pass: boolean; note: string; worst: string };
+  const verdicts: NoiseVerdict[] = [];
+  let scoreThreshold = '';
+
+  for (const line of lines) {
+    if (/^[═]{5,}$/.test(line.trim())) continue;
+    if (/NOISE PERTURBATION/i.test(line)) continue;
+
+    const clean = line.replace(/^[│\s]+/, '').replace(/[│\s]+$/, '');
+    if (!clean) continue;
+    if (/saved:/i.test(clean)) continue;
+    if (/^Level\s+Mean Sharpe/i.test(clean)) continue;
+
+    // "Baseline → Sharpe=3.736  CAGR=6484.6%  MaxDD=-29.76%  Calmar=217.89"
+    const blMatch = clean.match(/Baseline.*?Sharpe=([0-9.+-]+)\s+CAGR=([0-9.+-]+%?)\s+MaxDD=([0-9.+-]+%?)\s+Calmar=([0-9.+-]+)/i);
+    if (blMatch) {
+      baselineSharpe = blMatch[1]; baselineCAGR = blMatch[2]; baselineMaxDD = blMatch[3]; baselineCalmar = blMatch[4];
+      continue;
+    }
+
+    // "Trials per level: 100"
+    const trialMatch = clean.match(/Trials per level:\s*(\d+)/i);
+    if (trialMatch) { trialsPerLevel = trialMatch[1]; continue; }
+
+    // Mode headers: "── Mode A: Return Noise (0.1%|0.3%|0.5%|1.0% daily vol) ──"
+    const modeMatch = clean.match(/Mode\s+([A-Z]):\s*(.+?)(?:\s*──|$)/i);
+    if (modeMatch) {
+      currentMode = { tag: modeMatch[1], title: modeMatch[2].replace(/[───]+$/, '').trim(), rows: [] };
+      modes.push(currentMode);
+      continue;
+    }
+
+    // Data rows: "0.1%         5.646    0.000    5.646    22134.4%     -10.93%   1.511 ✓   1.511"
+    if (currentMode) {
+      const rowMatch = clean.match(
+        /^([0-9.]+%)\s+([0-9.+-]+)\s+([0-9.+-]+)\s+([0-9.+-]+)\s+([0-9.+-]+%?)\s+([0-9.+-]+%?)\s+([0-9.+-]+)\s*(✓|✗)?\s+([0-9.+-]+)/
+      );
+      if (rowMatch) {
+        currentMode.rows.push({
+          level: rowMatch[1],
+          meanSharpe: rowMatch[2],
+          std: rowMatch[3],
+          min: rowMatch[4],
+          meanCAGR: rowMatch[5],
+          meanMaxDD: rowMatch[6],
+          score: parseFloat(rowMatch[7]),
+          pass: rowMatch[8] !== '✗',
+          worst: rowMatch[9],
+        });
+        continue;
+      }
+    }
+
+    // Verdict lines: "Return noise verdict  : ROBUST       ✓  (all levels ≥ 0.85)  [worst=1.511]"
+    const vMatch = clean.match(/^(.+?)\s+verdict\s*:\s*(\S+)\s*(✓|✗)\s*\((.+?)\)\s*\[worst=([0-9.+-]+)\]/i);
+    if (vMatch) {
+      currentMode = null;
+      verdicts.push({
+        mode: vMatch[1].trim(),
+        verdict: vMatch[2].trim(),
+        pass: vMatch[3] === '✓',
+        note: vMatch[4].trim(),
+        worst: vMatch[5],
+      });
+      continue;
+    }
+
+    // "Score threshold       : ≥0.85 = robust  |  0.70–0.84 = marginal  |  <0.70 = fragile"
+    const threshMatch = clean.match(/Score threshold\s*:\s*(.+)/i);
+    if (threshMatch) { scoreThreshold = threshMatch[1].trim(); continue; }
+  }
+
+  if (modes.length === 0 && verdicts.length === 0) return <PreFallback body={body} />;
+
+  function scoreColor(s: number): string {
+    if (s >= 0.85) return 'var(--green)';
+    if (s >= 0.70) return 'var(--orange)';
+    return 'var(--red)';
+  }
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+      {sectionLabel('Noise Perturbation Stability Test')}
+
+      {/* Baseline + trials */}
+      <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
+        {baselineSharpe && (
+          <div style={{ background: 'var(--bg2)', border: '1px solid var(--line1)', borderRadius: 6, padding: '10px 16px', display: 'flex', flexDirection: 'column', gap: 3, flex: '1 1 100px' }}>
+            <span style={{ fontSize: 9, color: 'var(--t3)', textTransform: 'uppercase', letterSpacing: 0.5, ...MONO }}>Baseline Sharpe</span>
+            <span style={{ fontSize: 18, color: 'var(--t1)', fontWeight: 600, ...MONO }}>{baselineSharpe}</span>
+          </div>
+        )}
+        {baselineCAGR && (
+          <div style={{ background: 'var(--bg2)', border: '1px solid var(--line1)', borderRadius: 6, padding: '10px 16px', display: 'flex', flexDirection: 'column', gap: 3, flex: '1 1 100px' }}>
+            <span style={{ fontSize: 9, color: 'var(--t3)', textTransform: 'uppercase', letterSpacing: 0.5, ...MONO }}>CAGR</span>
+            <span style={{ fontSize: 16, color: 'var(--green)', fontWeight: 600, ...MONO }}>{baselineCAGR}</span>
+          </div>
+        )}
+        {baselineMaxDD && (
+          <div style={{ background: 'var(--bg2)', border: '1px solid var(--line1)', borderRadius: 6, padding: '10px 16px', display: 'flex', flexDirection: 'column', gap: 3, flex: '1 1 100px' }}>
+            <span style={{ fontSize: 9, color: 'var(--t3)', textTransform: 'uppercase', letterSpacing: 0.5, ...MONO }}>MaxDD</span>
+            <span style={{ fontSize: 16, color: 'var(--red)', fontWeight: 600, ...MONO }}>{baselineMaxDD}</span>
+          </div>
+        )}
+        {baselineCalmar && (
+          <div style={{ background: 'var(--bg2)', border: '1px solid var(--line1)', borderRadius: 6, padding: '10px 16px', display: 'flex', flexDirection: 'column', gap: 3, flex: '1 1 80px' }}>
+            <span style={{ fontSize: 9, color: 'var(--t3)', textTransform: 'uppercase', letterSpacing: 0.5, ...MONO }}>Calmar</span>
+            <span style={{ fontSize: 16, color: 'var(--t1)', fontWeight: 600, ...MONO }}>{baselineCalmar}</span>
+          </div>
+        )}
+        {trialsPerLevel && (
+          <div style={{ background: 'var(--bg2)', border: '1px solid var(--line1)', borderRadius: 6, padding: '10px 16px', display: 'flex', flexDirection: 'column', gap: 3, flex: '1 1 80px' }}>
+            <span style={{ fontSize: 9, color: 'var(--t3)', textTransform: 'uppercase', letterSpacing: 0.5, ...MONO }}>Trials / Level</span>
+            <span style={{ fontSize: 16, color: 'var(--t1)', fontWeight: 600, ...MONO }}>{trialsPerLevel}</span>
+          </div>
+        )}
+      </div>
+
+      {/* Verdict cards */}
+      {verdicts.length > 0 && (
+        <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
+          {verdicts.map((v, idx) => {
+            const isRobust = /ROBUST/i.test(v.verdict);
+            const isMarginal = /MARGINAL/i.test(v.verdict);
+            const color = isRobust ? 'var(--green)' : isMarginal ? 'var(--orange)' : 'var(--red)';
+            const bg = isRobust ? 'rgba(60,255,100,0.05)' : isMarginal ? 'rgba(255,160,60,0.05)' : 'rgba(255,60,60,0.05)';
+            const border = isRobust ? 'rgba(60,255,100,0.25)' : isMarginal ? 'rgba(255,160,60,0.25)' : 'rgba(255,60,60,0.25)';
+
+            return (
+              <div key={idx} style={{
+                flex: '1 1 180px', background: bg, border: `1px solid ${border}`, borderRadius: 6,
+                padding: '10px 14px', display: 'flex', flexDirection: 'column', gap: 4,
+              }}>
+                <span style={{ fontSize: 9, color: 'var(--t3)', textTransform: 'uppercase', letterSpacing: 0.5, ...MONO }}>{v.mode}</span>
+                <div style={{ display: 'flex', alignItems: 'baseline', gap: 8 }}>
+                  <span style={{ fontSize: 15, color, fontWeight: 600, ...MONO }}>{v.verdict}</span>
+                  <span style={{ fontSize: 10, color: 'var(--t3)', ...MONO }}>worst: {v.worst}</span>
+                </div>
+                <span style={{ fontSize: 9, color: 'var(--t4)', ...MONO }}>{v.note}</span>
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {/* Mode tables */}
+      {modes.map((m, mIdx) => (
+        <div key={mIdx} style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+          <div style={{ fontSize: 10, color: 'var(--t3)', textTransform: 'uppercase', letterSpacing: 0.5, ...MONO, borderBottom: '1px solid var(--line1)', paddingBottom: 4 }}>
+            <span style={{ color: 'var(--t4)', marginRight: 6 }}>[{m.tag}]</span>{m.title}
+          </div>
+
+          {/* Header */}
+          <div style={{
+            display: 'grid', gridTemplateColumns: '55px 1fr 60px 60px 90px 75px 65px',
+            gap: 6, padding: '4px 12px',
+          }}>
+            {['Level', 'Mean SR', 'Std', 'Min', 'Mean CAGR', 'MaxDD', 'Score'].map((h, i) => (
+              <span key={i} style={{ fontSize: 8.5, color: 'var(--t4)', textTransform: 'uppercase', letterSpacing: 0.4, textAlign: i >= 1 ? 'right' : 'left', ...MONO }}>{h}</span>
+            ))}
+          </div>
+
+          {m.rows.map((r, idx) => {
+            const sc = scoreColor(r.score);
+            const maxddNum = parseFloat(r.meanMaxDD.replace('%', ''));
+
+            return (
+              <div key={idx} style={{
+                display: 'grid', gridTemplateColumns: '55px 1fr 60px 60px 90px 75px 65px',
+                gap: 6, padding: '7px 12px',
+                background: idx % 2 === 0 ? 'var(--bg2)' : 'transparent',
+                borderRadius: 4,
+                borderLeft: `3px solid ${sc}`,
+                ...MONO,
+              }}>
+                <span style={{ fontSize: 11, color: 'var(--t1)', fontWeight: 600 }}>{r.level}</span>
+                <span style={{ fontSize: 12, color: 'var(--t1)', textAlign: 'right', fontWeight: 500 }}>{r.meanSharpe}</span>
+                <span style={{ fontSize: 11, color: 'var(--t3)', textAlign: 'right' }}>{r.std}</span>
+                <span style={{ fontSize: 11, color: parseFloat(r.min) < parseFloat(baselineSharpe) * 0.7 ? 'var(--red)' : 'var(--t2)', textAlign: 'right' }}>{r.min}</span>
+                <span style={{ fontSize: 11, color: 'var(--t2)', textAlign: 'right' }}>{r.meanCAGR}</span>
+                <span style={{ fontSize: 11, color: maxddNum <= -30 ? 'var(--red)' : maxddNum <= -15 ? 'var(--orange)' : 'var(--t2)', textAlign: 'right' }}>{r.meanMaxDD}</span>
+                <span style={{
+                  fontSize: 11, fontWeight: 600, textAlign: 'right', color: sc,
+                }}>{r.score.toFixed(3)}</span>
+              </div>
+            );
+          })}
+        </div>
+      ))}
+
+      {/* Threshold legend */}
+      {scoreThreshold && (
+        <div style={{ fontSize: 9, color: 'var(--t4)', ...MONO, padding: '6px 12px', background: 'var(--bg2)', borderRadius: 6, border: '1px solid var(--line1)' }}>
+          {scoreThreshold}
+        </div>
+      )}
+    </div>
+  );
 }
 
-// eslint-disable-next-line @typescript-eslint/no-unused-vars
-function renderParamJitter(body: string) {
-  const table = parseColumnarTable(body);
-  if (table && table.rows.length > 0) return <SectionTable headers={table.headers} rows={table.rows} />;
-  return renderKVSection(body, 'Param Jitter — Sharpe Stability', (v) => v > 0 ? 'var(--green)' : 'var(--amber)');
+
+function renderRegimeConditional(body: string) {
+  const lines = body.split('\n');
+
+  type DayStat = { label: string; count: string; mean: string; sharpe: string };
+  const dayStats: DayStat[] = [];
+
+  type VolRegime = { label: string; mean: string; sharpe: string };
+  const volRegimes: VolRegime[] = [];
+  let volThreshold = '';
+
+  type RollingMetric = { label: string; min: string; med: string; max: string };
+  const rollingMetrics: RollingMetric[] = [];
+
+  for (const line of lines) {
+    if (/^[│┌┐└┘─═]+$/.test(line.trim())) continue;
+    if (/REGIME.*CONDITIONAL/i.test(line)) continue;
+
+    const clean = line.replace(/^[│\s]+/, '').replace(/[│\s]+$/, '');
+    if (!clean) continue;
+
+    // "Up days:     329   mean=  3.33%  Sharpe=  7.71"
+    const dayMatch = clean.match(/^(Up|Down) days:\s+(\d+)\s+mean=\s*([0-9.+-]+%?)\s+Sharpe=\s*([0-9.+-]+)/i);
+    if (dayMatch) {
+      dayStats.push({ label: `${dayMatch[1]} days`, count: dayMatch[2], mean: dayMatch[3], sharpe: dayMatch[4] });
+      continue;
+    }
+
+    // "Low-vol regime:   mean=  0.34%  Sharpe=  1.05"
+    const volMatch = clean.match(/^(Low-vol|High-vol)\s+regime:\s+mean=\s*([0-9.+-]+%?)\s+Sharpe=\s*([0-9.+-]+)/i);
+    if (volMatch) {
+      volRegimes.push({ label: volMatch[1], mean: volMatch[2], sharpe: volMatch[3] });
+      continue;
+    }
+
+    // "Vol split threshold: 8.5411% daily vol"
+    const vtMatch = clean.match(/Vol split threshold:\s*(.+)/i);
+    if (vtMatch) { volThreshold = vtMatch[1].trim(); continue; }
+
+    // "Rolling 60d Sharpe:  min=-1.51  med=3.00  max=5.78"
+    const rollMatch = clean.match(/Rolling\s+(\d+d\s+\S+):\s+min=([0-9.+-]+%?)\s+med=([0-9.+-]+%?)\s+max=([0-9.+-]+%?)/i);
+    if (rollMatch) {
+      rollingMetrics.push({ label: `Rolling ${rollMatch[1]}`, min: rollMatch[2], med: rollMatch[3], max: rollMatch[4] });
+      continue;
+    }
+  }
+
+  if (dayStats.length === 0 && volRegimes.length === 0 && rollingMetrics.length === 0) return <PreFallback body={body} />;
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+      {sectionLabel('Regime & Conditional Analysis')}
+
+      {/* Up/Down day stats */}
+      {dayStats.length > 0 && (
+        <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
+          {dayStats.map((d, idx) => {
+            const isUp = /up/i.test(d.label);
+            const color = isUp ? 'var(--green)' : 'var(--red)';
+            const bg = isUp ? 'rgba(60,255,100,0.04)' : 'rgba(255,60,60,0.04)';
+            const border = isUp ? 'rgba(60,255,100,0.2)' : 'rgba(255,60,60,0.2)';
+
+            return (
+              <div key={idx} style={{
+                flex: '1 1 200px', background: bg, border: `1px solid ${border}`, borderRadius: 6,
+                padding: '12px 16px', display: 'flex', flexDirection: 'column', gap: 8,
+              }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                  <span style={{ fontSize: 12, color, fontWeight: 600, ...MONO }}>{d.label}</span>
+                  <span style={{ fontSize: 14, color: 'var(--t1)', fontWeight: 600, ...MONO }}>{d.count}</span>
+                </div>
+                <div style={{ display: 'flex', gap: 16, ...MONO }}>
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 1 }}>
+                    <span style={{ fontSize: 8, color: 'var(--t4)', textTransform: 'uppercase' }}>Mean</span>
+                    <span style={{ fontSize: 13, color, fontWeight: 500 }}>{d.mean}</span>
+                  </div>
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 1 }}>
+                    <span style={{ fontSize: 8, color: 'var(--t4)', textTransform: 'uppercase' }}>Sharpe</span>
+                    <span style={{ fontSize: 13, color: 'var(--t1)', fontWeight: 500 }}>{d.sharpe}</span>
+                  </div>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {/* Volatility regimes */}
+      {volRegimes.length > 0 && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+            <span style={{ fontSize: 9, color: 'var(--t4)', textTransform: 'uppercase', letterSpacing: 0.5, ...MONO }}>Volatility Regimes</span>
+            {volThreshold && <span style={{ fontSize: 9, color: 'var(--t4)', ...MONO }}>threshold: {volThreshold}</span>}
+          </div>
+          <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
+            {volRegimes.map((v, idx) => {
+              const sharpeNum = parseFloat(v.sharpe);
+              const sharpeColor = sharpeNum >= 2.0 ? 'var(--green)' : sharpeNum >= 1.0 ? 'var(--orange)' : 'var(--red)';
+
+              return (
+                <div key={idx} style={{
+                  flex: '1 1 160px', background: 'var(--bg2)', border: '1px solid var(--line1)', borderRadius: 6,
+                  padding: '10px 14px', display: 'flex', flexDirection: 'column', gap: 6,
+                }}>
+                  <span style={{ fontSize: 10, color: 'var(--t3)', fontWeight: 500, ...MONO }}>{v.label}</span>
+                  <div style={{ display: 'flex', gap: 16, ...MONO }}>
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 1 }}>
+                      <span style={{ fontSize: 8, color: 'var(--t4)', textTransform: 'uppercase' }}>Mean</span>
+                      <span style={{ fontSize: 14, color: parseFloat(v.mean) >= 0 ? 'var(--green)' : 'var(--red)', fontWeight: 500 }}>{v.mean}</span>
+                    </div>
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 1 }}>
+                      <span style={{ fontSize: 8, color: 'var(--t4)', textTransform: 'uppercase' }}>Sharpe</span>
+                      <span style={{ fontSize: 14, color: sharpeColor, fontWeight: 600 }}>{v.sharpe}</span>
+                    </div>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      {/* Rolling metrics */}
+      {rollingMetrics.length > 0 && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+          <span style={{ fontSize: 9, color: 'var(--t4)', textTransform: 'uppercase', letterSpacing: 0.5, ...MONO }}>Rolling Statistics</span>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+            {rollingMetrics.map((r, idx) => (
+              <div key={idx} style={{
+                display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+                padding: '8px 14px', borderRadius: 4,
+                background: idx % 2 === 0 ? 'var(--bg2)' : 'transparent',
+                ...MONO,
+              }}>
+                <span style={{ fontSize: 10, color: 'var(--t3)' }}>{r.label}</span>
+                <div style={{ display: 'flex', gap: 16 }}>
+                  <div style={{ display: 'flex', gap: 4, alignItems: 'baseline' }}>
+                    <span style={{ fontSize: 8, color: 'var(--t4)' }}>min</span>
+                    <span style={{ fontSize: 12, color: 'var(--red)', fontWeight: 500 }}>{r.min}</span>
+                  </div>
+                  <div style={{ display: 'flex', gap: 4, alignItems: 'baseline' }}>
+                    <span style={{ fontSize: 8, color: 'var(--t4)' }}>med</span>
+                    <span style={{ fontSize: 12, color: 'var(--t1)', fontWeight: 500 }}>{r.med}</span>
+                  </div>
+                  <div style={{ display: 'flex', gap: 4, alignItems: 'baseline' }}>
+                    <span style={{ fontSize: 8, color: 'var(--t4)' }}>max</span>
+                    <span style={{ fontSize: 12, color: 'var(--green)', fontWeight: 500 }}>{r.max}</span>
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
 }
 
-// eslint-disable-next-line @typescript-eslint/no-unused-vars
+function renderTailRiskExtended(body: string) {
+  const lines = body.split('\n');
+
+  type TailItem = { label: string; value: string };
+  const items: TailItem[] = [];
+
+  for (const line of lines) {
+    if (/^[│┌┐└┘─═]+$/.test(line.trim())) continue;
+    if (/TAIL RISK/i.test(line)) continue;
+
+    const clean = line.replace(/^[│\s]+/, '').replace(/[│\s]+$/, '');
+    if (!clean) continue;
+
+    const match = clean.match(/^(.+?):\s+(.+)$/);
+    if (match) {
+      items.push({ label: match[1].trim(), value: match[2].trim() });
+    }
+  }
+
+  if (items.length === 0) return <PreFallback body={body} />;
+
+  function valueColor(label: string, value: string): string {
+    const num = parseFloat(value.replace(/[,%]/g, ''));
+    const k = label.toLowerCase();
+    if (k.includes('cvar')) return num <= -30 ? 'var(--red)' : num <= -15 ? 'var(--orange)' : 'var(--green)';
+    if (k.includes('consec') && k.includes('losing')) return num >= 5 ? 'var(--red)' : num >= 3 ? 'var(--orange)' : 'var(--green)';
+    return 'var(--t1)';
+  }
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+      {sectionLabel('Tail Risk (Extended)')}
+
+      <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
+        {items.map((item, idx) => {
+          const color = valueColor(item.label, item.value);
+          const isCvar = /cvar/i.test(item.label);
+          const bg = isCvar && color === 'var(--red)' ? 'rgba(255,60,60,0.05)' : 'var(--bg2)';
+          const border = isCvar && color === 'var(--red)' ? 'rgba(255,60,60,0.25)' : 'var(--line1)';
+
+          return (
+            <div key={idx} style={{
+              flex: '1 1 140px', background: bg, border: `1px solid ${border}`, borderRadius: 6,
+              padding: '10px 16px', display: 'flex', flexDirection: 'column', gap: 3,
+            }}>
+              <span style={{ fontSize: 9, color: 'var(--t3)', textTransform: 'uppercase', letterSpacing: 0.5, ...MONO }}>{item.label}</span>
+              <span style={{ fontSize: 18, color, fontWeight: 600, ...MONO }}>{item.value}</span>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function renderStatisticalValidity(body: string) {
+  const lines = body.split('\n');
+
+  type StatItem = { label: string; value: string; status: 'pass' | 'fail' | 'none' };
+  const items: StatItem[] = [];
+
+  for (const line of lines) {
+    if (/^[│┌┐└┘─═]+$/.test(line.trim())) continue;
+    if (/STATISTICAL VALIDITY/i.test(line)) continue;
+
+    const clean = line.replace(/^[│\s]+/, '').replace(/[│\s]+$/, '');
+    if (!clean) continue;
+
+    // Match "Label:  value  ✅ PASS" or "Label:  value  ✅" or "Label:  value"
+    const match = clean.match(/^(.+?):\s+(.+?)(?:\s+(✅|❌)\s*(.*?))?$/);
+    if (match) {
+      const label = match[1].trim();
+      let value = match[2].trim();
+      const icon = match[3];
+      const suffix = match[4]?.trim() ?? '';
+
+      // Clean up value — remove trailing icon if captured as part of value
+      value = value.replace(/[✅❌]\s*(?:PASS|FAIL|YES|NO)?\s*$/, '').trim();
+
+      let status: 'pass' | 'fail' | 'none' = 'none';
+      if (icon === '✅') status = 'pass';
+      else if (icon === '❌') status = 'fail';
+
+      // Append suffix to value if present (e.g. "PASS", "YES")
+      if (suffix) value = `${value}  ${suffix}`;
+
+      items.push({ label, value, status });
+    }
+  }
+
+  if (items.length === 0) return <PreFallback body={body} />;
+
+  // Separate headline metrics from supporting details
+  const headlines = items.filter(i =>
+    /sharpe|DSR.*prob|DSR.*genuine|profit factor/i.test(i.label)
+  );
+  const details = items.filter(i => !headlines.includes(i));
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+      {sectionLabel('Statistical Validity')}
+
+      {/* Headline cards */}
+      {headlines.length > 0 && (
+        <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
+          {headlines.map((item, idx) => {
+            const color = item.status === 'pass' ? 'var(--green)' : item.status === 'fail' ? 'var(--red)' : 'var(--t1)';
+            const bg = item.status === 'pass' ? 'rgba(60,255,100,0.05)' : item.status === 'fail' ? 'rgba(255,60,60,0.05)' : 'var(--bg2)';
+            const border = item.status === 'pass' ? 'rgba(60,255,100,0.25)' : item.status === 'fail' ? 'rgba(255,60,60,0.25)' : 'var(--line1)';
+
+            return (
+              <div key={idx} style={{
+                flex: '1 1 140px', background: bg, border: `1px solid ${border}`, borderRadius: 6,
+                padding: '10px 16px', display: 'flex', flexDirection: 'column', gap: 3,
+              }}>
+                <span style={{ fontSize: 9, color: 'var(--t3)', textTransform: 'uppercase', letterSpacing: 0.5, ...MONO }}>{item.label}</span>
+                <span style={{ fontSize: 18, color, fontWeight: 600, ...MONO }}>{item.value}</span>
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {/* Detail rows */}
+      {details.length > 0 && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+          {details.map((item, idx) => {
+            const color = item.status === 'pass' ? 'var(--green)' : item.status === 'fail' ? 'var(--red)' : 'var(--t1)';
+
+            return (
+              <div key={idx} style={{
+                display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+                padding: '6px 12px', borderRadius: 4,
+                background: idx % 2 === 0 ? 'var(--bg2)' : 'transparent',
+                ...MONO,
+              }}>
+                <span style={{ fontSize: 10, color: 'var(--t3)' }}>{item.label}</span>
+                <span style={{ fontSize: 12, color, fontWeight: 500 }}>{item.value}</span>
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function renderCapitalOperational(body: string) {
+  const lines = body.split('\n');
+
+  let fullKelly = '';
+  let fullKellyPct = '';
+  let halfKelly = '';
+  let halfKellyPct = '';
+  let ruinProb = '';
+
+  type LevRow = { leverage: string; cagr: string; sharpe: string; maxdd: string };
+  const levRows: LevRow[] = [];
+
+  for (const line of lines) {
+    if (/^[│┌┐└┘─═]+$/.test(line.trim())) continue;
+    if (/[─]{5,}/.test(line)) continue;
+    if (/CAPITAL.*OPERATIONAL/i.test(line)) continue;
+    if (/LEVERAGE SENSITIVITY/i.test(line)) continue;
+    if (/Leverage\s+CAGR/i.test(line)) continue;
+
+    const clean = line.replace(/^[│\s]+/, '').replace(/[│\s]+$/, '');
+    if (!clean) continue;
+
+    // "Full Kelly fraction:      1.6275  (162.75% of capital per day)"
+    const fkMatch = clean.match(/Full Kelly fraction:\s*([0-9.+-]+)\s*\((.+?)\)/i);
+    if (fkMatch) { fullKelly = fkMatch[1]; fullKellyPct = fkMatch[2].trim(); continue; }
+
+    // "Half Kelly fraction:      0.8137  (81.37% of capital per day)"
+    const hkMatch = clean.match(/Half Kelly fraction:\s*([0-9.+-]+)\s*\((.+?)\)/i);
+    if (hkMatch) { halfKelly = hkMatch[1]; halfKellyPct = hkMatch[2].trim(); continue; }
+
+    // "Ruin probability (50% DD in 365d): 71.2600%"
+    const rpMatch = clean.match(/Ruin probability.*?:\s*([0-9.]+%)/i);
+    if (rpMatch) { ruinProb = rpMatch[1]; continue; }
+
+    // Leverage rows: "0.50x    699.62     2.818   -32.73%"
+    const levMatch = clean.match(/^([0-9.]+x)\s+([0-9.+-]+)\s+([0-9.+-]+)\s+([0-9.+-]+%)/);
+    if (levMatch) {
+      levRows.push({ leverage: levMatch[1], cagr: levMatch[2], sharpe: levMatch[3], maxdd: levMatch[4] });
+      continue;
+    }
+  }
+
+  if (!fullKelly && levRows.length === 0) return <PreFallback body={body} />;
+
+  const ruinNum = parseFloat(ruinProb);
+  const ruinColor = ruinNum <= 10 ? 'var(--green)' : ruinNum <= 40 ? 'var(--orange)' : 'var(--red)';
+  const ruinBg = ruinNum <= 10 ? 'rgba(60,255,100,0.05)' : ruinNum <= 40 ? 'rgba(255,160,60,0.05)' : 'rgba(255,60,60,0.05)';
+  const ruinBorder = ruinNum <= 10 ? 'rgba(60,255,100,0.25)' : ruinNum <= 40 ? 'rgba(255,160,60,0.25)' : 'rgba(255,60,60,0.25)';
+
+  // Find the 1.00x row for baseline reference
+  const baseRow = levRows.find(r => r.leverage === '1.00x');
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+      {sectionLabel('Capital & Operational')}
+
+      {/* Kelly + Ruin cards */}
+      <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
+        {fullKelly && (
+          <div style={{ background: 'var(--bg2)', border: '1px solid var(--line1)', borderRadius: 6, padding: '10px 16px', display: 'flex', flexDirection: 'column', gap: 3, flex: '1 1 140px' }}>
+            <span style={{ fontSize: 9, color: 'var(--t3)', textTransform: 'uppercase', letterSpacing: 0.5, ...MONO }}>Full Kelly</span>
+            <span style={{ fontSize: 18, color: 'var(--t1)', fontWeight: 600, ...MONO }}>{fullKelly}</span>
+            <span style={{ fontSize: 9, color: 'var(--t4)', ...MONO }}>{fullKellyPct}</span>
+          </div>
+        )}
+        {halfKelly && (
+          <div style={{ background: 'var(--bg2)', border: '1px solid var(--line1)', borderRadius: 6, padding: '10px 16px', display: 'flex', flexDirection: 'column', gap: 3, flex: '1 1 140px' }}>
+            <span style={{ fontSize: 9, color: 'var(--t3)', textTransform: 'uppercase', letterSpacing: 0.5, ...MONO }}>Half Kelly</span>
+            <span style={{ fontSize: 18, color: 'var(--t1)', fontWeight: 600, ...MONO }}>{halfKelly}</span>
+            <span style={{ fontSize: 9, color: 'var(--t4)', ...MONO }}>{halfKellyPct}</span>
+          </div>
+        )}
+        {ruinProb && (
+          <div style={{
+            background: ruinBg, border: `1px solid ${ruinBorder}`, borderRadius: 6,
+            padding: '10px 16px', display: 'flex', flexDirection: 'column', gap: 3, flex: '1 1 160px',
+          }}>
+            <span style={{ fontSize: 9, color: 'var(--t3)', textTransform: 'uppercase', letterSpacing: 0.5, ...MONO }}>Ruin Probability</span>
+            <span style={{ fontSize: 18, color: ruinColor, fontWeight: 600, ...MONO }}>{ruinProb}</span>
+            <span style={{ fontSize: 9, color: 'var(--t4)', ...MONO }}>50% DD in 365d</span>
+          </div>
+        )}
+      </div>
+
+      {/* Leverage sensitivity table */}
+      {levRows.length > 0 && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+          <div style={{ fontSize: 9, color: 'var(--t4)', textTransform: 'uppercase', letterSpacing: 0.5, ...MONO }}>
+            Leverage Sensitivity
+          </div>
+          <div style={{ display: 'inline-flex', flexDirection: 'column', gap: 2 }}>
+            {/* Header */}
+            <div style={{
+              display: 'grid', gridTemplateColumns: '70px 100px 70px 80px',
+              gap: 8, padding: '6px 12px', borderBottom: '1px solid var(--line1)',
+            }}>
+              {['Leverage', 'CAGR %', 'Sharpe', 'MaxDD %'].map((h, i) => (
+                <span key={i} style={{ fontSize: 8.5, color: 'var(--t4)', textTransform: 'uppercase', letterSpacing: 0.4, textAlign: i >= 1 ? 'right' : 'left', ...MONO }}>{h}</span>
+              ))}
+            </div>
+
+            {levRows.map((r, idx) => {
+              const isBase = r.leverage === '1.00x';
+              const maxddNum = parseFloat(r.maxdd.replace('%', ''));
+              const sharpeNum = parseFloat(r.sharpe);
+
+              return (
+                <div key={idx} style={{
+                  display: 'grid', gridTemplateColumns: '70px 100px 70px 80px',
+                  gap: 8, padding: '7px 12px', borderRadius: 4,
+                  background: isBase ? 'rgba(255,255,255,0.04)' : idx % 2 === 0 ? 'var(--bg2)' : 'transparent',
+                  border: isBase ? '1px solid rgba(255,255,255,0.08)' : '1px solid transparent',
+                  ...MONO,
+                }}>
+                  <span style={{ fontSize: 12, color: isBase ? '#f0c040' : 'var(--t1)', fontWeight: isBase ? 600 : 500 }}>{r.leverage}</span>
+                  <span style={{ fontSize: 11, color: 'var(--t1)', textAlign: 'right' }}>{parseFloat(r.cagr).toLocaleString(undefined, { maximumFractionDigits: 2 })}%</span>
+                  <span style={{ fontSize: 12, color: sharpeNum >= 2.0 ? 'var(--green)' : sharpeNum >= 1.5 ? 'var(--orange)' : 'var(--red)', textAlign: 'right', fontWeight: 500 }}>{r.sharpe}</span>
+                  <span style={{ fontSize: 11, color: maxddNum <= -70 ? 'var(--red)' : maxddNum <= -50 ? 'var(--orange)' : 'var(--t2)', textAlign: 'right' }}>{r.maxdd}</span>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function renderSlippageSensitivity(body: string) {
+  const lines = body.split('\n');
+
+  type SlipRow = { slippage: string; cagr: string; sharpe: number; maxdd: string };
+  const rows: SlipRow[] = [];
+  let elasticity = '';
+  let elasticityRaw = '';
+  let sensitivityVerdict = '';
+  let sensitivityNote = '';
+
+  for (const line of lines) {
+    if (/^[│┌┐└┘─═]+$/.test(line.trim())) continue;
+    if (/[─]{5,}/.test(line)) continue;
+    if (/SLIPPAGE SENSITIVITY/i.test(line)) continue;
+    if (/Slippage\s+CAGR/i.test(line)) continue;
+
+    const clean = line.replace(/^[│\s]+/, '').replace(/[│\s]+$/, '');
+    if (!clean) continue;
+
+    // Data rows: "0.0%   3192.25     2.818   -57.10%"
+    const rowMatch = clean.match(/^([0-9.]+%)\s+([0-9.+-]+)\s+([0-9.+-]+)\s+([0-9.+-]+%)/);
+    if (rowMatch) {
+      rows.push({ slippage: rowMatch[1], cagr: `${rowMatch[2]}%`, sharpe: parseFloat(rowMatch[3]), maxdd: rowMatch[4] });
+      continue;
+    }
+
+    // "Cost Elasticity (d log CAGR / d slip): -6.2346"
+    const elMatch = clean.match(/Cost Elasticity.*?:\s*([0-9.+-]+)/i);
+    if (elMatch) { elasticity = elMatch[1]; elasticityRaw = clean; continue; }
+
+    // "Sensitivity: ✅ LOW  (|elasticity| < 100 = low cost sensitivity)"
+    const sensMatch = clean.match(/Sensitivity:\s*(✅|⚠|❌)\s*(\S+)\s*\((.+)\)/i);
+    if (sensMatch) {
+      sensitivityVerdict = sensMatch[2];
+      sensitivityNote = sensMatch[3].trim();
+      continue;
+    }
+  }
+
+  if (rows.length === 0) return <PreFallback body={body} />;
+
+  const isLow = /LOW/i.test(sensitivityVerdict);
+  const isHigh = /HIGH/i.test(sensitivityVerdict);
+  const verdictColor = isLow ? 'var(--green)' : isHigh ? 'var(--red)' : 'var(--orange)';
+  const verdictBg = isLow ? 'rgba(60,255,100,0.05)' : isHigh ? 'rgba(255,60,60,0.05)' : 'rgba(255,160,60,0.05)';
+  const verdictBorder = isLow ? 'rgba(60,255,100,0.25)' : isHigh ? 'rgba(255,60,60,0.25)' : 'rgba(255,160,60,0.25)';
+
+  const baseline = rows[0];
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+      {sectionLabel('Slippage Sensitivity')}
+
+      {/* Verdict + elasticity */}
+      <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
+        {sensitivityVerdict && (
+          <div style={{
+            background: verdictBg, border: `1px solid ${verdictBorder}`, borderRadius: 6,
+            padding: '10px 16px', display: 'flex', flexDirection: 'column', gap: 3, flex: '1.5 1 180px',
+          }}>
+            <span style={{ fontSize: 9, color: 'var(--t3)', textTransform: 'uppercase', letterSpacing: 0.5, ...MONO }}>Cost Sensitivity</span>
+            <span style={{ fontSize: 16, color: verdictColor, fontWeight: 600, ...MONO }}>{sensitivityVerdict}</span>
+            {sensitivityNote && <span style={{ fontSize: 9, color: 'var(--t4)', ...MONO }}>{sensitivityNote}</span>}
+          </div>
+        )}
+        {elasticity && (
+          <div style={{ background: 'var(--bg2)', border: '1px solid var(--line1)', borderRadius: 6, padding: '10px 16px', display: 'flex', flexDirection: 'column', gap: 3, flex: '1 1 120px' }}>
+            <span style={{ fontSize: 9, color: 'var(--t3)', textTransform: 'uppercase', letterSpacing: 0.5, ...MONO }}>Cost Elasticity</span>
+            <span style={{ fontSize: 18, color: 'var(--t1)', fontWeight: 600, ...MONO }}>{elasticity}</span>
+            <span style={{ fontSize: 9, color: 'var(--t4)', ...MONO }}>d log CAGR / d slip</span>
+          </div>
+        )}
+      </div>
+
+      {/* Table */}
+      <div style={{ display: 'inline-flex', flexDirection: 'column', gap: 2 }}>
+        <div style={{
+          display: 'grid', gridTemplateColumns: '70px 100px 70px 80px',
+          gap: 8, padding: '6px 12px', borderBottom: '1px solid var(--line1)',
+        }}>
+          {['Slippage', 'CAGR %', 'Sharpe', 'MaxDD %'].map((h, i) => (
+            <span key={i} style={{ fontSize: 8.5, color: 'var(--t4)', textTransform: 'uppercase', letterSpacing: 0.4, textAlign: i >= 1 ? 'right' : 'left', ...MONO }}>{h}</span>
+          ))}
+        </div>
+
+        {rows.map((r, idx) => {
+          const isBase = idx === 0;
+          const sharpeColor = r.sharpe >= 2.0 ? 'var(--green)' : r.sharpe >= 1.5 ? 'var(--orange)' : 'var(--red)';
+          const maxddNum = parseFloat(r.maxdd.replace('%', ''));
+
+          return (
+            <div key={idx} style={{
+              display: 'grid', gridTemplateColumns: '70px 100px 70px 80px',
+              gap: 8, padding: '7px 12px', borderRadius: 4,
+              background: isBase ? 'rgba(255,255,255,0.04)' : idx % 2 === 0 ? 'var(--bg2)' : 'transparent',
+              border: isBase ? '1px solid rgba(255,255,255,0.08)' : '1px solid transparent',
+              ...MONO,
+            }}>
+              <span style={{ fontSize: 11, color: isBase ? '#f0c040' : 'var(--t1)', fontWeight: isBase ? 600 : 500 }}>{r.slippage}</span>
+              <span style={{ fontSize: 11, color: 'var(--t1)', textAlign: 'right' }}>{r.cagr}</span>
+              <span style={{ fontSize: 12, color: sharpeColor, textAlign: 'right', fontWeight: 600 }}>{r.sharpe.toFixed(3)}</span>
+              <span style={{ fontSize: 11, color: maxddNum <= -50 ? 'var(--red)' : maxddNum <= -30 ? 'var(--orange)' : 'var(--t2)', textAlign: 'right' }}>{r.maxdd}</span>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function renderCappedReturnSensitivity(body: string) {
+  const lines = body.split('\n');
+
+  type CapRow = { cap: string; days: string; pctDays: string; logGrw: string; cagr: string; sharpe: number; maxdd: string; isBaseline: boolean };
+  const rows: CapRow[] = [];
+
+  for (const line of lines) {
+    if (/^[│┌┐└┘─═]+$/.test(line.trim())) continue;
+    if (/[─]{5,}/.test(line)) continue;
+    if (/CAPPED RETURN/i.test(line)) continue;
+    if (/Cap\s+Days\s+%Days/i.test(line)) continue;
+
+    const clean = line.replace(/^[│\s]+/, '').replace(/[│\s]+$/, '');
+    if (!clean) continue;
+
+    // "none      0    0.0%      0.0%     3192.25    2.818  -57.10%"
+    // "10%     69   17.3%     81.0%       94.40    1.188  -40.01%"
+    const rowMatch = clean.match(/^(\S+)\s+(\d+)\s+([0-9.]+%)\s+([0-9.]+%)\s+([0-9.+-]+)\s+([0-9.+-]+)\s+([0-9.+-]+%)/);
+    if (rowMatch) {
+      rows.push({
+        cap: rowMatch[1],
+        days: rowMatch[2],
+        pctDays: rowMatch[3],
+        logGrw: rowMatch[4],
+        cagr: `${rowMatch[5]}%`,
+        sharpe: parseFloat(rowMatch[6]),
+        maxdd: rowMatch[7],
+        isBaseline: /none/i.test(rowMatch[1]),
+      });
+    }
+  }
+
+  if (rows.length === 0) return <PreFallback body={body} />;
+
+  const baseline = rows.find(r => r.isBaseline);
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+      {sectionLabel('Capped Return Sensitivity')}
+
+      <div style={{ display: 'inline-flex', flexDirection: 'column', gap: 2 }}>
+        {/* Header */}
+        <div style={{
+          display: 'grid', gridTemplateColumns: '55px 50px 60px 65px 90px 70px 75px',
+          gap: 6, padding: '6px 12px', borderBottom: '1px solid var(--line1)',
+        }}>
+          {['Cap', 'Days', '% Days', 'LogGrw%', 'CAGR %', 'Sharpe', 'MaxDD %'].map((h, i) => (
+            <span key={i} style={{ fontSize: 8.5, color: 'var(--t4)', textTransform: 'uppercase', letterSpacing: 0.4, textAlign: i >= 3 ? 'right' : 'left', ...MONO }}>{h}</span>
+          ))}
+        </div>
+
+        {rows.map((r, idx) => {
+          const sharpeColor = r.sharpe >= 2.0 ? 'var(--green)' : r.sharpe >= 1.5 ? 'var(--orange)' : 'var(--red)';
+          const maxddNum = parseFloat(r.maxdd.replace('%', ''));
+          const pctDaysNum = parseFloat(r.pctDays);
+
+          return (
+            <div key={idx} style={{
+              display: 'grid', gridTemplateColumns: '55px 50px 60px 65px 90px 70px 75px',
+              gap: 6, padding: '7px 12px', borderRadius: 4,
+              background: r.isBaseline ? 'rgba(255,255,255,0.04)' : idx % 2 === 0 ? 'var(--bg2)' : 'transparent',
+              border: r.isBaseline ? '1px solid rgba(255,255,255,0.08)' : '1px solid transparent',
+              ...MONO,
+            }}>
+              <span style={{ fontSize: 11, color: r.isBaseline ? '#f0c040' : 'var(--t1)', fontWeight: r.isBaseline ? 600 : 500 }}>{r.cap}</span>
+              <span style={{ fontSize: 11, color: 'var(--t2)' }}>{r.days}</span>
+              <span style={{ fontSize: 11, color: pctDaysNum > 10 ? 'var(--orange)' : 'var(--t2)' }}>{r.pctDays}</span>
+              <span style={{ fontSize: 11, color: parseFloat(r.logGrw) > 50 ? 'var(--red)' : 'var(--t2)', textAlign: 'right' }}>{r.logGrw}</span>
+              <span style={{ fontSize: 11, color: 'var(--t1)', textAlign: 'right' }}>{r.cagr}</span>
+              <span style={{ fontSize: 12, color: sharpeColor, textAlign: 'right', fontWeight: 600 }}>{r.sharpe.toFixed(3)}</span>
+              <span style={{ fontSize: 11, color: maxddNum <= -50 ? 'var(--red)' : maxddNum <= -30 ? 'var(--orange)' : 'var(--t2)', textAlign: 'right' }}>{r.maxdd}</span>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function renderTopNDayRemoval(body: string) {
+  const lines = body.split('\n');
+
+  let baselineSharpe = '';
+  let baselineCAGR = '';
+  let baselineMaxDD = '';
+
+  type RemovalRow = { n: string; sharpe: number; dSharpe: string; cagr: string; dCagr: string; maxdd: string; removed: string };
+  const rows: RemovalRow[] = [];
+  let lastRowIdx = -1;
+
+  for (const line of lines) {
+    if (/^[│┌┐└┘─═]+$/.test(line.trim())) continue;
+    if (/[─]{5,}/.test(line)) continue;
+    if (/TOP-N DAY REMOVAL/i.test(line)) continue;
+    if (/saved:/i.test(line)) continue;
+    if (/N\s+Removed\s+CAGR|N\s+removed\s+Days/i.test(line)) continue;
+
+    const clean = line.replace(/^[│\s]+/, '').replace(/[│\s]+$/, '');
+    if (!clean) continue;
+
+    // === variant baseline: "Baseline  Sharpe=3.462  CAGR=5914.8%  MaxDD=-37.95%"
+    const blMatch = clean.match(/Baseline\s+Sharpe=([0-9.+-]+)\s+CAGR=([0-9.+-]+%?)\s+MaxDD=([0-9.+-]+%?)/i);
+    if (blMatch) {
+      baselineSharpe = blMatch[1]; baselineCAGR = blMatch[2]; baselineMaxDD = blMatch[3];
+      continue;
+    }
+
+    // Box-drawn baseline: "Baseline     3192.25              2.818            -57.10%"
+    const blBox = clean.match(/^Baseline\s+([0-9.+-]+)\s+([0-9.+-]+)\s+([0-9.+-]+%)/i);
+    if (blBox) {
+      baselineCAGR = `${blBox[1]}%`; baselineSharpe = blBox[2]; baselineMaxDD = blBox[3];
+      continue;
+    }
+
+    // ↳ annotation: "↳ removed: 47.1%, 39.4%, 39.2%"
+    const annMatch = clean.match(/^↳\s*removed:\s*(.+)/i);
+    if (annMatch && lastRowIdx >= 0) {
+      rows[lastRowIdx].removed = annMatch[1].trim();
+      continue;
+    }
+
+    // === variant rows: "1    39.4%     3.324    -0.138    4378.4%    -37.95%"
+    // The "days removed" column may contain commas/spaces
+    const eqMatch = clean.match(/^\s*(\d+)\s+(.+?)\s+([0-9.+-]+)\s+([0-9.+-]+)\s+([0-9.+-]+%?)\s+([0-9.+-]+%)/);
+    if (eqMatch && !blMatch) {
+      rows.push({
+        n: eqMatch[1], removed: eqMatch[2].trim(),
+        sharpe: parseFloat(eqMatch[3]), dSharpe: eqMatch[4],
+        cagr: eqMatch[5], dCagr: '', maxdd: eqMatch[6],
+      });
+      lastRowIdx = rows.length - 1;
+      continue;
+    }
+
+    // Box-drawn rows: "Remove top 1     2229.68   -962.56    2.659    -0.159  -57.10%"
+    const boxMatch = clean.match(/Remove top\s+(\d+)\s+([0-9.+-]+)\s+([0-9.+-]+)\s+([0-9.+-]+)\s+([0-9.+-]+)\s+([0-9.+-]+%)/i);
+    if (boxMatch) {
+      rows.push({
+        n: boxMatch[1], cagr: `${boxMatch[2]}%`, dCagr: boxMatch[3],
+        sharpe: parseFloat(boxMatch[4]), dSharpe: boxMatch[5], maxdd: boxMatch[6], removed: '',
+      });
+      lastRowIdx = rows.length - 1;
+      continue;
+    }
+  }
+
+  if (rows.length === 0) return <PreFallback body={body} />;
+
+  const blSharpe = parseFloat(baselineSharpe);
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+      {sectionLabel('Top-N Day Removal Test')}
+
+      {/* Baseline cards */}
+      <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
+        {baselineSharpe && (
+          <div style={{ background: 'var(--bg2)', border: '1px solid var(--line1)', borderRadius: 6, padding: '10px 16px', display: 'flex', flexDirection: 'column', gap: 3, flex: '1 1 110px' }}>
+            <span style={{ fontSize: 9, color: 'var(--t3)', textTransform: 'uppercase', letterSpacing: 0.5, ...MONO }}>Baseline Sharpe</span>
+            <span style={{ fontSize: 18, color: 'var(--t1)', fontWeight: 600, ...MONO }}>{baselineSharpe}</span>
+          </div>
+        )}
+        {baselineCAGR && (
+          <div style={{ background: 'var(--bg2)', border: '1px solid var(--line1)', borderRadius: 6, padding: '10px 16px', display: 'flex', flexDirection: 'column', gap: 3, flex: '1 1 110px' }}>
+            <span style={{ fontSize: 9, color: 'var(--t3)', textTransform: 'uppercase', letterSpacing: 0.5, ...MONO }}>Baseline CAGR</span>
+            <span style={{ fontSize: 16, color: 'var(--green)', fontWeight: 600, ...MONO }}>{baselineCAGR}</span>
+          </div>
+        )}
+        {baselineMaxDD && (
+          <div style={{ background: 'var(--bg2)', border: '1px solid var(--line1)', borderRadius: 6, padding: '10px 16px', display: 'flex', flexDirection: 'column', gap: 3, flex: '1 1 110px' }}>
+            <span style={{ fontSize: 9, color: 'var(--t3)', textTransform: 'uppercase', letterSpacing: 0.5, ...MONO }}>Baseline MaxDD</span>
+            <span style={{ fontSize: 16, color: 'var(--red)', fontWeight: 600, ...MONO }}>{baselineMaxDD}</span>
+          </div>
+        )}
+      </div>
+
+      {/* Removal rows */}
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+        {rows.map((r, idx) => {
+          const sharpeColor = r.sharpe >= 2.0 ? 'var(--green)' : r.sharpe >= 1.5 ? 'var(--orange)' : 'var(--red)';
+          const dSharpeNum = parseFloat(r.dSharpe);
+          const retention = Number.isFinite(blSharpe) && blSharpe > 0 ? (r.sharpe / blSharpe) * 100 : 0;
+
+          return (
+            <div key={idx} style={{
+              background: 'var(--bg2)', border: '1px solid var(--line1)', borderRadius: 6,
+              padding: '10px 14px', display: 'flex', flexDirection: 'column', gap: 6,
+              position: 'relative', overflow: 'hidden',
+            }}>
+              {/* Retention bar */}
+              <div style={{
+                position: 'absolute', top: 0, left: 0, bottom: 0,
+                width: `${Math.min(retention, 100)}%`,
+                background: retention >= 60 ? 'rgba(60,255,100,0.03)' : 'rgba(255,60,60,0.03)',
+              }} />
+
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', position: 'relative', flexWrap: 'wrap', gap: 8 }}>
+                <span style={{ fontSize: 11, color: 'var(--t2)', fontWeight: 500, ...MONO }}>
+                  Remove top {r.n} day{parseInt(r.n) > 1 ? 's' : ''}
+                </span>
+                <div style={{ display: 'flex', gap: 16, alignItems: 'baseline', ...MONO }}>
+                  <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 1 }}>
+                    <span style={{ fontSize: 8, color: 'var(--t4)', textTransform: 'uppercase' }}>Sharpe</span>
+                    <span style={{ fontSize: 14, color: sharpeColor, fontWeight: 600 }}>{r.sharpe.toFixed(3)}</span>
+                  </div>
+                  <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 1 }}>
+                    <span style={{ fontSize: 8, color: 'var(--t4)', textTransform: 'uppercase' }}>ΔSharpe</span>
+                    <span style={{ fontSize: 12, color: dSharpeNum >= 0 ? 'var(--green)' : 'var(--red)' }}>{r.dSharpe}</span>
+                  </div>
+                  {r.cagr && (
+                    <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 1 }}>
+                      <span style={{ fontSize: 8, color: 'var(--t4)', textTransform: 'uppercase' }}>CAGR</span>
+                      <span style={{ fontSize: 12, color: 'var(--t2)' }}>{r.cagr}</span>
+                    </div>
+                  )}
+                  {r.maxdd && (
+                    <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 1 }}>
+                      <span style={{ fontSize: 8, color: 'var(--t4)', textTransform: 'uppercase' }}>MaxDD</span>
+                      <span style={{ fontSize: 12, color: 'var(--t2)' }}>{r.maxdd}</span>
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              {r.removed && (
+                <div style={{ fontSize: 9, color: 'var(--t4)', ...MONO, position: 'relative' }}>
+                  Removed: {r.removed}
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function renderLuckyStreakTest(title: string, body: string) {
+  const lines = body.split('\n');
+
+  // Extract window size from title first (box-drawn: "LUCKY STREAK TEST (30-day windows)")
+  const titleWinMatch = title.match(/(\d+)-day/i);
+  let windowSize = titleWinMatch ? `${titleWinMatch[1]}d` : '';
+  let nBlocks = '';
+  let baselineSharpe = '';
+  let baselineCAGR = '';
+  let baselineMaxDD = '';
+
+  type StreakRow = { scenario: string; cagr: string; dCagr: string; sharpe: number; dSharpe: string; blocks: string; dCalmar: string };
+  const rows: StreakRow[] = [];
+
+  for (const line of lines) {
+    if (/^[│┌┐└┘─═]+$/.test(line.trim())) continue;
+    if (/[─]{5,}/.test(line)) continue;
+    if (/LUCKY STREAK/i.test(line)) continue;
+    if (/saved:/i.test(line)) continue;
+    if (/Scenario\s+CAGR|Blocks removed/i.test(line)) continue;
+
+    const clean = line.replace(/^[│\s]+/, '').replace(/[│\s]+$/, '');
+    if (!clean) continue;
+
+    // Window from title: "(30-day windows)"
+    const winMatch = clean.match(/(\d+)-day windows/i);
+    if (winMatch) { windowSize = `${winMatch[1]}d`; continue; }
+
+    // "13 non-overlapping 30-day blocks"
+    const nbMatch = clean.match(/(\d+)\s+non-overlapping\s+(\d+)-day blocks/i);
+    if (nbMatch) { nBlocks = nbMatch[1]; windowSize = `${nbMatch[2]}d`; continue; }
+
+    // "Baseline  Sharpe=3.462  CAGR=5914.8%  MaxDD=-37.95%" (=== variant)
+    const blMatch2 = clean.match(/Baseline\s+Sharpe=([0-9.+-]+)\s+CAGR=([0-9.+-]+%?)\s+MaxDD=([0-9.+-]+%?)/i);
+    if (blMatch2) {
+      baselineSharpe = blMatch2[1]; baselineCAGR = blMatch2[2]; baselineMaxDD = blMatch2[3];
+      continue;
+    }
+
+    // Box-drawn baseline: "Baseline (all blocks)     3192.25              2.818"
+    const blMatch1 = clean.match(/Baseline\s*\(all blocks\)\s+([0-9.+-]+)\s+([0-9.+-]+)/i);
+    if (blMatch1) {
+      baselineCAGR = `${blMatch1[1]}%`; baselineSharpe = blMatch1[2];
+      continue;
+    }
+
+    // "↳ best block(s): +202.9%, +154.0%" — skip, annotation line
+    if (/^↳/.test(clean)) continue;
+
+    // === variant rows: "1    +187.0%     2.932    -0.531    2186.9%   -3727.8%"
+    const eqRowMatch = clean.match(/^\s*(\d+)\s+([0-9.+%,\s]+?)\s+([0-9.+-]+)\s+([0-9.+-]+)\s+([0-9.+-]+%?)\s+([0-9.+-]+%?)/);
+    if (eqRowMatch) {
+      rows.push({
+        scenario: `Remove best ${eqRowMatch[1]} block${parseInt(eqRowMatch[1]) > 1 ? 's' : ''}`,
+        blocks: eqRowMatch[2].trim(),
+        sharpe: parseFloat(eqRowMatch[3]),
+        dSharpe: eqRowMatch[4],
+        cagr: eqRowMatch[5],
+        dCagr: '',
+        dCalmar: eqRowMatch[6],
+      });
+      continue;
+    }
+
+    // Box-drawn rows: "Remove best 1 block     1091.59  -2100.65    2.276    -0.543"
+    const boxRowMatch = clean.match(/Remove best (\d+) blocks?\s+([0-9.+-]+)\s+([0-9.+-]+)\s+([0-9.+-]+)\s+([0-9.+-]+)/i);
+    if (boxRowMatch) {
+      rows.push({
+        scenario: `Remove best ${boxRowMatch[1]} block${parseInt(boxRowMatch[1]) > 1 ? 's' : ''}`,
+        cagr: `${boxRowMatch[2]}%`,
+        dCagr: boxRowMatch[3],
+        sharpe: parseFloat(boxRowMatch[4]),
+        dSharpe: boxRowMatch[5],
+        blocks: '',
+        dCalmar: '',
+      });
+      continue;
+    }
+  }
+
+  if (rows.length === 0) return <PreFallback body={body} />;
+
+  const blSharpe = parseFloat(baselineSharpe);
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+      {sectionLabel('Lucky Streak Test')}
+
+      {/* Metadata */}
+      <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
+        {baselineSharpe && (
+          <div style={{ background: 'var(--bg2)', border: '1px solid var(--line1)', borderRadius: 6, padding: '10px 16px', display: 'flex', flexDirection: 'column', gap: 3, flex: '1 1 110px' }}>
+            <span style={{ fontSize: 9, color: 'var(--t3)', textTransform: 'uppercase', letterSpacing: 0.5, ...MONO }}>Baseline Sharpe</span>
+            <span style={{ fontSize: 18, color: 'var(--t1)', fontWeight: 600, ...MONO }}>{baselineSharpe}</span>
+          </div>
+        )}
+        {baselineCAGR && (
+          <div style={{ background: 'var(--bg2)', border: '1px solid var(--line1)', borderRadius: 6, padding: '10px 16px', display: 'flex', flexDirection: 'column', gap: 3, flex: '1 1 110px' }}>
+            <span style={{ fontSize: 9, color: 'var(--t3)', textTransform: 'uppercase', letterSpacing: 0.5, ...MONO }}>Baseline CAGR</span>
+            <span style={{ fontSize: 16, color: 'var(--green)', fontWeight: 600, ...MONO }}>{baselineCAGR}</span>
+          </div>
+        )}
+        {windowSize && (
+          <div style={{ background: 'var(--bg2)', border: '1px solid var(--line1)', borderRadius: 6, padding: '10px 16px', display: 'flex', flexDirection: 'column', gap: 3, flex: '1 1 80px' }}>
+            <span style={{ fontSize: 9, color: 'var(--t3)', textTransform: 'uppercase', letterSpacing: 0.5, ...MONO }}>Window</span>
+            <span style={{ fontSize: 16, color: 'var(--t1)', fontWeight: 600, ...MONO }}>{windowSize}</span>
+          </div>
+        )}
+        {nBlocks && (
+          <div style={{ background: 'var(--bg2)', border: '1px solid var(--line1)', borderRadius: 6, padding: '10px 16px', display: 'flex', flexDirection: 'column', gap: 3, flex: '1 1 80px' }}>
+            <span style={{ fontSize: 9, color: 'var(--t3)', textTransform: 'uppercase', letterSpacing: 0.5, ...MONO }}>Blocks</span>
+            <span style={{ fontSize: 16, color: 'var(--t1)', fontWeight: 600, ...MONO }}>{nBlocks}</span>
+          </div>
+        )}
+      </div>
+
+      {/* Removal rows */}
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+        {rows.map((r, idx) => {
+          const sharpeColor = r.sharpe >= 2.0 ? 'var(--green)' : r.sharpe >= 1.5 ? 'var(--orange)' : 'var(--red)';
+          const dSharpeNum = parseFloat(r.dSharpe);
+          // How much of baseline Sharpe is retained
+          const retention = Number.isFinite(blSharpe) && blSharpe > 0 ? (r.sharpe / blSharpe) * 100 : 0;
+
+          return (
+            <div key={idx} style={{
+              background: 'var(--bg2)', border: '1px solid var(--line1)', borderRadius: 6,
+              padding: '10px 14px', display: 'flex', flexDirection: 'column', gap: 6,
+              position: 'relative', overflow: 'hidden',
+            }}>
+              {/* Retention bar background */}
+              <div style={{
+                position: 'absolute', top: 0, left: 0, bottom: 0,
+                width: `${Math.min(retention, 100)}%`,
+                background: retention >= 60 ? 'rgba(60,255,100,0.03)' : 'rgba(255,60,60,0.03)',
+              }} />
+
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', position: 'relative' }}>
+                <span style={{ fontSize: 11, color: 'var(--t2)', fontWeight: 500, ...MONO }}>{r.scenario}</span>
+                <div style={{ display: 'flex', gap: 16, alignItems: 'baseline', ...MONO }}>
+                  <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 1 }}>
+                    <span style={{ fontSize: 8, color: 'var(--t4)', textTransform: 'uppercase' }}>Sharpe</span>
+                    <span style={{ fontSize: 14, color: sharpeColor, fontWeight: 600 }}>{r.sharpe.toFixed(3)}</span>
+                  </div>
+                  <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 1 }}>
+                    <span style={{ fontSize: 8, color: 'var(--t4)', textTransform: 'uppercase' }}>ΔSharpe</span>
+                    <span style={{ fontSize: 12, color: dSharpeNum >= 0 ? 'var(--green)' : 'var(--red)' }}>{r.dSharpe}</span>
+                  </div>
+                  {r.cagr && (
+                    <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 1 }}>
+                      <span style={{ fontSize: 8, color: 'var(--t4)', textTransform: 'uppercase' }}>CAGR</span>
+                      <span style={{ fontSize: 12, color: 'var(--t2)' }}>{r.cagr}</span>
+                    </div>
+                  )}
+                  {r.dCalmar && (
+                    <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 1 }}>
+                      <span style={{ fontSize: 8, color: 'var(--t4)', textTransform: 'uppercase' }}>ΔCalmar</span>
+                      <span style={{ fontSize: 12, color: parseFloat(r.dCalmar) >= 0 ? 'var(--green)' : 'var(--red)' }}>{r.dCalmar}</span>
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              {/* Block returns */}
+              {r.blocks && (
+                <div style={{ fontSize: 9, color: 'var(--t4)', ...MONO, position: 'relative' }}>
+                  Zeroed: {r.blocks}
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function renderParamSensitivityMap(body: string) {
+  const lines = body.split('\n');
+
+  let baselineSharpe = '';
+  let perturbations = '';
+  let legend = '';
+
+  type SensRow = { param: string; values: { label: string; sharpe: number }[]; baseSharpe: number; range: number; verdict: string };
+  const rows: SensRow[] = [];
+  let colHeaders: string[] = [];
+
+  for (const line of lines) {
+    if (/^[│┌┐└┘─═]+$/.test(line.trim())) continue;
+    if (/[─═]{5,}/.test(line)) continue;
+    if (/PARAMETER SENSITIVITY/i.test(line)) continue;
+
+    const clean = line.replace(/^[│\s]+/, '').replace(/[│\s]+$/, '');
+    if (!clean) continue;
+
+    // "Baseline Sharpe (from simulation): 2.886"
+    const blMatch = clean.match(/Baseline Sharpe.*?:\s*([0-9.+-]+)/i);
+    if (blMatch) { baselineSharpe = blMatch[1]; continue; }
+
+    // "Perturbations tested: ±10%, ±20%, ±30%"
+    const pertMatch = clean.match(/Perturbations tested:\s*(.+)/i);
+    if (pertMatch) { perturbations = pertMatch[1].trim(); continue; }
+
+    // "Range interpretation: ..."
+    const legMatch = clean.match(/Range interpretation:\s*(.+)/i);
+    if (legMatch) { legend = legMatch[1].trim(); continue; }
+
+    // Header row: "Parameter     −30%     −20%     −10%     BASE     +10%     +20%     +30%    Range"
+    if (/Parameter\s+[−+-]?\d+%/.test(clean)) {
+      colHeaders = clean.split(/\s{2,}/).map(h => h.trim()).filter(Boolean);
+      continue;
+    }
+
+    // Data rows: "EARLY_KILL_X     1.84     2.05     2.05     2.89     2.00     2.00     2.38    1.05  ⚠ FRAGILE"
+    const parts = clean.split(/\s{2,}/);
+    if (parts.length >= 8 && colHeaders.length > 0) {
+      const param = parts[0].trim();
+      // Skip if it looks like a non-data line
+      if (!/^[A-Z_]/.test(param)) continue;
+
+      const numParts = parts.slice(1);
+      const values: { label: string; sharpe: number }[] = [];
+      let baseSharpe = 0;
+      let range = 0;
+      let verdict = '';
+
+      // Map values to column headers (skip "Parameter" header)
+      const dataHeaders = colHeaders.slice(1);
+      for (let i = 0; i < numParts.length; i++) {
+        const raw = numParts[i].trim();
+        const num = parseFloat(raw);
+
+        if (i < dataHeaders.length) {
+          const header = dataHeaders[i];
+          if (/BASE/i.test(header)) {
+            baseSharpe = num;
+            values.push({ label: 'BASE', sharpe: num });
+          } else if (/Range/i.test(header)) {
+            range = num;
+          } else if (Number.isFinite(num)) {
+            values.push({ label: header, sharpe: num });
+          }
+        } else {
+          // Remaining parts: range value then verdict
+          if (Number.isFinite(num) && !range) {
+            range = num;
+          } else {
+            verdict += ` ${raw}`;
+          }
+        }
+      }
+
+      verdict = verdict.replace(/[⚠✅]/g, '').trim();
+      rows.push({ param, values, baseSharpe, range, verdict });
+    }
+  }
+
+  if (rows.length === 0) return <PreFallback body={body} />;
+
+  function rangeColor(r: number): string {
+    if (r <= 0.30) return 'var(--green)';
+    if (r <= 1.00) return 'var(--orange)';
+    return 'var(--red)';
+  }
+
+  // Find global sharpe min/max for heatmap coloring
+  const allSharpes = rows.flatMap(r => r.values.map(v => v.sharpe)).filter(Number.isFinite);
+  const globalMin = Math.min(...allSharpes);
+  const globalMax = Math.max(...allSharpes);
+  const globalRange = globalMax - globalMin || 1;
+
+  function heatColor(s: number): string {
+    const t = (s - globalMin) / globalRange;
+    if (t >= 0.8) return 'rgba(60,255,100,0.12)';
+    if (t >= 0.5) return 'rgba(60,255,100,0.05)';
+    if (t >= 0.3) return 'rgba(255,160,60,0.06)';
+    return 'rgba(255,60,60,0.08)';
+  }
+
+  function textColor(s: number, base: number): string {
+    const diff = s - base;
+    if (Math.abs(diff) < 0.05) return 'var(--t1)';
+    return diff >= 0 ? 'var(--green)' : 'var(--red)';
+  }
+
+  // Get unique perturbation labels in order
+  const pertLabels = rows[0]?.values.map(v => v.label) ?? [];
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+      {sectionLabel('Parameter Sensitivity Map')}
+
+      {/* Metadata */}
+      <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
+        {baselineSharpe && (
+          <div style={{ background: 'var(--bg2)', border: '1px solid var(--line1)', borderRadius: 6, padding: '10px 16px', display: 'flex', flexDirection: 'column', gap: 3, flex: '1 1 110px' }}>
+            <span style={{ fontSize: 9, color: 'var(--t3)', textTransform: 'uppercase', letterSpacing: 0.5, ...MONO }}>Baseline Sharpe</span>
+            <span style={{ fontSize: 18, color: 'var(--t1)', fontWeight: 600, ...MONO }}>{baselineSharpe}</span>
+          </div>
+        )}
+        {perturbations && (
+          <div style={{ background: 'var(--bg2)', border: '1px solid var(--line1)', borderRadius: 6, padding: '10px 16px', display: 'flex', flexDirection: 'column', gap: 3, flex: '1.5 1 160px' }}>
+            <span style={{ fontSize: 9, color: 'var(--t3)', textTransform: 'uppercase', letterSpacing: 0.5, ...MONO }}>Perturbations</span>
+            <span style={{ fontSize: 13, color: 'var(--t1)', fontWeight: 500, ...MONO }}>{perturbations}</span>
+          </div>
+        )}
+      </div>
+
+      {/* Heatmap table */}
+      <div style={{ overflowX: 'auto' }}>
+        <div style={{ display: 'inline-flex', flexDirection: 'column', gap: 2, minWidth: 'min-content' }}>
+          {/* Header */}
+          <div style={{
+            display: 'grid',
+            gridTemplateColumns: `140px repeat(${pertLabels.length}, 58px) 60px 80px`,
+            gap: 4, padding: '6px 8px', borderBottom: '1px solid var(--line1)',
+          }}>
+            <span style={{ fontSize: 8.5, color: 'var(--t4)', textTransform: 'uppercase', letterSpacing: 0.4, ...MONO }}>Parameter</span>
+            {pertLabels.map((h, i) => (
+              <span key={i} style={{
+                fontSize: 8.5, color: h === 'BASE' ? '#f0c040' : 'var(--t4)',
+                textTransform: 'uppercase', letterSpacing: 0.3, textAlign: 'center',
+                fontWeight: h === 'BASE' ? 600 : 400, ...MONO,
+              }}>{h}</span>
+            ))}
+            <span style={{ fontSize: 8.5, color: 'var(--t4)', textTransform: 'uppercase', letterSpacing: 0.4, textAlign: 'right', ...MONO }}>Range</span>
+            <span style={{ fontSize: 8.5, color: 'var(--t4)', textTransform: 'uppercase', letterSpacing: 0.4, textAlign: 'right', ...MONO }}>Status</span>
+          </div>
+
+          {/* Data rows */}
+          {rows.map((r, idx) => {
+            const rc = rangeColor(r.range);
+            return (
+              <div key={idx} style={{
+                display: 'grid',
+                gridTemplateColumns: `140px repeat(${pertLabels.length}, 58px) 60px 80px`,
+                gap: 4, padding: '6px 8px', borderRadius: 4,
+                background: idx % 2 === 0 ? 'var(--bg2)' : 'transparent',
+                ...MONO,
+              }}>
+                <span style={{ fontSize: 10, color: 'var(--t2)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{r.param}</span>
+                {r.values.map((v, vi) => (
+                  <span key={vi} style={{
+                    fontSize: 11, textAlign: 'center', fontWeight: v.label === 'BASE' ? 600 : 400,
+                    color: v.label === 'BASE' ? '#f0c040' : textColor(v.sharpe, r.baseSharpe),
+                    background: v.label === 'BASE' ? 'transparent' : heatColor(v.sharpe),
+                    borderRadius: 3, padding: '2px 0',
+                  }}>
+                    {v.sharpe.toFixed(2)}
+                  </span>
+                ))}
+                <span style={{ fontSize: 11, color: rc, textAlign: 'right', fontWeight: 600 }}>{r.range.toFixed(2)}</span>
+                <span style={{ fontSize: 9, color: rc, textAlign: 'right', fontWeight: 500 }}>{r.verdict || '—'}</span>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+
+      {/* Legend */}
+      {legend && (
+        <div style={{ fontSize: 9, color: 'var(--t4)', ...MONO, padding: '6px 12px', background: 'var(--bg2)', borderRadius: 6, border: '1px solid var(--line1)' }}>
+          {legend}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function renderNeighborPlateau(body: string) {
+  const lines = body.split('\n');
+
+  let description = '';
+  let nNeighbors = '';
+  let baselineSharpe = '';
+  let plateauRatio = '';
+  let plateauVerdict = '';  // "SPIKE" or "PLATEAU"
+  let p10 = '';
+  let p25 = '';
+  let median = '';
+  let p75 = '';
+  let std = '';
+
+  for (const line of lines) {
+    if (/^[│┌┐└┘─═]+$/.test(line.trim())) continue;
+    if (/[─═]{5,}/.test(line)) continue;
+    if (/NEIGHBOR PLATEAU/i.test(line)) continue;
+
+    const clean = line.replace(/^[│\s]+/, '').replace(/[│\s]+$/, '');
+    if (!clean) continue;
+
+    // Skip interpretation legend lines
+    if (/^Interpretation:/i.test(clean)) continue;
+    if (/^[<≥]/.test(clean)) continue;
+
+    // "Joint ±15% perturbation of all parameters simultaneously"
+    if (/perturbation/i.test(clean) && !description) { description = clean; continue; }
+
+    // "n_neighbors: 200  |  baseline Sharpe: 2.886"
+    const metaMatch = clean.match(/n_neighbors:\s*(\d+)\s*\|\s*baseline Sharpe:\s*([0-9.+-]+)/i);
+    if (metaMatch) { nNeighbors = metaMatch[1]; baselineSharpe = metaMatch[2]; continue; }
+
+    // "Plateau ratio (within ±0.5 Sharpe):  41.5%  ⚠ SPIKE"
+    const prMatch = clean.match(/Plateau ratio.*?:\s*([0-9.]+%)\s*(⚠|✅)?\s*(SPIKE|PLATEAU)?/i);
+    if (prMatch) {
+      plateauRatio = prMatch[1];
+      plateauVerdict = prMatch[3]?.toUpperCase() ?? '';
+      continue;
+    }
+
+    // Percentile lines
+    const pMatch = clean.match(/Neighbor Sharpe\s+(p\d+|median|std)\s*:\s*([0-9.+-]+)/i);
+    if (pMatch) {
+      const key = pMatch[1].toLowerCase();
+      const val = pMatch[2];
+      if (key === 'p10') p10 = val;
+      else if (key === 'p25') p25 = val;
+      else if (key === 'median') median = val;
+      else if (key === 'p75') p75 = val;
+      else if (key === 'std') std = val;
+      continue;
+    }
+  }
+
+  if (!plateauRatio && !baselineSharpe) return <PreFallback body={body} />;
+
+  const isSpike = plateauVerdict === 'SPIKE';
+  const ratioNum = parseFloat(plateauRatio);
+  const ratioColor = ratioNum >= 70 ? 'var(--green)' : ratioNum >= 50 ? 'var(--orange)' : 'var(--red)';
+  const ratioBg = ratioNum >= 70 ? 'rgba(60,255,100,0.05)' : ratioNum >= 50 ? 'rgba(255,160,60,0.05)' : 'rgba(255,60,60,0.05)';
+  const ratioBorder = ratioNum >= 70 ? 'rgba(60,255,100,0.3)' : ratioNum >= 50 ? 'rgba(255,160,60,0.3)' : 'rgba(255,60,60,0.3)';
+
+  // Distribution visual
+  const pctiles = [
+    { label: 'p10', value: p10 },
+    { label: 'p25', value: p25 },
+    { label: 'Median', value: median },
+    { label: 'p75', value: p75 },
+  ].filter(p => p.value);
+
+  const blNum = parseFloat(baselineSharpe);
+  const allNums = [...pctiles.map(p => parseFloat(p.value)), blNum].filter(Number.isFinite);
+  const distMin = allNums.length ? Math.min(...allNums) * 0.9 : 0;
+  const distMax = allNums.length ? Math.max(...allNums) * 1.05 : 5;
+  const distRange = distMax - distMin || 1;
+  function pctPos(v: number): number { return ((v - distMin) / distRange) * 100; }
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+      {sectionLabel('Neighbor Plateau Test')}
+
+      {description && (
+        <div style={{ fontSize: 10, color: 'var(--t3)', ...MONO, padding: '6px 12px', background: 'var(--bg2)', borderRadius: 6, border: '1px solid var(--line1)' }}>
+          {description}
+        </div>
+      )}
+
+      {/* Top cards */}
+      <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
+        {/* Plateau ratio card — the key metric */}
+        <div style={{
+          background: ratioBg, border: `1px solid ${ratioBorder}`, borderRadius: 6,
+          padding: '12px 16px', display: 'flex', flexDirection: 'column', gap: 4, flex: '1.5 1 180px',
+        }}>
+          <span style={{ fontSize: 9, color: 'var(--t3)', textTransform: 'uppercase', letterSpacing: 0.5, ...MONO }}>Plateau Ratio</span>
+          <div style={{ display: 'flex', alignItems: 'baseline', gap: 10 }}>
+            <span style={{ fontSize: 22, color: ratioColor, fontWeight: 700, ...MONO }}>{plateauRatio}</span>
+            {plateauVerdict && (
+              <span style={{
+                fontSize: 10, fontWeight: 600, padding: '2px 8px', borderRadius: 4,
+                background: isSpike ? 'rgba(255,60,60,0.12)' : 'rgba(60,255,100,0.12)',
+                color: isSpike ? 'var(--red)' : 'var(--green)',
+                ...MONO,
+              }}>
+                {plateauVerdict}
+              </span>
+            )}
+          </div>
+          <span style={{ fontSize: 9, color: 'var(--t4)', ...MONO }}>within ±0.5 Sharpe of baseline</span>
+          {/* Mini progress bar */}
+          <div style={{ height: 4, borderRadius: 2, background: 'rgba(255,255,255,0.06)', overflow: 'hidden', marginTop: 2 }}>
+            <div style={{ height: '100%', width: `${Math.min(ratioNum, 100)}%`, borderRadius: 2, background: ratioColor }} />
+          </div>
+        </div>
+
+        {baselineSharpe && (
+          <div style={{ background: 'var(--bg2)', border: '1px solid var(--line1)', borderRadius: 6, padding: '12px 16px', display: 'flex', flexDirection: 'column', gap: 3, flex: '1 1 110px' }}>
+            <span style={{ fontSize: 9, color: 'var(--t3)', textTransform: 'uppercase', letterSpacing: 0.5, ...MONO }}>Baseline Sharpe</span>
+            <span style={{ fontSize: 20, color: 'var(--t1)', fontWeight: 600, ...MONO }}>{baselineSharpe}</span>
+          </div>
+        )}
+        {nNeighbors && (
+          <div style={{ background: 'var(--bg2)', border: '1px solid var(--line1)', borderRadius: 6, padding: '12px 16px', display: 'flex', flexDirection: 'column', gap: 3, flex: '1 1 90px' }}>
+            <span style={{ fontSize: 9, color: 'var(--t3)', textTransform: 'uppercase', letterSpacing: 0.5, ...MONO }}>Neighbors</span>
+            <span style={{ fontSize: 20, color: 'var(--t1)', fontWeight: 600, ...MONO }}>{nNeighbors}</span>
+          </div>
+        )}
+        {std && (
+          <div style={{ background: 'var(--bg2)', border: '1px solid var(--line1)', borderRadius: 6, padding: '12px 16px', display: 'flex', flexDirection: 'column', gap: 3, flex: '1 1 90px' }}>
+            <span style={{ fontSize: 9, color: 'var(--t3)', textTransform: 'uppercase', letterSpacing: 0.5, ...MONO }}>Std Dev</span>
+            <span style={{ fontSize: 20, color: 'var(--t2)', fontWeight: 600, ...MONO }}>{std}</span>
+          </div>
+        )}
+      </div>
+
+      {/* Distribution range visualization */}
+      {pctiles.length > 0 && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+          <div style={{ fontSize: 9, color: 'var(--t4)', textTransform: 'uppercase', letterSpacing: 0.5, ...MONO }}>
+            Neighbor Sharpe Distribution
+          </div>
+          <div style={{
+            background: 'var(--bg2)', border: '1px solid var(--line1)', borderRadius: 6,
+            padding: '16px 20px 28px', position: 'relative',
+          }}>
+            {/* Range bar */}
+            <div style={{ position: 'relative', height: 8, background: 'rgba(255,255,255,0.04)', borderRadius: 4, marginBottom: 22 }}>
+              {/* IQR fill (p25 to p75) */}
+              {p25 && p75 && (
+                <div style={{
+                  position: 'absolute', top: 0, bottom: 0, borderRadius: 4,
+                  left: `${pctPos(parseFloat(p25))}%`,
+                  width: `${pctPos(parseFloat(p75)) - pctPos(parseFloat(p25))}%`,
+                  background: 'rgba(255,255,255,0.08)',
+                }} />
+              )}
+              {/* Baseline marker */}
+              {baselineSharpe && (
+                <div style={{
+                  position: 'absolute', top: -5, height: 18, width: 2, borderRadius: 1,
+                  background: 'var(--green)', left: `${pctPos(blNum)}%`,
+                }} />
+              )}
+              {/* Median marker */}
+              {median && (
+                <div style={{
+                  position: 'absolute', top: -4, height: 16, width: 2, borderRadius: 1,
+                  background: 'var(--t1)', left: `${pctPos(parseFloat(median))}%`,
+                }} />
+              )}
+            </div>
+            {/* Labels */}
+            <div style={{ position: 'relative', height: 28, ...MONO }}>
+              {pctiles.map((p, i) => {
+                const pos = pctPos(parseFloat(p.value));
+                return (
+                  <div key={i} style={{
+                    position: 'absolute', left: `${pos}%`, transform: 'translateX(-50%)',
+                    display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 1,
+                  }}>
+                    <span style={{ fontSize: 11, color: p.label === 'Median' ? 'var(--t1)' : 'var(--t2)', fontWeight: p.label === 'Median' ? 600 : 400 }}>{p.value}</span>
+                    <span style={{ fontSize: 7.5, color: 'var(--t4)', textTransform: 'uppercase' }}>{p.label}</span>
+                  </div>
+                );
+              })}
+              {baselineSharpe && (
+                <div style={{
+                  position: 'absolute', left: `${pctPos(blNum)}%`, transform: 'translateX(-50%)', top: -34,
+                  display: 'flex', flexDirection: 'column', alignItems: 'center',
+                }}>
+                  <span style={{ fontSize: 7.5, color: 'var(--green)', textTransform: 'uppercase' }}>Base</span>
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function renderReturnConcentration(body: string) {
-  const table = parseColumnarTable(body);
-  if (table && table.rows.length > 0) return <SectionTable headers={table.headers} rows={table.rows} />;
-  return renderKVSection(body, 'Concentration Metrics', (v) => v >= 0 ? 'var(--green)' : 'var(--amber)');
+  const lines = body.split('\n');
+
+  // Metadata
+  let activeDays = '';
+  let flatDays = '';
+  let totalPnl = '';
+  let grossPos = '';
+  let grossNeg = '';
+
+  // Gini
+  let giniValue = '';
+  let giniNote = '';
+
+  // Concentration table
+  const concRows: { topN: string; nDays: string; pctGross: string; threshold: string; pass: boolean | null }[] = [];
+
+  // Verdict
+  let verdict = '';
+  let verdictDetail = '';
+
+  // Worst-day concentration
+  let worstDayLabel = '';
+  let worstDayPct = '';
+  let worstDayNote = '';
+
+  // PnL half-life
+  let halfLifePct = '';
+  let halfLifeDetail = '';
+  let halfLifeNote = '';
+
+  for (const line of lines) {
+    if (/^[─═]{5,}$/.test(line.trim())) continue;
+    if (/RETURN CONCENTRATION/i.test(line)) continue;
+    if (/saved/i.test(line)) continue;
+
+    const clean = line.replace(/^[│\s]+/, '').replace(/[│\s]+$/, '');
+    if (!clean) continue;
+
+    // Metadata: "Filter: Tail + Disp + Vol  |  Active days: 113  |  Flat days: 285"
+    const activeMatch = clean.match(/Active days:\s*(\d+)/i);
+    if (activeMatch) activeDays = activeMatch[1];
+    const flatMatch = clean.match(/Flat days:\s*(\d+)/i);
+    if (flatMatch) flatDays = flatMatch[1];
+
+    // "Total PnL: +556.19%   Gross+: 924.91%   Gross-: -368.71%"
+    const pnlMatch = clean.match(/Total PnL:\s*([0-9.+%-]+)\s+Gross\+:\s*([0-9.+%-]+)\s+Gross-:\s*([0-9.+%-]+)/i);
+    if (pnlMatch) {
+      totalPnl = pnlMatch[1];
+      grossPos = pnlMatch[2];
+      grossNeg = pnlMatch[3];
+      continue;
+    }
+
+    // "Gini coefficient : 0.378 (winners only)  → moderate inequality"
+    const giniMatch = clean.match(/Gini coefficient\s*:\s*([0-9.]+).*?→\s*(.+)/i);
+    if (giniMatch) {
+      giniValue = giniMatch[1];
+      giniNote = giniMatch[2].trim();
+      continue;
+    }
+
+    // Table rows: "1%        1            4.3%       < 20%   ✓"
+    const rowMatch = clean.match(/^(\d+%)\s+(\d+)\s+([0-9.]+%)\s+([<> 0-9%—-]+)\s*(✓|✗|—)?/);
+    if (rowMatch) {
+      concRows.push({
+        topN: rowMatch[1],
+        nDays: rowMatch[2],
+        pctGross: rowMatch[3],
+        threshold: rowMatch[4].trim(),
+        pass: rowMatch[5] === '✓' ? true : rowMatch[5] === '✗' ? false : null,
+      });
+      continue;
+    }
+
+    // "Verdict  : DIVERSIFIED — return broadly distributed across winning days"
+    const verdictMatch = clean.match(/^Verdict\s*:\s*(\S+)\s*[—–-]\s*(.+)/i);
+    if (verdictMatch) {
+      verdict = verdictMatch[1].trim();
+      verdictDetail = verdictMatch[2].trim();
+      continue;
+    }
+
+    // "Worst 5% contribute : 26.3% of total losses  → healthy — losses distributed"
+    const worstMatch = clean.match(/Worst\s+(\d+%)\s+contribute\s*:\s*([0-9.]+%)\s+of total losses\s*→\s*(.+)/i);
+    if (worstMatch) {
+      worstDayLabel = `Worst ${worstMatch[1]}`;
+      worstDayPct = worstMatch[2];
+      worstDayNote = worstMatch[3].trim();
+      continue;
+    }
+
+    // "Worst-day concentration (worst 5% of days = 6 days)" — capture label
+    const worstHeaderMatch = clean.match(/Worst-day concentration\s*\((.+?)\)/i);
+    if (worstHeaderMatch && !worstDayLabel) {
+      worstDayLabel = worstHeaderMatch[1];
+      continue;
+    }
+
+    // "PnL Half-Life : top 8.0% of days generate 50% of total PnL"
+    const halfMatch = clean.match(/PnL Half-Life\s*:\s*top\s+([0-9.]+%)\s+of days\s+generate\s+50%\s+of total PnL/i);
+    if (halfMatch) {
+      halfLifePct = halfMatch[1];
+      continue;
+    }
+
+    // "(9 of 113 active days)  → excellent — highly concentrated winners"
+    const halfDetailMatch = clean.match(/\((\d+\s+of\s+\d+\s+active days)\)\s*→\s*(.+)/i);
+    if (halfDetailMatch) {
+      halfLifeDetail = halfDetailMatch[1];
+      halfLifeNote = halfDetailMatch[2].trim();
+      continue;
+    }
+  }
+
+  if (concRows.length === 0 && !verdict && !giniValue) return <PreFallback body={body} />;
+
+  // Verdict color
+  const isConcentrated = /CONCENTRATED/i.test(verdict);
+  const isDiversified = /DIVERSIFIED/i.test(verdict);
+  const verdictColor = isConcentrated ? 'var(--red)' : isDiversified ? 'var(--green)' : 'var(--orange)';
+  const verdictBg = isConcentrated ? 'rgba(255,60,60,0.05)' : isDiversified ? 'rgba(60,255,100,0.05)' : 'rgba(255,160,60,0.05)';
+  const verdictBorder = isConcentrated ? 'rgba(255,60,60,0.3)' : isDiversified ? 'rgba(60,255,100,0.3)' : 'rgba(255,160,60,0.3)';
+
+  // Gini color: lower is more distributed
+  const giniNum = parseFloat(giniValue);
+  const giniColor = giniNum <= 0.3 ? 'var(--green)' : giniNum <= 0.5 ? 'var(--orange)' : 'var(--red)';
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+      {sectionLabel('Return Concentration Analysis')}
+
+      {/* Summary cards row */}
+      <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
+        {verdict && (
+          <div style={{
+            background: verdictBg, border: `1px solid ${verdictBorder}`, borderRadius: 6,
+            padding: '10px 16px', display: 'flex', flexDirection: 'column', gap: 3, flex: '1.5 1 180px',
+          }}>
+            <span style={{ fontSize: 9, color: 'var(--t3)', textTransform: 'uppercase', letterSpacing: 0.5, ...MONO }}>Verdict</span>
+            <span style={{ fontSize: 15, color: verdictColor, fontWeight: 600, ...MONO }}>{verdict}</span>
+            <span style={{ fontSize: 9, color: 'var(--t4)', ...MONO }}>{verdictDetail}</span>
+          </div>
+        )}
+        {totalPnl && (
+          <div style={{ background: 'var(--bg2)', border: '1px solid var(--line1)', borderRadius: 6, padding: '10px 16px', display: 'flex', flexDirection: 'column', gap: 3, flex: '1 1 100px' }}>
+            <span style={{ fontSize: 9, color: 'var(--t3)', textTransform: 'uppercase', letterSpacing: 0.5, ...MONO }}>Total PnL</span>
+            <span style={{ fontSize: 16, color: parseFloat(totalPnl) >= 0 ? 'var(--green)' : 'var(--red)', fontWeight: 600, ...MONO }}>{totalPnl}</span>
+          </div>
+        )}
+        {giniValue && (
+          <div style={{ background: 'var(--bg2)', border: '1px solid var(--line1)', borderRadius: 6, padding: '10px 16px', display: 'flex', flexDirection: 'column', gap: 3, flex: '1 1 100px' }}>
+            <span style={{ fontSize: 9, color: 'var(--t3)', textTransform: 'uppercase', letterSpacing: 0.5, ...MONO }}>Gini Coeff</span>
+            <span style={{ fontSize: 16, color: giniColor, fontWeight: 600, ...MONO }}>{giniValue}</span>
+            <span style={{ fontSize: 9, color: 'var(--t4)', ...MONO }}>{giniNote}</span>
+          </div>
+        )}
+      </div>
+
+      {/* Activity + PnL breakdown bar */}
+      {(activeDays || grossPos) && (
+        <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
+          {activeDays && (
+            <div style={{ background: 'var(--bg2)', border: '1px solid var(--line1)', borderRadius: 6, padding: '8px 14px', display: 'flex', gap: 16, flex: '1 1 160px', alignItems: 'center' }}>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+                <span style={{ fontSize: 8.5, color: 'var(--t4)', textTransform: 'uppercase', letterSpacing: 0.4, ...MONO }}>Active</span>
+                <span style={{ fontSize: 14, color: 'var(--t1)', fontWeight: 600, ...MONO }}>{activeDays}d</span>
+              </div>
+              {flatDays && (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+                  <span style={{ fontSize: 8.5, color: 'var(--t4)', textTransform: 'uppercase', letterSpacing: 0.4, ...MONO }}>Flat</span>
+                  <span style={{ fontSize: 14, color: 'var(--t3)', fontWeight: 500, ...MONO }}>{flatDays}d</span>
+                </div>
+              )}
+            </div>
+          )}
+          {grossPos && (
+            <div style={{ background: 'var(--bg2)', border: '1px solid var(--line1)', borderRadius: 6, padding: '8px 14px', display: 'flex', gap: 16, flex: '1 1 160px', alignItems: 'center' }}>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+                <span style={{ fontSize: 8.5, color: 'var(--t4)', textTransform: 'uppercase', letterSpacing: 0.4, ...MONO }}>Gross +</span>
+                <span style={{ fontSize: 13, color: 'var(--green)', fontWeight: 500, ...MONO }}>{grossPos}</span>
+              </div>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+                <span style={{ fontSize: 8.5, color: 'var(--t4)', textTransform: 'uppercase', letterSpacing: 0.4, ...MONO }}>Gross −</span>
+                <span style={{ fontSize: 13, color: 'var(--red)', fontWeight: 500, ...MONO }}>{grossNeg}</span>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Concentration table */}
+      {concRows.length > 0 && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+          <div style={{
+            display: 'grid', gridTemplateColumns: '60px 60px 1fr 90px 48px',
+            gap: 8, padding: '6px 12px', borderBottom: '1px solid var(--line1)',
+          }}>
+            {['Top N%', 'Days', '% of Gross +', 'Threshold', 'Pass'].map((h, i) => (
+              <span key={i} style={{ fontSize: 9, color: 'var(--t4)', textTransform: 'uppercase', letterSpacing: 0.5, textAlign: i >= 2 ? 'right' : 'left', ...MONO }}>{h}</span>
+            ))}
+          </div>
+          {concRows.map((r, idx) => {
+            const pctNum = parseFloat(r.pctGross);
+            // Visual bar width capped at 100
+            const barWidth = Math.min(pctNum, 100);
+
+            return (
+              <div key={idx} style={{
+                display: 'grid', gridTemplateColumns: '60px 60px 1fr 90px 48px',
+                gap: 8, padding: '8px 12px', borderRadius: 4, alignItems: 'center',
+                background: 'var(--bg2)', position: 'relative', overflow: 'hidden',
+                ...MONO,
+              }}>
+                {/* Background bar */}
+                <div style={{
+                  position: 'absolute', top: 0, left: 0, bottom: 0,
+                  width: `${barWidth}%`, opacity: 0.04,
+                  background: 'var(--green)',
+                }} />
+                <span style={{ fontSize: 12, color: 'var(--t1)', fontWeight: 600, position: 'relative' }}>{r.topN}</span>
+                <span style={{ fontSize: 11, color: 'var(--t2)', position: 'relative' }}>{r.nDays}</span>
+                <span style={{ fontSize: 12, color: 'var(--t1)', textAlign: 'right', fontWeight: 500, position: 'relative' }}>{r.pctGross}</span>
+                <span style={{ fontSize: 11, color: 'var(--t3)', textAlign: 'right', position: 'relative' }}>{r.threshold}</span>
+                <span style={{
+                  fontSize: 10, fontWeight: 600, textAlign: 'center', position: 'relative',
+                  color: r.pass === true ? 'var(--green)' : r.pass === false ? 'var(--red)' : 'var(--t4)',
+                }}>
+                  {r.pass === true ? '✓' : r.pass === false ? '✗' : '—'}
+                </span>
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {/* Bottom insight cards: Worst-day + PnL half-life */}
+      {(worstDayPct || halfLifePct) && (
+        <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
+          {worstDayPct && (
+            <div style={{
+              flex: '1 1 200px', background: 'var(--bg2)', border: '1px solid var(--line1)', borderRadius: 6,
+              padding: '12px 16px', display: 'flex', flexDirection: 'column', gap: 4,
+            }}>
+              <span style={{ fontSize: 9, color: 'var(--t3)', textTransform: 'uppercase', letterSpacing: 0.5, ...MONO }}>Worst-Day Concentration</span>
+              <div style={{ display: 'flex', alignItems: 'baseline', gap: 8 }}>
+                <span style={{ fontSize: 18, color: 'var(--t1)', fontWeight: 600, ...MONO }}>{worstDayPct}</span>
+                <span style={{ fontSize: 10, color: 'var(--t3)', ...MONO }}>of total losses ({worstDayLabel})</span>
+              </div>
+              {worstDayNote && <span style={{ fontSize: 9, color: 'var(--t4)', ...MONO }}>{worstDayNote}</span>}
+            </div>
+          )}
+          {halfLifePct && (
+            <div style={{
+              flex: '1 1 200px', background: 'var(--bg2)', border: '1px solid var(--line1)', borderRadius: 6,
+              padding: '12px 16px', display: 'flex', flexDirection: 'column', gap: 4,
+            }}>
+              <span style={{ fontSize: 9, color: 'var(--t3)', textTransform: 'uppercase', letterSpacing: 0.5, ...MONO }}>PnL Half-Life</span>
+              <div style={{ display: 'flex', alignItems: 'baseline', gap: 8 }}>
+                <span style={{ fontSize: 18, color: 'var(--t1)', fontWeight: 600, ...MONO }}>Top {halfLifePct}</span>
+                <span style={{ fontSize: 10, color: 'var(--t3)', ...MONO }}>of days → 50% of PnL</span>
+              </div>
+              {halfLifeDetail && <span style={{ fontSize: 9.5, color: 'var(--t3)', ...MONO }}>{halfLifeDetail}</span>}
+              {halfLifeNote && <span style={{ fontSize: 9, color: 'var(--t4)', ...MONO }}>{halfLifeNote}</span>}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function renderParamJitter(body: string) {
+  const lines = body.split('\n');
+
+  let trials = '';
+  const jitterParams: { name: string; baseline: string; range: string }[] = [];
+
+  // Results
+  let baselineSharpe = '';
+  let trialCount = '';
+  let mean = '';
+  let bias = '';
+  let biasPct = '';
+  let biasNote = '';
+  let median = '';
+  let std = '';
+  let p5 = '';
+  let p10 = '';
+  let p25 = '';
+  let p75 = '';
+  let minVal = '';
+  let maxVal = '';
+  let pctBelow2 = '';
+  let pctBelow15 = '';
+  let elasticity = '';
+  let elasticityNote = '';
+  let verdict = '';
+  let verdictDetail = '';
+
+  for (const line of lines) {
+    const clean = line.replace(/^[│\s]+/, '').replace(/[│\s]+$/, '');
+    if (!clean) continue;
+
+    // Trials count: "Filter: Tail Guardrail  |  Trials: 300"
+    const trialsMatch = clean.match(/Trials:\s*(\d+)/i);
+    if (trialsMatch) { trials = trialsMatch[1]; continue; }
+
+    // Jitter spec: "L_HIGH                 baseline=2.2  ±10%"
+    const specMatch = clean.match(/^([A-Z_][A-Z0-9_]*)\s+baseline=([0-9.+-]+)\s+(±[0-9.]+[%]?)/);
+    if (specMatch) {
+      jitterParams.push({ name: specMatch[1], baseline: specMatch[2], range: specMatch[3] });
+      continue;
+    }
+
+    // "✓  300/300 trials completed successfully"
+    const trialCompleteMatch = clean.match(/(\d+\/\d+)\s+trials completed/i);
+    if (trialCompleteMatch) { trialCount = trialCompleteMatch[1]; continue; }
+
+    // "Baseline Sharpe : 3.741"
+    const blMatch = clean.match(/^Baseline Sharpe\s*:\s*([0-9.+-]+)/i);
+    if (blMatch) { baselineSharpe = blMatch[1]; continue; }
+
+    // "Mean            : 2.754   Bias: -0.987  (-26.4%)  → LARGE DRIFT ..."
+    const meanMatch = clean.match(/^Mean\s*:\s*([0-9.+-]+)\s+Bias:\s*([0-9.+-]+)\s*\(([0-9.+-]+%)\)\s*→?\s*(.*)/i);
+    if (meanMatch) { mean = meanMatch[1]; bias = meanMatch[2]; biasPct = meanMatch[3]; biasNote = meanMatch[4].trim(); continue; }
+
+    // "Median          : 2.777"
+    const medMatch = clean.match(/^Median\s*:\s*([0-9.+-]+)/i);
+    if (medMatch) { median = medMatch[1]; continue; }
+
+    // "Std             : 0.542"
+    const stdMatch = clean.match(/^Std\s*:\s*([0-9.+-]+)/i);
+    if (stdMatch) { std = stdMatch[1]; continue; }
+
+    // Percentiles
+    const p5Match = clean.match(/^p5\s*:\s*([0-9.+-]+)/i);
+    if (p5Match) { p5 = p5Match[1]; continue; }
+    const p10Match = clean.match(/^p10\s*:\s*([0-9.+-]+)/i);
+    if (p10Match) { p10 = p10Match[1]; continue; }
+    const p25Match = clean.match(/^p25\s*:\s*([0-9.+-]+)/i);
+    if (p25Match) { p25 = p25Match[1]; continue; }
+    const p75Match = clean.match(/^p75\s*:\s*([0-9.+-]+)/i);
+    if (p75Match) { p75 = p75Match[1]; continue; }
+
+    // "Min / Max       : 1.774  /  3.870"
+    const mmMatch = clean.match(/Min\s*\/\s*Max\s*:\s*([0-9.+-]+)\s*\/\s*([0-9.+-]+)/i);
+    if (mmMatch) { minVal = mmMatch[1]; maxVal = mmMatch[2]; continue; }
+
+    // "% trials < 2.0  : 4.3%"
+    const pct2Match = clean.match(/%\s*trials\s*<\s*2\.0\s*:\s*([0-9.]+%)/i);
+    if (pct2Match) { pctBelow2 = pct2Match[1]; continue; }
+    const pct15Match = clean.match(/%\s*trials\s*<\s*1\.5\s*:\s*([0-9.]+%)/i);
+    if (pct15Match) { pctBelow15 = pct15Match[1]; continue; }
+
+    // "Elasticity      : 0.1448  → moderate sensitivity"
+    const elMatch = clean.match(/^Elasticity\s*:\s*([0-9.+-]+)\s*→?\s*(.*)/i);
+    if (elMatch) { elasticity = elMatch[1]; elasticityNote = elMatch[2].trim(); continue; }
+
+    // "Verdict         : Moderate sensitivity — review left tail and bias"
+    const vMatch = clean.match(/^Verdict\s*:\s*(.+?)(?:\s*[—–-]\s*(.+))?$/i);
+    if (vMatch && !verdict) { verdict = vMatch[1].trim(); verdictDetail = vMatch[2]?.trim() ?? ''; continue; }
+  }
+
+  if (!baselineSharpe && !mean && jitterParams.length === 0) return <PreFallback body={body} />;
+
+  // Verdict coloring
+  const isLow = /low|stable|robust/i.test(verdict);
+  const isHigh = /high|large|unstable/i.test(verdict);
+  const verdictColor = isLow ? 'var(--green)' : isHigh ? 'var(--red)' : 'var(--orange)';
+  const verdictBg = isLow ? 'rgba(60,255,100,0.05)' : isHigh ? 'rgba(255,60,60,0.05)' : 'rgba(255,160,60,0.05)';
+  const verdictBorder = isLow ? 'rgba(60,255,100,0.3)' : isHigh ? 'rgba(255,60,60,0.3)' : 'rgba(255,160,60,0.3)';
+
+  // Bias color
+  const biasNum = parseFloat(bias);
+  const biasColor = Math.abs(biasNum) <= 0.3 ? 'var(--green)' : Math.abs(biasNum) <= 0.7 ? 'var(--orange)' : 'var(--red)';
+
+  // Build percentile distribution for visual
+  const pctiles = [
+    { label: 'p5', value: p5 },
+    { label: 'p10', value: p10 },
+    { label: 'p25', value: p25 },
+    { label: 'Median', value: median },
+    { label: 'p75', value: p75 },
+  ].filter(p => p.value);
+
+  const blNum = parseFloat(baselineSharpe);
+  const allNums = [
+    ...pctiles.map(p => parseFloat(p.value)),
+    parseFloat(minVal), parseFloat(maxVal), blNum,
+  ].filter(Number.isFinite);
+  const distMin = allNums.length ? Math.min(...allNums) : 0;
+  const distMax = allNums.length ? Math.max(...allNums) : 5;
+  const distRange = distMax - distMin || 1;
+
+  function pctPos(v: number): number {
+    return ((v - distMin) / distRange) * 100;
+  }
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+      {sectionLabel('Param Jitter / Sharpe Stability')}
+
+      {/* Verdict + headline stats */}
+      <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
+        {verdict && (
+          <div style={{
+            background: verdictBg, border: `1px solid ${verdictBorder}`, borderRadius: 6,
+            padding: '10px 16px', display: 'flex', flexDirection: 'column', gap: 3, flex: '1.5 1 180px',
+          }}>
+            <span style={{ fontSize: 9, color: 'var(--t3)', textTransform: 'uppercase', letterSpacing: 0.5, ...MONO }}>Verdict</span>
+            <span style={{ fontSize: 14, color: verdictColor, fontWeight: 600, ...MONO }}>{verdict}</span>
+            {verdictDetail && <span style={{ fontSize: 9, color: 'var(--t4)', ...MONO }}>{verdictDetail}</span>}
+          </div>
+        )}
+        {baselineSharpe && (
+          <div style={{ background: 'var(--bg2)', border: '1px solid var(--line1)', borderRadius: 6, padding: '10px 16px', display: 'flex', flexDirection: 'column', gap: 3, flex: '1 1 110px' }}>
+            <span style={{ fontSize: 9, color: 'var(--t3)', textTransform: 'uppercase', letterSpacing: 0.5, ...MONO }}>Baseline Sharpe</span>
+            <span style={{ fontSize: 18, color: 'var(--t1)', fontWeight: 600, ...MONO }}>{baselineSharpe}</span>
+          </div>
+        )}
+        {mean && (
+          <div style={{ background: 'var(--bg2)', border: '1px solid var(--line1)', borderRadius: 6, padding: '10px 16px', display: 'flex', flexDirection: 'column', gap: 3, flex: '1 1 110px' }}>
+            <span style={{ fontSize: 9, color: 'var(--t3)', textTransform: 'uppercase', letterSpacing: 0.5, ...MONO }}>Mean (Jittered)</span>
+            <span style={{ fontSize: 18, color: 'var(--t1)', fontWeight: 600, ...MONO }}>{mean}</span>
+            {bias && <span style={{ fontSize: 10, color: biasColor, ...MONO }}>Bias: {bias}</span>}
+          </div>
+        )}
+        {trials && (
+          <div style={{ background: 'var(--bg2)', border: '1px solid var(--line1)', borderRadius: 6, padding: '10px 16px', display: 'flex', flexDirection: 'column', gap: 3, flex: '1 1 80px' }}>
+            <span style={{ fontSize: 9, color: 'var(--t3)', textTransform: 'uppercase', letterSpacing: 0.5, ...MONO }}>Trials</span>
+            <span style={{ fontSize: 18, color: 'var(--t1)', fontWeight: 600, ...MONO }}>{trialCount || trials}</span>
+          </div>
+        )}
+      </div>
+
+      {/* Distribution + Stats side by side */}
+      {pctiles.length > 0 && (
+        <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap' }}>
+          {/* Distribution visualization */}
+          <div style={{
+            flex: '2 1 340px', background: 'var(--bg2)', border: '1px solid var(--line1)', borderRadius: 6,
+            padding: '16px 20px 28px', position: 'relative', overflow: 'hidden',
+          }}>
+            <div style={{ fontSize: 9, color: 'var(--t4)', textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 14, ...MONO }}>
+              Sharpe Distribution under Parameter Jitter
+            </div>
+
+            {/* Range track with threshold zones */}
+            <div style={{ position: 'relative', height: 32, background: 'rgba(255,255,255,0.03)', borderRadius: 4, marginBottom: 24 }}>
+              {/* Danger zone: < 1.5 */}
+              {parseFloat(minVal) < 1.5 && (
+                <div style={{
+                  position: 'absolute', top: 0, bottom: 0, left: 0, borderRadius: '4px 0 0 4px',
+                  width: `${Math.max(pctPos(1.5), 0)}%`,
+                  background: 'rgba(255,60,60,0.08)',
+                }} />
+              )}
+              {/* Warning zone: 1.5 – 2.0 */}
+              {parseFloat(minVal) < 2.0 && (
+                <div style={{
+                  position: 'absolute', top: 0, bottom: 0,
+                  left: `${Math.max(pctPos(1.5), 0)}%`,
+                  width: `${Math.max(pctPos(2.0) - Math.max(pctPos(1.5), 0), 0)}%`,
+                  background: 'rgba(255,160,60,0.06)',
+                }} />
+              )}
+              {/* IQR fill (p25 to p75) */}
+              {p25 && p75 && (
+                <div style={{
+                  position: 'absolute', top: 4, bottom: 4, borderRadius: 3,
+                  left: `${pctPos(parseFloat(p25))}%`,
+                  width: `${pctPos(parseFloat(p75)) - pctPos(parseFloat(p25))}%`,
+                  background: 'rgba(255,180,50,0.18)',
+                  border: '1px solid rgba(255,180,50,0.25)',
+                }} />
+              )}
+              {/* Min whisker */}
+              {minVal && <div style={{ position: 'absolute', top: 6, bottom: 6, width: 1, background: 'var(--t4)', left: `${pctPos(parseFloat(minVal))}%` }} />}
+              {/* Max whisker */}
+              {maxVal && <div style={{ position: 'absolute', top: 6, bottom: 6, width: 1, background: 'var(--t4)', left: `${pctPos(parseFloat(maxVal))}%` }} />}
+              {/* Whisker connectors */}
+              {minVal && p25 && (
+                <div style={{ position: 'absolute', top: '50%', height: 1, background: 'rgba(255,255,255,0.1)',
+                  left: `${pctPos(parseFloat(minVal))}%`, width: `${pctPos(parseFloat(p25)) - pctPos(parseFloat(minVal))}%`,
+                }} />
+              )}
+              {maxVal && p75 && (
+                <div style={{ position: 'absolute', top: '50%', height: 1, background: 'rgba(255,255,255,0.1)',
+                  left: `${pctPos(parseFloat(p75))}%`, width: `${pctPos(parseFloat(maxVal)) - pctPos(parseFloat(p75))}%`,
+                }} />
+              )}
+              {/* p5 marker — red dashed */}
+              {p5 && <div style={{ position: 'absolute', top: 2, bottom: 2, width: 2, borderRadius: 1, background: 'var(--red)', opacity: 0.7, left: `${pctPos(parseFloat(p5))}%` }} />}
+              {/* p10 marker — amber dashed */}
+              {p10 && <div style={{ position: 'absolute', top: 2, bottom: 2, width: 2, borderRadius: 1, background: 'var(--orange)', opacity: 0.7, left: `${pctPos(parseFloat(p10))}%` }} />}
+              {/* Mean marker — green */}
+              {mean && (
+                <div style={{ position: 'absolute', top: 0, bottom: 0, width: 2, borderRadius: 1, background: 'var(--green)', left: `${pctPos(parseFloat(mean))}%` }} />
+              )}
+              {/* Median marker — cyan/blue */}
+              {median && (
+                <div style={{ position: 'absolute', top: 0, bottom: 0, width: 2, borderRadius: 1, background: '#5bc0de', left: `${pctPos(parseFloat(median))}%` }} />
+              )}
+              {/* Baseline marker — yellow, bold */}
+              {baselineSharpe && (
+                <div style={{ position: 'absolute', top: -2, bottom: -2, width: 3, borderRadius: 1, background: '#f0c040', left: `${pctPos(blNum)}%` }} />
+              )}
+            </div>
+
+            {/* Labels row */}
+            <div style={{ position: 'relative', height: 32, ...MONO }}>
+              {/* Threshold labels */}
+              {parseFloat(minVal) < 2.0 && (
+                <div style={{ position: 'absolute', left: `${Math.max(pctPos(2.0), 0)}%`, transform: 'translateX(-50%)', top: 18 }}>
+                  <span style={{ fontSize: 7.5, color: 'var(--orange)', opacity: 0.6 }}>2.0</span>
+                </div>
+              )}
+              {parseFloat(minVal) < 1.5 && (
+                <div style={{ position: 'absolute', left: `${Math.max(pctPos(1.5), 0)}%`, transform: 'translateX(-50%)', top: 18 }}>
+                  <span style={{ fontSize: 7.5, color: 'var(--red)', opacity: 0.6 }}>1.5</span>
+                </div>
+              )}
+              {/* Percentile labels */}
+              {[
+                { label: 'p5', value: p5, color: 'var(--red)' },
+                { label: 'p10', value: p10, color: 'var(--orange)' },
+                { label: 'p25', value: p25, color: 'var(--t2)' },
+                { label: 'p75', value: p75, color: 'var(--t2)' },
+              ].filter(p => p.value).map((p, i) => (
+                <div key={i} style={{
+                  position: 'absolute', left: `${pctPos(parseFloat(p.value))}%`, transform: 'translateX(-50%)',
+                  display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 0,
+                }}>
+                  <span style={{ fontSize: 9.5, color: p.color, fontWeight: 400 }}>{p.value}</span>
+                  <span style={{ fontSize: 7, color: 'var(--t4)', textTransform: 'uppercase' }}>{p.label}</span>
+                </div>
+              ))}
+              {/* Mean label */}
+              {mean && (
+                <div style={{ position: 'absolute', left: `${pctPos(parseFloat(mean))}%`, transform: 'translateX(-50%)', display: 'flex', flexDirection: 'column', alignItems: 'center' }}>
+                  <span style={{ fontSize: 9.5, color: 'var(--green)', fontWeight: 500 }}>{mean}</span>
+                  <span style={{ fontSize: 7, color: 'var(--green)', textTransform: 'uppercase' }}>Mean</span>
+                </div>
+              )}
+              {/* Median label */}
+              {median && (
+                <div style={{ position: 'absolute', left: `${pctPos(parseFloat(median))}%`, transform: 'translateX(-50%)', display: 'flex', flexDirection: 'column', alignItems: 'center' }}>
+                  <span style={{ fontSize: 9.5, color: '#5bc0de', fontWeight: 500 }}>{median}</span>
+                  <span style={{ fontSize: 7, color: '#5bc0de', textTransform: 'uppercase' }}>Med</span>
+                </div>
+              )}
+              {/* Baseline label */}
+              {baselineSharpe && (
+                <div style={{ position: 'absolute', left: `${pctPos(blNum)}%`, transform: 'translateX(-50%)', top: -48, display: 'flex', flexDirection: 'column', alignItems: 'center' }}>
+                  <span style={{ fontSize: 9.5, color: '#f0c040', fontWeight: 600 }}>{baselineSharpe}</span>
+                  <span style={{ fontSize: 7, color: '#f0c040', textTransform: 'uppercase' }}>Base</span>
+                </div>
+              )}
+            </div>
+
+            {/* Legend */}
+            <div style={{ display: 'flex', gap: 14, flexWrap: 'wrap', marginTop: 8, paddingTop: 8, borderTop: '1px solid var(--line1)' }}>
+              {[
+                { color: '#f0c040', label: 'Baseline' },
+                { color: 'var(--green)', label: 'Mean' },
+                { color: '#5bc0de', label: 'Median' },
+                { color: 'var(--red)', label: 'p5' },
+                { color: 'var(--orange)', label: 'p10' },
+              ].map((l, i) => (
+                <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+                  <div style={{ width: 10, height: 2, borderRadius: 1, background: l.color }} />
+                  <span style={{ fontSize: 8, color: 'var(--t4)', ...MONO }}>{l.label}</span>
+                </div>
+              ))}
+              <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+                <div style={{ width: 10, height: 6, borderRadius: 2, background: 'rgba(255,180,50,0.2)', border: '1px solid rgba(255,180,50,0.3)' }} />
+                <span style={{ fontSize: 8, color: 'var(--t4)', ...MONO }}>IQR (p25–p75)</span>
+              </div>
+            </div>
+          </div>
+
+          {/* Stats panel — right side, matching the chart's JITTER STATS panel */}
+          <div style={{
+            flex: '1 1 180px', display: 'flex', flexDirection: 'column', gap: 0,
+            background: 'var(--bg2)', border: '1px solid var(--line1)', borderRadius: 6,
+            padding: '12px 0', overflow: 'hidden',
+          }}>
+            <div style={{ fontSize: 10, color: 'var(--t3)', textTransform: 'uppercase', letterSpacing: 0.8, fontWeight: 700, padding: '0 14px 8px', borderBottom: '1px solid var(--line1)', ...MONO }}>
+              Jitter Stats
+            </div>
+            {[
+              { label: 'Baseline', value: baselineSharpe, color: '#f0c040', bold: true },
+              { label: 'Mean', value: mean, color: 'var(--green)', bold: false },
+              { label: 'Median', value: median, color: '#5bc0de', bold: false },
+              { label: 'Std', value: std, color: 'var(--t2)', bold: false },
+              { label: 'Min', value: minVal, color: 'var(--t2)', bold: false },
+              { label: 'p5', value: p5, color: 'var(--red)', bold: false },
+              { label: 'p10', value: p10, color: 'var(--orange)', bold: false },
+              { label: 'p25', value: p25, color: 'var(--t2)', bold: false },
+              { label: 'p75', value: p75, color: 'var(--t2)', bold: false },
+              { label: 'Max', value: maxVal, color: 'var(--t2)', bold: false },
+              { label: '< 2.0', value: pctBelow2, color: parseFloat(pctBelow2) > 10 ? 'var(--red)' : parseFloat(pctBelow2) > 5 ? 'var(--orange)' : 'var(--green)', bold: false },
+              { label: '< 1.5', value: pctBelow15, color: parseFloat(pctBelow15) > 5 ? 'var(--red)' : parseFloat(pctBelow15) > 0 ? 'var(--orange)' : 'var(--green)', bold: false },
+              { label: 'Bias', value: bias ? `${bias} (${biasPct})` : '', color: biasColor, bold: false },
+              { label: 'Elasticity', value: elasticity, color: 'var(--t2)', bold: false },
+            ].filter(s => s.value).map((s, idx) => (
+              <div key={idx} style={{
+                display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+                padding: '4px 14px',
+                background: idx % 2 === 0 ? 'transparent' : 'rgba(255,255,255,0.015)',
+                ...MONO,
+              }}>
+                <span style={{ fontSize: 10, color: s.color, fontWeight: s.bold ? 700 : 400 }}>{s.label}</span>
+                <span style={{ fontSize: 11, color: s.color, fontWeight: s.bold ? 700 : 500 }}>{s.value}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Jitter parameters */}
+      {jitterParams.length > 0 && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+          <div style={{ fontSize: 9, color: 'var(--t4)', textTransform: 'uppercase', letterSpacing: 0.5, ...MONO, paddingBottom: 2 }}>
+            Jitter Specification
+          </div>
+          <div style={{
+            display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: 6,
+          }}>
+            {jitterParams.map((p, idx) => (
+              <div key={idx} style={{
+                background: 'var(--bg2)', border: '1px solid var(--line1)', borderRadius: 5,
+                padding: '6px 10px', display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+                ...MONO,
+              }}>
+                <span style={{ fontSize: 10, color: 'var(--t3)' }}>{p.name}</span>
+                <div style={{ display: 'flex', gap: 6, alignItems: 'baseline' }}>
+                  <span style={{ fontSize: 11, color: 'var(--t1)', fontWeight: 500 }}>{p.baseline}</span>
+                  <span style={{ fontSize: 9, color: 'var(--t4)' }}>{p.range}</span>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
 }
 
 function renderPeriodicBreakdown(body: string) {
-  return <PreFallback body={body} />;
+  const lines = body.split('\n');
+
+  type PeriodGroup = {
+    period: string;   // "MONTHLY", "WEEKLY", "DAILY"
+    count: string;    // "(13 months)", "(56 weeks)", etc.
+    winRate: string;
+    winLoss: string;  // "9W / 4L"
+    avg: string;
+    avgWin: string;
+    avgLoss: string;
+    best: string;
+    worst: string;
+  };
+
+  const groups: PeriodGroup[] = [];
+  let cur: Partial<PeriodGroup> | null = null;
+
+  for (const line of lines) {
+    if (/[─═]{5,}/.test(line)) continue;
+    if (/PERIODIC RETURN/i.test(line)) continue;
+    if (/saved:/i.test(line)) continue;
+
+    const clean = line.replace(/^[│\s]+/, '').replace(/[│\s]+$/, '');
+    if (!clean) continue;
+
+    // Period header: "MONTHLY  (13 months)"
+    const periodMatch = clean.match(/^(MONTHLY|WEEKLY|DAILY)\s+\((.+?)\)/i);
+    if (periodMatch) {
+      if (cur && cur.period) groups.push(cur as PeriodGroup);
+      cur = { period: periodMatch[1].toUpperCase(), count: periodMatch[2], winRate: '', winLoss: '', avg: '', avgWin: '', avgLoss: '', best: '', worst: '' };
+      continue;
+    }
+
+    if (!cur) continue;
+
+    // Win rate : 69.2%  (9W / 4L)
+    const wrMatch = clean.match(/Win rate\s*:\s*([0-9.]+%)\s*\((.+?)\)/i);
+    if (wrMatch) { cur.winRate = wrMatch[1]; cur.winLoss = wrMatch[2]; continue; }
+
+    // Avg      : +48.32%
+    const avgMatch = clean.match(/^Avg\s*:\s*([0-9.+%-]+)/i);
+    if (avgMatch) { cur.avg = avgMatch[1]; continue; }
+
+    // Avg win  : 72.89%
+    const awMatch = clean.match(/Avg win\s*:\s*([0-9.+%-]+)/i);
+    if (awMatch) { cur.avgWin = awMatch[1]; continue; }
+
+    // Avg loss : -6.95%
+    const alMatch = clean.match(/Avg loss\s*:\s*([0-9.+%-]+)/i);
+    if (alMatch) { cur.avgLoss = alMatch[1]; continue; }
+
+    // Best     : 187.03%   Worst: -9.45%
+    const bwMatch = clean.match(/Best\s*:\s*([0-9.+%-]+)\s+Worst\s*:\s*([0-9.+%-]+)/i);
+    if (bwMatch) { cur.best = bwMatch[1]; cur.worst = bwMatch[2]; continue; }
+  }
+  if (cur && cur.period) groups.push(cur as PeriodGroup);
+
+  if (groups.length === 0) return <PreFallback body={body} />;
+
+  const periodIcon: Record<string, string> = { MONTHLY: 'M', WEEKLY: 'W', DAILY: 'D' };
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+      {sectionLabel('Periodic Return Breakdown')}
+
+      <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap' }}>
+        {groups.map((g, gIdx) => {
+          const wr = parseFloat(g.winRate);
+          const wrColor = wr >= 60 ? 'var(--green)' : wr >= 45 ? 'var(--orange)' : 'var(--red)';
+          const avgNum = parseFloat(g.avg);
+          const avgColor = avgNum >= 0 ? 'var(--green)' : 'var(--red)';
+
+          return (
+            <div key={gIdx} style={{
+              flex: '1 1 200px',
+              background: 'var(--bg2)',
+              border: '1px solid var(--line1)',
+              borderRadius: 8,
+              padding: '14px 16px',
+              display: 'flex',
+              flexDirection: 'column',
+              gap: 12,
+            }}>
+              {/* Period header */}
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                <div style={{
+                  width: 28, height: 28, borderRadius: 6,
+                  background: 'rgba(255,255,255,0.05)', border: '1px solid var(--line1)',
+                  display: 'flex', alignItems: 'center', justifyContent: 'center',
+                  fontSize: 14, fontWeight: 700, color: 'var(--t2)', ...MONO,
+                }}>
+                  {periodIcon[g.period] ?? g.period[0]}
+                </div>
+                <div style={{ display: 'flex', flexDirection: 'column' }}>
+                  <span style={{ fontSize: 12, fontWeight: 600, color: 'var(--t1)', ...MONO }}>{g.period}</span>
+                  <span style={{ fontSize: 9, color: 'var(--t4)', ...MONO }}>{g.count}</span>
+                </div>
+              </div>
+
+              {/* Win rate bar */}
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' }}>
+                  <span style={{ fontSize: 9, color: 'var(--t3)', textTransform: 'uppercase', letterSpacing: 0.5, ...MONO }}>Win Rate</span>
+                  <span style={{ fontSize: 14, fontWeight: 600, color: wrColor, ...MONO }}>{g.winRate}</span>
+                </div>
+                <div style={{ height: 4, borderRadius: 2, background: 'rgba(255,255,255,0.06)', overflow: 'hidden' }}>
+                  <div style={{ height: '100%', width: `${wr}%`, borderRadius: 2, background: wrColor, transition: 'width 0.3s' }} />
+                </div>
+                <span style={{ fontSize: 9, color: 'var(--t4)', ...MONO, textAlign: 'right' }}>{g.winLoss}</span>
+              </div>
+
+              {/* Avg return */}
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', padding: '6px 0', borderTop: '1px solid var(--line1)' }}>
+                <span style={{ fontSize: 9, color: 'var(--t3)', textTransform: 'uppercase', letterSpacing: 0.5, ...MONO }}>Avg Return</span>
+                <span style={{ fontSize: 16, fontWeight: 600, color: avgColor, ...MONO }}>{g.avg}</span>
+              </div>
+
+              {/* Avg win / Avg loss */}
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+                  <span style={{ fontSize: 8.5, color: 'var(--t4)', textTransform: 'uppercase', letterSpacing: 0.4, ...MONO }}>Avg Win</span>
+                  <span style={{ fontSize: 12, color: 'var(--green)', fontWeight: 500, ...MONO }}>{g.avgWin}</span>
+                </div>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 2, textAlign: 'right' }}>
+                  <span style={{ fontSize: 8.5, color: 'var(--t4)', textTransform: 'uppercase', letterSpacing: 0.4, ...MONO }}>Avg Loss</span>
+                  <span style={{ fontSize: 12, color: 'var(--red)', fontWeight: 500, ...MONO }}>{g.avgLoss}</span>
+                </div>
+              </div>
+
+              {/* Best / Worst */}
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, borderTop: '1px solid var(--line1)', paddingTop: 8 }}>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+                  <span style={{ fontSize: 8.5, color: 'var(--t4)', textTransform: 'uppercase', letterSpacing: 0.4, ...MONO }}>Best</span>
+                  <span style={{ fontSize: 12, color: 'var(--green)', fontWeight: 500, ...MONO }}>{g.best}</span>
+                </div>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 2, textAlign: 'right' }}>
+                  <span style={{ fontSize: 8.5, color: 'var(--t4)', textTransform: 'uppercase', letterSpacing: 0.4, ...MONO }}>Worst</span>
+                  <span style={{ fontSize: 12, color: 'var(--red)', fontWeight: 500, ...MONO }}>{g.worst}</span>
+                </div>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
 }
 
-// eslint-disable-next-line @typescript-eslint/no-unused-vars
-function renderShockInjection(body: string) {
-  const table = parseColumnarTable(body);
-  if (table && table.rows.length > 0) return <SectionTable headers={table.headers} rows={table.rows} />;
-  return renderKVSection(body, 'Shock Impact', (v) => v >= 0 ? 'var(--green)' : 'var(--red)');
-}
 
 interface StabCubeRow { params: Record<string, number>; sharpe: number; cagr: number; maxdd: number; }
 
@@ -4767,25 +8173,13 @@ function renderLiquidityCapacityCurve(body: string) {
   const breakEvenIdx = lines.findIndex((l) => /Break-even AUM/i.test(l));
   const tableEndIdx = breakEvenIdx >= 0 ? breakEvenIdx : lines.length;
 
-  // Parse table rows using token splitting.
-  // The AUM column is right-aligned so position-based slicing fails — the "$" and
-  // the number are separated by many spaces and always tokenise as two pieces.
-  // We detect this by checking whether the first token is exactly "$", and if so
-  // merge it with the second token to reconstruct the full AUM value.
+  // Parse table rows — collapse "$      10,000" → "$10,000" before splitting
   const rows: string[][] = [];
   for (let i = tableStartIdx; i < tableEndIdx; i += 1) {
-    const line = lines[i];
-    if (!line.trim() || /^[─=]+$/.test(line.trim())) continue;
-    const tokens = line.split(/\s{2,}/).filter(Boolean);
-    if (tokens.length === 0) continue;
-    let row: string[];
-    if (tokens[0] === '$') {
-      // Merge "$" and the number into a single AUM token
-      row = [`$${tokens[1]}`, ...tokens.slice(2)];
-    } else {
-      row = tokens;
-    }
-    if (row.length >= 2) rows.push(row);
+    const normalized = lines[i].replace(/\$\s+([\d,]+)/g, '$$$1').trim();
+    if (!normalized || /^[─=]+$/.test(normalized)) continue;
+    const tokens = normalized.split(/\s{2,}/).filter(Boolean);
+    if (tokens.length >= 2) rows.push(tokens);
   }
 
   // Break-even footer lines
@@ -4930,6 +8324,471 @@ function renderLiquidityCapacityCurve(body: string) {
               </div>
             );
           })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function renderCapacityCurveTest(body: string) {
+  const lines = body.split('\n');
+
+  // Extract metadata line (Start: $X | Impact ...)
+  const metaLines: string[] = [];
+  const tableHeaderIdx = lines.findIndex((l) => /Particip%/i.test(l));
+  for (let i = 0; i < (tableHeaderIdx >= 0 ? tableHeaderIdx : lines.length); i += 1) {
+    const stripped = lines[i].replace(/^\s*│\s*/, '').trim();
+    if (stripped && !/^[─=]+$/.test(stripped)) metaLines.push(stripped);
+  }
+
+  // Parse table headers
+  const headers = tableHeaderIdx >= 0
+    ? lines[tableHeaderIdx].replace(/^\s*│\s*/, '').trim().split(/\s{2,}/).filter(Boolean)
+    : [];
+
+  // Find divider after header
+  const dividerIdx = lines.findIndex(
+    (l, i) => i > tableHeaderIdx && /^[\s│─]+$/.test(l) && l.includes('─'),
+  );
+  const tableStartIdx = dividerIdx >= 0 ? dividerIdx + 1 : tableHeaderIdx + 1;
+
+  // Find footer (⚠ or ✅ line after blank)
+  const footerIdx = lines.findIndex((l, i) => i > tableStartIdx && /^\s*│\s*$/.test(l));
+  const tableEndIdx = footerIdx >= 0 ? footerIdx : lines.length;
+
+  // Parse data rows — collapse "$      10,000" → "$10,000" before splitting
+  const rows: string[][] = [];
+  for (let i = tableStartIdx; i < tableEndIdx; i += 1) {
+    const normalized = lines[i].replace(/^\s*│\s*/, '').replace(/\$\s+([\d,]+)/g, '$$$1').trim();
+    if (!normalized || /^[─=]+$/.test(normalized)) continue;
+    const tokens = normalized.split(/\s{2,}/).filter(Boolean);
+    if (tokens.length >= 2) rows.push(tokens);
+  }
+
+  // Footer lines (⚠ or ✅)
+  const footerLines: string[] = [];
+  for (let i = footerIdx >= 0 ? footerIdx + 1 : lines.length; i < lines.length; i += 1) {
+    const stripped = lines[i].replace(/^\s*[│└─┌┐┘]+\s*/, '').trim();
+    if (stripped && !/^[─=]+$/.test(stripped)) footerLines.push(stripped);
+  }
+
+  // Column indices
+  const flagIdx = headers.findIndex((h) => /^flag$/i.test(h));
+  const sharpeIdx = headers.findIndex((h) => /^sharpe$/i.test(h));
+  const impactIdx = headers.findIndex((h) => /impact/i.test(h));
+
+  const isHighRow = (row: string[]) => flagIdx >= 0 && /HIGH/i.test(row[flagIdx] ?? '');
+
+  const sharpeColor = (v: string) => {
+    const n = parseFloat(v);
+    if (!Number.isFinite(n)) return 'var(--t1)';
+    if (n >= 2.0) return 'var(--green)';
+    if (n >= 1.5) return 'var(--amber)';
+    return 'var(--red)';
+  };
+
+  if (headers.length === 0 && rows.length === 0) return <PreFallback body={body} />;
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 12, fontSize: 9, ...MONO }}>
+      {/* Metadata banner */}
+      {metaLines.length > 0 && (
+        <div style={{
+          display: 'flex',
+          flexWrap: 'wrap',
+          gap: '6px 20px',
+          padding: '8px 12px',
+          background: 'var(--bg2)',
+          borderRadius: 6,
+          border: '1px solid var(--line1)',
+          fontSize: 10,
+        }}>
+          {metaLines.map((line, i) => {
+            const m = line.match(/^(.+?):\s+(.+)$/);
+            if (m) {
+              return (
+                <div key={i} style={{ display: 'flex', gap: 6 }}>
+                  <span style={{ color: 'var(--t3)' }}>{m[1].trim()}:</span>
+                  <span style={{ color: 'var(--t1)' }}>{m[2].trim()}</span>
+                </div>
+              );
+            }
+            // Handle "Start: $X  |  Impact ..." format — split on |
+            const parts = line.split(/\s*\|\s*/);
+            return (
+              <Fragment key={i}>
+                {parts.map((part, j) => {
+                  const kvMatch = part.match(/^(.+?):\s+(.+)$/);
+                  if (kvMatch) {
+                    return (
+                      <div key={j} style={{ display: 'flex', gap: 6 }}>
+                        <span style={{ color: 'var(--t3)' }}>{kvMatch[1].trim()}:</span>
+                        <span style={{ color: 'var(--t1)' }}>{kvMatch[2].trim()}</span>
+                      </div>
+                    );
+                  }
+                  return <span key={j} style={{ color: 'var(--t2)' }}>{part}</span>;
+                })}
+              </Fragment>
+            );
+          })}
+        </div>
+      )}
+
+      {/* Capacity table */}
+      {rows.length > 0 && (
+        <div style={{ overflowX: 'auto' }}>
+          <table style={{ borderCollapse: 'collapse', fontSize: 9, tableLayout: 'auto', ...MONO }}>
+            <thead>
+              <tr>
+                {headers.map((h, i) => (
+                  <th
+                    key={i}
+                    style={{
+                      padding: '4px 10px 4px 6px',
+                      textAlign: i === 0 ? 'left' : 'right',
+                      color: 'var(--t3)',
+                      fontWeight: 700,
+                      textTransform: 'uppercase',
+                      letterSpacing: '0.08em',
+                      borderBottom: '1px solid var(--line2)',
+                      whiteSpace: 'nowrap',
+                    }}
+                  >
+                    {h}
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((row, ri) => {
+                const high = isHighRow(row);
+                return (
+                  <tr
+                    key={ri}
+                    style={{
+                      background: high
+                        ? 'rgba(255, 60, 60, 0.06)'
+                        : ri % 2 === 1
+                          ? 'rgba(255,255,255,0.015)'
+                          : 'transparent',
+                    }}
+                  >
+                    {row.map((cell, ci) => {
+                      let color = 'var(--t1)';
+                      if (ci === flagIdx) {
+                        color = /HIGH/i.test(cell) ? 'var(--red)' : 'var(--green)';
+                      } else if (ci === sharpeIdx) {
+                        color = sharpeColor(cell);
+                      } else if (ci === impactIdx) {
+                        const n = parseFloat(cell);
+                        if (Number.isFinite(n) && n >= 0.005) color = 'var(--amber)';
+                      }
+                      return (
+                        <td
+                          key={ci}
+                          style={{
+                            padding: '3px 10px 3px 6px',
+                            textAlign: ci === 0 ? 'left' : 'right',
+                            color,
+                            whiteSpace: 'nowrap',
+                            fontWeight: ci === flagIdx ? 600 : 400,
+                          }}
+                        >
+                          {cell || '\u2014'}
+                        </td>
+                      );
+                    })}
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      {/* Footer verdict */}
+      {footerLines.length > 0 && (
+        <div style={{
+          display: 'flex',
+          flexDirection: 'column',
+          gap: 4,
+          padding: '8px 12px',
+          borderRadius: 6,
+          border: `1px solid ${footerLines.some((l) => l.includes('\u26A0')) ? 'rgba(255, 160, 60, 0.3)' : 'rgba(60, 255, 100, 0.3)'}`,
+          background: footerLines.some((l) => l.includes('\u26A0')) ? 'rgba(255, 160, 60, 0.05)' : 'rgba(60, 255, 100, 0.05)',
+        }}>
+          {footerLines.map((line, i) => (
+            <div key={i} style={{
+              fontSize: 10,
+              color: line.includes('\u26A0') ? 'var(--amber)' : 'var(--green)',
+              fontWeight: 600,
+            }}>
+              {line}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function CostCurveTooltip({ lines }: { lines: string[] }) {
+  const [show, setShow] = useState(false);
+  return (
+    <span
+      style={{ position: 'relative', display: 'inline-block', marginLeft: 4, cursor: 'help' }}
+      onMouseEnter={() => setShow(true)}
+      onMouseLeave={() => setShow(false)}
+    >
+      <span style={{
+        fontSize: 7,
+        color: 'var(--t3)',
+        opacity: 0.6,
+        verticalAlign: 'super',
+        borderBottom: '1px dotted var(--t3)',
+        lineHeight: 1,
+      }}>
+        ?
+      </span>
+      {show && (
+        <div style={{
+          position: 'absolute',
+          bottom: '100%',
+          right: 0,
+          marginBottom: 6,
+          padding: '8px 10px',
+          background: 'var(--bg1, #1a1a2e)',
+          border: '1px solid var(--line2)',
+          borderRadius: 6,
+          boxShadow: '0 4px 12px rgba(0,0,0,0.4)',
+          zIndex: 100,
+          whiteSpace: 'nowrap',
+          textTransform: 'none',
+          letterSpacing: 'normal',
+          fontWeight: 400,
+        }}>
+          {lines.map((line, i) => (
+            <div key={i} style={{
+              fontSize: i === 0 ? 9 : 8,
+              color: i === 0 ? 'var(--t1)' : 'var(--t3)',
+              fontWeight: i === 0 ? 600 : 400,
+              marginTop: i > 0 ? 3 : 0,
+              ...MONO,
+            }}>
+              {line}
+            </div>
+          ))}
+        </div>
+      )}
+    </span>
+  );
+}
+
+function renderCostCurveTest(body: string) {
+  const lines = body.split('\n');
+
+  // Find the columnar header row — must have "AUM" plus "Slip%" as discrete column names
+  const headerIdx = lines.findIndex((l) => {
+    const s = l.replace(/^\s*│\s*/, '').trim();
+    return /\bAUM\b/.test(s) && /\bSlip%?\b/.test(s) && s.split(/\s{2,}/).filter(Boolean).length >= 5;
+  });
+
+  // Everything before the header row is description text
+  const descParts: string[] = [];
+  for (let i = 0; i < (headerIdx >= 0 ? headerIdx : lines.length); i += 1) {
+    const stripped = lines[i].replace(/^\s*│\s*/, '').trim();
+    if (stripped && !/^[─=]+$/.test(stripped)) descParts.push(stripped);
+  }
+  const desc = descParts.join(' ');
+
+  const headers = headerIdx >= 0
+    ? lines[headerIdx].replace(/^\s*│\s*/, '').trim().split(/\s{2,}/).filter(Boolean)
+    : [];
+
+  // Find divider after header
+  const dividerIdx = lines.findIndex(
+    (l, i) => i > headerIdx && /^[\s│─]+$/.test(l) && l.includes('─'),
+  );
+  const tableStartIdx = dividerIdx >= 0 ? dividerIdx + 1 : headerIdx + 1;
+
+  // Parse data rows — collapse "$   5,000" → "$5,000" before splitting
+  const rows: string[][] = [];
+  for (let i = tableStartIdx; i < lines.length; i += 1) {
+    const raw = lines[i].trim();
+    if (!raw || /^[─└┘]/.test(raw)) continue;
+    const normalized = raw.replace(/^\s*│\s*/, '').replace(/\$\s+([\d,]+)/g, '$$$1').trim();
+    if (!normalized) continue;
+    const tokens = normalized.split(/\s{2,}/).filter(Boolean);
+    if (tokens.length >= 2) rows.push(tokens);
+  }
+
+  // Column indices for color coding
+  const sharpeIdx = headers.findIndex((h) => /^sharpe$/i.test(h));
+  const cagrIdx = headers.findIndex((h) => /cagr/i.test(h));
+  const totalIdx = headers.findIndex((h) => /^total/i.test(h));
+  const maxDdIdx = headers.findIndex((h) => /maxdd/i.test(h));
+  const slipIdx = headers.findIndex((h) => /^slip/i.test(h));
+  const impactIdx = headers.findIndex((h) => /^impact/i.test(h));
+
+  const sharpeColor = (v: string) => {
+    const n = parseFloat(v);
+    if (!Number.isFinite(n)) return 'var(--t1)';
+    if (n >= 2.0) return 'var(--green)';
+    if (n >= 1.0) return 'var(--amber)';
+    return 'var(--red)';
+  };
+
+  const cagrColor = (v: string) => {
+    const n = parseFloat(v);
+    if (!Number.isFinite(n)) return 'var(--t1)';
+    if (n > 100) return 'var(--green)';
+    if (n > 0) return 'var(--amber)';
+    return 'var(--red)';
+  };
+
+  const costColor = (v: string) => {
+    const n = parseFloat(v);
+    if (!Number.isFinite(n)) return 'var(--t1)';
+    if (n >= 1.0) return 'var(--red)';
+    if (n >= 0.5) return 'var(--amber)';
+    return 'var(--green)';
+  };
+
+  if (headers.length === 0 && rows.length === 0) return <PreFallback body={body} />;
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 14, fontSize: 9, ...MONO }}>
+      {/* Description banner */}
+      {desc && (
+        <div style={{
+          padding: '8px 12px',
+          background: 'var(--bg2)',
+          borderRadius: 6,
+          border: '1px solid var(--line1)',
+          fontSize: 10,
+          color: 'var(--t2)',
+          lineHeight: 1.5,
+        }}>
+          {desc}
+        </div>
+      )}
+
+      {/* Cost curve table */}
+      {rows.length > 0 && (
+        <div style={{ overflowX: 'auto' }}>
+          <table style={{ borderCollapse: 'collapse', width: '100%', fontSize: 9, ...MONO }}>
+            <thead>
+              <tr>
+                {headers.map((h, i) => {
+                  const labelMap: Record<string, string> = {
+                    'Slip%': 'Base Slip%/day',
+                    'Impact%': 'Mkt Impact%/day',
+                    'Total%': 'Total Cost%/day',
+                    'CAGR%': 'CAGR%',
+                    'MaxDD%': 'Max DD%',
+                  };
+                  const label = labelMap[h] ?? h;
+
+                  const tooltipMap: Record<string, string[]> = {
+                    'Total%': [
+                      'Total daily cost drag applied to each return',
+                      'Formula: Base Slip + Mkt Impact',
+                      '= slip + slip \u00D7 (AUM / ref_AUM)^exp',
+                    ],
+                    'Impact%': [
+                      'Market impact cost per day',
+                      'Scales with \u221A(AUM) \u2014 bigger size = more friction',
+                    ],
+                    'Slip%': [
+                      'Fixed base slippage per day',
+                      'Constant across all AUM levels',
+                    ],
+                  };
+                  const tipLines = tooltipMap[h];
+
+                  return (
+                    <th
+                      key={i}
+                      style={{
+                        padding: '6px 12px 6px 8px',
+                        textAlign: i === 0 ? 'left' : 'right',
+                        color: 'var(--t3)',
+                        fontWeight: 700,
+                        fontSize: 8,
+                        textTransform: 'uppercase',
+                        letterSpacing: '0.08em',
+                        borderBottom: '2px solid var(--line2)',
+                        whiteSpace: 'nowrap',
+                      }}
+                    >
+                      {label}
+                      {tipLines && <CostCurveTooltip lines={tipLines} />}
+                    </th>
+                  );
+                })}
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((row, ri) => {
+                const sharpeVal = sharpeIdx >= 0 ? parseFloat(row[sharpeIdx] ?? '') : NaN;
+                const degraded = Number.isFinite(sharpeVal) && sharpeVal < 1.0;
+                return (
+                  <tr
+                    key={ri}
+                    style={{
+                      background: degraded
+                        ? 'rgba(255, 60, 60, 0.07)'
+                        : ri % 2 === 1
+                          ? 'rgba(255,255,255,0.02)'
+                          : 'transparent',
+                      borderBottom: '1px solid var(--line1)',
+                    }}
+                  >
+                    {row.map((cell, ci) => {
+                      let color = 'var(--t1)';
+                      let fontWeight = 400;
+                      if (ci === 0) {
+                        // AUM column — always bright
+                        color = 'var(--t1)';
+                        fontWeight = 600;
+                      } else if (ci === sharpeIdx) {
+                        color = sharpeColor(cell);
+                        fontWeight = 600;
+                      } else if (ci === cagrIdx) {
+                        color = cagrColor(cell);
+                        fontWeight = 600;
+                      } else if (ci === totalIdx) {
+                        color = costColor(cell);
+                      } else if (ci === slipIdx || ci === impactIdx) {
+                        color = 'var(--t2)';
+                      } else if (ci === maxDdIdx) {
+                        const n = parseFloat(cell);
+                        if (Number.isFinite(n)) {
+                          const abs = Math.abs(n);
+                          color = abs <= 50 ? 'var(--green)' : abs <= 70 ? 'var(--amber)' : 'var(--red)';
+                        }
+                      }
+                      return (
+                        <td
+                          key={ci}
+                          style={{
+                            padding: '5px 12px 5px 8px',
+                            textAlign: ci === 0 ? 'left' : 'right',
+                            color,
+                            fontWeight,
+                            whiteSpace: 'nowrap',
+                          }}
+                        >
+                          {cell || '\u2014'}
+                        </td>
+                      );
+                    })}
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
         </div>
       )}
     </div>
@@ -5359,6 +9218,70 @@ function renderRunSummary(body: string) {
             })}
           </tbody>
         </table>
+      </div>
+    </div>
+  );
+}
+
+function renderBestFilterHeadline(body: string) {
+  const lines = body.split('\n');
+  const kv: { key: string; value: string }[] = [];
+
+  for (const line of lines) {
+    const clean = line.trim();
+    if (!clean) continue;
+    const match = clean.match(/^(.+?):\s*(.+)$/);
+    if (match) kv.push({ key: match[1].trim(), value: match[2].trim() });
+  }
+
+  if (kv.length === 0) return <PreFallback body={body} />;
+
+  function metricColor(key: string, value: string): string {
+    const k = key.toLowerCase();
+    const num = parseFloat(value.replace(/[,%]/g, ''));
+
+    if (k.includes('sharpe')) return num >= 2.0 ? 'var(--green)' : num >= 1.5 ? 'var(--orange)' : 'var(--red)';
+    if (k.includes('cagr')) return num >= 0 ? 'var(--green)' : 'var(--red)';
+    if (k.includes('max dd')) return num <= -50 ? 'var(--red)' : num <= -30 ? 'var(--orange)' : 'var(--green)';
+    if (k.includes('dsr')) return num >= 95 ? 'var(--green)' : num >= 70 ? 'var(--orange)' : 'var(--red)';
+    if (k.includes('grade')) return num >= 80 ? 'var(--green)' : num >= 60 ? 'var(--orange)' : 'var(--red)';
+    return 'var(--t1)';
+  }
+
+  function metricSize(key: string): number {
+    const k = key.toLowerCase();
+    if (k.includes('sharpe')) return 22;
+    if (k.includes('filter')) return 13;
+    return 18;
+  }
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+      {sectionLabel('Best Filter Headline')}
+
+      <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
+        {kv.map((item, idx) => {
+          const isFilter = item.key.toLowerCase().includes('filter');
+          const color = isFilter ? 'var(--t1)' : metricColor(item.key, item.value);
+          const size = metricSize(item.key);
+
+          return (
+            <div key={idx} style={{
+              flex: isFilter ? '1 1 100%' : '1 1 130px',
+              background: 'var(--bg2)',
+              border: `1px solid ${isFilter ? 'var(--line1)' : color === 'var(--green)' ? 'rgba(60,255,100,0.15)' : color === 'var(--red)' ? 'rgba(255,60,60,0.15)' : color === 'var(--orange)' ? 'rgba(255,160,60,0.15)' : 'var(--line1)'}`,
+              borderRadius: 6,
+              padding: isFilter ? '8px 16px' : '12px 16px',
+              display: 'flex',
+              flexDirection: isFilter ? 'row' : 'column',
+              gap: isFilter ? 8 : 4,
+              alignItems: isFilter ? 'center' : 'flex-start',
+            }}>
+              <span style={{ fontSize: 9, color: 'var(--t3)', textTransform: 'uppercase', letterSpacing: 0.5, ...MONO }}>{item.key}</span>
+              <span style={{ fontSize: size, color, fontWeight: isFilter ? 500 : 600, ...MONO }}>{item.value}</span>
+            </div>
+          );
+        })}
       </div>
     </div>
   );
@@ -6048,6 +9971,848 @@ function renderTrailSweep(body: string, title: string): React.ReactNode {
   );
 }
 
+// ── SHARPE STABILITY ANALYSIS (walk-forward folds) ──────────────────────────
+function renderSharpeStability(body: string): React.ReactNode {
+  let nFolds: number | null = null;
+  let meanSharpe: number | null = null;
+  let stdDev: number | null = null;
+  let pctGt2: string | null = null;
+  let ciLow: number | null = null;
+  let ciHigh: number | null = null;
+  let tStat: number | null = null;
+  let pValue: number | null = null;
+  let significance: string | null = null;
+
+  for (const raw of body.split('\n')) {
+    const line = raw.replace(/^[│┌└─\s]*/, '').trim();
+    if (!line) continue;
+    const foldsM = line.match(/^Folds:\s*(\d+)/i);
+    if (foldsM) { nFolds = parseInt(foldsM[1]); continue; }
+    const meanM = line.match(/^Mean OOS Sharpe:\s*([-\d.]+)/i);
+    if (meanM) { meanSharpe = parseFloat(meanM[1]); continue; }
+    const stdM = line.match(/^Sharpe Std Dev:\s*([-\d.]+)/i);
+    if (stdM) { stdDev = parseFloat(stdM[1]); continue; }
+    const pctM = line.match(/%\s*Folds\s*>\s*2\.0:\s*([\d.]+%)/i);
+    if (pctM) { pctGt2 = pctM[1]; continue; }
+    const ciM = line.match(/^95%\s*CI:\s*\[([-\d.]+),\s*([-\d.]+)\]/i);
+    if (ciM) { ciLow = parseFloat(ciM[1]); ciHigh = parseFloat(ciM[2]); continue; }
+    const tM = line.match(/^T-stat.*?:\s*([-\d.]+)/i);
+    if (tM) { tStat = parseFloat(tM[1]); continue; }
+    const pM = line.match(/^P-value:\s*([\d.]+)\s*(.*)/i);
+    if (pM) { pValue = parseFloat(pM[1]); significance = pM[2].replace(/[✅⚠❌]/g, '').trim(); }
+  }
+
+  if (meanSharpe === null) return <PreFallback body={body} />;
+
+  const isSig = pValue !== null && pValue < 0.05;
+  const isMarginal = pValue !== null && pValue >= 0.05 && pValue < 0.10;
+  const sigColor = isSig ? 'var(--green)' : isMarginal ? 'var(--amber)' : 'var(--red)';
+  const sigLabel = isSig ? 'SIGNIFICANT' : isMarginal ? 'MARGINAL' : 'NOT SIGNIFICANT';
+  const sharpeColor = meanSharpe >= 3.0 ? 'var(--green)' : meanSharpe >= 2.0 ? 'var(--amber)' : 'var(--red)';
+
+  const stat = (label: string, value: string, color?: string, sub?: string) => (
+    <div style={{
+      background: 'var(--bg2)', border: '1px solid var(--line1)', borderRadius: 6,
+      padding: '12px 16px', display: 'flex', flexDirection: 'column' as const, gap: 4,
+      boxShadow: 'inset 0 1px 0 rgba(255,255,255,0.02)',
+    }}>
+      <div style={{ fontSize: 9.5, color: 'var(--t3)', textTransform: 'uppercase' as const, letterSpacing: 0.5, ...MONO }}>
+        {label}
+      </div>
+      <div style={{ fontSize: 16, color: color ?? 'var(--t1)', fontWeight: 500, letterSpacing: -0.5, ...MONO }}>
+        {value}
+      </div>
+      {sub && (
+        <div style={{ fontSize: 9, color: 'var(--t4)', fontStyle: 'italic' as const, paddingTop: 2, ...MONO }}>
+          {sub}
+        </div>
+      )}
+    </div>
+  );
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 16, fontSize: 9, ...MONO }}>
+      {/* Significance banner */}
+      <div style={{
+        display: 'flex', alignItems: 'center', gap: 10, padding: '8px 14px',
+        background: isSig ? 'rgba(80,200,120,0.08)' : isMarginal ? 'rgba(240,180,40,0.08)' : 'rgba(220,80,60,0.08)',
+        border: `1px solid ${sigColor}`,
+        borderRadius: 6,
+      }}>
+        <span style={{ fontSize: 14 }}>{isSig ? '✅' : '⚠'}</span>
+        <span style={{ color: sigColor, fontWeight: 700, fontSize: 11, textTransform: 'uppercase', letterSpacing: '0.08em' }}>
+          {sigLabel}
+        </span>
+        {pValue !== null && (
+          <span style={{ color: 'var(--t3)', fontSize: 9, marginLeft: 'auto' }}>
+            p = {pValue < 0.001 ? pValue.toExponential(2) : pValue.toFixed(6)}
+          </span>
+        )}
+        {nFolds !== null && (
+          <span style={{ color: 'var(--t4)', fontSize: 9 }}>
+            {nFolds} folds
+          </span>
+        )}
+      </div>
+
+      {/* Stat cards grid */}
+      <div style={{
+        display: 'grid',
+        gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))',
+        gap: 10,
+      }}>
+        {stat('Mean OOS Sharpe', meanSharpe.toFixed(3), sharpeColor)}
+        {stdDev !== null && stat('Std Dev', stdDev.toFixed(3), undefined,
+          stdDev > 0 && meanSharpe > 0
+            ? `CV = ${(stdDev / meanSharpe).toFixed(2)}`
+            : undefined,
+        )}
+        {pctGt2 !== null && stat('% Folds > 2.0', pctGt2,
+          parseFloat(pctGt2) >= 75 ? 'var(--green)' : parseFloat(pctGt2) >= 50 ? 'var(--amber)' : 'var(--red)',
+        )}
+        {ciLow !== null && ciHigh !== null && stat(
+          '95% Confidence Interval',
+          `[${ciLow.toFixed(3)}, ${ciHigh.toFixed(3)}]`,
+          ciLow > 0 ? 'var(--green)' : 'var(--amber)',
+          ciLow > 0 ? 'Lower bound > 0' : 'Interval includes zero',
+        )}
+        {tStat !== null && stat('T-Statistic (vs 0)', tStat.toFixed(3),
+          tStat >= 2.0 ? 'var(--green)' : tStat >= 1.5 ? 'var(--amber)' : 'var(--red)',
+        )}
+        {pValue !== null && stat('P-Value', pValue < 0.001 ? pValue.toExponential(2) : pValue.toFixed(6), sigColor,
+          significance ?? undefined,
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ── WALK-FORWARD VALIDATION (expanding window) ──────────────────────────────
+function renderWalkForwardValidation(title: string, body: string): React.ReactNode {
+  // Parse fold count & window type from title
+  const titleM = title.match(/\((\d+)\s+folds?,\s*(\w[\w\s]*)\)/i);
+  const foldCount = titleM ? parseInt(titleM[1]) : null;
+  const windowType = titleM ? titleM[2].trim() : null;
+
+  interface WFVFold {
+    num: number; train: string; test: string; days: number;
+    sharpe: number; cagr: number; maxdd: number; sortino: number;
+    r2: number; dsr: number; fp: number;
+  }
+
+  const folds: WFVFold[] = [];
+  let meanSharpe: number | null = null;
+  let stdSharpe: number | null = null;
+  let minSharpe: number | null = null;
+  let maxSharpe: number | null = null;
+  let meanCagr: string | null = null;
+  let meanMaxdd: string | null = null;
+  let meanSortino: string | null = null;
+  let meanR2: string | null = null;
+  let meanDsr: number | null = null;
+  let dsrStatus: string | null = null;
+  let pctPositive: number | null = null;
+  let cv: number | null = null;
+  let cvStable: boolean | null = null;
+  let cvNote: string | null = null;
+  let notes: string[] = [];
+
+  for (const rawLine of body.split('\n')) {
+    const stripped = rawLine.replace(/^\s*│\s*/, '').trim();
+    if (!stripped || /^[─└┌┐┘]+$/.test(stripped) || /^Fold\s+Train\s+Test/i.test(stripped) || /^────/.test(stripped)) continue;
+
+    // Note lines at top
+    if (/^Each fold:/i.test(stripped) || /^DSR per fold/i.test(stripped)) {
+      notes.push(stripped);
+      continue;
+    }
+
+    // Data row: num  train  test  days  sharpe  cagr  maxdd  sortino  r2  dsr  fp
+    const dm = stripped.match(/^\s*(\d+)\s+([\w-]+)\s+([\w-]+\s*-\d+)\s+(\d+)\s+([-\d.]+)\s+([-\d.]+)\s+([-\d.]+)\s+([-\d.]+)\s+([-\d.]+)\s+([-\d.]+)\s+([-\d.]+)/);
+    if (dm) {
+      folds.push({
+        num: parseInt(dm[1]), train: dm[2], test: dm[3].trim(), days: parseInt(dm[4]),
+        sharpe: parseFloat(dm[5]), cagr: parseFloat(dm[6]), maxdd: parseFloat(dm[7]),
+        sortino: parseFloat(dm[8]), r2: parseFloat(dm[9]), dsr: parseFloat(dm[10]),
+        fp: parseFloat(dm[11]),
+      });
+      continue;
+    }
+
+    // Aggregates
+    const mshM = stripped.match(/^Mean Sharpe:\s*([-\d.]+)\s+\(±([\d.]+)\s+min=([-\d.]+)\s+max=([-\d.]+)\)/i);
+    if (mshM) { meanSharpe = parseFloat(mshM[1]); stdSharpe = parseFloat(mshM[2]); minSharpe = parseFloat(mshM[3]); maxSharpe = parseFloat(mshM[4]); continue; }
+    const mcagrM = stripped.match(/^Mean CAGR:\s*([-\d.%]+)/i);
+    if (mcagrM) { meanCagr = mcagrM[1]; continue; }
+    const mmddM = stripped.match(/^Mean MaxDD:\s*([-\d.%]+)/i);
+    if (mmddM) { meanMaxdd = mmddM[1]; continue; }
+    const msortM = stripped.match(/^Mean Sortino:\s*([-\d.]+)/i);
+    if (msortM) { meanSortino = msortM[1]; continue; }
+    const mr2M = stripped.match(/^Mean R²:\s*([-\d.]+)/i);
+    if (mr2M) { meanR2 = mr2M[1]; continue; }
+    const mdsrM = stripped.match(/^Mean OOS DSR:\s*([\d.]+)%\s*(.*)/i);
+    if (mdsrM) { meanDsr = parseFloat(mdsrM[1]); dsrStatus = mdsrM[2].replace(/[⚠✅❌]/g, '').trim(); continue; }
+    const pctM = stripped.match(/%\s*folds positive.*?:\s*(\d+)%/i);
+    if (pctM) { pctPositive = parseInt(pctM[1]); continue; }
+    const stabM = stripped.match(/^Stability\s*\(CV=([\d.]+)\):\s*(.*)/i);
+    if (stabM) {
+      cv = parseFloat(stabM[1]);
+      cvStable = /STABLE/i.test(stabM[2]) && !/UNSTABLE/i.test(stabM[2]);
+      cvNote = stabM[2].replace(/[⚠✅❌]/g, '').trim();
+      continue;
+    }
+  }
+
+  if (folds.length === 0) return <PreFallback body={body} />;
+
+  const sharpeColor = (s: number) => s >= 3.0 ? 'var(--green)' : s >= 2.0 ? 'var(--amber)' : 'var(--red)';
+  const maxddColor  = (v: number) => Math.abs(v) <= 20 ? 'var(--green)' : Math.abs(v) <= 35 ? 'var(--amber)' : 'var(--red)';
+  const dsrColor    = (v: number) => v >= 95 ? 'var(--green)' : v >= 80 ? 'var(--amber)' : 'var(--red)';
+  const r2Color     = (v: number) => v >= 0.7 ? 'var(--green)' : v >= 0.4 ? 'var(--amber)' : 'var(--red)';
+  const sortinoColor = (v: number) => v >= 3.0 ? 'var(--green)' : v >= 1.0 ? 'var(--amber)' : 'var(--red)';
+  const fmt = (v: number, d: number, suf = '') => `${v.toFixed(d)}${suf}`;
+
+  // Sharpe bar scaling
+  const allSharpes = folds.map((f) => f.sharpe);
+  const maxSh = Math.max(...allSharpes);
+  const minSh = Math.min(...allSharpes);
+
+  const thS: React.CSSProperties = {
+    padding: '3px 8px 3px 5px', textAlign: 'right', fontWeight: 700,
+    textTransform: 'uppercase', letterSpacing: '0.08em', fontSize: 8,
+    color: 'var(--t3)', borderBottom: '1px solid var(--line2)', whiteSpace: 'nowrap',
+  };
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 12, fontSize: 9, ...MONO }}>
+      {/* Config bar */}
+      <div style={{ display: 'flex', gap: 14, flexWrap: 'wrap', alignItems: 'center', paddingBottom: 8, borderBottom: '1px solid var(--line)' }}>
+        {foldCount !== null && (
+          <span style={{ color: 'var(--t2)' }}>
+            <span style={{ color: 'var(--t1)', fontWeight: 700 }}>{foldCount}</span> folds
+          </span>
+        )}
+        {windowType && (
+          <span style={{ color: 'var(--t3)' }}>{windowType}</span>
+        )}
+        {notes.length > 0 && (
+          <span style={{ marginLeft: 'auto', color: 'var(--t4)', fontSize: 8 }}>
+            {notes.join(' · ')}
+          </span>
+        )}
+      </div>
+
+      {/* Fold table */}
+      <div style={{ overflowX: 'auto' }}>
+        <table style={{ borderCollapse: 'collapse', fontSize: 9, tableLayout: 'auto', ...MONO }}>
+          <thead>
+            <tr>
+              <th style={{ ...thS, textAlign: 'left', paddingLeft: 5 }}>#</th>
+              <th style={{ ...thS, textAlign: 'left' }}>Train</th>
+              <th style={{ ...thS, textAlign: 'left' }}>Test</th>
+              <th style={{ ...thS }}>Days</th>
+              <th style={{ ...thS, minWidth: 88 }}>Sharpe</th>
+              <th style={{ ...thS }}>CAGR%</th>
+              <th style={{ ...thS }}>MaxDD%</th>
+              <th style={{ ...thS }}>Sortino</th>
+              <th style={{ ...thS }}>R²</th>
+              <th style={{ ...thS }}>DSR%</th>
+              <th style={{ ...thS }}>FP%</th>
+            </tr>
+          </thead>
+          <tbody>
+            {folds.map((fold) => {
+              const isNeg = fold.sharpe < 0;
+              const frac = maxSh > minSh
+                ? Math.max(0, (fold.sharpe - minSh) / (maxSh - minSh))
+                : fold.sharpe > 0 ? 1 : 0;
+              const rowBg = isNeg ? 'rgba(220,80,60,0.06)'
+                : fold.num % 2 === 1 ? 'rgba(255,255,255,0.015)' : 'transparent';
+              return (
+                <tr key={fold.num} style={{ background: rowBg }}>
+                  <td style={{ padding: '3px 8px 3px 5px', color: 'var(--t3)', fontSize: 8 }}>{fold.num}</td>
+                  <td style={{ padding: '3px 10px 3px 5px', whiteSpace: 'nowrap', color: 'var(--t3)', fontSize: 8 }}>{fold.train}</td>
+                  <td style={{ padding: '3px 10px 3px 5px', whiteSpace: 'nowrap', color: 'var(--t2)' }}>{fold.test}</td>
+                  <td style={{ padding: '3px 8px 3px 5px', textAlign: 'right', color: 'var(--t3)' }}>{fold.days}</td>
+                  <td style={{ padding: '3px 8px 3px 5px', textAlign: 'right' }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 5, justifyContent: 'flex-end' }}>
+                      <div style={{ width: 36, height: 3, background: 'var(--bg3)', borderRadius: 1, flexShrink: 0 }}>
+                        {fold.sharpe > 0 && (
+                          <div style={{ width: `${Math.round(frac * 100)}%`, height: '100%', background: sharpeColor(fold.sharpe), borderRadius: 1 }} />
+                        )}
+                      </div>
+                      <span style={{ color: sharpeColor(fold.sharpe), fontWeight: isNeg ? 700 : 400 }}>{fmt(fold.sharpe, 3)}</span>
+                    </div>
+                  </td>
+                  <td style={{ padding: '3px 8px 3px 5px', textAlign: 'right', color: fold.cagr >= 0 ? 'var(--t2)' : 'var(--red)' }}>{fold.cagr.toLocaleString()}</td>
+                  <td style={{ padding: '3px 8px 3px 5px', textAlign: 'right', color: maxddColor(fold.maxdd) }}>{fmt(fold.maxdd, 2, '%')}</td>
+                  <td style={{ padding: '3px 8px 3px 5px', textAlign: 'right', color: sortinoColor(fold.sortino) }}>{fmt(fold.sortino, 3)}</td>
+                  <td style={{ padding: '3px 8px 3px 5px', textAlign: 'right', color: r2Color(fold.r2) }}>{fmt(fold.r2, 3)}</td>
+                  <td style={{ padding: '3px 8px 3px 5px', textAlign: 'right', color: dsrColor(fold.dsr) }}>{fmt(fold.dsr, 1, '%')}</td>
+                  <td style={{ padding: '3px 8px 3px 5px', textAlign: 'right', color: fold.fp > 50 ? 'var(--red)' : 'var(--t3)' }}>{fmt(fold.fp, 1, '%')}</td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+
+      {/* Aggregate summary */}
+      {meanSharpe !== null && (
+        <div style={{ display: 'flex', gap: 18, flexWrap: 'wrap', padding: '6px 10px', background: 'var(--bg0)', border: '1px solid var(--line)', borderRadius: 3, alignItems: 'center' }}>
+          <span style={{ color: 'var(--t3)', fontSize: 8, textTransform: 'uppercase', letterSpacing: '0.1em' }}>
+            Aggregate — {folds.length} folds
+          </span>
+          <span style={{ color: 'var(--t2)' }}>
+            Mean SR <span style={{ color: sharpeColor(meanSharpe), fontWeight: 700 }}>{meanSharpe.toFixed(3)}</span>
+            {stdSharpe !== null && <span style={{ color: 'var(--t3)' }}> ±{stdSharpe.toFixed(3)}</span>}
+            {minSharpe !== null && maxSharpe !== null && (
+              <span style={{ color: 'var(--t4)', fontSize: 8 }}> [{minSharpe.toFixed(3)}, {maxSharpe.toFixed(3)}]</span>
+            )}
+          </span>
+          {meanDsr !== null && (
+            <span style={{ color: 'var(--t2)' }}>
+              DSR <span style={{ color: dsrColor(meanDsr) }}>{meanDsr.toFixed(1)}%</span>
+              {dsrStatus && (
+                <span style={{ marginLeft: 4, color: /PASS/i.test(dsrStatus) ? 'var(--green)' : /FAIL/i.test(dsrStatus) ? 'var(--red)' : 'var(--amber)', fontSize: 8 }}>
+                  {/PASS/i.test(dsrStatus) ? '✅' : /FAIL/i.test(dsrStatus) ? '❌' : '⚠'} {dsrStatus}
+                </span>
+              )}
+            </span>
+          )}
+          {pctPositive !== null && (
+            <span style={{ color: 'var(--t2)' }}>
+              Positive <span style={{ color: pctPositive >= 80 ? 'var(--green)' : pctPositive >= 60 ? 'var(--amber)' : 'var(--red)' }}>{pctPositive}%</span>
+            </span>
+          )}
+          {cv !== null && (
+            <span style={{ color: 'var(--t2)' }}>
+              CV=<span style={{ color: cvStable ? 'var(--green)' : 'var(--amber)', fontWeight: 700 }}>{cv.toFixed(2)}</span>
+              <span style={{ marginLeft: 5, color: cvStable ? 'var(--green)' : 'var(--amber)' }}>
+                {cvStable ? '✅ STABLE' : '⚠ UNSTABLE'}
+              </span>
+            </span>
+          )}
+        </div>
+      )}
+
+      {/* Additional aggregate stats */}
+      {(meanCagr || meanMaxdd || meanSortino || meanR2) && (
+        <div style={{ display: 'flex', gap: 18, flexWrap: 'wrap', padding: '4px 10px', alignItems: 'center' }}>
+          {meanCagr && <span style={{ color: 'var(--t3)', fontSize: 8 }}>Mean CAGR <span style={{ color: 'var(--t2)' }}>{meanCagr}</span></span>}
+          {meanMaxdd && <span style={{ color: 'var(--t3)', fontSize: 8 }}>Mean MaxDD <span style={{ color: 'var(--t2)' }}>{meanMaxdd}</span></span>}
+          {meanSortino && <span style={{ color: 'var(--t3)', fontSize: 8 }}>Mean Sortino <span style={{ color: 'var(--t2)' }}>{meanSortino}</span></span>}
+          {meanR2 && <span style={{ color: 'var(--t3)', fontSize: 8 }}>Mean R² <span style={{ color: 'var(--t2)' }}>{meanR2}</span></span>}
+        </div>
+      )}
+
+      {/* CV note */}
+      {cvNote && !cvStable && (
+        <div style={{ padding: '4px 10px', fontSize: 8, color: 'var(--amber)' }}>
+          {cvNote}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── WALK-FORWARD ROLLING ─────────────────────────────────────────────────────
+function renderWalkForwardRolling(title: string, body: string): React.ReactNode {
+  const paramM = title.match(/\(train=(\d+)d\s+test=(\d+)d\s+step=(\d+)d\)/i);
+  const trainD = paramM ? parseInt(paramM[1]) : null;
+  const testD  = paramM ? parseInt(paramM[2]) : null;
+  const stepD  = paramM ? parseInt(paramM[3]) : null;
+  const isFilterAware = /FILTER.AWARE/i.test(title);
+
+  interface WFRFold {
+    num: number; dateFrom: string; dateTo: string;
+    trainRange: string; testRange: string;
+    isSaturated: boolean; isUnstable: boolean; isExcluded: boolean;
+    isSharpe: number | null; isCagr: string | null; isMaxdd: number | null;
+    oosSharpe: number | null; oosCagr: string | null; oosMaxdd: number | null;
+    oosSortino: number | null; oosR2: number | null; oosDsr: number | null;
+    activeDays: number | null; flatDays: number | null;
+    dailyBreakdown: DailyRow[] | null;
+    dailySummary: DailySummary | null;
+  }
+
+  interface DailyRow {
+    day: number; date: string; ret: number; cumul: number;
+    type: 'WIN' | 'LOSS'; isBig: boolean;
+  }
+
+  interface DailySummary {
+    winDays: number; totalDays: number; winPct: number; lossPct: number;
+    avgDaily: number; avgWin: number; avgLoss: number;
+    worstDay: number; bestDay: number; pattern: string;
+  }
+
+  const folds: WFRFold[] = [];
+  let curFold: WFRFold | null = null;
+  let inDailyBreakdown = false;
+  let dailyRows: DailyRow[] = [];
+  let dailySummary: Partial<DailySummary> = {};
+  const notes: string[] = [];
+
+  // Aggregates
+  let meanSharpe: number | null = null;
+  let stdSharpe: number | null = null;
+  let minSharpe: number | null = null;
+  let maxSharpe: number | null = null;
+  let robustScore: number | null = null;
+  let meanCagr: string | null = null;
+  let meanMaxdd: string | null = null;
+  let meanSortino: string | null = null;
+  let meanR2: string | null = null;
+  let meanDsr: number | null = null;
+  let dsrStatus: string | null = null;
+  let pctPositive: number | null = null;
+  let cv: number | null = null;
+  let cvStable: boolean | null = null;
+  let saturatedCount = 0;
+  let totalFoldsCount = 0;
+  let activeFoldsUsed = 0;
+  let unstableCount = 0;
+  const oiCorrs: Array<{ label: string; value: string }> = [];
+  let inOI = false;
+
+  const finishDailyBreakdown = () => {
+    if (curFold && dailyRows.length > 0) {
+      curFold.dailyBreakdown = [...dailyRows];
+      curFold.dailySummary = (dailySummary.winDays !== undefined && dailySummary.totalDays !== undefined)
+        ? dailySummary as DailySummary : null;
+    }
+    dailyRows = [];
+    dailySummary = {};
+    inDailyBreakdown = false;
+  };
+
+  for (const rawLine of body.split('\n')) {
+    const stripped = rawLine.replace(/^\s*│\s*/, '').replace(/^[└─┌┐┘]+$/, '').trim();
+    if (!stripped) continue;
+
+    // Notes at top
+    if (/^Params fixed|^Filter applied|^0% return|^Calendar-saturation|^Saturated folds \(\d/i.test(stripped) && folds.length === 0 && !curFold) {
+      notes.push(stripped);
+      continue;
+    }
+    if (/^DSR per fold/i.test(stripped) && folds.length === 0 && !curFold) {
+      notes.push(stripped);
+      continue;
+    }
+    if (/^OI regime:/i.test(stripped) && folds.length === 0) {
+      notes.push(stripped);
+      continue;
+    }
+
+    // Fold header — with or without dates
+    const foldMDated = stripped.match(/^FOLD\s+(\d+)\s+Train:\s*([\w-]+)\s*\(\d+d\)\s+Test:\s*([\w-]+)\s*\(\d+d\)\s+\((\d{4}-\d{2}-\d{2})\s*->\s*(\d{4}-\d{2}-\d{2})\)/i);
+    const foldMNoDates = !foldMDated ? stripped.match(/^FOLD\s+(\d+)\s+Train:\s*([\w-]+)\s*\(\d+d\)\s+Test:\s*([\w-]+)\s*\(\d+d\)/i) : null;
+    const foldM = foldMDated || foldMNoDates;
+    if (foldM) {
+      if (inDailyBreakdown) finishDailyBreakdown();
+      if (curFold) folds.push(curFold);
+      const sat = /⊘\s*SATURATED/i.test(stripped);
+      curFold = {
+        num: parseInt(foldM[1]), trainRange: foldM[2], testRange: foldM[3],
+        dateFrom: foldMDated ? foldMDated[4] : '',
+        dateTo: foldMDated ? foldMDated[5] : '',
+        isSaturated: sat, isUnstable: /⚠.*unstable/i.test(stripped), isExcluded: sat,
+        isSharpe: null, isCagr: null, isMaxdd: null,
+        oosSharpe: null, oosCagr: null, oosMaxdd: null,
+        oosSortino: null, oosR2: null, oosDsr: null,
+        activeDays: null, flatDays: null,
+        dailyBreakdown: null, dailySummary: null,
+      };
+      continue;
+    }
+
+    // IS line
+    const isM = stripped.match(/^In-sample.*?Sharpe=\s*([-\d.]+).*?CAGR=\s*([-\d.,%]+).*?MaxDD=\s*([-\d.]+)%/i);
+    if (isM && curFold) {
+      curFold.isSharpe = parseFloat(isM[1]);
+      curFold.isCagr = isM[2].trim();
+      curFold.isMaxdd = parseFloat(isM[3]);
+      continue;
+    }
+
+    // OOS line — with or without active/flat days
+    const oosM = stripped.match(/^OOS.*?Sharpe=\s*([-\d.]+).*?CAGR=\s*([-\d.,%]+).*?MaxDD=\s*([-\d.]+)%\s+Sortino=\s*([-\d.]+)\s+R²=([-\d.]+)\s+DSR=\s*([-\d.]+)%/i);
+    if (oosM && curFold) {
+      curFold.oosSharpe = parseFloat(oosM[1]);
+      curFold.oosCagr = oosM[2].trim();
+      curFold.oosMaxdd = parseFloat(oosM[3]);
+      curFold.oosSortino = parseFloat(oosM[4]);
+      curFold.oosR2 = parseFloat(oosM[5]);
+      curFold.oosDsr = parseFloat(oosM[6]);
+      const actM = stripped.match(/\[active=(\d+)d\s+flat=(\d+)d\]/i);
+      if (actM) { curFold.activeDays = parseInt(actM[1]); curFold.flatDays = parseInt(actM[2]); }
+      if (/EXCLUDED/i.test(stripped)) curFold.isExcluded = true;
+      continue;
+    }
+
+    // Unstable fold daily breakdown start
+    if (/UNSTABLE FOLD.*DAILY RETURN/i.test(stripped) || /UNSTABLE FOLD DETAIL/i.test(stripped)) {
+      inDailyBreakdown = true;
+      continue;
+    }
+    // Daily breakdown header / separator
+    if (inDailyBreakdown && (/^Day\s+Date/i.test(stripped) || /^────/.test(stripped))) continue;
+
+    // Daily data row
+    if (inDailyBreakdown) {
+      const dayM = stripped.match(/^(\d+)\s+(\S+)\s+([-\d.]+)%\s+([-\d.]+)%\s+(WIN|LOSS)/i);
+      if (dayM) {
+        dailyRows.push({
+          day: parseInt(dayM[1]), date: dayM[2],
+          ret: parseFloat(dayM[3]), cumul: parseFloat(dayM[4]),
+          type: dayM[5].toUpperCase() as 'WIN' | 'LOSS',
+          isBig: /BIG/i.test(stripped),
+        });
+        continue;
+      }
+      // Daily summary lines
+      const winM = stripped.match(/^Win days:\s+(\d+)\/(\d+)\s+\((\d+)%\)/i);
+      if (winM) { dailySummary.winDays = parseInt(winM[1]); dailySummary.totalDays = parseInt(winM[2]); dailySummary.winPct = parseInt(winM[3]); continue; }
+      const lossM = stripped.match(/^Loss days:\s+\d+\/\d+\s+\((\d+)%\)/i);
+      if (lossM) { dailySummary.lossPct = parseInt(lossM[1]); continue; }
+      const avgDM = stripped.match(/^Avg daily:\s+([-+\d.]+)%/i);
+      if (avgDM) { dailySummary.avgDaily = parseFloat(avgDM[1]); continue; }
+      const avgWM = stripped.match(/^Avg win:\s+\+?([-\d.]+)%/i);
+      if (avgWM) { dailySummary.avgWin = parseFloat(avgWM[1]); continue; }
+      const avgLM = stripped.match(/^Avg loss:\s+([-\d.]+)%/i);
+      if (avgLM) { dailySummary.avgLoss = parseFloat(avgLM[1]); continue; }
+      const worstM = stripped.match(/^Worst day:\s+([-\d.]+)%/i);
+      if (worstM) { dailySummary.worstDay = parseFloat(worstM[1]); continue; }
+      const bestM = stripped.match(/^Best day:\s+\+?([-\d.]+)%/i);
+      if (bestM) { dailySummary.bestDay = parseFloat(bestM[1]); continue; }
+      const patM = stripped.match(/^Pattern:\s+(.+)/i);
+      if (patM) { dailySummary.pattern = patM[1].trim(); continue; }
+      // Arrow continuation line for pattern
+      if (/^→/.test(stripped) && dailySummary.pattern) {
+        dailySummary.pattern += ' ' + stripped;
+        continue;
+      }
+      // Filter detail line
+      if (/^Filter blocked/i.test(stripped)) continue;
+    }
+
+    // Counts
+    const satCountM = stripped.match(/^Saturated folds excluded.*?(\d+)\/(\d+).*?active folds used:\s*(\d+)/i);
+    if (satCountM) {
+      if (inDailyBreakdown) finishDailyBreakdown();
+      if (curFold) { folds.push(curFold); curFold = null; }
+      saturatedCount = parseInt(satCountM[1]); totalFoldsCount = parseInt(satCountM[2]); activeFoldsUsed = parseInt(satCountM[3]);
+      continue;
+    }
+    const unstCountM = stripped.match(/^Unstable folds.*?:\s*(\d+)\/(\d+)/i);
+    if (unstCountM) {
+      if (inDailyBreakdown) finishDailyBreakdown();
+      if (curFold) { folds.push(curFold); curFold = null; }
+      unstableCount = parseInt(unstCountM[1]);
+      totalFoldsCount = totalFoldsCount || parseInt(unstCountM[2]);
+      continue;
+    }
+
+    // Aggregates
+    if (/^(PRIMARY )?AGGREGATE/i.test(stripped)) {
+      if (inDailyBreakdown) finishDailyBreakdown();
+      if (curFold) { folds.push(curFold); curFold = null; }
+      const countM = stripped.match(/(\d+)\s+(VALID\s+)?FOLDS/i);
+      if (countM) activeFoldsUsed = activeFoldsUsed || parseInt(countM[1]);
+      continue;
+    }
+    const mshM = stripped.match(/^Mean Sharpe:\s*([-\d.]+)\s+\(±([\d.]+)(?:\s+min=([-\d.]+)\s+max=([-\d.]+))?\)/i);
+    if (mshM) { meanSharpe = parseFloat(mshM[1]); stdSharpe = parseFloat(mshM[2]); minSharpe = mshM[3] ? parseFloat(mshM[3]) : null; maxSharpe = mshM[4] ? parseFloat(mshM[4]) : null; continue; }
+    const robM = stripped.match(/^Robust score:\s*([-\d.]+)/i);
+    if (robM) { robustScore = parseFloat(robM[1]); continue; }
+    const mcagrM = stripped.match(/^Mean CAGR:\s*([-\d.,%]+)/i);
+    if (mcagrM) { meanCagr = mcagrM[1]; continue; }
+    const mmddM = stripped.match(/^Mean MaxDD:\s*([-\d.%]+)/i);
+    if (mmddM) { meanMaxdd = mmddM[1]; continue; }
+    const msortM = stripped.match(/^Mean Sortino:\s*([-\d.]+)/i);
+    if (msortM) { meanSortino = msortM[1]; continue; }
+    const mr2M = stripped.match(/^Mean R²:\s*([-\d.]+)/i);
+    if (mr2M) { meanR2 = mr2M[1]; continue; }
+    const mdsrM = stripped.match(/^Mean OOS DSR:\s*([\d.]+)%\s*(.*)/i);
+    if (mdsrM) { meanDsr = parseFloat(mdsrM[1]); dsrStatus = mdsrM[2].replace(/[⚠✅❌]/g, '').trim(); continue; }
+    const pctM = stripped.match(/%\s*folds positive.*?:\s*(\d+)%/i);
+    if (pctM) { pctPositive = parseInt(pctM[1]); continue; }
+    const stabM = stripped.match(/^Stability\s*\(CV=([\d.]+)\):\s*(.*)/i);
+    if (stabM) { cv = parseFloat(stabM[1]); cvStable = /STABLE/i.test(stabM[2]) && !/UNSTABLE/i.test(stabM[2]); continue; }
+
+    // OI correlations
+    if (/^── OI Regime Diagnostics/i.test(stripped)) { inOI = true; continue; }
+    if (inOI) {
+      const corrM = stripped.match(/^Spearman corr\((.+?)\)\s*=\s*(\S+)/i);
+      if (corrM && corrM[2] !== 'n/a') oiCorrs.push({ label: corrM[1].trim(), value: corrM[2] });
+    }
+  }
+  if (inDailyBreakdown) finishDailyBreakdown();
+  if (curFold) folds.push(curFold);
+  if (folds.length === 0) return <PreFallback body={body} />;
+
+  // Sharpe range for bar scaling (active folds only)
+  const activeSharpes = folds.filter((f) => !f.isExcluded && f.oosSharpe !== null).map((f) => f.oosSharpe!);
+  const maxS = activeSharpes.length > 0 ? Math.max(...activeSharpes) : 0;
+  const minS = activeSharpes.length > 0 ? Math.min(...activeSharpes) : 0;
+
+  const sharpeColor = (s: number | null) => s === null ? 'var(--t3)' : s >= 3.0 ? 'var(--green)' : s >= 2.0 ? 'var(--amber)' : 'var(--red)';
+  const maxddColor  = (v: number | null) => v === null ? 'var(--t3)' : Math.abs(v) <= 20 ? 'var(--green)' : Math.abs(v) <= 35 ? 'var(--amber)' : 'var(--red)';
+  const dsrColor    = (v: number | null) => v === null ? 'var(--t3)' : v >= 95 ? 'var(--green)' : v >= 80 ? 'var(--amber)' : 'var(--red)';
+  const r2Color     = (v: number | null) => v === null ? 'var(--t3)' : v >= 0.7 ? 'var(--green)' : v >= 0.4 ? 'var(--amber)' : 'var(--red)';
+  const sortinoColor = (v: number | null) => v === null ? 'var(--t3)' : v >= 3.0 ? 'var(--green)' : v >= 1.0 ? 'var(--amber)' : 'var(--red)';
+  const fmt = (v: number | null, d: number, suf = '') => v === null ? '—' : `${v.toFixed(d)}${suf}`;
+
+  const thS: React.CSSProperties = {
+    padding: '3px 8px 3px 5px', textAlign: 'right', fontWeight: 700,
+    textTransform: 'uppercase', letterSpacing: '0.08em', fontSize: 8,
+    color: 'var(--t3)', borderBottom: '1px solid var(--line2)', whiteSpace: 'nowrap',
+  };
+
+  const hasDates = folds.some((f) => f.dateFrom);
+  const hasActiveDays = folds.some((f) => f.activeDays !== null);
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 12, fontSize: 9, ...MONO }}>
+      {/* Config bar */}
+      <div style={{ display: 'flex', gap: 14, flexWrap: 'wrap', alignItems: 'center', paddingBottom: 8, borderBottom: '1px solid var(--line)' }}>
+        {trainD !== null && (
+          <span style={{ color: 'var(--t2)' }}>
+            train <span style={{ color: 'var(--t1)', fontWeight: 700 }}>{trainD}d</span>
+            {' · '}test <span style={{ color: 'var(--t1)', fontWeight: 700 }}>{testD}d</span>
+            {' · '}step <span style={{ color: 'var(--t1)', fontWeight: 700 }}>{stepD}d</span>
+          </span>
+        )}
+        {totalFoldsCount > 0 && <span style={{ color: 'var(--t3)' }}>{totalFoldsCount} folds</span>}
+        {saturatedCount > 0 && (
+          <span style={{ color: 'var(--t3)' }}>
+            <span style={{ color: 'var(--amber)', fontWeight: 700 }}>{saturatedCount}</span> saturated excluded
+          </span>
+        )}
+        {unstableCount > 0 && (
+          <span style={{ color: 'var(--t3)' }}>
+            <span style={{ color: 'var(--red)', fontWeight: 700 }}>{unstableCount}</span> unstable
+          </span>
+        )}
+        {isFilterAware && (
+          <span style={{ marginLeft: 'auto', color: 'var(--t4)', fontSize: 8 }}>filter on both windows · 0% return on flat days</span>
+        )}
+      </div>
+
+      {/* Notes */}
+      {notes.length > 0 && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 2, padding: '0 2px' }}>
+          {notes.map((n, i) => (
+            <span key={i} style={{ color: 'var(--t4)', fontSize: 8 }}>{n}</span>
+          ))}
+        </div>
+      )}
+
+      {/* Fold table */}
+      <div style={{ overflowX: 'auto' }}>
+        <table style={{ borderCollapse: 'collapse', fontSize: 9, tableLayout: 'auto', ...MONO }}>
+          <thead>
+            <tr>
+              <th style={{ ...thS, textAlign: 'left', paddingLeft: 5 }}>#</th>
+              {hasDates && <th style={{ ...thS, textAlign: 'left' }}>OOS Period</th>}
+              <th style={{ ...thS, textAlign: 'left' }}>Train</th>
+              <th style={{ ...thS, textAlign: 'left' }}>Test</th>
+              <th style={{ ...thS }}>IS Sh</th>
+              <th style={{ ...thS, minWidth: 88 }}>OOS Sh</th>
+              <th style={{ ...thS }}>CAGR</th>
+              <th style={{ ...thS }}>MaxDD</th>
+              <th style={{ ...thS }}>Sortino</th>
+              <th style={{ ...thS }}>R²</th>
+              <th style={{ ...thS }}>DSR</th>
+              {hasActiveDays && <th style={{ ...thS }}>Active</th>}
+            </tr>
+          </thead>
+          <tbody>
+            {folds.map((fold) => {
+              const excl = fold.isExcluded;
+              const unstb = fold.isUnstable && !excl;
+              const frac = fold.oosSharpe !== null && maxS > minS
+                ? Math.max(0, (fold.oosSharpe - minS) / (maxS - minS))
+                : fold.oosSharpe !== null && fold.oosSharpe > 0 ? 1 : 0;
+              const rowBg = excl ? 'transparent'
+                : unstb ? 'rgba(220,80,60,0.06)'
+                : fold.num % 2 === 1 ? 'rgba(255,255,255,0.015)' : 'transparent';
+              return (
+                <tr key={fold.num} style={{ background: rowBg, opacity: excl ? 0.35 : 1 }}>
+                  <td style={{ padding: '3px 8px 3px 5px', color: 'var(--t3)', fontSize: 8 }}>{fold.num}</td>
+                  {hasDates && (
+                    <td style={{ padding: '3px 10px 3px 5px', whiteSpace: 'nowrap', color: 'var(--t2)' }}>
+                      {fold.dateFrom} <span style={{ color: 'var(--t4)' }}>→</span> {fold.dateTo}
+                    </td>
+                  )}
+                  <td style={{ padding: '3px 10px 3px 5px', whiteSpace: 'nowrap', color: 'var(--t3)', fontSize: 8 }}>{fold.trainRange}</td>
+                  <td style={{ padding: '3px 10px 3px 5px', whiteSpace: 'nowrap', color: 'var(--t2)', fontSize: 8 }}>
+                    {fold.testRange}
+                    {excl && <span style={{ marginLeft: 5, fontSize: 7, color: 'var(--t3)', textTransform: 'uppercase', letterSpacing: '0.06em' }}>⊘ sat</span>}
+                    {unstb && <span style={{ marginLeft: 5, fontSize: 7, color: 'var(--amber)', textTransform: 'uppercase', letterSpacing: '0.06em' }}>⚠ unstable</span>}
+                  </td>
+                  <td style={{ padding: '3px 8px 3px 5px', textAlign: 'right', color: excl ? 'var(--t4)' : sharpeColor(fold.isSharpe) }}>{fmt(fold.isSharpe, 3)}</td>
+                  <td style={{ padding: '3px 8px 3px 5px', textAlign: 'right' }}>
+                    {excl ? (
+                      <span style={{ color: 'var(--t4)' }}>{fmt(fold.oosSharpe, 3)}</span>
+                    ) : (
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 5, justifyContent: 'flex-end' }}>
+                        <div style={{ width: 36, height: 3, background: 'var(--bg3)', borderRadius: 1, flexShrink: 0 }}>
+                          {fold.oosSharpe !== null && fold.oosSharpe > 0 && (
+                            <div style={{ width: `${Math.round(frac * 100)}%`, height: '100%', background: sharpeColor(fold.oosSharpe), borderRadius: 1 }} />
+                          )}
+                        </div>
+                        <span style={{ color: sharpeColor(fold.oosSharpe), fontWeight: unstb ? 700 : 400 }}>{fmt(fold.oosSharpe, 3)}</span>
+                      </div>
+                    )}
+                  </td>
+                  <td style={{ padding: '3px 8px 3px 5px', textAlign: 'right', color: excl ? 'var(--t4)' : 'var(--t2)', fontSize: 8 }}>{fold.oosCagr ?? '—'}</td>
+                  <td style={{ padding: '3px 8px 3px 5px', textAlign: 'right', color: excl ? 'var(--t4)' : maxddColor(fold.oosMaxdd) }}>{fmt(fold.oosMaxdd, 2, '%')}</td>
+                  <td style={{ padding: '3px 8px 3px 5px', textAlign: 'right', color: excl ? 'var(--t4)' : sortinoColor(fold.oosSortino) }}>{fmt(fold.oosSortino, 3)}</td>
+                  <td style={{ padding: '3px 8px 3px 5px', textAlign: 'right', color: excl ? 'var(--t4)' : r2Color(fold.oosR2) }}>{fmt(fold.oosR2, 3)}</td>
+                  <td style={{ padding: '3px 8px 3px 5px', textAlign: 'right', color: excl ? 'var(--t4)' : dsrColor(fold.oosDsr) }}>{fmt(fold.oosDsr, 1, '%')}</td>
+                  {hasActiveDays && (
+                    <td style={{ padding: '3px 8px 3px 5px', textAlign: 'right', whiteSpace: 'nowrap' }}>
+                      {fold.activeDays !== null && fold.flatDays !== null
+                        ? <><span style={{ color: 'var(--t2)' }}>{fold.activeDays}</span><span style={{ color: 'var(--t4)' }}>/{fold.activeDays + fold.flatDays}d</span></>
+                        : <span style={{ color: 'var(--t4)' }}>—</span>}
+                    </td>
+                  )}
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+
+      {/* Unstable fold daily breakdowns (collapsible) */}
+      {folds.filter((f) => f.dailyBreakdown && f.dailyBreakdown.length > 0).map((fold) => (
+        <details key={`daily-${fold.num}`} style={{ border: '1px solid var(--line)', borderRadius: 3, background: 'rgba(220,80,60,0.03)' }}>
+          <summary style={{ padding: '5px 10px', cursor: 'pointer', color: 'var(--amber)', fontSize: 8, textTransform: 'uppercase', letterSpacing: '0.08em' }}>
+            ⚠ Fold {fold.num} — Daily Return Breakdown
+            {fold.dailySummary && (
+              <span style={{ marginLeft: 10, color: 'var(--t3)', textTransform: 'none', letterSpacing: 0 }}>
+                {fold.dailySummary.winDays}/{fold.dailySummary.totalDays} wins ({fold.dailySummary.winPct}%) · avg {fold.dailySummary.avgDaily?.toFixed(3)}%/d
+              </span>
+            )}
+          </summary>
+          <div style={{ padding: '4px 10px 8px' }}>
+            {/* Daily return bar chart */}
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 1, marginBottom: 8 }}>
+              {fold.dailyBreakdown!.map((row) => {
+                const maxRet = Math.max(...fold.dailyBreakdown!.map((r) => Math.abs(r.ret)));
+                const barW = maxRet > 0 ? Math.abs(row.ret) / maxRet * 100 : 0;
+                const isWin = row.type === 'WIN';
+                return (
+                  <div key={row.day} style={{ display: 'flex', alignItems: 'center', gap: 4, height: 10 }}>
+                    <span style={{ width: 18, textAlign: 'right', color: 'var(--t4)', fontSize: 7 }}>{row.day}</span>
+                    <div style={{ flex: 1, display: 'flex', justifyContent: isWin ? 'flex-start' : 'flex-end', position: 'relative' }}>
+                      <div style={{ position: 'absolute', left: '50%', top: 0, bottom: 0, width: 1, background: 'var(--line)' }} />
+                      <div style={{
+                        position: 'absolute',
+                        [isWin ? 'left' : 'right']: '50%',
+                        width: `${barW * 0.5}%`,
+                        height: 6, borderRadius: 1, top: 2,
+                        background: isWin ? 'var(--green)' : 'var(--red)',
+                        opacity: row.isBig ? 0.9 : 0.5,
+                      }} />
+                    </div>
+                    <span style={{ width: 44, textAlign: 'right', color: isWin ? 'var(--green)' : 'var(--red)', fontSize: 8 }}>
+                      {row.ret > 0 ? '+' : ''}{row.ret.toFixed(2)}%
+                    </span>
+                    <span style={{ width: 44, textAlign: 'right', color: 'var(--t4)', fontSize: 7.5 }}>{row.cumul.toFixed(1)}%</span>
+                  </div>
+                );
+              })}
+            </div>
+            {/* Summary stats */}
+            {fold.dailySummary && (
+              <div style={{ display: 'flex', gap: 14, flexWrap: 'wrap', padding: '4px 0', borderTop: '1px solid var(--line)', fontSize: 8 }}>
+                <span style={{ color: 'var(--t3)' }}>Avg win <span style={{ color: 'var(--green)' }}>+{fold.dailySummary.avgWin?.toFixed(2)}%</span></span>
+                <span style={{ color: 'var(--t3)' }}>Avg loss <span style={{ color: 'var(--red)' }}>{fold.dailySummary.avgLoss?.toFixed(2)}%</span></span>
+                <span style={{ color: 'var(--t3)' }}>Worst <span style={{ color: 'var(--red)' }}>{fold.dailySummary.worstDay?.toFixed(2)}%</span></span>
+                <span style={{ color: 'var(--t3)' }}>Best <span style={{ color: 'var(--green)' }}>+{fold.dailySummary.bestDay?.toFixed(2)}%</span></span>
+                {fold.dailySummary.pattern && (
+                  <span style={{ color: 'var(--amber)', fontSize: 7.5 }}>{fold.dailySummary.pattern}</span>
+                )}
+              </div>
+            )}
+          </div>
+        </details>
+      ))}
+
+      {/* Aggregate summary */}
+      {meanSharpe !== null && (
+        <div style={{ display: 'flex', gap: 18, flexWrap: 'wrap', padding: '6px 10px', background: 'var(--bg0)', border: '1px solid var(--line)', borderRadius: 3, alignItems: 'center' }}>
+          <span style={{ color: 'var(--t3)', fontSize: 8, textTransform: 'uppercase', letterSpacing: '0.1em' }}>
+            Aggregate — {activeFoldsUsed || folds.filter((f) => !f.isExcluded).length} active folds
+          </span>
+          <span style={{ color: 'var(--t2)' }}>
+            Mean SR <span style={{ color: sharpeColor(meanSharpe), fontWeight: 700 }}>{meanSharpe.toFixed(3)}</span>
+            {stdSharpe !== null && <span style={{ color: 'var(--t3)' }}> ±{stdSharpe.toFixed(3)}</span>}
+            {minSharpe !== null && maxSharpe !== null && (
+              <span style={{ color: 'var(--t4)', fontSize: 8 }}> [{minSharpe.toFixed(3)}, {maxSharpe.toFixed(3)}]</span>
+            )}
+          </span>
+          {robustScore !== null && (
+            <span style={{ color: 'var(--t2)' }}>
+              Robust <span style={{ color: robustScore >= 0 ? 'var(--green)' : 'var(--red)', fontWeight: 700 }}>{robustScore.toFixed(3)}</span>
+            </span>
+          )}
+          {meanDsr !== null && (
+            <span style={{ color: 'var(--t2)' }}>
+              DSR <span style={{ color: dsrColor(meanDsr) }}>{meanDsr.toFixed(1)}%</span>
+              {dsrStatus && (
+                <span style={{ marginLeft: 4, color: /PASS/i.test(dsrStatus) ? 'var(--green)' : /FAIL/i.test(dsrStatus) ? 'var(--red)' : 'var(--amber)', fontSize: 8 }}>
+                  {/PASS/i.test(dsrStatus) ? '✅' : /FAIL/i.test(dsrStatus) ? '❌' : '⚠'} {dsrStatus}
+                </span>
+              )}
+            </span>
+          )}
+          {pctPositive !== null && (
+            <span style={{ color: 'var(--t2)' }}>
+              Positive <span style={{ color: pctPositive >= 80 ? 'var(--green)' : pctPositive >= 60 ? 'var(--amber)' : 'var(--red)' }}>{pctPositive}%</span>
+            </span>
+          )}
+          {cv !== null && (
+            <span style={{ color: 'var(--t2)' }}>
+              CV=<span style={{ color: cvStable ? 'var(--green)' : 'var(--amber)', fontWeight: 700 }}>{cv.toFixed(3)}</span>
+              <span style={{ marginLeft: 5, color: cvStable ? 'var(--green)' : 'var(--amber)' }}>
+                {cvStable ? '✅ STABLE' : '⚠ UNSTABLE'}
+              </span>
+            </span>
+          )}
+        </div>
+      )}
+
+      {/* Secondary aggregate stats */}
+      {(meanCagr || meanMaxdd || meanSortino || meanR2) && (
+        <div style={{ display: 'flex', gap: 18, flexWrap: 'wrap', padding: '4px 10px', alignItems: 'center' }}>
+          {meanCagr && <span style={{ color: 'var(--t3)', fontSize: 8 }}>Mean CAGR <span style={{ color: 'var(--t2)' }}>{meanCagr}</span></span>}
+          {meanMaxdd && <span style={{ color: 'var(--t3)', fontSize: 8 }}>Mean MaxDD <span style={{ color: 'var(--t2)' }}>{meanMaxdd}</span></span>}
+          {meanSortino && <span style={{ color: 'var(--t3)', fontSize: 8 }}>Mean Sortino <span style={{ color: 'var(--t2)' }}>{meanSortino}</span></span>}
+          {meanR2 && <span style={{ color: 'var(--t3)', fontSize: 8 }}>Mean R² <span style={{ color: 'var(--t2)' }}>{meanR2}</span></span>}
+        </div>
+      )}
+
+      {/* OI diagnostics */}
+      {oiCorrs.length > 0 && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 4, padding: '6px 10px', background: 'var(--bg0)', border: '1px solid var(--line)', borderRadius: 3 }}>
+          <span style={{ color: 'var(--t3)', fontSize: 8, textTransform: 'uppercase', letterSpacing: '0.1em', marginBottom: 2 }}>OI Regime Correlations</span>
+          {oiCorrs.map((c) => (
+            <div key={c.label} style={{ display: 'flex', gap: 10, alignItems: 'center' }}>
+              <span style={{ color: 'var(--t3)', minWidth: 200, fontSize: 8.5 }}>{c.label}</span>
+              <span style={{ color: Math.abs(parseFloat(c.value)) > 0.5 ? 'var(--amber)' : 'var(--t2)' }}>{c.value}</span>
+              {Math.abs(parseFloat(c.value)) > 0.5 && <span style={{ color: 'var(--amber)', fontSize: 7.5 }}>★ consider as regime filter</span>}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ── PARAMETER SURFACE MAP (2-D HEAT MAP) ─────────────────────────────────────
 function renderParamSurfaceMap(title: string, body: string): React.ReactNode {
   // Extract the two param names from title: "... -- PARAM_X x PARAM_Y"
@@ -6224,31 +10989,242 @@ function renderParameterSweep(title: string, body: string): React.ReactNode {
   return renderTrailSweep(body, title);
 }
 
+function renderStressTestSummary(body: string): React.ReactNode {
+  const lines = body.split('\n');
+
+  // Parse header info (MC iters, BB iters, block length)
+  let mcIters = '';
+  let bbIters = '';
+  for (const line of lines) {
+    const m = line.match(/MC Reshuffle:\s*([\d,]+)\s*iters.*Block Bootstrap:\s*([\d,]+)\s*iters\s*block=(\d+)/i);
+    if (m) { mcIters = m[1]; bbIters = `${m[2]} (block=${m[3]}d)`; break; }
+  }
+
+  // Parse Max Drawdown Distribution table
+  const ddRows: { label: string; mc: string; bb: string }[] = [];
+  for (const line of lines) {
+    const m = line.match(/│?\s*(p\d+\s*\([^)]+\)|Median)\s+([-\d.]+%)\s+([-\d.]+%)/i);
+    if (m) ddRows.push({ label: m[1].trim(), mc: m[2].trim(), bb: m[3].trim() });
+  }
+
+  // Parse Total Return Multiple Distribution
+  const multRows: { label: string; value: string }[] = [];
+  const simStats: { label: string; value: string }[] = [];
+  let collapsed = false;
+  let inMult = false;
+  for (const line of lines) {
+    if (/TOTAL RETURN MULTIPLE/i.test(line)) { inMult = true; continue; }
+    if (!inMult) continue;
+    if (/path-order invariant/i.test(line)) { collapsed = true; continue; }
+    const pMatch = line.match(/│?\s*(p\d+\s*\([^)]+\)|Median):\s+([\d.]+x)/i);
+    if (pMatch) { multRows.push({ label: pMatch[1].trim(), value: pMatch[2].trim() }); continue; }
+    const sMatch = line.match(/│?\s*(% sims[^:]+):\s+([\d.]+%)/i);
+    if (sMatch) { simStats.push({ label: sMatch[1].trim(), value: sMatch[2].trim() }); continue; }
+  }
+
+  if (ddRows.length === 0 && multRows.length === 0) return <PreFallback body={body} />;
+
+  const parseNum = (s: string) => parseFloat(s.replace(/[%x,]/g, ''));
+
+  const ddColor = (val: string) => {
+    const n = parseNum(val);
+    if (!Number.isFinite(n)) return 'var(--t1)';
+    if (n < -40) return 'var(--red)';
+    if (n < -20) return 'var(--orange)';
+    return 'var(--green)';
+  };
+
+  const multColor = (val: string) => {
+    const n = parseNum(val);
+    if (!Number.isFinite(n)) return 'var(--t1)';
+    if (n < 1) return 'var(--red)';
+    if (n < 5) return 'var(--t1)';
+    return 'var(--green)';
+  };
+
+  const simColor = (label: string, val: string) => {
+    const n = parseNum(val);
+    if (!Number.isFinite(n)) return 'var(--t2)';
+    if (label.includes('lost money')) return n > 10 ? 'var(--red)' : n > 0 ? 'var(--orange)' : 'var(--green)';
+    return n > 50 ? 'var(--green)' : n > 10 ? 'var(--t1)' : 'var(--t3)';
+  };
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+      {sectionLabel('Stress Test Summary')}
+
+      {/* Config badges */}
+      {(mcIters || bbIters) && (
+        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+          {mcIters && (
+            <div style={{
+              padding: '4px 10px', borderRadius: 12, fontSize: 9, ...MONO,
+              background: 'rgba(100, 160, 255, 0.1)', color: 'var(--blue)', border: '1px solid rgba(100, 160, 255, 0.2)',
+            }}>
+              MC Reshuffle: {mcIters} iters
+            </div>
+          )}
+          {bbIters && (
+            <div style={{
+              padding: '4px 10px', borderRadius: 12, fontSize: 9, ...MONO,
+              background: 'rgba(180, 130, 255, 0.1)', color: 'var(--purple)', border: '1px solid rgba(180, 130, 255, 0.2)',
+            }}>
+              Block Bootstrap: {bbIters}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Max Drawdown Distribution */}
+      {ddRows.length > 0 && (
+        <div style={{
+          background: 'var(--bg1)', border: '1px solid var(--line2)', borderRadius: 6, overflow: 'hidden',
+        }}>
+          <div style={{
+            padding: '10px 14px', borderBottom: '1px solid var(--line2)', background: 'var(--bg2)',
+            fontSize: 9.5, color: 'var(--t3)', textTransform: 'uppercase', letterSpacing: '0.08em', fontWeight: 700, ...MONO,
+          }}>
+            Max Drawdown Distribution
+          </div>
+          {/* Header */}
+          <div style={{
+            display: 'grid', gridTemplateColumns: '1fr 1fr 1fr',
+            padding: '8px 14px', borderBottom: '1px solid var(--line1)',
+            fontSize: 9, color: 'var(--t4)', textTransform: 'uppercase', letterSpacing: 0.5, ...MONO,
+          }}>
+            <div>Percentile</div>
+            <div style={{ textAlign: 'right' }}>MC Reshuffle</div>
+            <div style={{ textAlign: 'right' }}>Block Bootstrap</div>
+          </div>
+          {/* Rows */}
+          {ddRows.map((row, idx) => (
+            <div key={idx} style={{
+              display: 'grid', gridTemplateColumns: '1fr 1fr 1fr',
+              padding: '10px 14px',
+              borderBottom: idx === ddRows.length - 1 ? 'none' : '1px solid var(--line1)',
+              fontSize: 11.5, alignItems: 'center', ...MONO,
+            }}>
+              <div style={{ color: 'var(--t2)', fontSize: 10 }}>{row.label}</div>
+              <div style={{ textAlign: 'right', fontWeight: 600, color: ddColor(row.mc) }}>{row.mc}</div>
+              <div style={{ textAlign: 'right', fontWeight: 600, color: ddColor(row.bb) }}>{row.bb}</div>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* Total Return Multiple Distribution */}
+      {multRows.length > 0 && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+          <div style={{
+            fontSize: 9.5, color: 'var(--t3)', textTransform: 'uppercase', letterSpacing: '0.08em', fontWeight: 700, ...MONO,
+          }}>
+            Total Return Multiple (MC Reshuffle)
+          </div>
+
+          {collapsed && (
+            <div style={{
+              padding: '6px 10px', borderRadius: 4, fontSize: 9, lineHeight: 1.5,
+              background: 'rgba(100, 160, 255, 0.06)', color: 'var(--blue)', border: '1px solid rgba(100, 160, 255, 0.15)', ...MONO,
+            }}>
+              TotalMultiple is path-order invariant — variance captured by MaxDD distribution above.
+            </div>
+          )}
+
+          <div style={{
+            display: 'grid', gridTemplateColumns: `repeat(${multRows.length}, 1fr)`, gap: 10,
+          }}>
+            {multRows.map((row, idx) => (
+              <div key={idx} style={{
+                background: 'var(--bg2)', border: '1px solid var(--line1)', borderRadius: 6,
+                padding: '14px 16px', display: 'flex', flexDirection: 'column', gap: 5,
+                boxShadow: 'inset 0 1px 0 rgba(255,255,255,0.02)',
+              }}>
+                <div style={{ fontSize: 9, color: 'var(--t3)', textTransform: 'uppercase', letterSpacing: 0.5, ...MONO }}>
+                  {row.label}
+                </div>
+                <div style={{ fontSize: 20, fontWeight: 500, letterSpacing: -0.5, color: multColor(row.value), ...MONO }}>
+                  {row.value}
+                </div>
+              </div>
+            ))}
+          </div>
+
+          {/* Sim threshold stats */}
+          {simStats.length > 0 && (
+            <div style={{
+              display: 'grid', gridTemplateColumns: `repeat(${simStats.length}, 1fr)`, gap: 8,
+            }}>
+              {simStats.map((s, idx) => {
+                const n = parseNum(s.value);
+                const barWidth = Number.isFinite(n) ? Math.min(n, 100) : 0;
+                return (
+                  <div key={idx} style={{
+                    background: 'var(--bg1)', border: '1px solid var(--line1)', borderRadius: 4,
+                    padding: '8px 12px', position: 'relative', overflow: 'hidden',
+                  }}>
+                    <div style={{
+                      position: 'absolute', top: 0, left: 0, bottom: 0,
+                      width: `${barWidth}%`, opacity: 0.08,
+                      background: s.label.includes('lost money') ? 'var(--red)' : 'var(--green)',
+                    }} />
+                    <div style={{ position: 'relative', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                      <div style={{ fontSize: 9, color: 'var(--t3)', ...MONO }}>{s.label}</div>
+                      <div style={{ fontSize: 12, fontWeight: 600, color: simColor(s.label, s.value), ...MONO }}>{s.value}</div>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function renderSectionViz(title: string, body: string): React.ReactNode {
   const t = title.toUpperCase();
 
   if (t.includes('RUN SUMMARY')) return renderRunSummary(body);
+  if (t.includes('BEST FILTER HEADLINE STATS')) return renderBestFilterHeadline(body);
   if (t.includes('ALLOCATOR VIEW SCORECARD') || t.includes('TECHNICAL APPENDIX SCORECARD')) return renderScorecardTable(body);
   if (t.includes('RETURN RATES BY PERIOD')) return renderReturnRatesByPeriod(body);
   if (t.includes('RETURN DISTRIBUTION')) return renderReturnDistribution(body);
   if (t.includes('RETURN + CONDITIONAL ANALYSIS') || t.includes('RETURN+CONDITIONAL')) return renderReturnConditional(body);
+  if (t.includes('REGIME & CONDITIONAL ANALYSIS')) return renderRegimeConditional(body);
   if (t.includes('ROLLING MAX DRAWDOWN')) return renderRollingMaxDrawdown(body);
   if (t.includes('DRAWDOWN EPISODE ANALYSIS')) return renderDrawdownEpisodes(body);
   if (t.includes('RISK-ADJUSTED RETURN QUALITY')) return renderRiskAdjustedQuality(body);
   if (t.includes('DAILY VAR') || t.includes('CVAR')) return renderDailyVarCvar(body);
+  if (t.includes('STATISTICAL VALIDITY')) return renderStatisticalValidity(body);
+  if (t.includes('TAIL RISK') && t.includes('EXTENDED')) return renderTailRiskExtended(body);
   if (t.includes('SIGNAL PREDICTIVENESS')) return renderSignalPredictiveness(body);
-  if (t.includes('SLIPPAGE IMPACT SWEEP')) return <PreFallback body={body} />;
-  if (t.includes('NOISE PERTURBATION STABILITY TEST')) return <PreFallback body={body} />;
-  if (t.includes('PARAM JITTER')) return <PreFallback body={body} />;
-  if (t.includes('RETURN CONCENTRATION ANALYSIS')) return <PreFallback body={body} />;
+  if (t.includes('SLIPPAGE IMPACT SWEEP')) return renderSlippageSweep(body);
+  if (t.includes('NOISE PERTURBATION STABILITY TEST')) return renderNoisePerturbation(body);
+  if (t.includes('PARAM JITTER')) return renderParamJitter(body);
+  if (t.includes('NEIGHBOR PLATEAU TEST')) return renderNeighborPlateau(body);
+  if (t.includes('PARAMETER SENSITIVITY MAP')) return renderParamSensitivityMap(body);
+  if (t.includes('SLIPPAGE SENSITIVITY TABLE')) return renderSlippageSensitivity(body);
+  if (t.includes('CAPPED RETURN SENSITIVITY')) return renderCappedReturnSensitivity(body);
+  if (t.includes('TOP-N DAY REMOVAL TEST') || t.includes('TOP‑N DAY REMOVAL')) return renderTopNDayRemoval(body);
+  if (t.includes('LUCKY STREAK TEST')) return renderLuckyStreakTest(title, body);
+  if (t.includes('RETURN CONCENTRATION ANALYSIS')) return renderReturnConcentration(body);
   if (t.includes('PERIODIC RETURN BREAKDOWN')) return renderPeriodicBreakdown(body);
-  if (t.includes('SHOCK INJECTION TEST')) return <PreFallback body={body} />;
+  if (t.includes('SHOCK INJECTION TEST')) return renderShockInjection(body);
+  if (t.includes('REGIME ROBUSTNESS TEST')) return renderRegimeRobustness(body);
   if (t.includes('WEEKLY MILESTONES') || t.includes('MONTHLY MILESTONES')) return renderMilestones(body);
   if (t.includes('MINIMUM CUMULATIVE RETURN')) return renderMinCumReturn(body);
   if (t.includes('LIQUIDITY CAPACITY CURVE')) return renderLiquidityCapacityCurve(body);
+  if (t.includes('CAPACITY CURVE TEST')) return renderCapacityCurveTest(body);
+  if (t.includes('COST CURVE TEST')) return renderCostCurveTest(body);
+  if (t.includes('CAPITAL & OPERATIONAL')) return renderCapitalOperational(body);
   if (t.includes('MARKET CAP DIAGNOSTIC')) return renderMarketCapDiagnostic(body);
   if (/^RUIN PROBABILITY/i.test(t)) return renderRuinProbability(body);
   if (t.includes('DEFLATED SHARPE RATIO')) return renderDeflatedSharpe(body);
+
+  if (t.includes('SHARPE STABILITY ANALYSIS')) return renderSharpeStability(body);
+  if (t.includes('WALK-FORWARD VALIDATION')) return renderWalkForwardValidation(title, body);
+  if (t.includes('WALK-FORWARD ROLLING') || t.includes('FILTER-AWARE WALK-FORWARD')) return renderWalkForwardRolling(title, body);
 
   if (t.includes('TAIL GUARDRAIL GRID SWEEP')) return renderTailGuardrailGridSweep(body);
   if (t.includes('PARAMETER SURFACE MAP')) return renderParamSurfaceMap(title, body);
@@ -6261,6 +11237,8 @@ function renderSectionViz(title: string, body: string): React.ReactNode {
   if (t.includes('PARAMETER SWEEP')) return renderParameterSweep(title, body);
   if (t.includes('L_HIGH SURFACE') && t.includes('RANKED BY SHARPE')) return renderLHighRanked(body);
   if (t.includes('L_HIGH SURFACE')) return renderLHighSweep(body, title);
+
+  if (t.includes('STRESS TEST SUMMARY')) return renderStressTestSummary(body);
 
   return <PreFallback body={body} />;
 }
@@ -6327,6 +11305,7 @@ export default function ResultsView({ results, jobId, startingCapital, params }:
   const [equityLogScale, setEquityLogScale] = useState(false);
   const [manualSelectedFilter, setManualSelectedFilter] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<ReportTab>('summary');
+  const [hideFlatDays, setHideFlatDays] = useState(false);
   const [auditOutput, setAuditOutput] = useState<string>('');
   const [outputLoading, setOutputLoading] = useState(false);
   const [outputError, setOutputError] = useState<string | null>(null);
@@ -8417,6 +13396,7 @@ export default function ResultsView({ results, jobId, startingCapital, params }:
                   height: 24,
                   display: 'flex',
                   alignItems: 'center',
+                  justifyContent: 'space-between',
                   borderBottom: '1px solid var(--line)',
                   fontSize: 9,
                   color: 'var(--t3)',
@@ -8432,6 +13412,25 @@ export default function ResultsView({ results, jobId, startingCapital, params }:
                 }}
               >
                 {`Fees Panel${selectedFilter ? ` • ${selectedFilter}` : ''}`}
+                <button
+                  onClick={() => setHideFlatDays((v) => !v)}
+                  style={{
+                    background: hideFlatDays ? 'var(--green-dim)' : 'transparent',
+                    border: `1px solid ${hideFlatDays ? 'var(--green)' : 'var(--line)'}`,
+                    borderRadius: 3,
+                    padding: '2px 8px',
+                    fontSize: 8,
+                    color: hideFlatDays ? 'var(--green)' : 'var(--t2)',
+                    textTransform: 'uppercase',
+                    letterSpacing: '0.08em',
+                    fontWeight: 700,
+                    cursor: 'pointer',
+                    fontFamily: 'var(--font-space-mono), Space Mono, monospace',
+                    lineHeight: 1,
+                  }}
+                >
+                  {hideFlatDays ? 'Flat Hidden' : 'Hide Flat'}
+                </button>
               </div>
               {selectedFeesTableRowsWithCumulative.length > 0 ? (
                 <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
@@ -8488,7 +13487,7 @@ export default function ResultsView({ results, jobId, startingCapital, params }:
                       </tr>
                     </thead>
                     <tbody>
-                      {selectedFeesTableRowsWithCumulative.map((row, i) => {
+                      {selectedFeesTableRowsWithCumulative.filter((row) => !hideFlatDays || !row.no_entry).map((row, i) => {
                         const bg = i % 2 === 0 ? 'var(--bg1)' : 'var(--bg2)';
                         const fmtN = (v: number | null | undefined) => (v === null || v === undefined || !Number.isFinite(v) ? '—' : new Intl.NumberFormat(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(v));
                         const fmtLev = (v: number | null | undefined) => (v === null || v === undefined || !Number.isFinite(v) ? '—' : v.toFixed(3));
@@ -9073,6 +14072,64 @@ export default function ResultsView({ results, jobId, startingCapital, params }:
                 {fullReportSections.length === 0 && (
                   <div style={{ fontSize: 10, color: 'var(--t3)' }}>No full report sections detected.</div>
                 )}
+                {fullReportSections.length > 0 && (
+                  <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
+                    <button
+                      onClick={() => {
+                        setOpenFullReportCategories((prev) => {
+                          const next = { ...prev };
+                          for (const cat of fullReportCategoryGroups) next[cat.key] = true;
+                          return next;
+                        });
+                        setOpenFullReportSectionKeys((prev) => {
+                          const next = { ...prev };
+                          for (const cat of fullReportCategoryGroups) {
+                            for (let idx = 0; idx < cat.sections.length; idx += 1) {
+                              next[`${cat.key}-${idx}-${cat.sections[idx].title}`] = true;
+                            }
+                          }
+                          return next;
+                        });
+                      }}
+                      style={{
+                        padding: '4px 10px', borderRadius: 4,
+                        border: '1px solid var(--line1)', background: 'var(--bg2)',
+                        color: 'var(--t2)', fontSize: 9, cursor: 'pointer',
+                        letterSpacing: '0.05em', textTransform: 'uppercase',
+                        ...MONO,
+                      }}
+                    >
+                      Expand All
+                    </button>
+                    <button
+                      onClick={() => {
+                        setOpenFullReportCategories((prev) => {
+                          const next = { ...prev };
+                          for (const cat of fullReportCategoryGroups) next[cat.key] = false;
+                          return next;
+                        });
+                        setOpenFullReportSectionKeys((prev) => {
+                          const next = { ...prev };
+                          for (const cat of fullReportCategoryGroups) {
+                            for (let idx = 0; idx < cat.sections.length; idx += 1) {
+                              next[`${cat.key}-${idx}-${cat.sections[idx].title}`] = false;
+                            }
+                          }
+                          return next;
+                        });
+                      }}
+                      style={{
+                        padding: '4px 10px', borderRadius: 4,
+                        border: '1px solid var(--line1)', background: 'var(--bg2)',
+                        color: 'var(--t2)', fontSize: 9, cursor: 'pointer',
+                        letterSpacing: '0.05em', textTransform: 'uppercase',
+                        ...MONO,
+                      }}
+                    >
+                      Collapse All
+                    </button>
+                  </div>
+                )}
                 {fullReportCategoryGroups.map((cat) => (
                   <details
                     key={`group-${cat.key}`}
@@ -9080,7 +14137,10 @@ export default function ResultsView({ results, jobId, startingCapital, params }:
                     open={openFullReportCategories[cat.key]}
                     onToggle={(e) => {
                       const isOpen = (e.currentTarget as HTMLDetailsElement).open;
-                      setOpenFullReportCategories((prev) => ({ ...prev, [cat.key]: isOpen }));
+                      setOpenFullReportCategories((prev) => {
+                        if (prev[cat.key] === isOpen) return prev;
+                        return { ...prev, [cat.key]: isOpen };
+                      });
                     }}
                     style={{ border: '1px solid var(--line)', borderRadius: 3, padding: '6px 8px', background: 'var(--bg1)' }}
                   >
@@ -9104,6 +14164,7 @@ export default function ResultsView({ results, jobId, startingCapital, params }:
                           onClick={(e) => {
                             e.preventDefault();
                             e.stopPropagation();
+                            setOpenFullReportCategories((prev) => ({ ...prev, [cat.key]: true }));
                             setOpenFullReportSectionKeys((prev) => {
                               const next = { ...prev };
                               for (let idx = 0; idx < cat.sections.length; idx += 1) {
@@ -9166,7 +14227,10 @@ export default function ResultsView({ results, jobId, startingCapital, params }:
                           onToggle={(e) => {
                             const key = `${cat.key}-${idx}-${section.title}`;
                             const isOpen = (e.currentTarget as HTMLDetailsElement).open;
-                            setOpenFullReportSectionKeys((prev) => ({ ...prev, [key]: isOpen }));
+                            setOpenFullReportSectionKeys((prev) => {
+                              if (prev[key] === isOpen) return prev;
+                              return { ...prev, [key]: isOpen };
+                            });
                           }}
                           style={{
                             border: '1px solid var(--line2)',
