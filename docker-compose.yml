@@ -23,7 +23,7 @@ services:
       - NODE_BIN=node
     volumes:
       - jobs_data:/app/backend/jobs
-      - /data:/data:ro
+      - /data:/data
     depends_on:
       redis:
         condition: service_healthy
@@ -44,7 +44,7 @@ services:
       - NODE_BIN=node
     volumes:
       - jobs_data:/app/backend/jobs
-      - /data:/data:ro
+      - /data:/data
     depends_on:
       redis:
         condition: service_healthy
