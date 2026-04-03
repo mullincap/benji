@@ -16,11 +16,11 @@ export default function LandingPage() {
       {/* Three.js wave background */}
       <div style={{ position: 'fixed', top: 0, left: 0, width: '100%', height: '100%', pointerEvents: 'none' }}>
         <WaveAnimation
-          waveSpeed={1.5}
-          waveIntensity={6.0}
+          waveSpeed={0.8}
+          waveIntensity={1.2}
           particleColor="#3cff78"
-          pointSize={1.2}
-          gridDistance={4}
+          pointSize={2.0}
+          gridDistance={3}
         />
       </div>
 
@@ -150,11 +150,12 @@ export default function LandingPage() {
               style={{
                 fontSize: 10,
                 letterSpacing: '0.06em',
-                color: 'rgba(255,255,255,0.35)',
-                border: '1px solid rgba(255,255,255,0.08)',
+                color: 'rgba(255,255,255,0.6)',
+                border: '1px solid rgba(255,255,255,0.12)',
                 borderRadius: 20,
                 padding: '6px 14px',
-                background: 'rgba(255,255,255,0.02)',
+                background: 'rgba(0,0,0,0.4)',
+                backdropFilter: 'blur(6px)',
               }}
             >
               {feat}

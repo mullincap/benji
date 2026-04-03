@@ -10,6 +10,8 @@ interface WaveAnimationProps {
   pointSize?: number
   waveSpeed?: number
   waveIntensity?: number
+  waveAmplitude?: number
+  cameraZ?: number
   particleColor?: string
   gridDistance?: number
   className?: string
@@ -22,6 +24,8 @@ export function WaveAnimation({
   pointSize = 1.5,
   waveSpeed = 2.0,
   waveIntensity = 8.0,
+  waveAmplitude = 1.0,
+  cameraZ = 10,
   particleColor = "#ffffff",
   gridDistance = 5,
   className = "",
@@ -52,7 +56,7 @@ export function WaveAnimation({
     container.appendChild(renderer.domElement)
 
     const camera = new THREE.PerspectiveCamera(fov, w / h, 1, 1000)
-    camera.position.set(0, 0, 10)
+    camera.position.set(0, 0, cameraZ)
 
     const scene = new THREE.Scene()
 
@@ -88,7 +92,7 @@ export function WaveAnimation({
           p.y += (
             cos(p.x / M_PI * ${waveIntensity.toFixed(1)} + u_time * ${waveSpeed.toFixed(1)}) +
             sin(p.z / M_PI * ${waveIntensity.toFixed(1)} + u_time * ${waveSpeed.toFixed(1)})
-          );
+          ) * ${waveAmplitude.toFixed(1)};
           gl_PointSize = u_point_size;
           gl_Position = projectionMatrix * modelViewMatrix * vec4(p, 1.0);
         }
@@ -139,7 +143,7 @@ export function WaveAnimation({
       geo.dispose()
       mat.dispose()
     }
-  }, [width, height, particles, pointSize, waveSpeed, waveIntensity, particleColor, gridDistance])
+  }, [width, height, particles, pointSize, waveSpeed, waveIntensity, waveAmplitude, cameraZ, particleColor, gridDistance])
 
   return (
     <div
