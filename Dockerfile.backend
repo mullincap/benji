@@ -1,0 +1,40 @@
+FROM python:3.13-slim
+
+WORKDIR /app
+
+# System deps for pyarrow, scipy, etc.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential curl && \
+    rm -rf /var/lib/apt/lists/*
+
+# Install Node.js (for report generation)
+RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && \
+    apt-get install -y nodejs && \
+    rm -rf /var/lib/apt/lists/*
+
+# Python deps
+COPY backend/requirements.txt /app/backend/requirements.txt
+RUN pip install --no-cache-dir -r /app/backend/requirements.txt
+
+# Pipeline Python deps (pandas, pyarrow, scipy, etc.)
+COPY pipeline/requirements.txt /app/pipeline/requirements.txt
+RUN pip install --no-cache-dir -r /app/pipeline/requirements.txt || true
+
+# Pipeline Node deps
+COPY pipeline/package.json pipeline/package-lock.json* /app/pipeline/
+RUN cd /app/pipeline && npm install --production 2>/dev/null || true
+
+# Copy application code
+COPY backend/ /app/backend/
+COPY pipeline/ /app/pipeline/
+
+# Create jobs directory
+RUN mkdir -p /app/backend/jobs
+
+ENV PYTHONPATH=/app/backend
+ENV PIPELINE_PYTHON=python
+ENV NODE_BIN=node
+
+EXPOSE 8000
+
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]

@@ -1,0 +1,10 @@
+numpy
+pandas
+pyarrow
+scipy
+scikit-learn
+matplotlib
+tqdm
+gspread
+google-auth
+google-auth-oauthlib

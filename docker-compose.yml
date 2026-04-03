@@ -1,0 +1,74 @@
+services:
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      retries: 3
+
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+    restart: unless-stopped
+    env_file: .env.production
+    environment:
+      - REDIS_URL=redis://redis:6379/0
+      - JOBS_DIR=/app/backend/jobs
+      - PIPELINE_DIR=/app/pipeline
+      - PIPELINE_PYTHON=python
+      - NODE_BIN=node
+    volumes:
+      - jobs_data:/app/backend/jobs
+      - /data:/data:ro
+    depends_on:
+      redis:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:8000:8000"
+
+  celery:
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+    restart: unless-stopped
+    env_file: .env.production
+    environment:
+      - REDIS_URL=redis://redis:6379/0
+      - JOBS_DIR=/app/backend/jobs
+      - PIPELINE_DIR=/app/pipeline
+      - PIPELINE_PYTHON=python
+      - NODE_BIN=node
+    volumes:
+      - jobs_data:/app/backend/jobs
+      - /data:/data:ro
+    depends_on:
+      redis:
+        condition: service_healthy
+    command: celery -A app.workers.pipeline_worker.celery_app worker --loglevel=info --concurrency=2
+
+  frontend:
+    build:
+      context: .
+      dockerfile: Dockerfile.frontend
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:3000:3000"
+
+  nginx:
+    image: nginx:alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+    volumes:
+      - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro
+    depends_on:
+      - frontend
+      - backend
+
+volumes:
+  redis_data:
+  jobs_data:

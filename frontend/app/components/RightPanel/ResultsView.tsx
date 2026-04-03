@@ -12348,7 +12348,8 @@ export default function ResultsView({ results, jobId, startingCapital, params }:
     setOutputLoading(true);
     setOutputError(null);
     try {
-      const res = await fetch(`http://localhost:8000/api/jobs/${jobId}/output`);
+      const apiBase = process.env.NEXT_PUBLIC_API_BASE || '';
+      const res = await fetch(`${apiBase}/api/jobs/${jobId}/output`);
       if (!res.ok) throw new Error(`GET /api/jobs/${jobId}/output failed: ${res.status}`);
       const data = (await res.json()) as { text?: string };
       setAuditOutput(typeof data.text === 'string' ? data.text : '');

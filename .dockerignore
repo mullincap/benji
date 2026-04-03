@@ -1,0 +1,13 @@
+.git
+.env
+.env.production
+node_modules
+frontend/node_modules
+frontend/.next
+pipeline/node_modules
+pipeline/audit_outputs*
+backend/jobs
+*.parquet
+*.pyc
+__pycache__
+.venv
