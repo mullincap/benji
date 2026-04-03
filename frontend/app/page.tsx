@@ -1,101 +1,7 @@
 'use client';
 
-import { useEffect, useRef } from 'react';
 import Link from 'next/link';
-
-function WaveCanvas() {
-  const canvasRef = useRef<HTMLCanvasElement>(null);
-
-  useEffect(() => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-    const ctx = canvas.getContext('2d');
-    if (!ctx) return;
-
-    let animationId: number;
-    let time = 0;
-
-    function resize() {
-      if (!canvas) return;
-      canvas.width = window.innerWidth * 2;
-      canvas.height = window.innerHeight * 2;
-      canvas.style.width = `${window.innerWidth}px`;
-      canvas.style.height = `${window.innerHeight}px`;
-    }
-
-    resize();
-    window.addEventListener('resize', resize);
-
-    function draw() {
-      if (!canvas || !ctx) return;
-      const w = canvas.width;
-      const h = canvas.height;
-
-      ctx.clearRect(0, 0, w, h);
-
-      const waves = [
-        { amplitude: 40, wavelength: 600, speed: 0.015, y: h * 0.62, color: 'rgba(60, 255, 120, 0.06)', lineColor: 'rgba(60, 255, 120, 0.15)' },
-        { amplitude: 30, wavelength: 450, speed: 0.02, y: h * 0.65, color: 'rgba(60, 255, 120, 0.04)', lineColor: 'rgba(60, 255, 120, 0.10)' },
-        { amplitude: 50, wavelength: 800, speed: 0.01, y: h * 0.68, color: 'rgba(60, 255, 120, 0.03)', lineColor: 'rgba(60, 255, 120, 0.07)' },
-        { amplitude: 25, wavelength: 350, speed: 0.025, y: h * 0.72, color: 'rgba(60, 255, 120, 0.02)', lineColor: 'rgba(60, 255, 120, 0.05)' },
-      ];
-
-      for (const wave of waves) {
-        ctx.beginPath();
-        ctx.moveTo(0, wave.y);
-
-        for (let x = 0; x <= w; x += 4) {
-          const y = wave.y +
-            Math.sin((x / wave.wavelength) * Math.PI * 2 + time * wave.speed) * wave.amplitude +
-            Math.sin((x / (wave.wavelength * 1.7)) * Math.PI * 2 - time * wave.speed * 0.7) * wave.amplitude * 0.5;
-          ctx.lineTo(x, y);
-        }
-
-        ctx.lineTo(w, h);
-        ctx.lineTo(0, h);
-        ctx.closePath();
-        ctx.fillStyle = wave.color;
-        ctx.fill();
-
-        ctx.beginPath();
-        for (let x = 0; x <= w; x += 4) {
-          const y = wave.y +
-            Math.sin((x / wave.wavelength) * Math.PI * 2 + time * wave.speed) * wave.amplitude +
-            Math.sin((x / (wave.wavelength * 1.7)) * Math.PI * 2 - time * wave.speed * 0.7) * wave.amplitude * 0.5;
-          if (x === 0) ctx.moveTo(x, y);
-          else ctx.lineTo(x, y);
-        }
-        ctx.strokeStyle = wave.lineColor;
-        ctx.lineWidth = 1;
-        ctx.stroke();
-      }
-
-      time += 1;
-      animationId = requestAnimationFrame(draw);
-    }
-
-    draw();
-
-    return () => {
-      cancelAnimationFrame(animationId);
-      window.removeEventListener('resize', resize);
-    };
-  }, []);
-
-  return (
-    <canvas
-      ref={canvasRef}
-      style={{
-        position: 'fixed',
-        top: 0,
-        left: 0,
-        width: '100%',
-        height: '100%',
-        pointerEvents: 'none',
-      }}
-    />
-  );
-}
+import { WaveAnimation } from './components/ui/wave-animation';
 
 export default function LandingPage() {
   return (
@@ -107,7 +13,16 @@ export default function LandingPage() {
       overflow: 'hidden',
       fontFamily: 'var(--font-space-mono), Space Mono, monospace',
     }}>
-      <WaveCanvas />
+      {/* Three.js wave background */}
+      <div style={{ position: 'fixed', top: 0, left: 0, width: '100%', height: '100%', pointerEvents: 'none' }}>
+        <WaveAnimation
+          waveSpeed={1.5}
+          waveIntensity={6.0}
+          particleColor="#3cff78"
+          pointSize={1.2}
+          gridDistance={4}
+        />
+      </div>
 
       {/* Nav */}
       <nav style={{
