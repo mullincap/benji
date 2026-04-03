@@ -18,7 +18,7 @@ RUN pip install --no-cache-dir -r /app/backend/requirements.txt
 
 # Pipeline Python deps (pandas, pyarrow, scipy, etc.)
 COPY pipeline/requirements.txt /app/pipeline/requirements.txt
-RUN pip install --no-cache-dir -r /app/pipeline/requirements.txt || true
+RUN pip install --no-cache-dir -r /app/pipeline/requirements.txt
 
 # Pipeline Node deps
 COPY pipeline/package.json pipeline/package-lock.json* /app/pipeline/
