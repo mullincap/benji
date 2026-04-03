@@ -463,7 +463,8 @@ DISPERSION_DYNAMIC_RETURNS_CACHE_FILE = "dispersion_dynamic_returns_cache.csv"
 #   * Resumable download with checkpoint file
 # Set to "" to always use the live API (original behaviour).
 # Default path matches coingecko_marketcap.py --output-dir data/marketcap
-DISPERSION_MCAP_PARQUET = os.environ.get("MARKETCAP_PARQUET", "/Users/johnmullin/Desktop/desk/benji3m/binetl/data/marketcap/marketcap_daily.parquet")
+_default_mcap_dir = os.environ.get("MARKETCAP_DIR", "/Users/johnmullin/Desktop/desk/benji3m/binetl/data/marketcap")
+DISPERSION_MCAP_PARQUET = os.environ.get("MARKETCAP_PARQUET", os.path.join(_default_mcap_dir, "marketcap_daily.parquet"))
 
 # ── CoinGecko API key ─────────────────────────────────────────────────
 # CoinGecko now requires an API key even on the free Demo tier (changed
