@@ -194,8 +194,9 @@ export default function AuditHistory({
             <div style={{ fontSize: 10, color: 'var(--t2)', padding: 6 }}>No audits found.</div>
           )}
           {!error &&
-            jobs.map((job) => {
+            jobs.map((job, jobIdx) => {
               const selected = selectedJobId === job.id;
+              const nextIsSelected = jobIdx + 1 < jobs.length && selectedJobId === jobs[jobIdx + 1].id;
               const bestSharpe = pickBestSharpe(job.results as Record<string, unknown> | null | undefined);
               const sharpeVal = bestSharpe !== null ? bestSharpe.toFixed(3) : '—';
               const deleting = deletingJobId === job.id;
@@ -219,11 +220,12 @@ export default function AuditHistory({
                   style={{
                     width: '100%',
                     textAlign: 'left',
-                    marginBottom: 8,
-                    padding: 8,
-                    borderRadius: 3,
-                    border: `1px solid ${selected ? 'rgba(255, 255, 255, 0.45)' : 'var(--line2)'}`,
-                    background: selected ? 'rgba(255, 255, 255, 0.06)' : 'var(--bg2)',
+                    marginBottom: 0,
+                    padding: '8px 8px',
+                    borderRadius: selected ? 3 : 0,
+                    border: selected ? '1px solid var(--line)' : 'none',
+                    borderBottom: selected ? '1px solid var(--line)' : nextIsSelected ? '1px solid transparent' : '1px solid var(--line2)',
+                    background: selected ? 'var(--bg2)' : 'transparent',
                     cursor: 'pointer',
                   }}
                 >
