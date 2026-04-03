@@ -4,8 +4,8 @@ import "@fontsource/space-mono/700.css";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "Benji3m — Audit",
-  description: "Risk Audit Engine",
+  title: "Benji — Institutional-Grade Crypto Risk Audits",
+  description: "Quantitative risk audit engine for crypto fund managers and allocators",
 };
 
 export default function RootLayout({
@@ -15,7 +15,7 @@ export default function RootLayout({
 }>) {
   return (
     <html lang="en" className="h-full">
-      <body className="h-full overflow-hidden">{children}</body>
+      <body className="h-full">{children}</body>
     </html>
   );
 }
