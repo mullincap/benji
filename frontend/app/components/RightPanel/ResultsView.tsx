@@ -4200,8 +4200,9 @@ function renderRuinProbability(body: string) {
 
 function renderDeflatedSharpe(body: string) {
   const lines = body.split('\n');
-  const groups: { title: string; items: { label: string; value: string; note: string }[] }[] = [];
-  let currentGroup = null;
+  type DSRGroup = { title: string; items: { label: string; value: string; note: string }[] };
+  const groups: DSRGroup[] = [];
+  let currentGroup: DSRGroup | null = null;
 
   for (const line of lines) {
     if (/[=─_]{5,}/.test(line)) continue;
