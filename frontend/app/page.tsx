@@ -122,7 +122,7 @@ export default function LandingPage() {
           BENJI
         </span>
         <Link
-          href="/dashboard"
+          href="/simulator"
           style={{
             fontSize: 11,
             letterSpacing: '0.1em',
@@ -189,7 +189,7 @@ export default function LandingPage() {
         </p>
 
         <Link
-          href="/dashboard"
+          href="/simulator"
           style={{
             fontSize: 13,
             letterSpacing: '0.12em',
