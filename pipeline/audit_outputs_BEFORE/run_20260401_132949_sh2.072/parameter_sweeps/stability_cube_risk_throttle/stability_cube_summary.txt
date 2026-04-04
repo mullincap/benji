@@ -1,8 +1,0 @@
-RISK THROTTLE STABILITY CUBE — EARLY_FILL_Y × EARLY_KILL_Y × BOOST
-Filter        : Tail Guardrail
-Grid          : 5×3×11 = 165 cells
-Cells valid   : 165
-Peak Sharpe   : 0.7122  at  FILL_Y=0.11  KILL_Y=0.001  BOOST=2.0
-Baseline Sharpe: 0.5125
-Plateau ≥95%  : 21/165  (12.7%)
-Verdict       : HIGH SENSITIVITY

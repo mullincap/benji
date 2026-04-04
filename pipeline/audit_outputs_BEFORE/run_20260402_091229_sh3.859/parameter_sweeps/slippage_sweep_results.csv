@@ -1,6 +1,0 @@
-slippage_one_way_pct,round_trip_pct,sharpe,sharpe_delta,cagr_pct,maxdd_pct,calmar,grade
-0.05,0.1,3.4867,-0.0474,14646.45,-49.37,296.68,Excellent
-0.1,0.2,3.4391,-0.0951,13302.65,-49.61,268.15,Excellent
-0.25,0.5,3.295,-0.2391,9956.64,-50.33,197.83,Excellent
-0.5,1.0,3.0513,-0.4829,6119.09,-51.51,118.79,Excellent
-1.0,2.0,2.5509,-0.9833,2261.15,-53.81,42.02,Excellent

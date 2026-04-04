@@ -1,6 +1,0 @@
-RUIN PROBABILITY  |  Filter: Tail + Blofin
-n_sims=10000  horizon_days=365  sample_size=398
-
-Threshold -33%: P(ruin)=0.20550  ELEVATED
-Threshold -50%: P(ruin)=0.01180  LOW
-Threshold -75%: P(ruin)=0.00010  VERY LOW

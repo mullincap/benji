@@ -1,8 +1,0 @@
-EXIT ARCHITECTURE STABILITY CUBE — PORT_SL × PORT_TSL × EARLY_KILL_Y
-Filter        : Tail Guardrail
-Grid          : 7×18×3 = 378 cells
-Cells valid   : 378
-Peak Sharpe   : 1.2200  at  PORT_SL=-0.07  PORT_TSL=0.045  KILL_Y=0.001
-Baseline Sharpe: nan
-Plateau ≥95%  : 189/378  (50.0%)
-Verdict       : MODERATE SENSITIVITY

@@ -1,8 +1,0 @@
-PARAMETRIC STABILITY CUBE — L_BASE × L_HIGH × VOL_LEV_MAX_BOOST
-Filter        : Tail Guardrail
-Grid          : 3×12×4 = 144 cells
-Cells valid   : 132
-Peak Sharpe   : 0.8743  at  L_BASE=0.0  L_HIGH=0.8  BOOST=2.0
-Baseline Sharpe: nan
-Plateau ≥95%  : 99/132  (75.0%)
-Verdict       : MODERATE SENSITIVITY

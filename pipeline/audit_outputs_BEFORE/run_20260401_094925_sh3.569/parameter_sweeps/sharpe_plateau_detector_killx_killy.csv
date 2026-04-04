@@ -1,4 +1,0 @@
-threshold_pct,threshold_sharpe,cells_above_threshold,pct_of_surface,largest_cluster_cells,baseline_in_cluster,verdict
-0.95,3.3944,8,12.5,8,True,Robust plateau | baseline inside
-0.975,3.4838,8,12.5,8,True,Robust plateau | baseline inside
-0.99,3.5374,8,12.5,8,True,Robust plateau | baseline inside
