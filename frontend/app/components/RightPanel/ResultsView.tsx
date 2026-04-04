@@ -1408,16 +1408,15 @@ function parseHeadingLine(line: string): string | null {
 type ParsedSection = { title: string; body: string };
 
 type FullReportCategoryKey =
-  | 'executive_summary'
-  | 'core_performance'
-  | 'risk_profile'
-  | 'signal_quality'
-  | 'robustness_stress'
-  | 'parameter_exploration'
-  | 'stability_cubes'
-  | 'capacity_diagnostics'
-  | 'milestones_appendices'
-  | 'artifact_outputs';
+  | 'verdict_grades'
+  | 'scorecards_summary'
+  | 'return_profile'
+  | 'risk_drawdown'
+  | 'statistical_validity'
+  | 'walkforward_regime'
+  | 'sensitivity_stress'
+  | 'cost_capacity'
+  | 'parameter_optimization';
 
 type FullReportCategoryDef = {
   key: FullReportCategoryKey;
@@ -1426,126 +1425,145 @@ type FullReportCategoryDef = {
 };
 
 const FULL_REPORT_CATEGORIES: FullReportCategoryDef[] = [
-  { key: 'executive_summary', title: 'Executive Summary', defaultOpen: true },
-  { key: 'core_performance', title: 'Core Performance', defaultOpen: true },
-  { key: 'risk_profile', title: 'Risk Profile', defaultOpen: true },
-  { key: 'signal_quality', title: 'Signal Quality', defaultOpen: false },
-  { key: 'robustness_stress', title: 'Robustness & Stress', defaultOpen: false },
-  { key: 'parameter_exploration', title: 'Parameter Exploration', defaultOpen: false },
-  { key: 'stability_cubes', title: 'Stability Cubes', defaultOpen: false },
-  { key: 'capacity_diagnostics', title: 'Capacity & Diagnostics', defaultOpen: false },
-  { key: 'milestones_appendices', title: 'Milestones & Appendices', defaultOpen: false },
-  { key: 'artifact_outputs', title: 'Artifact Outputs', defaultOpen: false },
+  { key: 'verdict_grades', title: '1. Verdict & Grades', defaultOpen: true },
+  { key: 'scorecards_summary', title: '2. Scorecards & Summary', defaultOpen: true },
+  { key: 'return_profile', title: '3. Return Profile', defaultOpen: false },
+  { key: 'risk_drawdown', title: '4. Risk & Drawdown', defaultOpen: false },
+  { key: 'statistical_validity', title: '5. Statistical Validity', defaultOpen: false },
+  { key: 'walkforward_regime', title: '6. Walk-Forward & Regime', defaultOpen: false },
+  { key: 'sensitivity_stress', title: '7. Sensitivity & Stress', defaultOpen: false },
+  { key: 'cost_capacity', title: '8. Cost & Capacity', defaultOpen: false },
+  { key: 'parameter_optimization', title: '9. Parameter Optimization', defaultOpen: false },
 ];
 
 function fullReportCategoryForTitle(title: string): FullReportCategoryKey {
   const t = title.toUpperCase();
-  if (/^RUN SUMMARY\b/.test(t) || /^BEST FILTER HEADLINE STATS\b/.test(t)) return 'executive_summary';
-
+  // 1. Verdict & Grades
   if (
-    /^DAILY SERIES AUDIT\b/.test(t)
-    || /^SIMULATION BIAS AUDIT\b/.test(t)
+    /^BOTTOM LINE\b/.test(t)
+    || /^VERDICT\b/.test(t)
     || /^GATING METRICS\b/.test(t)
     || /^CORE METRICS\b/.test(t)
     || /^SUPPORTING METRICS\b/.test(t)
-    || /^RETURN RATES BY PERIOD\b/.test(t)
+    || /^WHAT YOU HAVE\b/.test(t)
+    || /^WHAT YOU STILL NEED\b/.test(t)
+  ) {
+    return 'verdict_grades';
+  }
+
+  // 2. Scorecards & Summary
+  if (
+    /^ALLOCATOR VIEW SCORECARD\b/.test(t)
+    || /^TECHNICAL APPENDIX SCORECARD\b/.test(t)
+    || /^INSTITUTIONAL SCORECARD\b/.test(t)
+    || /^BEST FILTER HEADLINE STATS\b/.test(t)
+    || /^RUN SUMMARY\b/.test(t)
+    || /^WEEKLY MILESTONES\b/.test(t)
+    || /^MONTHLY MILESTONES\b/.test(t)
+    || /^EQUITY ENSEMBLE\b/.test(t)
+    || /OUTPUT FILES/i.test(t)
+  ) {
+    return 'scorecards_summary';
+  }
+
+  // 3. Return Profile
+  if (
+    /^RETURN RATES BY PERIOD\b/.test(t)
+    || /^PERIODIC RETURN BREAKDOWN\b/.test(t)
     || /^RETURN DISTRIBUTION\b/.test(t)
+    || /^RETURN CONCENTRATION ANALYSIS\b/.test(t)
     || /^RETURN \+ CONDITIONAL ANALYSIS\b/.test(t)
     || /^REGIME & CONDITIONAL ANALYSIS\b/.test(t)
     || /^ROLLING MAX DRAWDOWN\b/.test(t)
+    || /^ALPHA VS BETA DECOMPOSITION\b/.test(t)
   ) {
-    return 'core_performance';
+    return 'return_profile';
   }
 
+  // 4. Risk & Drawdown
   if (
     /^RISK-ADJUSTED RETURN QUALITY\b/.test(t)
     || /^DAILY VAR \/ CVAR\b/.test(t)
+    || /^TAIL RISK\b/.test(t)
     || /^DRAWDOWN EPISODE ANALYSIS\b/.test(t)
-    || /^DEFLATED SHARPE RATIO \+ MINIMUM TRACK RECORD LENGTH\b/.test(t)
     || /^RUIN PROBABILITY\b/.test(t)
-    || /^STATISTICAL VALIDITY\b/.test(t)
-    || /^TAIL RISK \(EXTENDED\)/.test(t)
-  ) {
-    return 'risk_profile';
-  }
-
-  if (
-    /^SIGNAL PREDICTIVENESS\b/.test(t)
-    || /^ALLOCATOR VIEW SCORECARD\b/.test(t)
-    || /^TECHNICAL APPENDIX SCORECARD\b/.test(t)
-  ) {
-    return 'signal_quality';
-  }
-
-  if (
-    /^SLIPPAGE IMPACT SWEEP\b/.test(t)
-    || /^NOISE PERTURBATION STABILITY TEST\b/.test(t)
-    || /^PARAM JITTER \/ SHARPE STABILITY TEST\b/.test(t)
-    || /^RETURN CONCENTRATION ANALYSIS\b/.test(t)
-    || /^PERIODIC RETURN BREAKDOWN\b/.test(t)
     || /^SHOCK INJECTION TEST\b/.test(t)
+  ) {
+    return 'risk_drawdown';
+  }
+
+  // 5. Statistical Validity
+  if (
+    /^DEFLATED SHARPE RATIO\b/.test(t)
+    || /^STATISTICAL VALIDITY\b/.test(t)
+    || /^PBO\b/.test(t)
+    || /^PROBABILITY OF BACKTEST OVERFITTING\b/.test(t)
+    || /^SIGNAL PREDICTIVENESS\b/.test(t)
+    || /^SIMULATION BIAS AUDIT\b/.test(t)
+    || /^DAILY SERIES AUDIT\b/.test(t)
+    || /^STRESS TEST SUMMARY\b/.test(t)
+  ) {
+    return 'statistical_validity';
+  }
+
+  // 6. Walk-Forward & Regime
+  if (
+    /^WALK-FORWARD VALIDATION\b/.test(t)
+    || /^WALK-FORWARD ROLLING\b/.test(t)
+    || /^FILTER-AWARE WALK-FORWARD\b/.test(t)
+    || /^SHARPE STABILITY ANALYSIS\b/.test(t)
     || /^REGIME ROBUSTNESS TEST\b/.test(t)
     || /^REGIME CONSISTENCY SUMMARY\b/.test(t)
+  ) {
+    return 'walkforward_regime';
+  }
+
+  // 7. Sensitivity & Stress
+  if (
+    /^NOISE PERTURBATION STABILITY TEST\b/.test(t)
+    || /^PARAM JITTER \/ SHARPE STABILITY TEST\b/.test(t)
     || /^NEIGHBOR PLATEAU TEST\b/.test(t)
     || /^PARAMETER SENSITIVITY MAP\b/.test(t)
+    || /^PARAMETER SENSITIVITY SUMMARY\b/.test(t)
     || /^LUCKY STREAK TEST\b/.test(t)
     || /^TOP-N DAY REMOVAL TEST\b/.test(t)
     || /^CAPPED RETURN SENSITIVITY TABLE\b/.test(t)
-    || /^SLIPPAGE SENSITIVITY TABLE\b/.test(t)
   ) {
-    return 'robustness_stress';
+    return 'sensitivity_stress';
   }
 
+  // 8. Cost & Capacity
+  if (
+    /^SLIPPAGE SENSITIVITY TABLE\b/.test(t)
+    || /^SLIPPAGE IMPACT SWEEP\b/.test(t)
+    || /^COST CURVE TEST\b/.test(t)
+    || /^CAPACITY CURVE TEST\b/.test(t)
+    || /^LIQUIDITY CAPACITY CURVE\b/.test(t)
+    || /^CAPITAL & OPERATIONAL\b/.test(t)
+    || /^MARKET CAP DIAGNOSTIC\b/.test(t)
+    || /^MARKET CAP UNIVERSE SUMMARY\b/.test(t)
+    || /^MINIMUM CUMULATIVE RETURN\b/.test(t)
+  ) {
+    return 'cost_capacity';
+  }
+
+  // 9. Parameter Optimization
   if (
     /^TAIL GUARDRAIL GRID SWEEP\b/.test(t)
     || /^PARAMETER SWEEP\b/.test(t)
-    || /^L_HIGH SURFACE - RANKED BY SHARPE\b/.test(t)
     || /^PARAMETER SURFACE MAP\b/.test(t)
+    || /^L_HIGH SURFACE\b/.test(t)
     || /^SHARPE RIDGE MAP\b/.test(t)
     || /^SHARPE PLATEAU DETECTOR\b/.test(t)
-  ) {
-    return 'parameter_exploration';
-  }
-
-  if (
-    /^PARAMETRIC STABILITY CUBE\b/.test(t)
+    || /^PARAMETRIC STABILITY CUBE\b/.test(t)
+    || /^STABILITY CUBE SUMMARY\b/.test(t)
     || /^RISK THROTTLE STABILITY CUBE\b/.test(t)
     || /^EXIT ARCHITECTURE STABILITY CUBE\b/.test(t)
   ) {
-    return 'stability_cubes';
+    return 'parameter_optimization';
   }
 
-  if (
-    /^LIQUIDITY CAPACITY CURVE\b/.test(t)
-    || /^CAPACITY CURVE TEST\b/.test(t)
-    || /^COST CURVE TEST\b/.test(t)
-    || /^MINIMUM CUMULATIVE RETURN\b/.test(t)
-    || /^MARKET CAP DIAGNOSTIC\b/.test(t)
-    || /^MARKET CAP UNIVERSE SUMMARY\b/.test(t)
-    || /^CAPITAL & OPERATIONAL\b/.test(t)
-  ) {
-    return 'capacity_diagnostics';
-  }
-
-  if (
-    /^WEEKLY MILESTONES\b/.test(t)
-    || /^MONTHLY MILESTONES\b/.test(t)
-    || /^WHAT YOU HAVE\b/.test(t)
-    || /^WHAT YOU STILL NEED\b/.test(t)
-    || /^BOTTOM LINE\b/.test(t)
-  ) {
-    return 'milestones_appendices';
-  }
-
-  if (
-    /^EQUITY ENSEMBLE\b/.test(t)
-    || /OUTPUT FILES/i.test(t)
-    || /SAVED:/i.test(t)
-  ) {
-    return 'artifact_outputs';
-  }
-
-  return 'core_performance';
+  return 'return_profile';
 }
 
 function extractRunSummarySection(text: string): ParsedSection | null {
@@ -2021,69 +2039,97 @@ function extractSpecialFullReportSections(text: string, selectedFilter: string |
 function fullReportOrderRank(title: string): number {
   const t = title.toUpperCase();
   const order: Array<[RegExp, number]> = [
-    [/^DAILY SERIES AUDIT\b/, 10],
-    [/^SIMULATION BIAS AUDIT\b/, 20],
-    [/^GATING METRICS\b/, 22],
-    [/^CORE METRICS\b/, 24],
-    [/^SUPPORTING METRICS\b/, 26],
-    [/^RETURN RATES BY PERIOD\b/, 30],
-    [/^RISK-ADJUSTED RETURN QUALITY\b/, 40],
-    [/^DRAWDOWN EPISODE ANALYSIS\b/, 50],
-    [/^RETURN DISTRIBUTION\b/, 60],
-    [/^RETURN \+ CONDITIONAL ANALYSIS\b/, 70],
-    [/^REGIME & CONDITIONAL ANALYSIS\b/, 72],
-    [/^ROLLING MAX DRAWDOWN\b/, 80],
-    [/^DAILY VAR \/ CVAR\b/, 90],
-    [/^STATISTICAL VALIDITY\b/, 95],
-    [/^TAIL RISK \(EXTENDED\)/, 97],
+    // 1. Verdict & Grades
+    [/^BOTTOM LINE\b/, 100],
+    [/^VERDICT\b/, 101],
+    [/^GATING METRICS\b/, 102],
+    [/^CORE METRICS\b/, 103],
+    [/^SUPPORTING METRICS\b/, 104],
+    [/^WHAT YOU HAVE\b/, 105],
+    [/^WHAT YOU STILL NEED\b/, 106],
 
-    [/^SIGNAL PREDICTIVENESS\b/, 120],
-    [/^ALLOCATOR VIEW SCORECARD\b/, 130],
-    [/^TECHNICAL APPENDIX SCORECARD\b/, 140],
+    // 2. Scorecards & Summary
+    [/^ALLOCATOR VIEW SCORECARD\b/, 200],
+    [/^TECHNICAL APPENDIX SCORECARD\b/, 201],
+    [/^INSTITUTIONAL SCORECARD\b/, 202],
+    [/^BEST FILTER HEADLINE STATS\b/, 203],
+    [/^RUN SUMMARY\b/, 204],
+    [/^WEEKLY MILESTONES\b/, 205],
+    [/^MONTHLY MILESTONES\b/, 206],
+    [/^EQUITY ENSEMBLE\b/, 207],
+    [/OUTPUT FILES/i, 208],
 
-    [/^WEEKLY MILESTONES\b/, 160],
-    [/^MONTHLY MILESTONES\b/, 170],
+    // 3. Return Profile
+    [/^RETURN RATES BY PERIOD\b/, 300],
+    [/^PERIODIC RETURN BREAKDOWN\b/, 301],
+    [/^RETURN DISTRIBUTION\b/, 302],
+    [/^RETURN CONCENTRATION ANALYSIS\b/, 303],
+    [/^RETURN \+ CONDITIONAL ANALYSIS\b/, 304],
+    [/^REGIME & CONDITIONAL ANALYSIS\b/, 305],
+    [/^ROLLING MAX DRAWDOWN\b/, 306],
+    [/^ALPHA VS BETA DECOMPOSITION\b/, 307],
 
-    [/^TAIL GUARDRAIL GRID SWEEP\b/, 200],
-    [/^PARAMETER SWEEP\b/, 210],
-    [/^L_HIGH SURFACE - RANKED BY SHARPE\b/, 220],
-    [/^PARAMETER SURFACE MAP\b/, 230],
-    [/^SHARPE RIDGE MAP\b/, 240],
-    [/^SHARPE PLATEAU DETECTOR\b/, 250],
+    // 4. Risk & Drawdown
+    [/^RISK-ADJUSTED RETURN QUALITY\b/, 400],
+    [/^DAILY VAR \/ CVAR\b/, 401],
+    [/^TAIL RISK\b/, 402],
+    [/^DRAWDOWN EPISODE ANALYSIS\b/, 403],
+    [/^RUIN PROBABILITY\b/, 404],
+    [/^SHOCK INJECTION TEST\b/, 405],
 
-    [/^PARAMETRIC STABILITY CUBE\b/, 300],
-    [/^RISK THROTTLE STABILITY CUBE\b/, 310],
-    [/^EXIT ARCHITECTURE STABILITY CUBE\b/, 320],
+    // 5. Statistical Validity
+    [/^DEFLATED SHARPE RATIO\b/, 500],
+    [/^STATISTICAL VALIDITY\b/, 501],
+    [/^PBO\b/, 502],
+    [/^PROBABILITY OF BACKTEST OVERFITTING\b/, 503],
+    [/^SIGNAL PREDICTIVENESS\b/, 504],
+    [/^SIMULATION BIAS AUDIT\b/, 505],
+    [/^DAILY SERIES AUDIT\b/, 506],
+    [/^STRESS TEST SUMMARY\b/, 507],
 
-    [/^SLIPPAGE IMPACT SWEEP\b/, 350],
-    [/^NOISE PERTURBATION STABILITY TEST\b/, 360],
-    [/^PARAM JITTER \/ SHARPE STABILITY TEST\b/, 370],
-    [/^NEIGHBOR PLATEAU TEST\b/, 375],
-    [/^PARAMETER SENSITIVITY MAP\b/, 377],
-    [/^CAPPED RETURN SENSITIVITY TABLE\b/, 374],
-    [/^SLIPPAGE SENSITIVITY TABLE\b/, 373],
-    [/^TOP-N DAY REMOVAL TEST\b/, 376],
-    [/^LUCKY STREAK TEST\b/, 378],
-    [/^RETURN CONCENTRATION ANALYSIS\b/, 380],
-    [/^PERIODIC RETURN BREAKDOWN\b/, 390],
-    [/^SHOCK INJECTION TEST\b/, 400],
-    [/^RUIN PROBABILITY\b/, 410],
-    [/^REGIME ROBUSTNESS TEST\b/, 420],
-    [/^REGIME CONSISTENCY SUMMARY\b/, 430],
+    // 6. Walk-Forward & Regime
+    [/^WALK-FORWARD VALIDATION\b/, 600],
+    [/^WALK-FORWARD ROLLING\b/, 601],
+    [/^FILTER-AWARE WALK-FORWARD\b/, 602],
+    [/^SHARPE STABILITY ANALYSIS\b/, 603],
+    [/^REGIME ROBUSTNESS TEST\b/, 604],
+    [/^REGIME CONSISTENCY SUMMARY\b/, 605],
 
-    [/^LIQUIDITY CAPACITY CURVE\b/, 450],
-    [/^CAPACITY CURVE TEST\b/, 455],
-    [/^COST CURVE TEST\b/, 457],
-    [/^MINIMUM CUMULATIVE RETURN\b/, 460],
-    [/^CAPITAL & OPERATIONAL\b/, 465],
-    [/^MARKET CAP DIAGNOSTIC\b/, 470],
-    [/^MARKET CAP UNIVERSE SUMMARY\b/, 480],
-    [/^EQUITY ENSEMBLE\b/, 490],
+    // 7. Sensitivity & Stress
+    [/^NOISE PERTURBATION STABILITY TEST\b/, 700],
+    [/^PARAM JITTER \/ SHARPE STABILITY TEST\b/, 701],
+    [/^NEIGHBOR PLATEAU TEST\b/, 702],
+    [/^PARAMETER SENSITIVITY MAP\b/, 703],
+    [/^PARAMETER SENSITIVITY SUMMARY\b/, 704],
+    [/^LUCKY STREAK TEST\b/, 705],
+    [/^TOP-N DAY REMOVAL TEST\b/, 706],
+    [/^CAPPED RETURN SENSITIVITY TABLE\b/, 707],
 
-    [/^DEFLATED SHARPE RATIO \+ MINIMUM TRACK RECORD LENGTH\b/, 520],
-    [/^WHAT YOU HAVE\b/, 530],
-    [/^WHAT YOU STILL NEED\b/, 540],
-    [/^BOTTOM LINE\b/, 550],
+    // 8. Cost & Capacity
+    [/^SLIPPAGE SENSITIVITY TABLE\b/, 800],
+    [/^SLIPPAGE IMPACT SWEEP\b/, 801],
+    [/^COST CURVE TEST\b/, 802],
+    [/^CAPACITY CURVE TEST\b/, 803],
+    [/^LIQUIDITY CAPACITY CURVE\b/, 804],
+    [/^CAPITAL & OPERATIONAL\b/, 805],
+    [/^MARKET CAP DIAGNOSTIC\b/, 806],
+    [/^MARKET CAP UNIVERSE SUMMARY\b/, 807],
+    [/^MINIMUM CUMULATIVE RETURN\b/, 808],
+
+    // 9. Parameter Optimization
+    [/^TAIL GUARDRAIL GRID SWEEP\b/, 900],
+    [/^PARAMETER SWEEP\b/, 901],
+    [/^PARAMETER SURFACE MAP\b/, 902],
+    [/^L_HIGH SURFACE - RANKED BY SHARPE\b/, 903],
+    [/^L_HIGH SURFACE\b/, 904],
+    [/^SHARPE RIDGE MAP\b/, 905],
+    [/^SHARPE PLATEAU DETECTOR\b/, 906],
+    [/^PARAMETRIC STABILITY CUBE\b/, 907],
+    [/^STABILITY CUBE SUMMARY\b/, 908],
+    [/^RISK THROTTLE STABILITY CUBE\b/, 909],
+    [/^RISK THROTTLE STABILITY CUBE SUMMARY\b/, 910],
+    [/^EXIT ARCHITECTURE STABILITY CUBE\b/, 911],
+    [/^EXIT ARCHITECTURE STABILITY CUBE SUMMARY\b/, 912],
   ];
   for (const [rx, rank] of order) {
     if (rx.test(t)) return rank;
