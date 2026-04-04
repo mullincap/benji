@@ -59,7 +59,16 @@ function fmtCagr(v: unknown): string {
   if (v === null || v === undefined) return 'N/A';
   const n = typeof v === 'number' ? v : Number(v);
   if (!Number.isFinite(n)) return String(v);
-  return `${new Intl.NumberFormat(undefined, { minimumFractionDigits: 1, maximumFractionDigits: 1 }).format(n)}%`;
+  const digits = Math.abs(n) >= 100 ? 0 : 2;
+  return `${new Intl.NumberFormat(undefined, { minimumFractionDigits: digits, maximumFractionDigits: digits }).format(n)}%`;
+}
+
+function fmtSummaryReturn(v: unknown): string {
+  if (v === null || v === undefined) return 'N/A';
+  const n = typeof v === 'number' ? v : Number(v);
+  if (!Number.isFinite(n)) return String(v);
+  const digits = Math.abs(n) >= 100 ? 0 : 2;
+  return `${new Intl.NumberFormat(undefined, { minimumFractionDigits: digits, maximumFractionDigits: digits }).format(n)}%`;
 }
 
 function fmtSignedPct(v: number | null | undefined, digits = 2): string {
@@ -92,6 +101,7 @@ function metricColor(key: string, value: unknown): string {
     max_dd: (v) => (v > -20 ? 'var(--green)' : v > -30 ? 'var(--amber)' : 'var(--red)'),
     active: (v) => (v > 90 ? 'var(--green)' : v > 30 ? 'var(--amber)' : 'var(--red)'),
     tot_ret: (v) => (v > 0 ? 'var(--green)' : v > -10 ? 'var(--amber)' : 'var(--red)'),
+    compounded_ret: (v) => (v > 0 ? 'var(--green)' : v > -10 ? 'var(--amber)' : 'var(--red)'),
     grade: (v) => (v >= 80 ? 'var(--green)' : v >= 65 ? 'var(--amber)' : 'var(--red)'),
     sortino: (v) => (v > 1 ? 'var(--green)' : v > 0.5 ? 'var(--amber)' : 'var(--red)'),
     calmar: (v) => (v > 1 ? 'var(--green)' : v > 0.5 ? 'var(--amber)' : 'var(--red)'),
@@ -1791,7 +1801,6 @@ function isSpecialSectionTitleLine(line: string): boolean {
     || /^NOISE PERTURBATION STABILITY TEST\b/i.test(t)
     || /^PARAM JITTER \/ SHARPE STABILITY TEST\b/i.test(t)
     || /^RETURN CONCENTRATION ANALYSIS\b/i.test(t)
-    || /^PERIODIC RETURN BREAKDOWN\b/i.test(t)
     || /^MINIMUM CUMULATIVE RETURN\b/i.test(t)
     || /^DEFLATED SHARPE RATIO \+ MINIMUM TRACK RECORD LENGTH\b/i.test(t)
     || /^RUIN PROBABILITY\s+\|\s+Filter:/i.test(t)
@@ -1929,7 +1938,6 @@ function extractSpecialFullReportSections(text: string, selectedFilter: string |
     /^NOISE PERTURBATION STABILITY TEST\b/i,
     /^PARAM JITTER \/ SHARPE STABILITY TEST\b/i,
     /^RETURN CONCENTRATION ANALYSIS\b/i,
-    /^PERIODIC RETURN BREAKDOWN\b/i,
     /^MINIMUM CUMULATIVE RETURN\b/i,
     /^DEFLATED SHARPE RATIO \+ MINIMUM TRACK RECORD LENGTH\b/i,
     /^RUIN PROBABILITY\s+\|\s+Filter:/i,
@@ -12872,8 +12880,13 @@ export default function ResultsView({ results, jobId, startingCapital, params }:
       },
       { label: 'WF-CV', key: 'cv', value: fmtMetric((selectedRow.wf_cv ?? selectedRow.cv) as unknown), colorValue: (selectedRow.wf_cv ?? selectedRow.cv) },
       { label: 'DSR %', key: 'dsr_pct', value: fmtPercent2(selectedRow.dsr_pct), colorValue: selectedRow.dsr_pct },
-      { label: 'Sum of Daily Return %', key: 'tot_ret', value: fmtPercent2(selectedRow.tot_ret), colorValue: selectedRow.tot_ret },
-      { label: 'Grade', key: 'grade', value: selectedRow.grade_score != null ? String(selectedRow.grade_score) : String(selectedRow.grade ?? 'N/A'), colorValue: selectedRow.grade_score },
+      { label: 'Simple Return %', key: 'tot_ret', value: fmtSummaryReturn(selectedRow.tot_ret), colorValue: selectedRow.tot_ret },
+      {
+        label: 'Compounded Return %',
+        key: 'compounded_ret',
+        value: feesKeyValues.netReturnPct !== null ? fmtSummaryReturn(feesKeyValues.netReturnPct) : 'N/A',
+        colorValue: feesKeyValues.netReturnPct,
+      },
       {
         label: 'Avg Win / Avg Loss',
         key: 'avg_win_loss',

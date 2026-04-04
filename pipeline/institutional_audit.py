@@ -2242,7 +2242,7 @@ def run_institutional_audit(
     capacity_df = capacity_curve_test(r, tdy, starting_capital=starting_capital)
 
     # ── Rolling MaxDD ─────────────────────────────────────────
-    roll_mdd = rolling_maxdd_table(r, windows=(3, 7, 10, 30))
+    roll_mdd = rolling_maxdd_table(r, windows=(3, 7, 10, 30, 60, 90))
 
     # ── Daily VaR / CVaR ──────────────────────────────────────
     var5,  cvar5  = var_cvar(r, 0.05)
@@ -4310,18 +4310,20 @@ def periodic_return_breakdown(
     n = len(r)
 
     # ── Daily ─────────────────────────────────────────────────
-    wins_d  = r[r > 0]
-    loss_d  = r[r < 0]
+    r_daily_active = r[r != 0]
+    n_daily_active = len(r_daily_active)
+    wins_d  = r_daily_active[r_daily_active > 0]
+    loss_d  = r_daily_active[r_daily_active < 0]
     daily = {
-        "n":           n,
-        "avg":         float(np.mean(r))         if n  else float("nan"),
-        "best":        float(np.max(r))           if n  else float("nan"),
-        "worst":       float(np.min(r))           if n  else float("nan"),
-        "win_rate":    float(np.mean(r > 0))      if n  else float("nan"),
+        "n":           n_daily_active,
+        "avg":         float(np.mean(r_daily_active))         if n_daily_active else float("nan"),
+        "best":        float(np.max(r_daily_active))          if n_daily_active else float("nan"),
+        "worst":       float(np.min(r_daily_active))          if n_daily_active else float("nan"),
+        "win_rate":    float(np.mean(r_daily_active > 0))     if n_daily_active else float("nan"),
         "avg_win":     float(np.mean(wins_d))     if len(wins_d)  else float("nan"),
         "avg_loss":    float(np.mean(loss_d))     if len(loss_d)  else float("nan"),
-        "n_wins":      int(np.sum(r > 0)),
-        "n_losses":    int(np.sum(r < 0)),
+        "n_wins":      int(np.sum(r_daily_active > 0)),
+        "n_losses":    int(np.sum(r_daily_active < 0)),
     }
 
     # ── Weekly — aggregate into non-overlapping 7-day buckets ─
