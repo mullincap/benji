@@ -7297,6 +7297,7 @@ def simulate(df_4x: pd.DataFrame,
                     r_net   * 100,
                     _net_pnl,
                 ))
+            _eq_before_sim = equity_running
             if CAPITAL_MODE == "fixed":
                 _eq_now_sim = STARTING_CAPITAL * equity_running
                 _notional_sim = (min(STARTING_CAPITAL, _eq_now_sim)
@@ -7304,6 +7305,7 @@ def simulate(df_4x: pd.DataFrame,
                                  else STARTING_CAPITAL)
                 equity_running += (_notional_sim / STARTING_CAPITAL) * r_net
             else:
+                _notional_sim = STARTING_CAPITAL * equity_running
                 equity_running *= (1.0 + r_net)
 
             # ── Periodic Profit Harvest ────────────────────────────────
@@ -7386,7 +7388,14 @@ def simulate(df_4x: pd.DataFrame,
 
         # Store nan for non-finite returns so daily_with_zeros stays length-aligned
         # with df_4x.columns (required for date-aligned equity curve plotting).
-        daily.append(r_net if math.isfinite(r_net) else float("nan"))
+        # In fixed mode, record the account-relative return (smaller than r_net
+        # when equity exceeds starting capital).
+        if CAPITAL_MODE == "fixed" and math.isfinite(r_net):
+            _acct_ret = ((_notional_sim / STARTING_CAPITAL) * r_net / _eq_before_sim) if abs(_eq_before_sim) > 1e-9 else r_net
+            _acct_ret = float(np.clip(_acct_ret, -1.0, 10.0))
+            daily.append(_acct_ret)
+        else:
+            daily.append(r_net if math.isfinite(r_net) else float("nan"))
 
     _total_net = total_gross - total_fees
     if verbose:
