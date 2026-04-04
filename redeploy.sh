@@ -6,7 +6,7 @@ echo "→ Pulling latest..."
 git pull
 
 echo "→ Rebuilding and restarting..."
-docker compose up -d --build
+docker compose up -d --build --force-recreate
 
 echo "→ Cleaning old images..."
 docker image prune -f
