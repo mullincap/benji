@@ -8268,6 +8268,8 @@ def export_diagnostic_to_sheets(
         return max(0, min((mins // BAR_MINS) - 1, n - 1))
 
     equity_running  = 1.0
+    _eq_before_sim  = 1.0
+    _notional_sim   = STARTING_CAPITAL
     diag_rows       = []
     path_tabs       = {}   # date_str -> list of bar rows
 
