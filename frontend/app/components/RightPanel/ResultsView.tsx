@@ -55,6 +55,13 @@ function fmtPercent2(v: unknown): string {
   return String(v);
 }
 
+function fmtCagr(v: unknown): string {
+  if (v === null || v === undefined) return 'N/A';
+  const n = typeof v === 'number' ? v : Number(v);
+  if (!Number.isFinite(n)) return String(v);
+  return `${new Intl.NumberFormat(undefined, { minimumFractionDigits: 1, maximumFractionDigits: 1 }).format(n)}%`;
+}
+
 function fmtSignedPct(v: number | null | undefined, digits = 2): string {
   if (v === null || v === undefined || !Number.isFinite(v)) return 'N/A';
   const sign = v >= 0 ? '+' : '';
@@ -1437,6 +1444,10 @@ function fullReportCategoryForTitle(title: string): FullReportCategoryKey {
 
   if (
     /^DAILY SERIES AUDIT\b/.test(t)
+    || /^SIMULATION BIAS AUDIT\b/.test(t)
+    || /^GATING METRICS\b/.test(t)
+    || /^CORE METRICS\b/.test(t)
+    || /^SUPPORTING METRICS\b/.test(t)
     || /^RETURN RATES BY PERIOD\b/.test(t)
     || /^RETURN DISTRIBUTION\b/.test(t)
     || /^RETURN \+ CONDITIONAL ANALYSIS\b/.test(t)
@@ -1614,6 +1625,9 @@ function extractSelectedFilterAdvancedSections(text: string, selectedFilter: str
     const start = cur.idx + 1;
     const end = next ? next.idx : blockEnd;
     let sectionLines = lines.slice(start, end);
+    // For box-drawn sections, truncate at the closing └── line
+    const closeIdx = sectionLines.findIndex((l) => /^└[─]+/.test(l.trim()));
+    if (closeIdx >= 0) sectionLines = sectionLines.slice(0, closeIdx + 1);
     if (cur.title.includes('BOTTOM LINE')) {
       const cutoff = sectionLines.findIndex((line) => {
         const t = line.trim();
@@ -1654,7 +1668,11 @@ function extractFullReportSections(text: string): ParsedSection[] {
     const next = headings[i + 1];
     const start = cur.idx + 1;
     const end = next ? next.idx : lines.length;
-    const body = lines.slice(start, end).join('\n').trim();
+    let sectionLines = lines.slice(start, end);
+    // For box-drawn sections, truncate at the closing └── line
+    const closeIdx = sectionLines.findIndex((l) => /^└[─]+/.test(l.trim()));
+    if (closeIdx >= 0) sectionLines = sectionLines.slice(0, closeIdx + 1);
+    const body = sectionLines.join('\n').trim();
     if (!body) continue;
     sections.push({ title: cur.title, body });
   }
@@ -2005,6 +2023,9 @@ function fullReportOrderRank(title: string): number {
   const order: Array<[RegExp, number]> = [
     [/^DAILY SERIES AUDIT\b/, 10],
     [/^SIMULATION BIAS AUDIT\b/, 20],
+    [/^GATING METRICS\b/, 22],
+    [/^CORE METRICS\b/, 24],
+    [/^SUPPORTING METRICS\b/, 26],
     [/^RETURN RATES BY PERIOD\b/, 30],
     [/^RISK-ADJUSTED RETURN QUALITY\b/, 40],
     [/^DRAWDOWN EPISODE ANALYSIS\b/, 50],
@@ -3425,7 +3446,6 @@ function renderKVSection(body: string, label: string, colorFn?: (v: number) => s
   if (kv.length === 0) return renderTableSection(body, label);
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-      {sectionLabel(label)}
       <SectionHBarChart items={kv.map((k) => ({ label: k.key, value: k.num, raw: k.raw }))} colorFn={colorFn} />
     </div>
   );
@@ -3494,7 +3514,6 @@ function renderReturnRatesByPeriod(body: string) {
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
-      {sectionLabel('Return Rates by Period')}
 
       <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap' }}>
         {groups.map((g, gIdx) => {
@@ -3619,7 +3638,6 @@ function renderReturnDistribution(body: string) {
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
-      {sectionLabel('Return Distribution')}
 
       <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
         {items.map((item, idx) => {
@@ -3679,7 +3697,6 @@ function renderRollingMaxDrawdown(body: string) {
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
-      {sectionLabel('Rolling Max Drawdown')}
 
       <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
         {rows.map((r, idx) => {
@@ -3762,7 +3779,6 @@ function renderDrawdownEpisodes(body: string) {
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
-      {sectionLabel('Drawdown Episode Analysis')}
       
       {metrics.length > 0 && (
         <div style={{ 
@@ -3898,7 +3914,6 @@ function renderRiskAdjustedQuality(body: string) {
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-      {sectionLabel('Risk-Adjusted Return Quality')}
       <div style={{ 
         display: 'grid', 
         gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))', 
@@ -3988,7 +4003,6 @@ function renderDailyVarCvar(body: string) {
   if (items.length > 0) {
     return (
       <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-        {sectionLabel('Daily VaR / CVaR')}
         <div style={{ 
           display: 'grid', 
           gridTemplateColumns: 'repeat(auto-fit, minmax(130px, 1fr))', 
@@ -4073,7 +4087,6 @@ function renderRuinProbability(body: string) {
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
-      {sectionLabel('Ruin Probability')}
       
       {metadata.length > 0 && (
         <div style={{ display: 'flex', gap: 24, padding: '8px 12px', background: 'var(--bg2)', borderRadius: 6, border: '1px solid var(--line1)' }}>
@@ -4192,7 +4205,6 @@ function renderDeflatedSharpe(body: string) {
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
-      {sectionLabel('Deflated Sharpe Ratio (DSR)')}
       
       {groups.map((g, gIdx) => (
         <div key={gIdx} style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
@@ -4299,7 +4311,6 @@ function renderShockInjection(body: string) {
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
-      {sectionLabel('Shock Injection Test')}
 
       {/* Baseline + survival summary */}
       <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap' }}>
@@ -4497,7 +4508,6 @@ function renderRegimeBreakdown(body: string) {
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
-      {sectionLabel('Regime Robustness Test')}
 
       {/* Consistency summary banner (merged from REGIME CONSISTENCY SUMMARY) */}
       {consistencyVerdict && (
@@ -4671,7 +4681,6 @@ function renderRegimeISvsOOS(body: string) {
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
-      {sectionLabel('Regime Robustness Test')}
 
       {subtitle && (
         <div style={{ fontSize: 10.5, color: 'var(--t3)', ...MONO, padding: '6px 12px', background: 'var(--bg2)', borderRadius: 6, border: '1px solid var(--line1)' }}>
@@ -5149,7 +5158,6 @@ function renderSlippageSweep(body: string) {
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
-      {sectionLabel('Slippage Impact Sweep')}
 
       {/* Metadata bar */}
       <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
@@ -5437,7 +5445,6 @@ function renderNoisePerturbation(body: string) {
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
-      {sectionLabel('Noise Perturbation Stability Test')}
 
       {/* Baseline + trials */}
       <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
@@ -5606,7 +5613,6 @@ function renderRegimeConditional(body: string) {
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
-      {sectionLabel('Regime & Conditional Analysis')}
 
       {/* Up/Down day stats */}
       {dayStats.length > 0 && (
@@ -5744,7 +5750,6 @@ function renderTailRiskExtended(body: string) {
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
-      {sectionLabel('Tail Risk (Extended)')}
 
       <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
         {items.map((item, idx) => {
@@ -5813,7 +5818,6 @@ function renderStatisticalValidity(body: string) {
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
-      {sectionLabel('Statistical Validity')}
 
       {/* Headline cards */}
       {headlines.length > 0 && (
@@ -5854,6 +5858,80 @@ function renderStatisticalValidity(body: string) {
               </div>
             );
           })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function renderMarketCapUniverse(body: string) {
+  const lines = body.split('\n');
+
+  type KVItem = { label: string; value: string };
+  const kvs: KVItem[] = [];
+  const warnings: string[] = [];
+
+  for (const line of lines) {
+    if (/^[═]{5,}$/.test(line.trim())) continue;
+    if (/MARKET CAP UNIVERSE/i.test(line)) continue;
+    if (/saved:/i.test(line)) continue;
+
+    const clean = line.replace(/^[│\s]+/, '').replace(/[│\s]+$/, '');
+    if (!clean) continue;
+
+    // Warning lines: "⚠  36 symbol(s) missing..." or "⚠  LOW match rate..."
+    if (/^⚠/.test(clean)) {
+      warnings.push(clean.replace(/^⚠\s*/, '').trim());
+      continue;
+    }
+
+    // KV lines: "Symbol coverage   : 93.4%  (509 / 545 unique symbols matched in parquet)"
+    const kvMatch = clean.match(/^(.+?)\s*:\s+(.+)/);
+    if (kvMatch) {
+      kvs.push({ label: kvMatch[1].trim(), value: kvMatch[2].trim() });
+    }
+  }
+
+  if (kvs.length === 0) return <PreFallback body={body} />;
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+
+      <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
+        {kvs.map((kv, idx) => {
+          const isRate = /rate|coverage/i.test(kv.label);
+          const num = parseFloat(kv.value);
+          let color = 'var(--t1)';
+          if (isRate && Number.isFinite(num)) {
+            color = num >= 90 ? 'var(--green)' : num >= 70 ? 'var(--orange)' : 'var(--red)';
+          }
+
+          return (
+            <div key={idx} style={{
+              flex: '1 1 180px', background: 'var(--bg2)', border: '1px solid var(--line1)', borderRadius: 6,
+              padding: '10px 14px', display: 'flex', flexDirection: 'column', gap: 3,
+            }}>
+              <span style={{ fontSize: 9, color: 'var(--t3)', textTransform: 'uppercase', letterSpacing: 0.5, ...MONO }}>{kv.label}</span>
+              <span style={{ fontSize: 14, color, fontWeight: 600, ...MONO }}>{kv.value.split('(')[0].trim()}</span>
+              {kv.value.includes('(') && (
+                <span style={{ fontSize: 9, color: 'var(--t4)', ...MONO }}>{kv.value.slice(kv.value.indexOf('('))}</span>
+              )}
+            </div>
+          );
+        })}
+      </div>
+
+      {warnings.length > 0 && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+          {warnings.map((w, idx) => (
+            <div key={idx} style={{
+              padding: '6px 12px', borderRadius: 4,
+              background: 'rgba(255,160,60,0.04)', border: '1px solid rgba(255,160,60,0.15)',
+              fontSize: 9.5, color: 'var(--orange)', ...MONO, lineHeight: 1.5,
+            }}>
+              ⚠ {w}
+            </div>
+          ))}
         </div>
       )}
     </div>
@@ -5914,7 +5992,6 @@ function renderCapitalOperational(body: string) {
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
-      {sectionLabel('Capital & Operational')}
 
       {/* Kelly + Ruin cards */}
       <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
@@ -6039,7 +6116,6 @@ function renderSlippageSensitivity(body: string) {
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
-      {sectionLabel('Slippage Sensitivity')}
 
       {/* Verdict + elasticity */}
       <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
@@ -6136,7 +6212,6 @@ function renderCappedReturnSensitivity(body: string) {
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
-      {sectionLabel('Capped Return Sensitivity')}
 
       <div style={{ display: 'inline-flex', flexDirection: 'column', gap: 2 }}>
         {/* Header */}
@@ -6250,7 +6325,6 @@ function renderTopNDayRemoval(body: string) {
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
-      {sectionLabel('Top-N Day Removal Test')}
 
       {/* Baseline cards */}
       <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
@@ -6421,7 +6495,6 @@ function renderLuckyStreakTest(title: string, body: string) {
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
-      {sectionLabel('Lucky Streak Test')}
 
       {/* Metadata */}
       <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
@@ -6626,7 +6699,6 @@ function renderParamSensitivityMap(body: string) {
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
-      {sectionLabel('Parameter Sensitivity Map')}
 
       {/* Metadata */}
       <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
@@ -6785,7 +6857,6 @@ function renderNeighborPlateau(body: string) {
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
-      {sectionLabel('Neighbor Plateau Test')}
 
       {description && (
         <div style={{ fontSize: 10, color: 'var(--t3)', ...MONO, padding: '6px 12px', background: 'var(--bg2)', borderRadius: 6, border: '1px solid var(--line1)' }}>
@@ -7037,7 +7108,6 @@ function renderReturnConcentration(body: string) {
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
-      {sectionLabel('Return Concentration Analysis')}
 
       {/* Summary cards row */}
       <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
@@ -7308,7 +7378,6 @@ function renderParamJitter(body: string) {
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
-      {sectionLabel('Param Jitter / Sharpe Stability')}
 
       {/* Verdict + headline stats */}
       <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
@@ -7621,7 +7690,6 @@ function renderPeriodicBreakdown(body: string) {
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
-      {sectionLabel('Periodic Return Breakdown')}
 
       <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap' }}>
         {groups.map((g, gIdx) => {
@@ -8754,7 +8822,6 @@ function renderHeatmapSection(body: string, label: string) {
   if (grid && grid.data.length >= 2 && grid.colLabels.length >= 2) {
     return (
       <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-        {sectionLabel(label)}
         <HeatmapGrid rowLabels={grid.rowLabels} colLabels={grid.colLabels} data={grid.data} />
       </div>
     );
@@ -8763,7 +8830,6 @@ function renderHeatmapSection(body: string, label: string) {
   if (table && table.rows.length > 0) {
     return (
       <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-        {sectionLabel(label)}
         <SectionTable headers={table.headers} rows={table.rows} />
       </div>
     );
@@ -8787,7 +8853,6 @@ function renderRankedSection(body: string, label: string) {
     if (items.length >= 2) {
       return (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-          {sectionLabel(label + ' — Sharpe')}
           <SectionHBarChart items={items} colorFn={(v) => v >= 1.5 ? 'var(--green)' : v >= 0.5 ? 'var(--amber)' : 'var(--red)'} />
           <SectionTable headers={table.headers} rows={table.rows} />
         </div>
@@ -8796,7 +8861,6 @@ function renderRankedSection(body: string, label: string) {
   }
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-      {sectionLabel(label)}
       <SectionTable headers={table.headers} rows={table.rows} />
     </div>
   );
@@ -9176,6 +9240,380 @@ function renderRunSummary(body: string) {
   );
 }
 
+function renderGradedMetrics(title: string, body: string) {
+  const lines = body.split('\n');
+
+  // Parse header from title: "GATING METRICS  (25/45)  Grade: C"
+  const titleMatch = title.match(/^(.+?)\s*\((\d+)\/(\d+)\)\s*Grade:\s*(\S+)/i);
+  const sectionName = titleMatch ? titleMatch[1].trim() : title;
+  const score = titleMatch ? titleMatch[2] : '';
+  const total = titleMatch ? titleMatch[3] : '';
+  const grade = titleMatch ? titleMatch[4] : '';
+
+  type GradedMetric = { icon: string; name: string; score: string; description: string; goalActual: string; passed: boolean; warn: boolean };
+  const metrics: GradedMetric[] = [];
+
+  let currentMetric: GradedMetric | null = null;
+
+  for (const line of lines) {
+    if (/^[│┌┐└┘─═]+$/.test(line.trim())) continue;
+    if (/GATING METRICS|CORE METRICS|SUPPORTING METRICS/i.test(line)) continue;
+
+    const clean = line.replace(/^[│\s]+/, '').replace(/[│\s]+$/, '');
+    if (!clean) {
+      // Empty line separates metrics
+      if (currentMetric) { metrics.push(currentMetric); currentMetric = null; }
+      continue;
+    }
+
+    // "✅ Deflated Sharpe Ratio (DSR)  —  10/15" or "❌ Walk-Forward..." or "⚠  Neighbor..."
+    const metricMatch = clean.match(/^(✅|❌|⚠)\s+(.+?)\s+—\s+(\d+\/\d+)/);
+    if (metricMatch) {
+      if (currentMetric) metrics.push(currentMetric);
+      currentMetric = {
+        icon: metricMatch[1],
+        name: metricMatch[2].trim(),
+        score: metricMatch[3],
+        description: '',
+        goalActual: '',
+        passed: metricMatch[1] === '✅',
+        warn: metricMatch[1] === '⚠',
+      };
+      continue;
+    }
+
+    // "Goal: ≥95%  (≥99.5% ideal)   Actual: 98.94%"
+    if (currentMetric && /^Goal:/i.test(clean)) {
+      currentMetric.goalActual = clean;
+      continue;
+    }
+
+    // Description lines
+    if (currentMetric) {
+      currentMetric.description = currentMetric.description
+        ? `${currentMetric.description} ${clean}`
+        : clean;
+    }
+  }
+  if (currentMetric) metrics.push(currentMetric);
+
+  if (metrics.length === 0) return <PreFallback body={body} />;
+
+  // Grade color
+  const gradeColor = /^A/i.test(grade) ? 'var(--green)' : /^B/i.test(grade) ? '#5bc0de' : /^C/i.test(grade) ? 'var(--orange)' : 'var(--red)';
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+
+      {/* Header with score and grade */}
+      <div style={{
+        display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+        background: 'var(--bg2)', border: '1px solid var(--line1)', borderRadius: 6,
+        padding: '10px 16px',
+      }}>
+        <div style={{ display: 'flex', alignItems: 'baseline', gap: 10 }}>
+          {score && total && (
+            <span style={{ fontSize: 18, color: 'var(--t1)', fontWeight: 600, ...MONO }}>{score}/{total}</span>
+          )}
+          <span style={{ fontSize: 10, color: 'var(--t3)', ...MONO }}>points</span>
+        </div>
+        {grade && (
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            <span style={{ fontSize: 9, color: 'var(--t4)', textTransform: 'uppercase', letterSpacing: 0.5, ...MONO }}>Grade</span>
+            <span style={{
+              fontSize: 16, fontWeight: 700, color: gradeColor,
+              padding: '2px 10px', borderRadius: 4,
+              background: `color-mix(in srgb, ${gradeColor} 10%, transparent)`,
+              border: `1px solid color-mix(in srgb, ${gradeColor} 25%, transparent)`,
+              ...MONO,
+            }}>
+              {grade}
+            </span>
+          </div>
+        )}
+      </div>
+
+      {/* Metrics */}
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+        {metrics.map((m, idx) => {
+          const color = m.passed ? 'var(--green)' : m.warn ? 'var(--orange)' : 'var(--red)';
+          const bg = m.passed ? 'transparent' : m.warn ? 'rgba(255,160,60,0.03)' : 'rgba(255,60,60,0.03)';
+          const border = m.passed ? 'var(--line1)' : m.warn ? 'rgba(255,160,60,0.15)' : 'rgba(255,60,60,0.15)';
+
+          return (
+            <div key={idx} style={{
+              background: bg, border: `1px solid ${border}`, borderRadius: 6,
+              padding: '10px 14px', display: 'flex', flexDirection: 'column', gap: 6,
+            }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                  <span style={{ fontSize: 13 }}>{m.icon}</span>
+                  <span style={{ fontSize: 11, color: 'var(--t1)', fontWeight: 500, ...MONO }}>{m.name}</span>
+                </div>
+                <span style={{ fontSize: 11, color, fontWeight: 600, ...MONO }}>{m.score}</span>
+              </div>
+              {m.description && (
+                <span style={{ fontSize: 9.5, color: 'var(--t3)', lineHeight: 1.5, ...MONO }}>{m.description}</span>
+              )}
+              {m.goalActual && (
+                <div style={{ fontSize: 9, color: 'var(--t4)', ...MONO, padding: '4px 8px', background: 'rgba(255,255,255,0.02)', borderRadius: 3 }}>
+                  {m.goalActual}
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function renderWhatYouHave(body: string) {
+  const lines = body.split('\n');
+  const items: string[] = [];
+
+  for (const line of lines) {
+    if (/^[│┌┐└┘─═]+$/.test(line.trim())) continue;
+    if (/WHAT YOU HAVE/i.test(line)) continue;
+    const clean = line.replace(/^[│\s]+/, '').replace(/[│\s]+$/, '');
+    if (!clean) continue;
+
+    const match = clean.match(/^✅\s+(.+)/);
+    if (match) items.push(match[1].trim());
+  }
+
+  if (items.length === 0) return <PreFallback body={body} />;
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+        {items.map((item, idx) => (
+          <div key={idx} style={{
+            display: 'flex', gap: 8, alignItems: 'flex-start',
+            padding: '6px 10px', borderRadius: 4,
+            background: idx % 2 === 0 ? 'var(--bg2)' : 'transparent',
+            ...MONO,
+          }}>
+            <span style={{ fontSize: 11, flexShrink: 0, marginTop: 1, color: 'var(--green)' }}>✓</span>
+            <span style={{ fontSize: 10, color: 'var(--t2)', lineHeight: 1.5 }}>{item}</span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function renderWhatYouNeed(body: string) {
+  const lines = body.split('\n');
+  const items: { num: string; text: string }[] = [];
+  let current: { num: string; text: string } | null = null;
+
+  for (const line of lines) {
+    if (/^[│┌┐└┘─═]+$/.test(line.trim())) continue;
+    if (/WHAT YOU STILL NEED/i.test(line)) continue;
+    const clean = line.replace(/^[│\s]+/, '').replace(/[│\s]+$/, '');
+    if (!clean) {
+      if (current) { items.push(current); current = null; }
+      continue;
+    }
+
+    // "1. │     DSR below threshold — ..."
+    const numMatch = clean.match(/^(\d+)\.\s*│?\s*(.+)/);
+    if (numMatch) {
+      if (current) items.push(current);
+      current = { num: numMatch[1], text: numMatch[2].trim() };
+      continue;
+    }
+
+    // Continuation line
+    if (current) {
+      current.text += ` ${clean}`;
+    }
+  }
+  if (current) items.push(current);
+
+  if (items.length === 0) return <PreFallback body={body} />;
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+        {items.map((item, idx) => (
+          <div key={idx} style={{
+            display: 'flex', gap: 10, alignItems: 'flex-start',
+            padding: '8px 12px', borderRadius: 4,
+            background: 'var(--bg2)', border: '1px solid rgba(255,160,60,0.12)',
+            ...MONO,
+          }}>
+            <span style={{ fontSize: 12, color: 'var(--orange)', fontWeight: 600, flexShrink: 0, minWidth: 16 }}>{item.num}.</span>
+            <span style={{ fontSize: 10, color: 'var(--t2)', lineHeight: 1.5 }}>{item.text}</span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function renderBottomLine(body: string) {
+  const lines = body.split('\n');
+  const textParts: string[] = [];
+
+  for (const line of lines) {
+    if (/^[│┌┐└┘─═]+$/.test(line.trim())) continue;
+    if (/BOTTOM LINE/i.test(line)) continue;
+    const clean = line.replace(/^[│\s]+/, '').replace(/[│\s]+$/, '');
+    if (!clean) continue;
+    textParts.push(clean);
+  }
+
+  if (textParts.length === 0) return <PreFallback body={body} />;
+
+  const text = textParts.join(' ');
+
+  // Extract score if present: "scores 63/100"
+  const scoreMatch = text.match(/scores?\s+(\d+)\/(\d+)/i);
+  const score = scoreMatch ? parseInt(scoreMatch[1]) : null;
+  const scoreColor = score !== null ? (score >= 80 ? 'var(--green)' : score >= 60 ? 'var(--orange)' : 'var(--red)') : 'var(--t1)';
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+      <div style={{
+        padding: '14px 18px', borderRadius: 6,
+        background: 'var(--bg2)', border: '1px solid var(--line1)',
+        ...MONO,
+      }}>
+        {score !== null && (
+          <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, marginBottom: 10 }}>
+            <span style={{ fontSize: 24, fontWeight: 700, color: scoreColor }}>{score}</span>
+            <span style={{ fontSize: 12, color: 'var(--t3)' }}>/ 100</span>
+          </div>
+        )}
+        <p style={{ fontSize: 10.5, color: 'var(--t2)', lineHeight: 1.6, margin: 0 }}>{text}</p>
+      </div>
+    </div>
+  );
+}
+
+function renderAuditChecklist(body: string, label: string) {
+  const lines = body.split('\n');
+
+  let filterName = '';
+  let passCount = '';
+  let totalCount = '';
+  let status = '';  // CLEAN or FAIL
+
+  type TestResult = { id: string; name: string; description: string; passed: boolean };
+  const tests: TestResult[] = [];
+  let summary = '';
+
+  for (const line of lines) {
+    if (/^[│┌┐└┘─═]+$/.test(line.trim())) continue;
+    if (/DAILY SERIES AUDIT/i.test(line)) continue;
+
+    const clean = line.replace(/^[│\s]+/, '').replace(/[│\s]+$/, '');
+    if (!clean) continue;
+
+    // "A - No Filter  |  Passed: 6/6   ✅ CLEAN"
+    const headerMatch = clean.match(/^(.+?)\s*\|\s*Passed:\s*(\d+)\/(\d+)\s*(✅|❌)\s*(\S+)/);
+    if (headerMatch) {
+      filterName = headerMatch[1].trim();
+      passCount = headerMatch[2];
+      totalCount = headerMatch[3];
+      status = headerMatch[5];
+      continue;
+    }
+
+    // "✅ T11 Filter Zero Injection" or "❌ T11 ..."
+    const testMatch = clean.match(/^(✅|❌)\s+(T\d+)\s+(.+)/);
+    if (testMatch) {
+      tests.push({
+        id: testMatch[2],
+        name: testMatch[3].trim(),
+        description: '',
+        passed: testMatch[1] === '✅',
+      });
+      continue;
+    }
+
+    // Description line (indented, follows a test)
+    if (tests.length > 0 && !tests[tests.length - 1].description && clean.length > 0 && !/^All \d+/.test(clean)) {
+      tests[tests.length - 1].description = clean;
+      continue;
+    }
+
+    // "All 6 daily-series checks passed."
+    if (/^All \d+/.test(clean)) {
+      summary = clean;
+      continue;
+    }
+
+    // "Portfolio-level return construction is causally sound."
+    if (/Portfolio-level/i.test(clean)) {
+      summary = summary ? `${summary} ${clean}` : clean;
+    }
+  }
+
+  if (tests.length === 0) return <PreFallback body={body} />;
+
+  const allPassed = status === 'CLEAN';
+  const statusColor = allPassed ? 'var(--green)' : 'var(--red)';
+  const statusBg = allPassed ? 'rgba(60,255,100,0.05)' : 'rgba(255,60,60,0.05)';
+  const statusBorder = allPassed ? 'rgba(60,255,100,0.25)' : 'rgba(255,60,60,0.25)';
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+
+      {/* Header card */}
+      <div style={{
+        display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+        background: statusBg, border: `1px solid ${statusBorder}`, borderRadius: 6,
+        padding: '10px 16px',
+      }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+          <span style={{ fontSize: 18, color: statusColor, fontWeight: 700, ...MONO }}>{passCount}/{totalCount}</span>
+          <span style={{ fontSize: 11, color: 'var(--t2)', ...MONO }}>{filterName}</span>
+        </div>
+        <span style={{
+          fontSize: 10, fontWeight: 600, padding: '3px 10px', borderRadius: 4,
+          background: allPassed ? 'rgba(60,255,100,0.12)' : 'rgba(255,60,60,0.12)',
+          color: statusColor, ...MONO,
+        }}>
+          {status}
+        </span>
+      </div>
+
+      {/* Test results */}
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+        {tests.map((t, idx) => (
+          <div key={idx} style={{
+            display: 'flex', gap: 10, padding: '8px 12px', borderRadius: 4,
+            background: idx % 2 === 0 ? 'var(--bg2)' : 'transparent',
+            alignItems: 'flex-start',
+            ...MONO,
+          }}>
+            <span style={{ fontSize: 12, flexShrink: 0, marginTop: 1 }}>{t.passed ? '✅' : '❌'}</span>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 2, minWidth: 0 }}>
+              <div style={{ display: 'flex', gap: 8, alignItems: 'baseline' }}>
+                <span style={{ fontSize: 9, color: 'var(--t4)', flexShrink: 0 }}>{t.id}</span>
+                <span style={{ fontSize: 10, color: t.passed ? 'var(--t1)' : 'var(--red)', fontWeight: 500 }}>{t.name}</span>
+              </div>
+              {t.description && (
+                <span style={{ fontSize: 9, color: 'var(--t4)', lineHeight: 1.4 }}>{t.description}</span>
+              )}
+            </div>
+          </div>
+        ))}
+      </div>
+
+      {/* Summary */}
+      {summary && (
+        <div style={{ fontSize: 9.5, color: 'var(--t3)', ...MONO, padding: '6px 12px', background: 'var(--bg2)', borderRadius: 6, border: '1px solid var(--line1)' }}>
+          {summary}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function renderBestFilterHeadline(body: string) {
   const lines = body.split('\n');
   const kv: { key: string; value: string }[] = [];
@@ -9210,7 +9648,6 @@ function renderBestFilterHeadline(body: string) {
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
-      {sectionLabel('Best Filter Headline')}
 
       <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
         {kv.map((item, idx) => {
@@ -9878,7 +10315,6 @@ function renderTrailSweep(body: string, title: string): React.ReactNode {
         const minS = Math.min(...allS);
         return (
           <div key={si} style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-            {sectionLabel(sec.label)}
             <div style={{ overflowX: 'auto' }}>
               <table style={{ borderCollapse: 'collapse', fontSize: 9, tableLayout: 'auto', ...MONO }}>
                 <thead>
@@ -11004,7 +11440,6 @@ function renderStressTestSummary(body: string): React.ReactNode {
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
-      {sectionLabel('Stress Test Summary')}
 
       {/* Config badges */}
       {(mcIters || bbIters) && (
@@ -11139,6 +11574,14 @@ function renderSectionViz(title: string, body: string): React.ReactNode {
   const t = title.toUpperCase();
 
   if (t.includes('RUN SUMMARY')) return renderRunSummary(body);
+  if (t.includes('DAILY SERIES AUDIT')) return renderAuditChecklist(body, 'Daily Series Audit');
+  if (t.includes('SIMULATION BIAS AUDIT')) return renderAuditChecklist(body, 'Simulation Bias Audit');
+  if (t.includes('GATING METRICS')) return renderGradedMetrics(title, body);
+  if (t.includes('CORE METRICS')) return renderGradedMetrics(title, body);
+  if (t.includes('SUPPORTING METRICS')) return renderGradedMetrics(title, body);
+  if (t.includes('WHAT YOU HAVE')) return renderWhatYouHave(body);
+  if (t.includes('WHAT YOU STILL NEED')) return renderWhatYouNeed(body);
+  if (t.includes('BOTTOM LINE')) return renderBottomLine(body);
   if (t.includes('BEST FILTER HEADLINE STATS')) return renderBestFilterHeadline(body);
   if (t.includes('ALLOCATOR VIEW SCORECARD') || t.includes('TECHNICAL APPENDIX SCORECARD')) return renderScorecardTable(body);
   if (t.includes('RETURN RATES BY PERIOD')) return renderReturnRatesByPeriod(body);
@@ -11171,6 +11614,7 @@ function renderSectionViz(title: string, body: string): React.ReactNode {
   if (t.includes('CAPACITY CURVE TEST')) return renderCapacityCurveTest(body);
   if (t.includes('COST CURVE TEST')) return renderCostCurveTest(body);
   if (t.includes('CAPITAL & OPERATIONAL')) return renderCapitalOperational(body);
+  if (t.includes('MARKET CAP UNIVERSE SUMMARY')) return renderMarketCapUniverse(body);
   if (t.includes('MARKET CAP DIAGNOSTIC')) return renderMarketCapDiagnostic(body);
   if (/^RUIN PROBABILITY/i.test(t)) return renderRuinProbability(body);
   if (t.includes('DEFLATED SHARPE RATIO')) return renderDeflatedSharpe(body);
@@ -11277,6 +11721,7 @@ export default function ResultsView({ results, jobId, startingCapital, params }:
   } | null>(null);
   const [calendarRowHoverKey, setCalendarRowHoverKey] = useState<string | null>(null);
   const [calendarViewMode, setCalendarViewMode] = useState<'grid' | 'chart'>('grid');
+  const [showFullReportBackToTop, setShowFullReportBackToTop] = useState(false);
   const [openFullReportCategories, setOpenFullReportCategories] = useState<Record<FullReportCategoryKey, boolean>>(() => (
     FULL_REPORT_CATEGORIES.reduce((acc, cat) => {
       acc[cat.key] = cat.defaultOpen;
@@ -11286,6 +11731,7 @@ export default function ResultsView({ results, jobId, startingCapital, params }:
   const [openFullReportSectionKeys, setOpenFullReportSectionKeys] = useState<Record<string, boolean>>({});
   const filterComparisonRef = useRef<HTMLDetailsElement | null>(null);
   const monthlyHeatmapRailRef = useRef<HTMLDivElement | null>(null);
+  const resultsViewRootRef = useRef<HTMLDivElement | null>(null);
   const defaultSelectedFilter = (() => {
     if (mergedFilters.length === 0) return null;
     const candidates = mergedFilters.filter((r) => !r.not_run);
@@ -11609,7 +12055,7 @@ export default function ResultsView({ results, jobId, startingCapital, params }:
   );
   const fullReportKpis = useMemo(() => ([
     { label: 'Sharpe', key: 'sharpe', value: fmtMetric(selectedRow?.sharpe ?? m.sharpe), colorValue: selectedRow?.sharpe ?? m.sharpe },
-    { label: 'CAGR %', key: 'cagr', value: fmtPercent2(selectedRow?.cagr ?? m.cagr), colorValue: selectedRow?.cagr ?? m.cagr },
+    { label: 'CAGR %', key: 'cagr', value: fmtCagr(selectedRow?.cagr ?? m.cagr), colorValue: selectedRow?.cagr ?? m.cagr },
     { label: 'Max DD %', key: 'max_dd', value: fmtPercent2(selectedRow?.max_dd ?? m.max_drawdown), colorValue: selectedRow?.max_dd ?? m.max_drawdown },
     { label: 'DSR %', key: 'dsr_pct', value: fmtPercent2(selectedRow?.dsr_pct ?? m.dsr_pct), colorValue: selectedRow?.dsr_pct ?? m.dsr_pct },
     {
@@ -11638,6 +12084,29 @@ export default function ResultsView({ results, jobId, startingCapital, params }:
       return prev;
     });
   }, [fullReportCategoryGroups]);
+
+  useEffect(() => {
+    if (activeTab !== 'full_report') {
+      setShowFullReportBackToTop(false);
+      return;
+    }
+
+    const scrollContainer = resultsViewRootRef.current?.parentElement;
+    if (!scrollContainer) {
+      setShowFullReportBackToTop(false);
+      return;
+    }
+
+    const onScroll = () => {
+      setShowFullReportBackToTop(scrollContainer.scrollTop > 480);
+    };
+
+    onScroll();
+    scrollContainer.addEventListener('scroll', onScroll, { passive: true });
+    return () => {
+      scrollContainer.removeEventListener('scroll', onScroll);
+    };
+  }, [activeTab]);
 
   const selectedEquityCurve = ((selectedRow?.equity_curve as Point[] | undefined) ?? equityCurve) as Point[] | null | undefined;
   const selectedDrawdownCurve = ((selectedRow?.drawdown_curve as Point[] | undefined) ?? drawdownCurve) as Point[] | null | undefined;
@@ -12344,7 +12813,7 @@ export default function ResultsView({ results, jobId, startingCapital, params }:
   const metricCards: Array<{ label: string; key: string; value: string; colorValue: unknown; secondary?: string; unit?: string; unitColor?: string }> = selectedRow
     ? [
       { label: 'Sharpe', key: 'sharpe', value: fmtMetric(selectedRow.sharpe), colorValue: selectedRow.sharpe },
-      { label: 'CAGR %', key: 'cagr', value: fmtPercent2(selectedRow.cagr), colorValue: selectedRow.cagr },
+      { label: 'CAGR %', key: 'cagr', value: fmtCagr(selectedRow.cagr), colorValue: selectedRow.cagr },
       { label: 'Max DD %', key: 'max_dd', value: fmtPercent2(selectedRow.max_dd), colorValue: selectedRow.max_dd },
       {
         label: 'Active Days',
@@ -12470,7 +12939,7 @@ export default function ResultsView({ results, jobId, startingCapital, params }:
   }
 
   return (
-    <div style={{ padding: '0 16px 16px 16px', display: 'flex', flexDirection: 'column', gap: 16 }}>
+    <div ref={resultsViewRootRef} style={{ padding: '0 16px 16px 16px', display: 'flex', flexDirection: 'column', gap: 16 }}>
       <div
         style={{
           display: 'flex',
@@ -12495,6 +12964,32 @@ export default function ResultsView({ results, jobId, startingCapital, params }:
           }}
         >
           Audit id: {jobId ?? 'N/A'}
+          {mergedFilters.length > 0 && (
+            <select
+              value={selectedFilter ?? ''}
+              onChange={(e) => setManualSelectedFilter(e.target.value || null)}
+              style={{
+                marginLeft: 12,
+                height: 22,
+                padding: '0 6px',
+                borderRadius: 3,
+                border: '1px solid var(--line2)',
+                background: 'var(--bg1)',
+                color: 'var(--t1)',
+                fontSize: 9,
+                letterSpacing: '0.06em',
+                cursor: 'pointer',
+                fontFamily: 'var(--font-space-mono), Space Mono, monospace',
+                outline: 'none',
+              }}
+            >
+              {mergedFilters.filter((r) => !r.not_run).map((r) => (
+                <option key={String(r.filter)} value={String(r.filter)}>
+                  {String(r.filter)}
+                </option>
+              ))}
+            </select>
+          )}
         </div>
         <div style={{ display: 'flex', gap: 6, justifyContent: 'flex-end' }}>
           {([
@@ -13283,41 +13778,70 @@ export default function ResultsView({ results, jobId, startingCapital, params }:
                       const range = Math.max(1e-9, maxCum - minCum);
                       const toY = (v: number) => h - padB - ((v - minCum) / range) * (h - padT - padB);
                       const plotW = w - padL - padR;
-                      const barW = Math.max(1, Math.min(6, plotW / Math.max(1, cum.length) * 0.9));
                       const yZero = toY(0);
+                      const points = cum.map((c, i) => ({
+                        x: padL + ((i + 0.5) / cum.length) * plotW,
+                        y: toY(c.pct),
+                      }));
+                      // Build smooth cubic bezier curve
+                      const smoothLine = (pts: typeof points): string => {
+                        if (pts.length < 2) return pts.map((p, i) => `${i === 0 ? 'M' : 'L'}${p.x},${p.y}`).join(' ');
+                        let d = `M${pts[0].x},${pts[0].y}`;
+                        for (let i = 0; i < pts.length - 1; i++) {
+                          const p0 = pts[Math.max(0, i - 1)];
+                          const p1 = pts[i];
+                          const p2 = pts[i + 1];
+                          const p3 = pts[Math.min(pts.length - 1, i + 2)];
+                          const tension = 0.3;
+                          const cp1x = p1.x + (p2.x - p0.x) * tension;
+                          const cp1y = p1.y + (p2.y - p0.y) * tension;
+                          const cp2x = p2.x - (p3.x - p1.x) * tension;
+                          const cp2y = p2.y - (p3.y - p1.y) * tension;
+                          d += ` C${cp1x},${cp1y} ${cp2x},${cp2y} ${p2.x},${p2.y}`;
+                        }
+                        return d;
+                      };
+                      const linePath = smoothLine(points);
+                      const areaPath = points.length > 0
+                        ? `${linePath} L${points[points.length - 1].x},${yZero} L${points[0].x},${yZero} Z`
+                        : '';
+                      const lastPct = cum[cum.length - 1]?.pct ?? 0;
+                      const isPos = lastPct >= 0;
                       return (
-                        <svg viewBox={`0 0 ${w} ${h}`} style={{ width: '100%', height: '100%', display: 'block' }} preserveAspectRatio="none">
+                        <svg
+                          viewBox={`0 0 ${w} ${h}`}
+                          style={{ width: '100%', height: '100%', display: 'block' }}
+                          preserveAspectRatio="none"
+                          onMouseMove={(e) => {
+                            const rect = e.currentTarget.getBoundingClientRect();
+                            const mx = ((e.clientX - rect.left) / rect.width) * w;
+                            let idx = Math.floor(((mx - padL) / Math.max(1, plotW)) * cum.length);
+                            idx = Math.max(0, Math.min(cum.length - 1, idx));
+                            const c = cum[idx];
+                            if (c) {
+                              setCalendarHover({
+                                x: e.clientX, y: e.clientY,
+                                text: `${c.key} | cum ${c.pct >= 0 ? '+' : ''}${c.pct.toFixed(2)}%`,
+                              });
+                            }
+                          }}
+                          onMouseLeave={() => setCalendarHover(null)}
+                        >
+                          <defs>
+                            <clipPath id={`clip-pos-${month.monthKey}`}><rect x={padL} y={0} width={plotW} height={yZero} /></clipPath>
+                            <clipPath id={`clip-neg-${month.monthKey}`}><rect x={padL} y={yZero} width={plotW} height={h - yZero} /></clipPath>
+                          </defs>
                           <line x1={padL} y1={padT} x2={padL} y2={h - padB} stroke="var(--line2)" />
                           <line x1={padL} y1={h - padB} x2={w - padR} y2={h - padB} stroke="var(--line2)" />
                           <line x1={padL} y1={yZero} x2={w - padR} y2={yZero} stroke="rgba(255,255,255,0.35)" strokeDasharray="2 2" />
-                          {cum.map((c, i) => {
-                            const x = padL + ((i + 0.5) / cum.length) * plotW;
-                            const y = toY(c.pct);
-                            const top = Math.min(yZero, y);
-                            const hh = Math.max(1, Math.abs(y - yZero));
-                            const isPos = c.pct >= 0;
-                            return (
-                              <rect
-                                key={`${month.monthKey}-cum-${c.key}`}
-                                x={x - (barW / 2)}
-                                y={top}
-                                width={barW}
-                                height={hh}
-                                fill={isPos ? 'rgba(0, 200, 150, 0.35)' : 'rgba(255, 77, 77, 0.35)'}
-                                stroke={isPos ? 'rgba(0, 200, 150, 0.75)' : 'rgba(255, 77, 77, 0.75)'}
-                                strokeWidth={0.35}
-                                onMouseEnter={(e) => setCalendarHover({
-                                  x: e.clientX,
-                                  y: e.clientY,
-                                  text: `${c.key} | cum ${c.pct >= 0 ? '+' : ''}${c.pct.toFixed(2)}%`,
-                                })}
-                                onMouseMove={(e) => setCalendarHover((prev) => (prev
-                                  ? { ...prev, x: e.clientX, y: e.clientY }
-                                  : { x: e.clientX, y: e.clientY, text: `${c.key} | cum ${c.pct >= 0 ? '+' : ''}${c.pct.toFixed(2)}%` }))}
-                                onMouseLeave={() => setCalendarHover(null)}
-                              />
-                            );
-                          })}
+                          {areaPath && (
+                            <>
+                              <path d={areaPath} fill="rgba(0, 200, 150, 0.15)" clipPath={`url(#clip-pos-${month.monthKey})`} />
+                              <path d={areaPath} fill="rgba(255, 77, 77, 0.15)" clipPath={`url(#clip-neg-${month.monthKey})`} />
+                              <path d={linePath} fill="none" stroke="rgba(0, 200, 150, 0.7)" strokeWidth="1" clipPath={`url(#clip-pos-${month.monthKey})`} />
+                              <path d={linePath} fill="none" stroke="rgba(255, 77, 77, 0.7)" strokeWidth="1" clipPath={`url(#clip-neg-${month.monthKey})`} />
+                            </>
+                          )}
                           <text x={4} y={toY(maxCum) + 3} fill="var(--t3)" fontSize="8" fontFamily="var(--font-space-mono), Space Mono, monospace">
                             {`${maxCum.toFixed(1)}%`}
                           </text>
@@ -14159,314 +14683,354 @@ export default function ResultsView({ results, jobId, startingCapital, params }:
       )}
 
       {activeTab === 'full_report' && (
-        <div
-          style={{
-            background: 'var(--bg2)',
-            border: '1px solid var(--line)',
-            borderRadius: 3,
-            display: 'flex',
-            flexDirection: 'column',
-          }}
-        >
-          {outputLoading && <div style={{ fontSize: 10, color: 'var(--t3)' }}>Loading full report sections...</div>}
-          {outputError && <div style={{ fontSize: 10, color: 'var(--red)' }}>{outputError}</div>}
-          {!outputLoading && !outputError && (
-            <>
-              <div style={{ padding: '12px 12px 0 12px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 10 }}>
-                <div style={{ fontSize: 9, color: 'var(--t3)', textTransform: 'uppercase', letterSpacing: '0.1em', fontWeight: 700 }}>
-                  Full Report • {fullReportSectionCount} sections
-                </div>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-                  <button
-                    onClick={jumpToFilterComparison}
-                    style={{
-                      height: 24,
-                      padding: '0 8px',
-                      borderRadius: 3,
-                      border: '1px solid var(--line2)',
-                      background: 'var(--bg1)',
-                      color: 'var(--t2)',
-                      fontSize: 9,
-                      letterSpacing: '0.06em',
-                      textTransform: 'uppercase',
-                      cursor: 'pointer',
-                    }}
-                    title="Jump to Filter Comparison in Summary"
-                  >
-                    Selected Filter: {selectedFilter ?? 'N/A'}
-                  </button>
-                  <button
-                    onClick={copyRawOutput}
-                    style={{
-                      height: 24,
-                      padding: '0 8px',
-                      borderRadius: 3,
-                      border: '1px solid var(--line2)',
-                      background: 'var(--bg1)',
-                      color: copyState === 'copied' ? 'var(--green)' : copyState === 'error' ? 'var(--red)' : 'var(--t1)',
-                      fontSize: 9,
-                      letterSpacing: '0.08em',
-                      fontWeight: 700,
-                      cursor: 'pointer',
-                    }}
-                  >
-                    {copyState === 'copied' ? 'COPIED' : copyState === 'error' ? 'COPY FAILED' : 'COPY ALL'}
-                  </button>
-                </div>
-              </div>
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 8, padding: '0 12px 12px 12px' }}>
-                <div
-                  style={{
-                    position: 'sticky',
-                    top: 0,
-                    zIndex: 3,
-                    background: 'var(--bg2)',
-                    paddingTop: 8,
-                    paddingBottom: 8,
-                    borderBottom: '1px solid var(--line)',
-                    display: 'flex',
-                    flexDirection: 'column',
-                    gap: 8,
-                  }}
-                >
-                  <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
-                    {fullReportCategoryGroups.map((cat) => (
-                      <button
-                        key={`toc-${cat.key}`}
-                        onClick={() => {
-                          const el = document.getElementById(`full-report-cat-${cat.key}`);
-                          if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
-                        }}
-                        style={{
-                          height: 22,
-                          padding: '0 8px',
-                          borderRadius: 3,
-                          border: '1px solid var(--line2)',
-                          background: 'var(--bg1)',
-                          color: 'var(--t2)',
-                          fontSize: 9,
-                          letterSpacing: '0.06em',
-                          textTransform: 'uppercase',
-                          cursor: 'pointer',
-                        }}
-                      >
-                        {cat.title} ({cat.sections.length})
-                      </button>
-                    ))}
+        <>
+          <div
+            style={{
+              background: 'var(--bg2)',
+              border: '1px solid var(--line)',
+              borderRadius: 3,
+              display: 'flex',
+              flexDirection: 'column',
+            }}
+          >
+            {outputLoading && <div style={{ fontSize: 10, color: 'var(--t3)' }}>Loading full report sections...</div>}
+            {outputError && <div style={{ fontSize: 10, color: 'var(--red)' }}>{outputError}</div>}
+            {!outputLoading && !outputError && (
+              <>
+                <div style={{ padding: '12px 12px 0 12px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 10 }}>
+                  <div style={{ fontSize: 9, color: 'var(--t3)', textTransform: 'uppercase', letterSpacing: '0.1em', fontWeight: 700 }}>
+                    Full Report • {fullReportSectionCount} sections
                   </div>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                    {(() => {
+                      const anyOpen = Object.values(openFullReportCategories).some(Boolean)
+                        || Object.values(openFullReportSectionKeys).some(Boolean);
+                      return (
+                        <button
+                          onClick={() => {
+                            if (anyOpen) {
+                              setOpenFullReportCategories((prev) => {
+                                const next = { ...prev };
+                                for (const cat of fullReportCategoryGroups) next[cat.key] = false;
+                                return next;
+                              });
+                              setOpenFullReportSectionKeys((prev) => {
+                                const next = { ...prev };
+                                for (const cat of fullReportCategoryGroups) {
+                                  for (let idx = 0; idx < cat.sections.length; idx += 1) {
+                                    next[`${cat.key}-${idx}-${cat.sections[idx].title}`] = false;
+                                  }
+                                }
+                                return next;
+                              });
+                            } else {
+                              setOpenFullReportCategories((prev) => {
+                                const next = { ...prev };
+                                for (const cat of fullReportCategoryGroups) next[cat.key] = true;
+                                return next;
+                              });
+                              setOpenFullReportSectionKeys((prev) => {
+                                const next = { ...prev };
+                                for (const cat of fullReportCategoryGroups) {
+                                  for (let idx = 0; idx < cat.sections.length; idx += 1) {
+                                    next[`${cat.key}-${idx}-${cat.sections[idx].title}`] = true;
+                                  }
+                                }
+                                return next;
+                              });
+                            }
+                          }}
+                          style={{
+                            height: 24,
+                            padding: '0 8px',
+                            borderRadius: 3,
+                            border: '1px solid var(--line2)',
+                            background: 'var(--bg1)',
+                            color: 'var(--t2)',
+                            fontSize: 9,
+                            letterSpacing: '0.06em',
+                            textTransform: 'uppercase',
+                            cursor: 'pointer',
+                          }}
+                        >
+                          {anyOpen ? 'Collapse All' : 'Expand All'}
+                        </button>
+                      );
+                    })()}
+                    <button
+                      onClick={copyRawOutput}
+                      style={{
+                        height: 24,
+                        padding: '0 8px',
+                        borderRadius: 3,
+                        border: '1px solid var(--line2)',
+                        background: 'var(--bg1)',
+                        color: copyState === 'copied' ? 'var(--green)' : copyState === 'error' ? 'var(--red)' : 'var(--t1)',
+                        fontSize: 9,
+                        letterSpacing: '0.08em',
+                        fontWeight: 700,
+                        cursor: 'pointer',
+                      }}
+                    >
+                      {copyState === 'copied' ? 'COPIED' : copyState === 'error' ? 'COPY FAILED' : 'COPY ALL'}
+                    </button>
+                  </div>
+                </div>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 8, padding: '0 12px 12px 12px' }}>
                   <div
                     style={{
-                      display: 'grid',
-                      gridTemplateColumns: 'repeat(5, minmax(0, 1fr))',
-                      gap: 6,
+                      position: 'sticky',
+                      top: 0,
+                      zIndex: 12,
+                      background: 'var(--bg2)',
+                      paddingTop: 8,
+                      paddingBottom: 8,
+                      borderBottom: '1px solid var(--line)',
+                      display: 'flex',
+                      flexDirection: 'column',
+                      gap: 8,
                     }}
                   >
-                    {fullReportKpis.map((kpi) => (
-                      <div
-                        key={`fr-kpi-${kpi.key}`}
+                    <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center' }}>
+                      {fullReportCategoryGroups.map((cat) => (
+                        <button
+                          key={`toc-${cat.key}`}
+                          onClick={() => {
+                            const el = document.getElementById(`full-report-cat-${cat.key}`);
+                            if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+                          }}
+                          style={{
+                            height: 22,
+                            padding: '0 8px',
+                            borderRadius: 3,
+                            border: '1px solid var(--line2)',
+                            background: 'var(--bg1)',
+                            color: 'var(--t2)',
+                            fontSize: 9,
+                            letterSpacing: '0.06em',
+                            textTransform: 'uppercase',
+                            cursor: 'pointer',
+                          }}
+                        >
+                          {cat.title} ({cat.sections.length})
+                        </button>
+                      ))}
+                    </div>
+                    <div
+                      style={{
+                        display: 'grid',
+                        gridTemplateColumns: 'repeat(5, minmax(0, 1fr))',
+                        gap: 6,
+                      }}
+                    >
+                      {fullReportKpis.map((kpi) => (
+                        <div
+                          key={`fr-kpi-${kpi.key}`}
+                          style={{
+                            border: '1px solid var(--line)',
+                            borderRadius: 3,
+                            background: 'var(--bg1)',
+                            padding: '6px 8px',
+                            display: 'flex',
+                            justifyContent: 'space-between',
+                            alignItems: 'center',
+                            gap: 10,
+                          }}
+                        >
+                          <span style={{ fontSize: 9, color: 'var(--t3)', letterSpacing: '0.08em', textTransform: 'uppercase' }}>{kpi.label}</span>
+                          <span style={{ fontSize: 12, fontWeight: 700, color: metricColor(kpi.key, kpi.colorValue) }}>{kpi.value}</span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                  {fullReportSections.length === 0 && (
+                    <div style={{ fontSize: 10, color: 'var(--t3)' }}>No full report sections detected.</div>
+                  )}
+                  {fullReportCategoryGroups.map((cat) => (
+                    <details
+                      key={`group-${cat.key}`}
+                      id={`full-report-cat-${cat.key}`}
+                      open={openFullReportCategories[cat.key]}
+                      onToggle={(e) => {
+                        const isOpen = (e.currentTarget as HTMLDetailsElement).open;
+                        setOpenFullReportCategories((prev) => {
+                          if (prev[cat.key] === isOpen) return prev;
+                          return { ...prev, [cat.key]: isOpen };
+                        });
+                      }}
+                      style={{ border: '1px solid var(--line)', borderRadius: 3, padding: '6px 8px', background: 'var(--bg1)' }}
+                    >
+                      <summary
                         style={{
-                          border: '1px solid var(--line)',
-                          borderRadius: 3,
-                          background: 'var(--bg1)',
-                          padding: '6px 8px',
+                          cursor: 'pointer',
+                          fontSize: 10,
+                          color: 'var(--t1)',
+                          fontWeight: 700,
+                          letterSpacing: '0.08em',
+                          textTransform: 'uppercase',
                           display: 'flex',
-                          justifyContent: 'space-between',
                           alignItems: 'center',
-                          gap: 10,
+                          justifyContent: 'space-between',
+                          gap: 8,
+                          position: 'sticky',
+                          top: 104,
+                          zIndex: 9,
+                          background: 'var(--bg1)',
+                          padding: '6px 0',
+                          margin: '-6px 0',
                         }}
                       >
-                        <span style={{ fontSize: 9, color: 'var(--t3)', letterSpacing: '0.08em', textTransform: 'uppercase' }}>{kpi.label}</span>
-                        <span style={{ fontSize: 12, fontWeight: 700, color: metricColor(kpi.key, kpi.colorValue) }}>{kpi.value}</span>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-                {fullReportSections.length === 0 && (
-                  <div style={{ fontSize: 10, color: 'var(--t3)' }}>No full report sections detected.</div>
-                )}
-                {fullReportSections.length > 0 && (
-                  <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
-                    <button
-                      onClick={() => {
-                        setOpenFullReportCategories((prev) => {
-                          const next = { ...prev };
-                          for (const cat of fullReportCategoryGroups) next[cat.key] = true;
-                          return next;
-                        });
-                        setOpenFullReportSectionKeys((prev) => {
-                          const next = { ...prev };
-                          for (const cat of fullReportCategoryGroups) {
-                            for (let idx = 0; idx < cat.sections.length; idx += 1) {
-                              next[`${cat.key}-${idx}-${cat.sections[idx].title}`] = true;
-                            }
-                          }
-                          return next;
-                        });
-                      }}
-                      style={{
-                        padding: '4px 10px', borderRadius: 4,
-                        border: '1px solid var(--line1)', background: 'var(--bg2)',
-                        color: 'var(--t2)', fontSize: 9, cursor: 'pointer',
-                        letterSpacing: '0.05em', textTransform: 'uppercase',
-                        ...MONO,
-                      }}
-                    >
-                      Expand All
-                    </button>
-                    <button
-                      onClick={() => {
-                        setOpenFullReportCategories((prev) => {
-                          const next = { ...prev };
-                          for (const cat of fullReportCategoryGroups) next[cat.key] = false;
-                          return next;
-                        });
-                        setOpenFullReportSectionKeys((prev) => {
-                          const next = { ...prev };
-                          for (const cat of fullReportCategoryGroups) {
-                            for (let idx = 0; idx < cat.sections.length; idx += 1) {
-                              next[`${cat.key}-${idx}-${cat.sections[idx].title}`] = false;
-                            }
-                          }
-                          return next;
-                        });
-                      }}
-                      style={{
-                        padding: '4px 10px', borderRadius: 4,
-                        border: '1px solid var(--line1)', background: 'var(--bg2)',
-                        color: 'var(--t2)', fontSize: 9, cursor: 'pointer',
-                        letterSpacing: '0.05em', textTransform: 'uppercase',
-                        ...MONO,
-                      }}
-                    >
-                      Collapse All
-                    </button>
-                  </div>
-                )}
-                {fullReportCategoryGroups.map((cat) => (
-                  <details
-                    key={`group-${cat.key}`}
-                    id={`full-report-cat-${cat.key}`}
-                    open={openFullReportCategories[cat.key]}
-                    onToggle={(e) => {
-                      const isOpen = (e.currentTarget as HTMLDetailsElement).open;
-                      setOpenFullReportCategories((prev) => {
-                        if (prev[cat.key] === isOpen) return prev;
-                        return { ...prev, [cat.key]: isOpen };
-                      });
-                    }}
-                    style={{ border: '1px solid var(--line)', borderRadius: 3, padding: '6px 8px', background: 'var(--bg1)' }}
-                  >
-                    <summary
-                      style={{
-                        cursor: 'pointer',
-                        fontSize: 10,
-                        color: 'var(--t1)',
-                        fontWeight: 700,
-                        letterSpacing: '0.08em',
-                        textTransform: 'uppercase',
-                        display: 'flex',
-                        alignItems: 'center',
-                        justifyContent: 'space-between',
-                        gap: 8,
-                      }}
-                    >
-                      <span>{cat.title} • {cat.sections.length}</span>
-                      <span style={{ display: 'inline-flex', gap: 6 }}>
-                        <button
-                          onClick={(e) => {
-                            e.preventDefault();
-                            e.stopPropagation();
-                            setOpenFullReportCategories((prev) => ({ ...prev, [cat.key]: true }));
-                            setOpenFullReportSectionKeys((prev) => {
-                              const next = { ...prev };
-                              for (let idx = 0; idx < cat.sections.length; idx += 1) {
-                                next[`${cat.key}-${idx}-${cat.sections[idx].title}`] = true;
-                              }
-                              return next;
-                            });
-                          }}
-                          title="Expand all sections"
-                          aria-label="Expand all sections"
-                          style={{
-                            width: 18,
-                            height: 18,
-                            border: 'none',
-                            background: 'transparent',
-                            color: 'var(--t2)',
-                            fontSize: 13,
-                            lineHeight: 1,
-                            cursor: 'pointer',
-                            padding: 0,
-                          }}
-                        >
-                          ⊞
-                        </button>
-                        <button
-                          onClick={(e) => {
-                            e.preventDefault();
-                            e.stopPropagation();
-                            setOpenFullReportSectionKeys((prev) => {
-                              const next = { ...prev };
-                              for (let idx = 0; idx < cat.sections.length; idx += 1) {
-                                next[`${cat.key}-${idx}-${cat.sections[idx].title}`] = false;
-                              }
-                              return next;
-                            });
-                          }}
-                          title="Collapse all sections"
-                          aria-label="Collapse all sections"
-                          style={{
-                            width: 18,
-                            height: 18,
-                            border: 'none',
-                            background: 'transparent',
-                            color: 'var(--t2)',
-                            fontSize: 13,
-                            lineHeight: 1,
-                            cursor: 'pointer',
-                            padding: 0,
-                          }}
-                        >
-                          ⊟
-                        </button>
-                      </span>
-                    </summary>
-                    <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginTop: 8, marginLeft: 24, paddingLeft: 10, borderLeft: '1px solid var(--line2)' }}>
-                      {cat.sections.map((section, idx) => (
+                        <span>{cat.title} • {cat.sections.length}</span>
+                        <span style={{ display: 'inline-flex', gap: 6 }}>
+                          <button
+                            onClick={(e) => {
+                              e.preventDefault();
+                              e.stopPropagation();
+                              setOpenFullReportCategories((prev) => ({ ...prev, [cat.key]: true }));
+                              setOpenFullReportSectionKeys((prev) => {
+                                const next = { ...prev };
+                                for (let idx = 0; idx < cat.sections.length; idx += 1) {
+                                  next[`${cat.key}-${idx}-${cat.sections[idx].title}`] = true;
+                                }
+                                return next;
+                              });
+                            }}
+                            title="Expand all sections"
+                            aria-label="Expand all sections"
+                            style={{
+                              width: 18,
+                              height: 18,
+                              border: 'none',
+                              background: 'transparent',
+                              color: 'var(--t2)',
+                              fontSize: 13,
+                              lineHeight: 1,
+                              cursor: 'pointer',
+                              padding: 0,
+                            }}
+                          >
+                            ⊞
+                          </button>
+                          <button
+                            onClick={(e) => {
+                              e.preventDefault();
+                              e.stopPropagation();
+                              setOpenFullReportSectionKeys((prev) => {
+                                const next = { ...prev };
+                                for (let idx = 0; idx < cat.sections.length; idx += 1) {
+                                  next[`${cat.key}-${idx}-${cat.sections[idx].title}`] = false;
+                                }
+                                return next;
+                              });
+                            }}
+                            title="Collapse all sections"
+                            aria-label="Collapse all sections"
+                            style={{
+                              width: 18,
+                              height: 18,
+                              border: 'none',
+                              background: 'transparent',
+                              color: 'var(--t2)',
+                              fontSize: 13,
+                              lineHeight: 1,
+                              cursor: 'pointer',
+                              padding: 0,
+                            }}
+                          >
+                            ⊟
+                          </button>
+                        </span>
+                      </summary>
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginTop: 8, marginLeft: 24, paddingLeft: 10 }}>
+                        {cat.sections.map((section, idx) => (
                         <details
                           key={`${cat.key}-${idx}-${section.title}`}
                           open={!!openFullReportSectionKeys[`${cat.key}-${idx}-${section.title}`]}
-                          onToggle={(e) => {
-                            const key = `${cat.key}-${idx}-${section.title}`;
-                            const isOpen = (e.currentTarget as HTMLDetailsElement).open;
-                            setOpenFullReportSectionKeys((prev) => {
-                              if (prev[key] === isOpen) return prev;
-                              return { ...prev, [key]: isOpen };
-                            });
-                          }}
-                          style={{
-                            border: '1px solid var(--line2)',
-                            borderRadius: 3,
-                            padding: '6px 8px',
+                            onToggle={(e) => {
+                              const key = `${cat.key}-${idx}-${section.title}`;
+                              const isOpen = (e.currentTarget as HTMLDetailsElement).open;
+                              setOpenFullReportSectionKeys((prev) => {
+                                if (prev[key] === isOpen) return prev;
+                                return { ...prev, [key]: isOpen };
+                              });
+                            }}
+                            style={{
+                              border: '1px solid var(--line2)',
+                              borderRadius: 3,
+                              padding: '6px 8px',
                             background: 'var(--bg0)',
                             width: 'calc(100% - 24px)',
                           }}
                         >
-                          <summary style={{ cursor: 'pointer', fontSize: 10, color: 'var(--t1)', fontWeight: 600 }}>
+                          <summary style={{
+                            cursor: 'pointer',
+                            fontSize: 11,
+                            color: openFullReportSectionKeys[`${cat.key}-${idx}-${section.title}`] ? 'var(--t0)' : 'var(--t1)',
+                            fontWeight: 700,
+                            letterSpacing: '0.06em',
+                            textTransform: 'uppercase',
+                            position: 'sticky',
+                            top: 134,
+                            zIndex: 6,
+                            background: openFullReportSectionKeys[`${cat.key}-${idx}-${section.title}`]
+                              ? 'rgba(20, 22, 28, 0.98)'
+                              : 'var(--bg0)',
+                            padding: openFullReportSectionKeys[`${cat.key}-${idx}-${section.title}`] ? '8px 10px' : '4px 8px',
+                            margin: openFullReportSectionKeys[`${cat.key}-${idx}-${section.title}`] ? '-6px -8px 0 -8px' : '-4px -8px',
+                            borderBottom: openFullReportSectionKeys[`${cat.key}-${idx}-${section.title}`]
+                              ? '1px solid var(--line)'
+                              : '1px solid transparent',
+                            boxShadow: openFullReportSectionKeys[`${cat.key}-${idx}-${section.title}`]
+                              ? '0 8px 20px rgba(0,0,0,0.18)'
+                              : 'none',
+                          }}>
                             {section.title}
                           </summary>
-                          <div style={{ marginTop: 8 }}>
+                          <div style={{ marginTop: 14, marginLeft: 16, paddingLeft: 12 }}>
                             {renderSectionViz(section.title, section.body)}
                           </div>
                         </details>
-                      ))}
-                    </div>
-                  </details>
-                ))}
-              </div>
-            </>
+                        ))}
+                      </div>
+                    </details>
+                  ))}
+                </div>
+              </>
+            )}
+          </div>
+          {showFullReportBackToTop && (
+            <button
+              type="button"
+              onClick={() => {
+                resultsViewRootRef.current?.parentElement?.scrollTo({ top: 0, behavior: 'smooth' });
+              }}
+              aria-label="Back to top"
+              title="Back to top"
+              style={{
+                position: 'fixed',
+                right: 24,
+                bottom: 24,
+                zIndex: 40,
+                height: 40,
+                minWidth: 40,
+                padding: '0 12px',
+                borderRadius: 999,
+                border: '1px solid rgba(255,255,255,0.16)',
+                background: 'rgba(10, 13, 20, 0.92)',
+                color: 'var(--t1)',
+                fontSize: 9,
+                fontWeight: 700,
+                letterSpacing: '0.08em',
+                textTransform: 'uppercase',
+                cursor: 'pointer',
+                boxShadow: '0 10px 30px rgba(0,0,0,0.35)',
+                backdropFilter: 'blur(10px)',
+              }}
+            >
+              ↑ Top
+            </button>
           )}
-        </div>
+        </>
       )}
     </div>
   );

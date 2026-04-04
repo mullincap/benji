@@ -426,8 +426,8 @@ export default function ResultsSummary({
           <span
             style={{
               fontSize: 8,
-              color: 'var(--green)',
-              border: '1px solid var(--green-mid)',
+              color: 'rgba(255,255,255,0.7)',
+              border: '1px solid rgba(255,255,255,0.25)',
               borderRadius: 2,
               padding: '1px 6px',
               letterSpacing: '0.08em',
