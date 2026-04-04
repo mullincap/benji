@@ -6924,6 +6924,8 @@ def simulate(df_4x: pd.DataFrame,
     equity_running = 1.0   # compound equity multiplier (1.0 = starting capital)
                            # updated as: equity_running *= (1 + r_net)
                            # _equity_start = STARTING_CAPITAL * equity_running
+    _eq_before_sim = 1.0   # equity_running before daily update (for fixed mode acct return)
+    _notional_sim  = float(STARTING_CAPITAL)  # deployment notional (for fixed mode acct return)
     _equity_level  = 1.0   # for vol-lev drawdown guard (1 = starting capital)
     _fees_rows     = []    # [(date, start, invested, vol, fee, fund, end, gross%, net%, pnl)]
     _lev_used_list    = []    # leverage scalar on each active (non-flat) trading day
