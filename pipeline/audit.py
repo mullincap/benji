@@ -7268,13 +7268,19 @@ def simulate(df_4x: pd.DataFrame,
             # ── Per-day fees panel row (accumulated for printing) ──────────
             if verbose and PRINT_FEES_PANEL:
                 _equity_start = STARTING_CAPITAL * equity_running
+                if CAPITAL_MODE == "fixed":
+                    _notional = (min(STARTING_CAPITAL, _equity_start)
+                                 if FIXED_NOTIONAL_CAP == "internal"
+                                 else STARTING_CAPITAL)
+                else:
+                    _notional = _equity_start
                 _margin       = _equity_start                      # full account = margin posted
                 _trade_lev    = lev_used                           # adaptive leverage scalar
-                _invested     = _equity_start * lev_used          # notional = margin × leverage
+                _invested     = _notional * lev_used               # notional = deployment base × leverage
                 _trade_vol    = _invested * 2.0                    # round-trip notional
-                _fee_amt      = _equity_start * fee_drag           # $ taker fees
-                _fund_amt     = _equity_start * funding_drag       # $ funding fees
-                _equity_end   = _equity_start * (1.0 + r_net)
+                _fee_amt      = _notional * fee_drag               # $ taker fees
+                _fund_amt     = _notional * funding_drag           # $ funding fees
+                _equity_end   = _equity_start + _notional * r_net if CAPITAL_MODE == "fixed" else _equity_start * (1.0 + r_net)
                 _net_pnl      = _equity_end - _equity_start
                 _col_ts_str   = str(_col_to_timestamp(col_str) or col_str)[:10]
                 _fees_rows.append((
@@ -7291,7 +7297,14 @@ def simulate(df_4x: pd.DataFrame,
                     r_net   * 100,
                     _net_pnl,
                 ))
-            equity_running *= (1.0 + r_net)
+            if CAPITAL_MODE == "fixed":
+                _eq_now_sim = STARTING_CAPITAL * equity_running
+                _notional_sim = (min(STARTING_CAPITAL, _eq_now_sim)
+                                 if FIXED_NOTIONAL_CAP == "internal"
+                                 else STARTING_CAPITAL)
+                equity_running += (_notional_sim / STARTING_CAPITAL) * r_net
+            else:
+                equity_running *= (1.0 + r_net)
 
             # ── Periodic Profit Harvest ────────────────────────────────
             # The harvest removes capital from the account. To keep daily[]
