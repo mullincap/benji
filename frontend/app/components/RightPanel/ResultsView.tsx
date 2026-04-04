@@ -991,7 +991,7 @@ function DailyReturnBarStatCard({
     return (
       <div style={{ background: 'var(--bg2)', border: '1px solid var(--line)', borderRadius: 3, padding: 12, minWidth: 0 }}>
         <div style={{ fontSize: 9, color: 'var(--t3)', textTransform: 'uppercase', letterSpacing: '0.12em', fontWeight: 700, marginBottom: 8 }}>
-          Daily Returns Bar Chart
+          Daily Returns
         </div>
         <div style={{ height: H, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 10, color: 'var(--t3)' }}>
           No return data
@@ -1030,7 +1030,7 @@ function DailyReturnBarStatCard({
   return (
     <div style={{ background: 'var(--bg2)', border: '1px solid var(--line)', borderRadius: 3, padding: 12, minWidth: 0, position: 'relative' }}>
       <div style={{ fontSize: 9, color: 'var(--t3)', textTransform: 'uppercase', letterSpacing: '0.12em', fontWeight: 700, marginBottom: 8 }}>
-        Daily Returns Bar Chart
+        Daily Returns
       </div>
       <div style={{ fontSize: 9, color: 'var(--t2)', marginBottom: 6, fontFamily: 'var(--font-space-mono), Space Mono, monospace' }}>
         Chronological active-day returns
@@ -1064,28 +1064,30 @@ function DailyReturnBarStatCard({
         <line x1={padL} y1={H - padB} x2={W - padR} y2={H - padB} stroke="var(--line2)" />
         <line x1={padL} y1={padT} x2={padL} y2={H - padB} stroke="var(--line2)" />
         <line x1={padL} y1={yZero} x2={W - padR} y2={yZero} stroke="rgba(255,255,255,0.35)" strokeDasharray="2 2" />
-        {sampled.map((v, i) => {
-          const x = padL + ((i + 0.5) / sampled.length) * plotW;
-          const y = toPy(v);
-          const top = Math.min(yZero, y);
-          const h = Math.max(1, Math.abs(y - yZero));
-          const isNeg = v < 0;
-          const fill = isNeg ? 'rgba(255, 77, 77, 0.38)' : 'rgba(0, 200, 150, 0.35)';
-          const stroke = isNeg ? 'rgba(255, 77, 77, 0.82)' : 'rgba(0, 200, 150, 0.75)';
-          const isHover = hoverIdx === i;
+        {/* Area fill — positive region */}
+        <clipPath id="clip-pos">
+          <rect x={padL} y={0} width={plotW} height={yZero} />
+        </clipPath>
+        <clipPath id="clip-neg">
+          <rect x={padL} y={yZero} width={plotW} height={H - yZero} />
+        </clipPath>
+        {(() => {
+          const points = sampled.map((v, i) => {
+            const x = padL + ((i + 0.5) / sampled.length) * plotW;
+            const y = toPy(v);
+            return { x, y };
+          });
+          const areaPath = `M${points[0].x},${yZero} ${points.map(p => `L${p.x},${p.y}`).join(' ')} L${points[points.length - 1].x},${yZero} Z`;
+          const linePath = points.map((p, i) => `${i === 0 ? 'M' : 'L'}${p.x},${p.y}`).join(' ');
           return (
-            <rect
-              key={`dbar-${i}`}
-              x={x - (barW / 2)}
-              y={top}
-              width={barW}
-              height={h}
-              fill={isHover ? (isNeg ? 'rgba(255,77,77,0.62)' : 'rgba(0,200,150,0.58)') : fill}
-              stroke={isHover ? '#ffba4d' : stroke}
-              strokeWidth={isHover ? 0.8 : 0.35}
-            />
+            <>
+              <path d={areaPath} fill="rgba(0, 200, 150, 0.15)" clipPath="url(#clip-pos)" />
+              <path d={areaPath} fill="rgba(255, 77, 77, 0.15)" clipPath="url(#clip-neg)" />
+              <path d={linePath} fill="none" stroke="rgba(0, 200, 150, 0.6)" strokeWidth="1" clipPath="url(#clip-pos)" />
+              <path d={linePath} fill="none" stroke="rgba(255, 77, 77, 0.6)" strokeWidth="1" clipPath="url(#clip-neg)" />
+            </>
           );
-        })}
+        })()}
         {hoverX !== null && (
           <line
             x1={hoverX}
@@ -2747,39 +2749,10 @@ type FeesRowWithCumulative = FeesRow & {
 
 function normalizeIntradaySeriesToDayReturn(
   bars: Array<number | null>,
-  targetReturnPct: number | null | undefined,
-  exitBar: number | null | undefined,
+  leverage: number,
 ): Array<number | null> {
   if (!Array.isArray(bars) || bars.length === 0) return [];
-  const finiteVals = bars.filter((v): v is number => v !== null && Number.isFinite(v));
-  if (finiteVals.length === 0) return bars.map(() => null);
-  const idx = typeof exitBar === 'number' && Number.isFinite(exitBar)
-    ? Math.max(0, Math.min(bars.length - 1, Math.floor(exitBar)))
-    : bars.length - 1;
-  let endpoint: number | null = null;
-  for (let i = idx; i >= 0; i -= 1) {
-    const v = bars[i];
-    if (v !== null && Number.isFinite(v)) {
-      endpoint = v;
-      break;
-    }
-  }
-  if (!Number.isFinite(endpoint) || endpoint === null || Math.abs(endpoint) < 1e-12 || targetReturnPct === null || targetReturnPct === undefined || !Number.isFinite(targetReturnPct)) {
-    return bars;
-  }
-  // Intraday payload units can vary by run (e.g., pct points vs centi-pct).
-  // Pick the scale that best matches the day's realized return endpoint.
-  const candidates = [1, 0.1, 0.01, 0.001, 0.0001, 10, 100, 1000];
-  let bestScale = 1;
-  let bestErr = Number.POSITIVE_INFINITY;
-  for (const s of candidates) {
-    const err = Math.abs((endpoint * s) - targetReturnPct);
-    if (err < bestErr) {
-      bestErr = err;
-      bestScale = s;
-    }
-  }
-  return bars.map((v) => (v === null || !Number.isFinite(v) ? null : v * bestScale));
+  return bars.map((v) => (v === null || !Number.isFinite(v) ? null : v * leverage));
 }
 
 function DailyReturnOverlapChart({
@@ -2794,7 +2767,7 @@ function DailyReturnOverlapChart({
   const [hovered, setHovered] = useState<{ date: string; ret: number; cx: number; cy: number } | null>(null);
   const [mode, setMode] = useState<'poly' | 'linear'>('poly');
   const [isOpen, setIsOpen] = useState(true);
-  const [zoomLevel, setZoomLevel] = useState(5); // 1=zoomed out, 10=zoomed in
+  const [zoomLevel, setZoomLevel] = useState(1); // 1=zoomed out, 10=zoomed in
   const [fullscreen, setFullscreen] = useState(false);
   const [sliderTrackH, setSliderTrackH] = useState(90);
   const sliderContainerRef = useRef<HTMLDivElement>(null);
@@ -2828,38 +2801,20 @@ function DailyReturnOverlapChart({
     for (const day of activeDays) {
       const raw = intradayBars[day.date];
       if (!raw || raw.length < 2) continue;
-      const target = (typeof day.ret_gross === 'number' && Number.isFinite(day.ret_gross))
-        ? day.ret_gross
-        : day.ret_net;
-      const exitBar = intradayExitBars?.[day.date];
-      intradayByDate[day.date] = normalizeIntradaySeriesToDayReturn(raw, target, exitBar);
+      const lev = typeof day.lev === 'number' && Number.isFinite(day.lev) ? day.lev : 1;
+      intradayByDate[day.date] = normalizeIntradaySeriesToDayReturn(raw, lev);
     }
   }
   const intradayMatchedDays = Object.keys(intradayByDate).length;
   const usePolylines = mode === 'poly' && intradayMatchedDays > 0;
 
-  // Scale y-axis to the 98th percentile of absolute values to avoid outliers
-  // dominating the range. Outlier paths are still drawn but clipped at the edge.
+  // Scale y-axis: use day returns for linear, day returns for poly baseline
+  // Poly mode uses the same scale as linear so zoom levels are consistent
   let absMax = 0.5;
   {
-    const allVals: number[] = [];
-    if (usePolylines) {
-      for (const day of activeDays) {
-        const bars = intradayByDate[day.date];
-        if (!bars) continue;
-        for (const v of bars) {
-          if (v !== null && Number.isFinite(v)) allVals.push(Math.abs(v));
-        }
-      }
-    } else {
-      for (const r of returns) {
-        if (Number.isFinite(r)) allVals.push(Math.abs(r));
-      }
-    }
-    if (allVals.length > 0) {
-      allVals.sort((a, b) => a - b);
-      const p98idx = Math.floor(allVals.length * 0.98);
-      absMax = Math.max(allVals[p98idx] ?? allVals[allVals.length - 1], 0.5);
+    const absReturns = returns.filter(Number.isFinite).map(Math.abs);
+    if (absReturns.length > 0) {
+      absMax = Math.max(...absReturns, 0.5);
     }
   }
   const mean = returns.reduce((a, b) => a + b, 0) / returns.length;
@@ -2872,7 +2827,7 @@ function DailyReturnOverlapChart({
   const plotH = H - padT - padB;
   // zoomLevel 1–10: equal steps from 1× (factor 1.0) to 4× (factor 0.25)
   const zoomFactor = 1 - (zoomLevel - 1) * (0.75 / 9); // 1→1.0, 2→0.917, …, 10→0.25
-  const yRange = absMax * 1.2 * zoomFactor;
+  const yRange = absMax * 1.2 * zoomFactor * (usePolylines ? 2.25 : 1);
 
   const toX = (h: number) => padL + (h / 18) * plotW;
   const toY = (pct: number) => padT + plotH / 2 - (pct / yRange) * (plotH / 2);
@@ -3087,11 +3042,8 @@ function DailyReturnOverlapChart({
               </text>
             </g>
           ))}
-          {yTickVals.map((v) => (
-            <text key={`yt-${v}`} x={padL - 4} y={toY(v) + 3} textAnchor="end" fontSize={7.5} fill="var(--t3)" fontFamily="var(--font-space-mono), Space Mono, monospace">
-              {v === 0 ? '0%' : `${v >= 0 ? '+' : ''}${Math.round(v)}%`}
-            </text>
-          ))}
+          {/* Y-axis: zero line label only */}
+          <text x={padL - 4} y={toY(0) + 3} textAnchor="end" fontSize={7.5} fill="var(--t3)" fontFamily="var(--font-space-mono), Space Mono, monospace">0%</text>
         </svg>
         {/* Custom vertical zoom slider */}
         {(() => {
@@ -11307,6 +11259,7 @@ export default function ResultsView({ results, jobId, startingCapital, params }:
   const [manualSelectedFilter, setManualSelectedFilter] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<ReportTab>('summary');
   const [hideFlatDays, setHideFlatDays] = useState(false);
+  const [breakdownPeriod, setBreakdownPeriod] = useState<'daily' | 'weekly' | 'monthly'>('monthly');
   const [auditOutput, setAuditOutput] = useState<string>('');
   const [outputLoading, setOutputLoading] = useState(false);
   const [outputError, setOutputError] = useState<string | null>(null);
@@ -11432,6 +11385,35 @@ export default function ResultsView({ results, jobId, startingCapital, params }:
     const netFeeDragPerCalendarDayPct = (netFeeDragPct !== null && totalCalendarDays > 0)
       ? (netFeeDragPct / totalCalendarDays)
       : null;
+    // Avg leverage (active days only)
+    const levValues = activeRows
+      .map((r) => r.lev as number)
+      .filter((v) => typeof v === 'number' && Number.isFinite(v));
+    const avgLeverage = levValues.length > 0
+      ? levValues.reduce((a, b) => a + b, 0) / levValues.length
+      : null;
+
+    // Avg drawdown — compute running drawdown from cumulative equity
+    let peak = 0;
+    let ddSum = 0;
+    let ddCount = 0;
+    for (const r of rows) {
+      const end = typeof r.end === 'number' && Number.isFinite(r.end) ? r.end : null;
+      if (end === null) continue;
+      if (end > peak) peak = end;
+      if (peak > 0) {
+        const dd = ((end - peak) / peak) * 100;
+        ddSum += dd;
+        ddCount += 1;
+      }
+    }
+    const avgDrawdownPct = ddCount > 0 ? ddSum / ddCount : null;
+
+    // Worst day (most negative net return)
+    const worstDayRet = activeRows.length > 0
+      ? Math.min(...activeRows.map(r => r.ret_net as number).filter(v => typeof v === 'number' && Number.isFinite(v)))
+      : null;
+
     return {
       totalCalendarDays,
       totalActiveDays,
@@ -11444,6 +11426,9 @@ export default function ResultsView({ results, jobId, startingCapital, params }:
       netFeeDragPct,
       netFeeDragPerActiveDayPct,
       netFeeDragPerCalendarDayPct,
+      avgLeverage,
+      avgDrawdownPct,
+      worstDayRet,
     };
   }, [selectedFeesTableRows]);
   const selectedFeesTableRowsWithCumulative = useMemo<FeesRowWithCumulative[]>(() => {
@@ -11466,6 +11451,20 @@ export default function ResultsView({ results, jobId, startingCapital, params }:
       };
     });
   }, [selectedFeesTableRows]);
+
+  type AggregatedPeriodRow = {
+    label: string;
+    startEquity: number;
+    endEquity: number;
+    retNet: number;
+    pnl: number;
+    totalFees: number;
+    totalVolume: number;
+    activeDays: number;
+    totalDays: number;
+    avgLev: number | null;
+  };
+
   const feesKeyValues = useMemo(() => {
     const rows = selectedFeesTableRowsWithCumulative;
     const last = rows[rows.length - 1] ?? null;
@@ -11787,6 +11786,92 @@ export default function ResultsView({ results, jobId, startingCapital, params }:
     const variance = vals.reduce((a, b) => a + ((b - mean) ** 2), 0) / (vals.length - 1);
     return Math.sqrt(Math.max(0, variance));
   }, [returnProfile.daily]);
+  const aggregatedPeriodRows = useMemo<AggregatedPeriodRow[]>(() => {
+    if (breakdownPeriod === 'daily') return [];
+    const rows = selectedFeesTableRowsWithCumulative;
+    if (rows.length === 0) return [];
+
+    const equityByDate = new Map<string, { first: number; last: number }>();
+    for (const p of equitySeriesDated) {
+      const key = breakdownPeriod === 'monthly'
+        ? `${p.d.getFullYear()}-${String(p.d.getMonth() + 1).padStart(2, '0')}`
+        : (() => {
+            const start = new Date(p.d.getFullYear(), p.d.getMonth(), p.d.getDate());
+            const day = start.getDay();
+            const diff = day === 0 ? 6 : day - 1;
+            start.setDate(start.getDate() - diff);
+            return `${start.getFullYear()}-${String(start.getMonth() + 1).padStart(2, '0')}-${String(start.getDate()).padStart(2, '0')}`;
+          })();
+      if (!equityByDate.has(key)) {
+        equityByDate.set(key, { first: p.y, last: p.y });
+      } else {
+        equityByDate.get(key)!.last = p.y;
+      }
+    }
+
+    const feesBuckets = new Map<string, typeof rows>();
+    for (const row of rows) {
+      if (!row.date) continue;
+      const d = new Date(`${row.date}T00:00:00Z`);
+      if (Number.isNaN(d.getTime())) continue;
+      let key: string;
+      if (breakdownPeriod === 'monthly') {
+        key = `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}`;
+      } else {
+        const start = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()));
+        const day = start.getUTCDay();
+        const diff = day === 0 ? 6 : day - 1;
+        start.setUTCDate(start.getUTCDate() - diff);
+        key = start.toISOString().slice(0, 10);
+      }
+      if (!feesBuckets.has(key)) feesBuckets.set(key, []);
+      feesBuckets.get(key)!.push(row);
+    }
+
+    const result: AggregatedPeriodRow[] = [];
+    const allKeys = new Set([...equityByDate.keys(), ...feesBuckets.keys()]);
+    const sortedKeys = [...allKeys].sort();
+
+    for (const key of sortedKeys) {
+      const eq = equityByDate.get(key);
+      const periodRows = feesBuckets.get(key) ?? [];
+
+      const startEquity = eq?.first ?? (periodRows[0] && typeof periodRows[0].start === 'number' ? periodRows[0].start : 0);
+      const endEquity = eq?.last ?? (periodRows.length > 0 && typeof periodRows[periodRows.length - 1].end === 'number' ? (periodRows[periodRows.length - 1].end as number) : 0);
+      const retNet = startEquity > 0 ? ((endEquity / startEquity) - 1) * 100 : 0;
+      const pnl = endEquity - startEquity;
+
+      const activeRows = periodRows.filter(r => !r.no_entry);
+      const totalFees = periodRows.reduce((acc, r) => {
+        const t = typeof r.taker_fee === 'number' && Number.isFinite(r.taker_fee) ? r.taker_fee : 0;
+        const f = typeof r.funding === 'number' && Number.isFinite(r.funding) ? r.funding : 0;
+        return acc + t + f;
+      }, 0);
+      const totalVolume = periodRows.reduce((acc, r) => {
+        const v = typeof r.trade_vol === 'number' && Number.isFinite(r.trade_vol) ? r.trade_vol : 0;
+        return acc + v;
+      }, 0);
+      const levs = activeRows
+        .map(r => r.lev as number)
+        .filter(v => typeof v === 'number' && Number.isFinite(v));
+      const avgLev = levs.length > 0 ? levs.reduce((a, b) => a + b, 0) / levs.length : null;
+
+      let label: string;
+      if (breakdownPeriod === 'monthly') {
+        const [y, m] = key.split('-');
+        const monthNames = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+        label = `${monthNames[parseInt(m) - 1]} ${y}`;
+      } else {
+        const endDate = periodRows.length > 0 ? periodRows[periodRows.length - 1].date : key;
+        label = `${key} → ${endDate}`;
+      }
+
+      result.push({ label, startEquity, endEquity, retNet, pnl, totalFees, totalVolume, activeDays: activeRows.length, totalDays: periodRows.length, avgLev });
+    }
+
+    return result;
+  }, [selectedFeesTableRowsWithCumulative, equitySeriesDated, breakdownPeriod]);
+
   const calendarMonths = useMemo(() => buildCalendarMonths(equitySeriesDated), [equitySeriesDated]);
   const calendarScale = useMemo(() => {
     const vals = calendarMonths
@@ -13086,10 +13171,10 @@ export default function ResultsView({ results, jobId, startingCapital, params }:
                                 const r = cell.ret;
                                 let bg = 'rgba(255,255,255,0.03)';
                                 let border = 'rgba(255,255,255,0.08)';
-                                if (typeof r === 'number' && Number.isFinite(r)) {
+                                if (typeof r === 'number' && Number.isFinite(r) && r !== 0) {
                                   const strength = Math.min(1, Math.abs(r) / Math.max(1e-9, calendarScale));
                                   const alpha = 0.10 + (0.70 * strength);
-                                  if (r >= 0) {
+                                  if (r > 0) {
                                     bg = `rgba(0, 200, 150, ${alpha.toFixed(3)})`;
                                     border = 'rgba(0, 200, 150, 0.35)';
                                   } else {
@@ -13321,6 +13406,27 @@ export default function ResultsView({ results, jobId, startingCapital, params }:
                     color: 'var(--green)',
                   },
                   {
+                    label: 'Avg Leverage',
+                    value: feesBreakdownKpis.avgLeverage === null
+                      ? 'N/A'
+                      : `${feesBreakdownKpis.avgLeverage.toFixed(2)}x`,
+                    color: 'var(--t1)',
+                  },
+                  {
+                    label: 'Avg Drawdown',
+                    value: feesBreakdownKpis.avgDrawdownPct === null
+                      ? 'N/A'
+                      : `${feesBreakdownKpis.avgDrawdownPct.toFixed(2)}%`,
+                    color: 'var(--red)',
+                  },
+                  {
+                    label: 'Worst Day',
+                    value: feesBreakdownKpis.worstDayRet === null
+                      ? 'N/A'
+                      : `${feesBreakdownKpis.worstDayRet.toFixed(2)}%`,
+                    color: 'var(--red)',
+                  },
+                  {
                     label: 'Net Fee Drag',
                     value: feesBreakdownKpis.netFeeDragPct === null
                       ? 'N/A'
@@ -13413,7 +13519,33 @@ export default function ResultsView({ results, jobId, startingCapital, params }:
                   boxShadow: '0 -1px 0 var(--bg0)',
                 }}
               >
-                {`Fees Panel${selectedFilter ? ` • ${selectedFilter}` : ''}`}
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                  {`Fees Panel${selectedFilter ? ` • ${selectedFilter}` : ''}`}
+                  <div style={{ display: 'flex', gap: 2, marginLeft: 8 }}>
+                    {(['daily', 'weekly', 'monthly'] as const).map((p) => (
+                      <button
+                        key={p}
+                        onClick={() => setBreakdownPeriod(p)}
+                        style={{
+                          background: breakdownPeriod === p ? 'var(--t1)' : 'transparent',
+                          border: `1px solid ${breakdownPeriod === p ? 'var(--t1)' : 'var(--line)'}`,
+                          borderRadius: 3,
+                          padding: '1px 6px',
+                          fontSize: 8,
+                          color: breakdownPeriod === p ? 'var(--bg0)' : 'var(--t3)',
+                          textTransform: 'uppercase',
+                          letterSpacing: '0.06em',
+                          fontWeight: 600,
+                          cursor: 'pointer',
+                          fontFamily: 'var(--font-space-mono), Space Mono, monospace',
+                          lineHeight: 1,
+                        }}
+                      >
+                        {p === 'daily' ? 'D' : p === 'weekly' ? 'W' : 'M'}
+                      </button>
+                    ))}
+                  </div>
+                </div>
                 <button
                   onClick={() => setHideFlatDays((v) => !v)}
                   style={{
@@ -13431,10 +13563,88 @@ export default function ResultsView({ results, jobId, startingCapital, params }:
                     lineHeight: 1,
                   }}
                 >
-                  {hideFlatDays ? 'Flat Hidden' : 'Hide Flat'}
+                  {hideFlatDays ? 'Inactive Hidden' : 'Hide Inactive'}
                 </button>
               </div>
-              {selectedFeesTableRowsWithCumulative.length > 0 ? (
+              {selectedFeesTableRowsWithCumulative.length > 0 && breakdownPeriod !== 'daily' ? (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+                  <table style={{ width: '100%', borderCollapse: 'separate', borderSpacing: 0, tableLayout: 'fixed' }}>
+                    <colgroup>
+                      <col style={{ width: '14%' }} />
+                      <col style={{ width: '10%' }} />
+                      <col style={{ width: '10%' }} />
+                      <col style={{ width: '8%' }} />
+                      <col style={{ width: '9%' }} />
+                      <col style={{ width: '9%' }} />
+                      <col style={{ width: '7%' }} />
+                      <col style={{ width: '7%' }} />
+                      <col style={{ width: '8%' }} />
+                      <col style={{ width: '10%' }} />
+                      <col style={{ width: '6%' }} />
+                    </colgroup>
+                    <thead style={{ position: 'sticky', top: 63, zIndex: 7, background: 'var(--bg0)' }}>
+                      <tr style={{ borderBottom: '1px solid var(--line)' }}>
+                        {['Period', 'Start ($)', 'End ($)', 'Return %', 'P&L ($)', 'Cum P&L ($)', 'Fees ($)', 'Volume ($)', 'Avg Lev', 'Exposure', 'CapEx'].map((h) => (
+                          <th
+                            key={`agg-head-${h}`}
+                            style={{
+                              textAlign: h === 'Period' ? 'left' : 'right',
+                              padding: '6px 8px',
+                              fontSize: 8,
+                              color: 'var(--t3)',
+                              textTransform: 'uppercase',
+                              letterSpacing: '0.08em',
+                              fontWeight: 700,
+                              fontFamily: 'var(--font-space-mono), Space Mono, monospace',
+                              borderBottom: '1px solid var(--line2)',
+                            }}
+                          >
+                            {h}
+                          </th>
+                        ))}
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {(() => {
+                        let cumPnl = 0;
+                        const fmtN = (v: number) => new Intl.NumberFormat(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(v);
+                        const MONO = 'var(--font-space-mono), Space Mono, monospace';
+                        const fmtD = (v: number) => `$${new Intl.NumberFormat(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(v)}`;
+                        const fmtD0 = (v: number) => `$${new Intl.NumberFormat(undefined, { minimumFractionDigits: 0, maximumFractionDigits: 0 }).format(v)}`;
+                        return aggregatedPeriodRows.filter((row) => !hideFlatDays || row.activeDays > 0).map((row, i) => {
+                          cumPnl += row.pnl;
+                          const bg = i % 2 === 0 ? 'var(--bg1)' : 'var(--bg2)';
+                          const retColor = row.retNet >= 0 ? 'var(--green)' : 'var(--red)';
+                          const inactive = row.activeDays === 0;
+                          return (
+                            <tr key={`agg-row-${i}`} style={{ background: bg, borderBottom: '1px solid var(--line)', opacity: inactive ? 0.5 : 1 }}>
+                              <td style={{ padding: '6px 8px', fontSize: 10, color: 'var(--t2)', fontFamily: MONO, whiteSpace: 'nowrap' }}>{row.label}</td>
+                              <td style={{ padding: '6px 8px', fontSize: 10, color: 'var(--t1)', textAlign: 'right', fontFamily: MONO }}>{fmtD0(row.startEquity)}</td>
+                              <td style={{ padding: '6px 8px', fontSize: 10, color: 'var(--t1)', textAlign: 'right', fontFamily: MONO }}>{fmtD0(row.endEquity)}</td>
+                              <td style={{ padding: '6px 8px', fontSize: 10, color: retColor, textAlign: 'right', fontFamily: MONO, fontWeight: 600 }}>{row.retNet >= 0 ? '+' : ''}{row.retNet.toFixed(2)}%</td>
+                              <td style={{ padding: '6px 8px', fontSize: 10, color: row.pnl >= 0 ? 'var(--green)' : 'var(--red)', textAlign: 'right', fontFamily: MONO }}>{row.pnl >= 0 ? '+' : ''}{fmtD0(row.pnl)}</td>
+                              <td style={{ padding: '6px 8px', fontSize: 10, color: cumPnl >= 0 ? 'var(--green)' : 'var(--red)', textAlign: 'right', fontFamily: MONO }}>{cumPnl >= 0 ? '+' : ''}{fmtD0(cumPnl)}</td>
+                              <td style={{ padding: '6px 8px', fontSize: 10, color: 'var(--amber)', textAlign: 'right', fontFamily: MONO }}>{fmtD(row.totalFees)}</td>
+                              <td style={{ padding: '6px 8px', fontSize: 10, color: 'var(--t1)', textAlign: 'right', fontFamily: MONO }}>{fmtD(row.totalVolume)}</td>
+                              <td style={{ padding: '6px 8px', fontSize: 10, color: 'var(--t1)', textAlign: 'right', fontFamily: MONO }}>{row.avgLev !== null ? row.avgLev.toFixed(2) : '—'}</td>
+                              {(() => {
+                                const exposure = row.totalDays > 0 ? row.activeDays / row.totalDays : 0;
+                                const capEx = exposure > 0 ? row.retNet / exposure : 0;
+                                return (
+                                  <>
+                                    <td style={{ padding: '6px 8px', fontSize: 10, color: 'var(--t1)', textAlign: 'right', fontFamily: MONO }}>{(exposure * 100).toFixed(1)}%</td>
+                                    <td style={{ padding: '6px 8px', fontSize: 10, color: capEx >= 0 ? 'var(--green)' : 'var(--red)', textAlign: 'right', fontFamily: MONO }}>{capEx >= 0 ? '+' : ''}{capEx.toFixed(2)}%</td>
+                                  </>
+                                );
+                              })()}
+                            </tr>
+                          );
+                        });
+                      })()}
+                    </tbody>
+                  </table>
+                </div>
+              ) : selectedFeesTableRowsWithCumulative.length > 0 ? (
                 <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
                   <table style={{ width: '100%', borderCollapse: 'separate', borderSpacing: 0, tableLayout: 'fixed' }}>
                     <colgroup>
