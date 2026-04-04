@@ -1,0 +1,63 @@
+Category,Metric,Institutional Goal,Actual,Status
+Return Quality,Sharpe Ratio,>2.0,1.16,Fail
+Return Quality,Sortino Ratio,>3.0,3.34,Pass
+Return Quality,Calmar Ratio,>3.0,1.80,Fail
+Return Quality,CAGR %,>30%,105.85%,Pass
+Return Quality,Return / MaxDD,>3x,1.80,Fail
+Return Quality,Gross Return %,info,171.40%,N/A
+Return Quality,Net Return %,info,143.66%,N/A
+Return Quality,CAGR / Total Return (×),info,0.74,N/A
+Return Quality,Equity Multiplier (×),info,2.44,N/A
+Return Quality,Doubling Periods,info,1.28,N/A
+Return Quality,Volatility Drag Ann %,info,63.98,N/A
+Return Quality,FA-WF Mean OOS Sharpe,>1.5,4.19,Pass
+Return Quality,FA-WF Median OOS Sharpe,>1.0,4.19,Pass
+Return Quality,Min OOS Fold Sharpe,>0.5,3.45,Pass
+Return Quality,Avg Monthly Return %,>0%,8.33%,Pass
+Return Quality,Worst Monthly Return %,>-20%,-18.61%,Pass
+Robustness & Validation,FA Walk-Forward CV,<0.25,0.25,Pass
+Robustness & Validation,Sharpe Std Dev (WF folds),<1.0,1.034,Borderline
+Robustness & Validation,FA-WF % Folds Positive,>80%,100.00%,Pass
+Robustness & Validation,FA-WF Unstable Folds,0,0,Pass
+Robustness & Validation,FA-WF Mean DSR %,>80%,93.68%,Pass
+Robustness & Validation,Deflated Sharpe (DSR) %,>95%,63.65%,Fail
+Robustness & Validation,PBO %,<30%,16.58,Pass
+Robustness & Validation,Performance Degradation,<0.3,0.273,Pass
+Robustness & Validation,IS/OOS CAGR Ratio,>0.5,3.324,Pass
+Robustness & Validation,Sharpe Decay IS→OOS %,<40%,68.76,Fail
+Risk Profile,Max Drawdown %,>-30%,-58.80%,Fail
+Risk Profile,Avg Drawdown %,>-15%,-17.60%,Fail
+Risk Profile,Avg DD Recovery (days),<90d,27d,Pass
+Risk Profile,Ulcer Index,<10,19.51,Fail
+Risk Profile,Max DD Duration (days),<180d,151.00,Pass
+Risk Profile,% Time Underwater,<70%,85.96,Fail
+Risk Profile,Worst Single Day %,>-10%,-27.12%,Fail
+Risk Profile,CVaR 5% (weekly) %,>-20%,-38.49,Fail
+Risk Profile,Consecutive Loss Streak,<7d,6,Pass
+Risk Profile,Probability of Loss %,<5%,3.40%,Pass
+Risk Profile,"Ruin Prob (50% DD, 365d) %",<10%,63.70,Fail
+Risk Profile,Tail Ratio,>1.2,1.95,Pass
+Risk Profile,Gain-to-Pain Ratio,>1.5,0.45,Fail
+Regime Attribution,Sharpe in High Dispersion,>1.5,N/A,N/A
+Regime Attribution,Sharpe in Low Dispersion,>0.5,N/A,N/A
+Regime Attribution,Sharpe in BTC Uptrend,>1.5,N/A,N/A
+Regime Attribution,Sharpe in BTC Downtrend,>0.5,N/A,N/A
+Regime Attribution,Sharpe in High BTC Vol,>1.0,N/A,N/A
+Regime Attribution,Sharpe in Low BTC Vol,>1.0,N/A,N/A
+Regime Attribution,Sharpe HighDisp+HighVol,>2.0,N/A,N/A
+Regime Attribution,Sharpe LowDisp+LowVol,>1.0,N/A,N/A
+Market Independence,Beta to BTC,<0.5,N/A,N/A
+Market Independence,BTC Variance Explained %,<10%,N/A,N/A
+Market Independence,Annual Alpha %,>0%,N/A,N/A
+Market Independence,Equity Curve R²,>0.9,0.711,Fail
+Market Independence,Return Autocorrelation,≈0,-0.080,Pass
+Execution & Capacity,Sharpe @2× Slippage,>1.5,1.16,Fail
+Execution & Capacity,Total Fee Drag %,<5%,11.38%,Fail
+Execution & Capacity,Avg Fee Per Active Day %,<0.15%,0.32%,Fail
+Execution & Capacity,Avg Fee Per Calendar Day %,<0.05%,0.07%,Fail
+Execution & Capacity,Avg Leverage Used,info,3.23×,N/A
+Execution & Capacity,Universe Size,>20,Top100,Pass
+Execution & Capacity,Active Days %,20–60%,21.61%,Pass
+Execution & Capacity,Avg Overlap Symbols/Day,>3,18.8/day,Pass
+Execution & Capacity,Data Coverage (days),>365d,398d,Pass
+Execution & Capacity,Sample Size,>500d,398d,Fail

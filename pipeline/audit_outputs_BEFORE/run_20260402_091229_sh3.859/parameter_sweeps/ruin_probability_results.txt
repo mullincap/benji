@@ -1,0 +1,6 @@
+RUIN PROBABILITY  |  Filter: Tail + Disp + Vol
+n_sims=10000  horizon_days=365  sample_size=398
+
+Threshold -33%: P(ruin)=0.96170  HIGH — review risk controls
+Threshold -50%: P(ruin)=0.53990  HIGH — review risk controls
+Threshold -75%: P(ruin)=0.04320  LOW

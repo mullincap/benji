@@ -1,0 +1,6 @@
+RUIN PROBABILITY  |  Filter: Tail + Blofin
+n_sims=10000  horizon_days=365  sample_size=398
+
+Threshold -33%: P(ruin)=1.00000  HIGH — review risk controls
+Threshold -50%: P(ruin)=0.99450  HIGH — review risk controls
+Threshold -75%: P(ruin)=0.72850  HIGH — review risk controls

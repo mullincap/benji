@@ -1,0 +1,6 @@
+slippage_one_way_pct,round_trip_pct,sharpe,sharpe_delta,cagr_pct,maxdd_pct,calmar,grade
+0.05,0.1,0.6991,-0.1741,-21.54,-86.5,-0.25,Unusable
+0.1,0.2,0.525,-0.3482,-42.35,-87.39,-0.48,Unusable
+0.25,0.5,0.0026,-0.8706,-77.17,-92.14,-0.84,Unusable
+0.5,1.0,-0.868,-1.7412,-95.15,-97.49,-0.98,Unusable
+1.0,2.0,-2.605,-3.4782,-99.79,-99.87,-1.0,Unusable

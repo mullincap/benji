@@ -1,0 +1,4 @@
+threshold_pct,threshold_sharpe,cells_above_threshold,pct_of_surface,largest_cluster_cells,baseline_in_cluster,verdict
+0.95,,0,,0,False,Single-cell peak | baseline outside
+0.975,,0,,0,False,Single-cell peak | baseline outside
+0.99,,0,,0,False,Single-cell peak | baseline outside

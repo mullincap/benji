@@ -1,0 +1,6 @@
+RUIN PROBABILITY  |  Filter: Tail Guardrail
+n_sims=10000  horizon_days=365  sample_size=398
+
+Threshold -33%: P(ruin)=0.99070  HIGH — review risk controls
+Threshold -50%: P(ruin)=0.69480  HIGH — review risk controls
+Threshold -75%: P(ruin)=0.09630  MODERATE

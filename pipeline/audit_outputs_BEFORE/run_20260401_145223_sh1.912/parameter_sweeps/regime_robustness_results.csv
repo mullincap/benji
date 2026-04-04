@@ -1,0 +1,11 @@
+taxonomy,label,n_days,sharpe,cagr_pct,maxdd_pct,calmar,wf_cv
+Volatility,Vol: Low  (rvol30 ≤ p33),274,1.3272,159.31,-58.799,2.709,4.798
+Volatility,Vol: Mid  (p33 < rvol30 ≤ p67),75,-0.3377,-40.05,-25.761,-1.555,nan
+Volatility,Vol: High (rvol30 > p67),49,-0.3232,-19.86,-12.181,-1.631,nan
+Volatility,Vol: Spike (5d/60d ratio > 1.5×),46,-0.8181,-21.17,-7.419,-2.854,nan
+BTC Dominance,DOM: Low  (BTC mom ≤ p33 — alt-season),158,0.2409,-37.1,-51.02,-0.727,nan
+BTC Dominance,DOM: Mid  (neutral momentum),173,1.929,356.02,-20.546,17.328,nan
+BTC Dominance,DOM: High (BTC mom > p67 — BTC dominant),67,1.9067,316.5,-16.956,18.666,nan
+Trend,Trend: Bull (21d BTC > +5%),92,2.1508,441.63,-18.226,24.23,nan
+Trend,Trend: Sideways (-5% to +5%),185,1.6623,226.64,-25.782,8.79,0.2094
+Trend,Trend: Bear  (21d BTC < -5%),121,-0.1847,-65.48,-57.647,-1.136,nan

@@ -1,0 +1,93 @@
+Metric,Institutional Goal,Actual,Status
+Sharpe,>2.0,1.95,Borderline
+CAGR,>30%,496.27%,Pass
+Sortino,>3.0,3.49,Pass
+Calmar,>3.0,7.23,Pass
+Return/MaxDD,>3x,~7x,Pass
+Mean OOS Sharpe,>1.5,2.81,Pass
+Median OOS Sharpe,>1.0,2.81,Pass
+OOS Sharpe,>1.5,2.81,Pass
+Win Rate,>50%,41.02%,Fail
+Avg Win / Avg Loss,>1.2,1.99,Pass
+Profit Factor,>1.3,1.39,Pass
+Gain-to-Pain,>1.5,0.39,Fail
+Omega Ratio,>1.3,1.39,Pass
+Weekly Win Rate %,>55%,53.57,Borderline
+Gross Return %,informational,333.20%,N/A
+Net Return %,informational,286.27%,N/A
+CAGR / Total Return (×),informational,1.73,N/A
+Equity Multiplier (×),informational,3.86,N/A
+Doubling Periods,informational,1.95,N/A
+Volatility Drag Ann %,informational,91.05,N/A
+Total Fee Drag %,<5%,12.15%,Fail
+Avg Fee Per Active Day %,<0.15%,0.14%,Pass
+Avg Fee Per Calendar Day %,<0.05%,0.12%,Fail
+Avg Leverage Used,informational,1.41×,N/A
+Win Rate (L_HIGH tier),>50%,41.02%,Fail
+Win Rate (L_BASE tier),>50%,N/A,N/A
+Avg Daily Return (L_HIGH tier),>0%,0.86,Pass
+Avg Daily Return (L_BASE tier),>0%,N/A,N/A
+Days at L_HIGH,informational,334,N/A
+Days at L_BASE,informational,0,N/A
+Best Single Day %,informational,40.40%,N/A
+Worst Single Day %,>-10%,-12.20%,Fail
+Avg Daily Return %,>0%,0.86%,Pass
+Avg Weekly Return %,>0%,5.23%,Pass
+Avg Monthly Return %,>0%,20.61%,Pass
+Worst Monthly Return %,>-20%,-33.72%,Fail
+Std Dev Daily Return %,informational,7.70%,N/A
+Consecutive Win Streak,informational,4,N/A
+Consecutive Loss Streak,<7d,12,Fail
+Max Drawdown,>-30%,-68.68%,Fail
+Avg Drawdown,<-15%,-23.32%,Fail
+Avg Max DD per Episode,<-10%,-12.84%,Fail
+Longest Drawdown (days),<120d,118d,Pass
+Drawdown Recovery,<90d,17d,Pass
+Max DD Duration,<180d,118d,Pass
+% Time Underwater,<70%,90.98,Fail
+Ulcer Index,<10,28.42,Fail
+CVaR 5% (weekly) %,>-20%,-31.99,Fail
+CVaR 1% (daily) %,>-15%,-12.20,Pass
+Tail Ratio,>1.2,2.12,Pass
+Skewness,>0,1.75,Pass
+Kurtosis,<10,4.79,Pass
+Return Autocorrelation,≈0  (|r|<0.1),0.052,Pass
+Walk-Forward CV,<0.40,1.01,Fail
+FA-WF Mean DSR %,>80%,78.08%,Borderline
+IS/OOS CAGR Ratio,>0.5,0.294,Fail
+Sharpe Decay,<40%,29.98%,Pass
+Positive WF Folds,>80%,88.89%,Pass
+Positive OOS Folds,100%,88.89%,Borderline
+Unstable WF Folds,0,1,Fail
+Saturated WF Folds,informational,0,N/A
+Active WF Folds,informational,9,N/A
+Sharpe Std Dev (WF folds),<1.0,2.834,Fail
+Min OOS Fold Sharpe,>0.5,-3.11,Fail
+Max OOS Fold Sharpe,informational,5.83,N/A
+Deflated Sharpe,>95%,89.58%,Borderline
+Probability of Loss,<5%,6.29%,Fail
+"Ruin Prob (50% DD, 365d) %",<10%,70.10,Fail
+Performance Degradation,<0.3,0.474,Fail
+PBO,<30%,90.88%,Fail
+Neighbor Plateau,>70%,100.00,Pass
+Sharpe in High Dispersion,>1.5,N/A,N/A
+Sharpe in Low Dispersion,>0.5,N/A,N/A
+Sharpe in BTC Uptrend,>1.5,N/A,N/A
+Sharpe in BTC Downtrend,>0.5,N/A,N/A
+Sharpe in High BTC Vol,>1.0,N/A,N/A
+Sharpe in Low BTC Vol,>1.0,N/A,N/A
+Sharpe in HighDisp+HighVol,>2.0,N/A,N/A
+Sharpe in LowDisp+LowVol,>1.0,N/A,N/A
+Equity Curve R²,>0.9,0.809,Borderline
+Beta to BTC,<0.5,N/A,N/A
+Annual Alpha,>20%,N/A,N/A
+BTC Variance Explained,<10%,N/A,N/A
+Strategy Alpha,positive,N/A,N/A
+Sharpe @2x Slippage,>1.5,1.94,Pass
+Active Days %,20–60%,83.92%,Pass
+Universe Size,>20,Top100,Pass
+Overlap Stability,moderate,N/A,Pass
+Data Coverage,>1yr,398d,Pass
+Sample Size,>500d,398d,Fail
+Turnover,moderate,306/yr,Pass
+Estimated Capacity,">$25,000K",N/A,N/A

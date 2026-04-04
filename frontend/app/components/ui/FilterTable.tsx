@@ -8,6 +8,8 @@ interface FilterRow {
   cagr?: number | null;
   cv?: number | null;
   dsr_pct?: number | null;
+  tot_ret?: number | null;
+  eq?: number | null;
   grade?: string | null;
   not_run?: boolean;
   [key: string]: unknown;
@@ -87,7 +89,7 @@ export default function FilterTable({ rows, selectedFilter, onSelectFilter }: Fi
     <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 9 }}>
       <thead>
         <tr style={{ borderBottom: '1px solid var(--line)' }}>
-          {['Filter', 'Sharpe', 'Max DD', 'Active Days', 'CAGR', 'WF-CV', 'DSR%', 'Grade'].map((h) => (
+          {['Filter', 'Sharpe', 'Max DD', 'Active Days', 'Simple%', 'Comp%', 'Comp Mult', 'CAGR', 'WF-CV', 'DSR%', 'Grade'].map((h) => (
             <th
               key={h}
               style={{
@@ -177,6 +179,31 @@ export default function FilterTable({ rows, selectedFilter, onSelectFilter }: Fi
               </td>
               <td style={{ padding: '6px 4px', textAlign: 'right', color: metricColor('max_dd', row.max_dd) }}>{fmtPercent2(row.max_dd)}</td>
               <td style={{ padding: '6px 4px', textAlign: 'right', color: 'var(--t1)' }}>{fmtInt(row.active)}</td>
+              <td style={{ padding: '6px 4px', textAlign: 'right', color: (row.tot_ret ?? 0) >= 0 ? 'var(--green)' : 'var(--red)' }}>
+                {row.tot_ret != null ? `${new Intl.NumberFormat(undefined, { maximumFractionDigits: 1 }).format(row.tot_ret as number)}%` : 'N/A'}
+              </td>
+              <td style={{ padding: '6px 4px', textAlign: 'right', color: 'var(--green)' }}>
+                {(() => {
+                  const ec = row.equity_curve as Array<number | { y: number }> | undefined;
+                  if (!ec || ec.length === 0) return 'N/A';
+                  const last = ec[ec.length - 1];
+                  const val = typeof last === 'number' ? last : (last as { y: number })?.y;
+                  if (val == null || !Number.isFinite(val)) return 'N/A';
+                  return `${new Intl.NumberFormat(undefined, { maximumFractionDigits: 1 }).format((val - 1) * 100)}%`;
+                })()}
+              </td>
+              <td style={{ padding: '6px 4px', textAlign: 'right', color: 'var(--t1)' }}>
+                {(() => {
+                  const ec = row.equity_curve as Array<number | { y: number }> | undefined;
+                  const simple = row.tot_ret as number | null | undefined;
+                  if (!ec || ec.length === 0 || !simple || simple <= 0) return 'N/A';
+                  const last = ec[ec.length - 1];
+                  const val = typeof last === 'number' ? last : (last as { y: number })?.y;
+                  if (val == null || !Number.isFinite(val)) return 'N/A';
+                  const compRet = (val - 1) * 100;
+                  return `${(compRet / simple).toFixed(2)}×`;
+                })()}
+              </td>
               <td style={{ padding: '6px 4px', textAlign: 'right', color: metricColor('cagr', row.cagr) }}>{fmtPercent2(row.cagr)}</td>
               <td style={{ padding: '6px 4px', textAlign: 'right', color: metricColor('cv', (row.wf_cv ?? row.cv) as number) }}>{fmt((row.wf_cv ?? row.cv) as number)}</td>
               <td style={{ padding: '6px 4px', textAlign: 'right', color: metricColor('dsr_pct', row.dsr_pct as number) }}>{fmt(row.dsr_pct as number, 1)}</td>

@@ -1,0 +1,12 @@
+DSR/MTL RESULTS  |  Filter: Tail + Dispersion
+n_days          : 398
+n_trials        : 1010
+observed_sharpe : 3.7785
+skewness        : 2.1765
+excess_kurtosis : 6.9829
+sr_benchmark    : 3.2580
+dsr             : 0.7066
+prob_false_pos  : 0.2934
+dsr_verdict     : FAIL — high false-discovery risk
+mtl_days        : 85.1
+mtl_verdict     : PASS — 398 days observed ≥ 85 days required

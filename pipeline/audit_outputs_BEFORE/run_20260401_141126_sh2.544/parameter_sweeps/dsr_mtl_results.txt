@@ -1,0 +1,12 @@
+DSR/MTL RESULTS  |  Filter: Tail + Disp + Vol
+n_days          : 398
+n_trials        : 1010
+observed_sharpe : 1.2135
+skewness        : 2.9644
+excess_kurtosis : 17.6649
+sr_benchmark    : 3.2580
+dsr             : 0.0164
+prob_false_pos  : 0.9836
+dsr_verdict     : FAIL — high false-discovery risk
+mtl_days        : 18021.9
+mtl_verdict     : INSUFFICIENT — need 18022 days, have 398

@@ -1,0 +1,12 @@
+DSR/MTL RESULTS  |  Filter: Tail + Disp + Vol
+n_days          : 398
+n_trials        : 10
+observed_sharpe : 3.5386
+skewness        : 2.1402
+excess_kurtosis : 7.2871
+sr_benchmark    : 1.5746
+dsr             : 0.9799
+prob_false_pos  : 0.0201
+dsr_verdict     : PASS — strong evidence of genuine edge
+mtl_days        : 105.7
+mtl_verdict     : PASS — 398 days observed ≥ 106 days required

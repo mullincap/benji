@@ -3968,10 +3968,10 @@ function renderRiskAdjustedQuality(body: string) {
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-      <div style={{ 
-        display: 'grid', 
-        gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))', 
-        gap: 12,
+      <div style={{
+        display: 'grid',
+        gridTemplateColumns: `repeat(${Math.min(metrics.length, 6)}, 1fr)`,
+        gap: 10,
         paddingBottom: 8
       }}>
         {metrics.map((m, idx) => {
@@ -4002,10 +4002,10 @@ function renderRiskAdjustedQuality(body: string) {
               background: bgColor,
               border: `1px solid ${borderColor}`,
               borderRadius: 6,
-              padding: '14px 18px',
+              padding: '10px 12px',
               display: 'flex',
               flexDirection: 'column',
-              gap: 6,
+              gap: 4,
               boxShadow: 'inset 0 1px 0 rgba(255,255,255,0.02)',
               transition: 'all 0.2s ease',
             }}
@@ -9220,8 +9220,9 @@ function renderRunSummary(body: string) {
               <th style={{ ...thStyle, textAlign: 'right' }}>MaxDD%</th>
               <th style={{ ...thStyle, textAlign: 'right' }}>Active</th>
               <th style={{ ...thStyle, textAlign: 'right' }}>WF-CV</th>
-              <th style={{ ...thStyle, textAlign: 'right' }}>TotRet%</th>
-              <th style={{ ...thStyle, textAlign: 'right' }}>Eq</th>
+              <th style={{ ...thStyle, textAlign: 'right' }}>Simple%</th>
+              <th style={{ ...thStyle, textAlign: 'right' }}>Comp%</th>
+              <th style={{ ...thStyle, textAlign: 'right' }}>Mult</th>
               <th style={{ ...thStyle, textAlign: 'right' }}>Wst 1D</th>
               <th style={{ ...thStyle, textAlign: 'right' }}>Wst 1W</th>
               <th style={{ ...thStyle, textAlign: 'right' }}>Wst 1M</th>
@@ -9266,8 +9267,11 @@ function renderRunSummary(body: string) {
                   <td style={{ padding: '3px 8px', textAlign: 'right', color: 'var(--t1)', whiteSpace: 'nowrap', borderBottom: '1px solid var(--line)' }}>
                     {row.totret.toLocaleString(undefined, { maximumFractionDigits: 1 })}%
                   </td>
-                  <td style={{ padding: '3px 8px', textAlign: 'right', color: 'var(--t1)', whiteSpace: 'nowrap', borderBottom: '1px solid var(--line)' }}>
-                    {row.eq.toFixed(2)}×
+                  <td style={{ padding: '3px 8px', textAlign: 'right', color: 'var(--green)', whiteSpace: 'nowrap', borderBottom: '1px solid var(--line)' }}>
+                    {((row.eq - 1) * 100).toLocaleString(undefined, { maximumFractionDigits: 1 })}%
+                  </td>
+                  <td style={{ padding: '3px 8px', textAlign: 'right', color: row.totret > 0 ? 'var(--t1)' : 'var(--t3)', whiteSpace: 'nowrap', borderBottom: '1px solid var(--line)' }}>
+                    {row.totret > 0 ? (((row.eq - 1) * 100) / row.totret).toFixed(2) : '—'}×
                   </td>
                   <td style={{ padding: '3px 8px', textAlign: 'right', color: ddColor(row.wst1d), whiteSpace: 'nowrap', borderBottom: '1px solid var(--line)' }}>
                     {pctFmt(row.wst1d)}
@@ -10456,13 +10460,13 @@ function renderSharpeStability(body: string): React.ReactNode {
   const stat = (label: string, value: string, color?: string, sub?: string) => (
     <div style={{
       background: 'var(--bg2)', border: '1px solid var(--line1)', borderRadius: 6,
-      padding: '12px 16px', display: 'flex', flexDirection: 'column' as const, gap: 4,
+      padding: '8px 10px', display: 'flex', flexDirection: 'column' as const, gap: 3,
       boxShadow: 'inset 0 1px 0 rgba(255,255,255,0.02)',
     }}>
-      <div style={{ fontSize: 9.5, color: 'var(--t3)', textTransform: 'uppercase' as const, letterSpacing: 0.5, ...MONO }}>
+      <div style={{ fontSize: 8.5, color: 'var(--t3)', textTransform: 'uppercase' as const, letterSpacing: 0.5, ...MONO }}>
         {label}
       </div>
-      <div style={{ fontSize: 16, color: color ?? 'var(--t1)', fontWeight: 500, letterSpacing: -0.5, ...MONO }}>
+      <div style={{ fontSize: 14, color: color ?? 'var(--t1)', fontWeight: 500, letterSpacing: -0.5, ...MONO }}>
         {value}
       </div>
       {sub && (
@@ -10501,8 +10505,8 @@ function renderSharpeStability(body: string): React.ReactNode {
       {/* Stat cards grid */}
       <div style={{
         display: 'grid',
-        gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))',
-        gap: 10,
+        gridTemplateColumns: 'repeat(auto-fill, minmax(120px, 1fr))',
+        gap: 8,
       }}>
         {stat('Mean OOS Sharpe', meanSharpe.toFixed(3), sharpeColor)}
         {stdDev !== null && stat('Std Dev', stdDev.toFixed(3), undefined,
@@ -11776,6 +11780,7 @@ export default function ResultsView({ results, jobId, startingCapital, params }:
   const [calendarRowHoverKey, setCalendarRowHoverKey] = useState<string | null>(null);
   const [calendarViewMode, setCalendarViewMode] = useState<'grid' | 'chart'>('grid');
   const [showFullReportBackToTop, setShowFullReportBackToTop] = useState(false);
+  const [fullReportTocOpen, setFullReportTocOpen] = useState(true);
   const [openFullReportCategories, setOpenFullReportCategories] = useState<Record<FullReportCategoryKey, boolean>>(() => (
     FULL_REPORT_CATEGORIES.reduce((acc, cat) => {
       acc[cat.key] = cat.defaultOpen;
@@ -14757,8 +14762,14 @@ export default function ResultsView({ results, jobId, startingCapital, params }:
             {!outputLoading && !outputError && (
               <>
                 <div style={{ padding: '12px 12px 0 12px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 10 }}>
-                  <div style={{ fontSize: 9, color: 'var(--t3)', textTransform: 'uppercase', letterSpacing: '0.1em', fontWeight: 700 }}>
-                    Full Report • {fullReportSectionCount} sections
+                  <div
+                    onClick={() => setFullReportTocOpen((v) => !v)}
+                    style={{ fontSize: 12, color: 'var(--t1)', textTransform: 'uppercase', letterSpacing: '0.1em', fontWeight: 700, cursor: 'pointer', userSelect: 'none' }}
+                  >
+                    {fullReportTocOpen ? '▾' : '▸'} Full Report{' '}
+                    <span style={{ fontSize: 9, color: 'var(--t4)', letterSpacing: '0.08em' }}>
+                      • {fullReportSectionCount} sections
+                    </span>
                   </div>
                   <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
                     {(() => {
@@ -14843,64 +14854,68 @@ export default function ResultsView({ results, jobId, startingCapital, params }:
                       zIndex: 12,
                       background: 'var(--bg2)',
                       paddingTop: 8,
-                      paddingBottom: 8,
+                      paddingBottom: fullReportTocOpen ? 8 : 4,
                       borderBottom: '1px solid var(--line)',
                       display: 'flex',
                       flexDirection: 'column',
                       gap: 8,
                     }}
                   >
-                    <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center' }}>
-                      {fullReportCategoryGroups.map((cat) => (
-                        <button
-                          key={`toc-${cat.key}`}
-                          onClick={() => {
-                            const el = document.getElementById(`full-report-cat-${cat.key}`);
-                            if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
-                          }}
-                          style={{
-                            height: 22,
-                            padding: '0 8px',
-                            borderRadius: 3,
-                            border: '1px solid var(--line2)',
-                            background: 'var(--bg1)',
-                            color: 'var(--t2)',
-                            fontSize: 9,
-                            letterSpacing: '0.06em',
-                            textTransform: 'uppercase',
-                            cursor: 'pointer',
-                          }}
-                        >
-                          {cat.title} ({cat.sections.length})
-                        </button>
-                      ))}
-                    </div>
-                    <div
-                      style={{
-                        display: 'grid',
-                        gridTemplateColumns: 'repeat(5, minmax(0, 1fr))',
-                        gap: 6,
-                      }}
-                    >
-                      {fullReportKpis.map((kpi) => (
-                        <div
-                          key={`fr-kpi-${kpi.key}`}
-                          style={{
-                            border: '1px solid var(--line)',
-                            borderRadius: 3,
-                            background: 'var(--bg1)',
-                            padding: '6px 8px',
-                            display: 'flex',
-                            justifyContent: 'space-between',
-                            alignItems: 'center',
-                            gap: 10,
-                          }}
-                        >
-                          <span style={{ fontSize: 9, color: 'var(--t3)', letterSpacing: '0.08em', textTransform: 'uppercase' }}>{kpi.label}</span>
-                          <span style={{ fontSize: 12, fontWeight: 700, color: metricColor(kpi.key, kpi.colorValue) }}>{kpi.value}</span>
+                    {fullReportTocOpen && (
+                      <>
+                        <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center' }}>
+                          {fullReportCategoryGroups.map((cat) => (
+                            <button
+                              key={`toc-${cat.key}`}
+                              onClick={() => {
+                                const el = document.getElementById(`full-report-cat-${cat.key}`);
+                                if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+                              }}
+                              style={{
+                                height: 22,
+                                padding: '0 8px',
+                                borderRadius: 3,
+                                border: '1px solid var(--line2)',
+                                background: 'var(--bg1)',
+                                color: 'var(--t2)',
+                                fontSize: 9,
+                                letterSpacing: '0.06em',
+                                textTransform: 'uppercase',
+                                cursor: 'pointer',
+                              }}
+                            >
+                              {cat.title} ({cat.sections.length})
+                            </button>
+                          ))}
                         </div>
-                      ))}
-                    </div>
+                        <div
+                          style={{
+                            display: 'grid',
+                            gridTemplateColumns: 'repeat(5, minmax(0, 1fr))',
+                            gap: 6,
+                          }}
+                        >
+                          {fullReportKpis.map((kpi) => (
+                            <div
+                              key={`fr-kpi-${kpi.key}`}
+                              style={{
+                                border: '1px solid var(--line)',
+                                borderRadius: 3,
+                                background: 'var(--bg1)',
+                                padding: '6px 8px',
+                                display: 'flex',
+                                justifyContent: 'space-between',
+                                alignItems: 'center',
+                                gap: 10,
+                              }}
+                            >
+                              <span style={{ fontSize: 9, color: 'var(--t3)', letterSpacing: '0.08em', textTransform: 'uppercase' }}>{kpi.label}</span>
+                              <span style={{ fontSize: 12, fontWeight: 700, color: metricColor(kpi.key, kpi.colorValue) }}>{kpi.value}</span>
+                            </div>
+                          ))}
+                        </div>
+                      </>
+                    )}
                   </div>
                   {fullReportSections.length === 0 && (
                     <div style={{ fontSize: 10, color: 'var(--t3)' }}>No full report sections detected.</div>
@@ -14932,7 +14947,7 @@ export default function ResultsView({ results, jobId, startingCapital, params }:
                           justifyContent: 'space-between',
                           gap: 8,
                           position: 'sticky',
-                          top: 104,
+                          top: fullReportTocOpen ? 104 : 34,
                           zIndex: 9,
                           background: 'var(--bg1)',
                           padding: '6px 0',
@@ -15029,7 +15044,7 @@ export default function ResultsView({ results, jobId, startingCapital, params }:
                             letterSpacing: '0.06em',
                             textTransform: 'uppercase',
                             position: 'sticky',
-                            top: 134,
+                            top: fullReportTocOpen ? 134 : 64,
                             zIndex: 6,
                             background: openFullReportSectionKeys[`${cat.key}-${idx}-${section.title}`]
                               ? 'rgba(20, 22, 28, 0.98)'
@@ -15045,7 +15060,7 @@ export default function ResultsView({ results, jobId, startingCapital, params }:
                           }}>
                             {section.title}
                           </summary>
-                          <div style={{ marginTop: 14, marginLeft: 16, paddingLeft: 12 }}>
+                          <div style={{ marginTop: 14, marginLeft: 16, paddingLeft: 12, overflow: 'hidden' }}>
                             {renderSectionViz(section.title, section.body)}
                           </div>
                         </details>
@@ -15067,7 +15082,8 @@ export default function ResultsView({ results, jobId, startingCapital, params }:
               title="Back to top"
               style={{
                 position: 'fixed',
-                right: 24,
+                left: '50%',
+                transform: 'translateX(-50%)',
                 bottom: 24,
                 zIndex: 40,
                 height: 40,
