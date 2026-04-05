@@ -2,17 +2,30 @@
 
 :root {
   --font-space-mono: "Space Mono";
-  --bg0: #080809;
-  --bg1: #0e0e10;
-  --bg2: #141416;
-  --bg3: #1a1a1d;
-  --bg4: #222226;
-  --line: #242428;
-  --line2: #2e2e33;
+
+  /* ─── Base theme vars (defaults = VAULT) ──────────────────── */
+  --base-surface: #0C0C0E;
+  --base-panel:   #131316;
+  --base-card:    #1C1C21;
+  --base-raised:  #26262D;
+  --base-border:  #32323B;
+
+  /* ─── Semantic aliases (consume base theme) ───────────────── */
+  --bg0: var(--base-surface);
+  --bg1: var(--base-panel);
+  --bg2: var(--base-card);
+  --bg3: var(--base-raised);
+  --bg4: var(--base-raised);
+  --line: var(--base-border);
+  --line2: var(--base-border);
+
+  /* ─── Text ────────────────────────────────────────────────── */
   --t0: #f0ede6;
   --t1: #a09d96;
   --t2: #5a5754;
   --t3: #bbbbbb;
+
+  /* ─── Accent colors ───────────────────────────────────────── */
   --green: #00c896;
   --green-dim: #00c89618;
   --green-mid: #00c89640;
@@ -54,9 +67,36 @@
   padding: 0;
 }
 
+input, button, textarea, select {
+  font-family: inherit;
+}
+
 body {
   font-family: var(--font-space-mono), 'Space Mono', monospace;
   background: var(--bg0);
   color: var(--t0);
   font-size: 10px;
+}
+
+/* ─── Navbar fill mode ────────────────────────────────────────── */
+
+.navbar--fill-mode {
+  background: var(--module-accent, var(--bg1)) !important;
+  border-bottom-color: transparent !important;
+}
+.navbar--fill-mode .navbar-title,
+.navbar--fill-mode .navbar-btn {
+  color: #0a0a0a !important;
+}
+.navbar--fill-mode .navbar-btn {
+  border-color: rgba(0,0,0,0.15) !important;
+  background: rgba(0,0,0,0.08) !important;
+}
+.navbar--fill-mode .navbar-btn:hover {
+  background: rgba(0,0,0,0.15) !important;
+}
+
+.navbar--mono-mode {
+  background: color-mix(in srgb, var(--module-accent) 12%, #0d0d0d) !important;
+  border-bottom-color: color-mix(in srgb, var(--module-accent) 8%, #1a1a1a) !important;
 }

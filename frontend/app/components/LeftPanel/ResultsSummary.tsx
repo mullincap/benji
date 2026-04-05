@@ -98,6 +98,8 @@ function kpiColor(key: string, value: unknown): string {
     return 'var(--red)';
   }
   if (key === 'max_dd') {
+    if (value > -20) return 'var(--green)';
+    if (value > -30) return 'var(--amber)';
     return 'var(--red)';
   }
   if (key === 'avg_1m_ret') {
