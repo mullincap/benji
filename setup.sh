@@ -120,6 +120,7 @@ if [[ "$SSL_ONLY" == false ]]; then
     apt-get install -y -qq \
         curl wget git unzip \
         python3 python3-pip python3-venv \
+        awscli \
         python3-dateutil \
         postgresql-client \
         cron \
@@ -355,10 +356,30 @@ DB_HOST=${DB_HOST:-127.0.0.1}
 DB_NAME=${DB_NAME}
 DB_USER=${DB_USER}
 DATA_ROOT=${DATA_ROOT}
+S3_ACCESS_KEY=${S3_ACCESS_KEY:-}
+S3_SECRET_KEY=${S3_SECRET_KEY:-}
+S3_BUCKET=${S3_BUCKET:-benji3m-data}
+S3_ENDPOINT=${S3_ENDPOINT:-https://hel1.your-objectstorage.com}
 EOF
     chmod 600 "$CREDS_DIR/secrets.env"
 
     success "Credentials written to $CREDS_DIR"
+fi
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 9b. Download seed data from Object Storage + run backfill
+# ─────────────────────────────────────────────────────────────────────────────
+if [[ "$SSL_ONLY" == false && -n "${S3_ACCESS_KEY:-}" && -n "${S3_SECRET_KEY:-}" ]]; then
+    log "Downloading historical seed data from Object Storage..."
+    bash "$REPO_DIR/download-from-storage.sh"         && success "Seed data downloaded"         || warn "Seed data download failed — run manually: bash $REPO_DIR/download-from-storage.sh"
+
+    log "Running backfill scripts..."
+    bash "$REPO_DIR/run_backfill.sh"         && success "Backfill complete"         || warn "Backfill failed — run manually: bash $REPO_DIR/run_backfill.sh"
+else
+    if [[ "$SSL_ONLY" == false ]]; then
+        warn "S3_ACCESS_KEY/S3_SECRET_KEY not set — skipping seed data download"
+        warn "To download manually: add S3 credentials to .env, then run: bash $REPO_DIR/download-from-storage.sh"
+    fi
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -601,7 +622,11 @@ PATH=/usr/local/sbin:/usr/local/bin:/sbin:/bin:/usr/sbin:/usr/bin
 10 1 * * * . $SECRETS && $PYTHON $PIPELINE_DIR/indexer/build_intraday_leaderboard.py --metric volume >> $LOG/indexer/cron.log 2>&1
 
 ${CERTBOT_CRON}
+
+# ── Object Storage sync — 02:00 UTC (after compiler + indexer finish) ─────────
+$([ -n "${S3_ACCESS_KEY:-}" ] && echo "0 2 * * * cd $REPO_DIR && bash sync-to-storage.sh >> $LOG/sync-storage.log 2>&1")
 EOF
+
     success "Cron jobs installed"
 fi
 

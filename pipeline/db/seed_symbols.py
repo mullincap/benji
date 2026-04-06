@@ -68,7 +68,7 @@ def main():
 
         from psycopg2.extras import execute_values
         result = execute_values(cur, """
-            INSERT INTO market.symbols (base, binance_id, blofin_id, active)
+            INSERT INTO market.symbols (base, binance_id, blofin_id)
             VALUES %s
             ON CONFLICT (base) DO NOTHING
             RETURNING symbol_id
@@ -91,7 +91,7 @@ def main():
         rows.append((base, sym, blofin_id))
 
     result = execute_values(cur, """
-        INSERT INTO market.symbols (base, binance_id, blofin_id, active)
+        INSERT INTO market.symbols (base, binance_id, blofin_id)
         VALUES %s
         ON CONFLICT (base) DO NOTHING
         RETURNING symbol_id
