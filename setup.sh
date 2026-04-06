@@ -59,7 +59,16 @@ done
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DATA_ROOT="/mnt/quant-data"
 VOLUME_DEVICE="/dev/disk/by-id/scsi-0HC_Volume_105339442"
-PYTHON_VERSION="3.11"
+# Auto-detect the best available Python version (prefers 3.12, falls back to 3.11)
+if command -v python3.12 &>/dev/null; then
+    PYTHON_VERSION="3.12"
+elif command -v python3.11 &>/dev/null; then
+    PYTHON_VERSION="3.11"
+else
+    PYTHON_VERSION=$(python3 --version 2>&1 | grep -oP '3\.\d+' | head -1)
+    [[ -n "$PYTHON_VERSION" ]] || error "No Python 3 installation found"
+fi
+log "Python version: $PYTHON_VERSION"
 TIMESCALE_VERSION="2.14.2-pg16"
 ENV_FILE="$REPO_DIR/.env"
 PIPELINE_DIR="$REPO_DIR/pipeline"
