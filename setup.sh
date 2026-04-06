@@ -14,8 +14,8 @@
 #   With DOMAIN set in .env    → full SSL setup, app at https://domain
 #   Without DOMAIN             → HTTP-only, app at http://SERVER_IP immediately
 #
-# To add SSL later after pointing DNS:
-#   bash setup.sh --ssl-only
+# To add SSL after pointing DNS:
+#   Add DOMAIN and SSL_EMAIL to .env then re-run: bash setup.sh
 #
 # Steps:
 #    1. System packages
@@ -457,27 +457,39 @@ fi
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 11. Certbot SSL
+# Runs automatically when DOMAIN is set in .env and cert doesn't exist yet.
+# Re-running setup.sh after adding DOMAIN to .env is all that's needed —
+# no --ssl-only flag required.
 # ─────────────────────────────────────────────────────────────────────────────
+CERT_PATH="/etc/letsencrypt/live/${DOMAIN}/fullchain.pem"
+
 if [[ "$NO_DOMAIN" == false ]]; then
-    log "Obtaining SSL certificate for $DOMAIN..."
+    if [[ -f "$CERT_PATH" ]]; then
+        success "SSL certificate already exists for $DOMAIN — skipping Certbot"
+        # Ensure compose file is patched even if cert already existed
+        sed -i "s|      - certbot_www:/var/www/certbot:ro|      - /var/www/certbot:/var/www/certbot:ro|g" "$REPO_DIR/docker-compose.yml"
+        sed -i "s|      - certbot_certs:/etc/letsencrypt:ro|      - /etc/letsencrypt:/etc/letsencrypt:ro|g" "$REPO_DIR/docker-compose.yml"
+    else
+        log "Obtaining SSL certificate for $DOMAIN..."
 
-    # Stop nginx temporarily so Certbot can bind port 80
-    docker compose -f "$REPO_DIR/docker-compose.yml" stop nginx 2>/dev/null || true
+        # Stop nginx temporarily so Certbot can bind port 80
+        docker compose -f "$REPO_DIR/docker-compose.yml" stop nginx 2>/dev/null || true
 
-    certbot certonly \
-        --standalone \
-        --non-interactive \
-        --agree-tos \
-        --email "$SSL_EMAIL" \
-        -d "$DOMAIN" \
-        -d "www.$DOMAIN"
+        certbot certonly \
+            --standalone \
+            --non-interactive \
+            --agree-tos \
+            --email "$SSL_EMAIL" \
+            -d "$DOMAIN" \
+            -d "www.$DOMAIN"
 
-    success "SSL certificate obtained for $DOMAIN"
+        success "SSL certificate obtained for $DOMAIN"
 
-    # Patch docker-compose.yml certbot volumes to use host paths
-    # (must happen before nginx restarts so it can find the certs)
-    sed -i "s|      - certbot_www:/var/www/certbot:ro|      - /var/www/certbot:/var/www/certbot:ro|g" "$REPO_DIR/docker-compose.yml"
-    sed -i "s|      - certbot_certs:/etc/letsencrypt:ro|      - /etc/letsencrypt:/etc/letsencrypt:ro|g" "$REPO_DIR/docker-compose.yml"
+        # Patch docker-compose.yml certbot volumes to use host paths
+        # (must happen before nginx restarts so it can find the certs)
+        sed -i "s|      - certbot_www:/var/www/certbot:ro|      - /var/www/certbot:/var/www/certbot:ro|g" "$REPO_DIR/docker-compose.yml"
+        sed -i "s|      - certbot_certs:/etc/letsencrypt:ro|      - /etc/letsencrypt:/etc/letsencrypt:ro|g" "$REPO_DIR/docker-compose.yml"
+    fi
 
     # Force-recreate nginx so it picks up the patched volumes and cert files
     log "Restarting nginx with SSL certificate..."
@@ -643,9 +655,10 @@ if [[ "$NO_DOMAIN" == true ]]; then
     echo -e "  ${BOLD}App:${RESET}  http://${SERVER_IP}"
     echo ""
     echo "  To add SSL when DNS is ready:"
-    echo "    1. Add to .env:  DOMAIN=heybenji.io"
+    echo "    1. Point DNS A records for your domain to $SERVER_IPV4"
+    echo "    2. Add to .env:  DOMAIN=yourdomain.com"
     echo "                     SSL_EMAIL=you@email.com"
-    echo "    2. Run:          bash setup.sh --ssl-only"
+    echo "    3. Re-run:       bash setup.sh"
 else
     echo -e "  ${BOLD}App:${RESET}  https://${DOMAIN}"
 fi
