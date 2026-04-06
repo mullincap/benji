@@ -231,7 +231,7 @@ export default function Topbar() {
         flexShrink: 0,
       }}
     >
-      {/* Logo — accent colored module name */}
+      {/* Logo */}
       <span className="navbar-title" style={{ fontSize: 14, fontWeight: 700, letterSpacing: '0.05em' }}>
         <span>3M </span>
         <span style={{
@@ -469,6 +469,23 @@ export default function Topbar() {
             </div>
           )}
         </div>
+
+        {/* Exit to landing */}
+        <button
+          onClick={() => router.push('/')}
+          style={{
+            background: 'transparent', border: '1px solid var(--line)',
+            borderRadius: 3, padding: '3px 8px',
+            fontSize: 9, color: 'var(--t3)', cursor: 'pointer',
+            transition: 'all 0.15s ease',
+            display: 'flex', alignItems: 'center', gap: 4,
+          }}
+          onMouseEnter={e => { e.currentTarget.style.borderColor = 'var(--line2)'; e.currentTarget.style.color = 'var(--t2)'; }}
+          onMouseLeave={e => { e.currentTarget.style.borderColor = 'var(--line)'; e.currentTarget.style.color = 'var(--t3)'; }}
+        >
+          EXIT
+          <svg width="10" height="10" viewBox="0 0 10 10" fill="none"><path d="M4 1L8 5L4 9" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round"/></svg>
+        </button>
 
       </div>
     </div>

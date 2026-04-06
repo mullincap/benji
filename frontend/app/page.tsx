@@ -34,7 +34,7 @@ export default function LandingPage() {
         padding: '24px 40px',
       }}>
         <span style={{ fontSize: 18, fontWeight: 700, letterSpacing: '0.08em', color: '#fff' }}>
-          BENJI
+          3M
         </span>
         <Link
           href="/simulator"
@@ -88,7 +88,7 @@ export default function LandingPage() {
           maxWidth: 800,
           letterSpacing: '-0.02em',
         }}>
-          Quantitative audit engine for{' '}
+          Quantitative engine for{' '}
           <span style={{ color: 'rgba(60, 255, 120, 0.9)' }}>crypto strategies</span>
         </h1>
 
