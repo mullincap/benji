@@ -51,7 +51,7 @@ function DashboardContent({ equity, dailyPnl, allocated, activeCount, totalAvail
   instances?: StrategyInstance[];
 }) {
   const availableBalance = Math.max(0, totalAvailable - allocated);
-  const [exchangesOpen, setExchangesOpen] = useState(false);
+  const [exchangesOpen, setExchangesOpen] = useState(true);
   const [positionsOpen, setPositionsOpen] = useState(positions.length > 0);
   return (
     <>

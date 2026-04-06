@@ -4,6 +4,10 @@ import { useState } from "react";
 import { usePathname, useRouter } from "next/navigation";
 import Topbar from "../components/Topbar";
 import { TraderProvider, useTrader, STRATEGY_CATALOG, StrategyType } from "./context";
+import { Chart as ChartJS, ArcElement } from "chart.js";
+import { Doughnut } from "react-chartjs-2";
+
+ChartJS.register(ArcElement);
 
 // ─── Nav item ────────────────────────────────────────────────────────────────
 
@@ -134,7 +138,7 @@ const CATALOG_ENTRIES = Object.entries(STRATEGY_CATALOG) as [StrategyType, typeo
 function Sidebar() {
   const pathname = usePathname();
   const router = useRouter();
-  const { instances } = useTrader();
+  const { instances, exchanges } = useTrader();
   const [collapsed, setCollapsed] = useState(false);
   const [strategiesOpen, setStrategiesOpen] = useState(true);
   const [tradersOpen, setTradersOpen] = useState(true);
@@ -179,8 +183,74 @@ function Sidebar() {
 
       {/* Expanded content */}
       {!collapsed && (
-        <div style={{ flex: 1, overflowY: "auto", paddingTop: 4 }}>
+        <div style={{ flex: 1, overflowY: "auto" }}>
+          {/* Sidebar donut */}
+          {(() => {
+            const totalBalance = exchanges.reduce((s, e) => s + e.balance, 0);
+            const totalAllocated = instances.filter(i => i.status === "live" || i.status === "paused").reduce((s, i) => s + (i.allocation ?? 0), 0);
+            const available = Math.max(0, totalBalance - totalAllocated);
+            const pct = totalBalance > 0 ? Math.round((totalAllocated / totalBalance) * 100) : 0;
+            const hasExchanges = exchanges.length > 0;
+            const fmtAbbrev = (n: number) => n >= 1000000 ? `$${(n / 1000000).toFixed(1)}m` : n >= 1000 ? `$${Math.round(n / 1000)}k` : `$${n}`;
+
+            const donutData = hasExchanges ? {
+              datasets: [{
+                data: [totalAllocated, available],
+                backgroundColor: ["#00c89630", "#1a1a1d"],
+                borderColor: ["#00c896", "#242428"],
+                borderWidth: 1.5,
+                hoverOffset: 0,
+              }],
+            } : {
+              datasets: [{
+                data: [1],
+                backgroundColor: ["#1a1a1d"],
+                borderColor: ["#242428"],
+                borderWidth: 1.5,
+                hoverOffset: 0,
+              }],
+            };
+
+            return (
+              <div style={{ padding: "14px 12px 10px", borderBottom: "0.5px solid var(--line)", display: "flex", flexDirection: "column", alignItems: "center" }}>
+                <div style={{ position: "relative", width: 100, height: 100 }}>
+                  <Doughnut
+                    data={donutData}
+                    width={100}
+                    height={100}
+                    options={{
+                      responsive: false,
+                      maintainAspectRatio: false,
+                      cutout: "72%",
+                      animation: { duration: 800 },
+                      plugins: { legend: { display: false }, tooltip: { enabled: false } },
+                    }}
+                  />
+                  <div style={{ position: "absolute", inset: 0, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", pointerEvents: "none" }}>
+                    <span style={{ fontSize: 13, fontWeight: 700, color: "var(--t0)" }}>{pct}%</span>
+                    <span style={{ fontSize: 8, color: "var(--t3)", marginTop: 1 }}>deployed</span>
+                  </div>
+                </div>
+                {hasExchanges ? (
+                  <div style={{ display: "flex", alignItems: "center", gap: 10, marginTop: 8 }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
+                      <span style={{ width: 6, height: 6, borderRadius: 1, background: "var(--green)", flexShrink: 0 }} />
+                      <span style={{ fontSize: 8, color: "var(--t2)" }}>{fmtAbbrev(totalAllocated)}</span>
+                    </div>
+                    <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
+                      <span style={{ width: 6, height: 6, borderRadius: 1, background: "var(--bg3)", flexShrink: 0 }} />
+                      <span style={{ fontSize: 8, color: "var(--t3)" }}>{fmtAbbrev(available)}</span>
+                    </div>
+                  </div>
+                ) : (
+                  <span style={{ fontSize: 8, color: "var(--t3)", marginTop: 8 }}>Link an exchange</span>
+                )}
+              </div>
+            );
+          })()}
+
           {/* TRADER section */}
+          <div style={{ paddingTop: 4 }} />
           <NavItem label="Overview" href="/trader/overview" active={pathname === "/trader/overview"} icon={<IconOverview color={pathname === "/trader/overview" ? "var(--t0)" : "var(--t2)"} />} />
 
           {/* Divider */}
