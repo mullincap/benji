@@ -116,7 +116,7 @@ if [[ "$SSL_ONLY" == false ]]; then
     DEBIAN_FRONTEND=noninteractive apt-get upgrade -y -qq
     apt-get install -y -qq \
         curl wget git unzip \
-        python${PYTHON_VERSION} python${PYTHON_VERSION}-pip python${PYTHON_VERSION}-venv \
+        python3 python3-pip python3-venv \
         python3-dateutil \
         postgresql-client \
         cron certbot \
