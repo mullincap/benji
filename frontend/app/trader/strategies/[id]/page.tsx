@@ -6,6 +6,14 @@ import { useTrader, STRATEGY_CATALOG, StrategyType, StrategyInstance, fmt, RISK_
 import EquityCurveSvg from "../../equity-curve";
 import SetupWizard from "../../components/SetupWizard";
 
+// ─── Capacity data ──────────────────────────────────────────────────────────
+
+const CAPACITY_DATA: Record<string, { allocators: number; deployed: number; capacity: number }> = {
+  "alpha-low":  { allocators: 8,  deployed: 740000, capacity: 1000000 },
+  "alpha-mid":  { allocators: 31, deployed: 220000, capacity: 1000000 },
+  "alpha-high": { allocators: 47, deployed: 920000, capacity: 1000000 },
+};
+
 // ─── Metric card ─────────────────────────────────────────────────────────────
 
 function MetricCard({ label, value, color }: { label: string; value: string; color?: string }) {
@@ -398,7 +406,7 @@ export default function MarketplaceDetailPage() {
                 )}
               </div>
             ) : (
-              /* No instance — LAUNCH CAPITAL */
+              /* No instance — SYNC CAPITAL */
               <button onClick={handleAdd} style={{
                 background: "var(--green)", color: "var(--bg0)",
                 border: "none", borderRadius: 3,
@@ -406,7 +414,7 @@ export default function MarketplaceDetailPage() {
                 letterSpacing: "0.12em", textTransform: "uppercase",
                 cursor: "pointer", whiteSpace: "nowrap",
               }}>
-                LAUNCH CAPITAL
+                SYNC CAPITAL
               </button>
             )}
           </div>
@@ -421,6 +429,30 @@ export default function MarketplaceDetailPage() {
           <MetricCard label="CAGR" value={`${fmt(cat.cagr, 1)}%`} color="var(--green)" />
           <MetricCard label="PROFIT FACTOR" value={`${fmt(cat.profitFactor, 2)}x`} />
         </div>
+
+        {/* Capacity + social proof */}
+        {(() => {
+          const cap = CAPACITY_DATA[id] ?? { allocators: 0, deployed: 0, capacity: 1 };
+          const remaining = cap.capacity - cap.deployed;
+          const remainingPct = remaining / cap.capacity;
+          const color = remainingPct > 0.5 ? "var(--green)" : remainingPct >= 0.2 ? "var(--amber)" : "var(--red)";
+          const isLow = remainingPct < 0.2;
+          const fmtFull = (n: number) => "$" + n.toLocaleString("en-US");
+          return (
+            <div style={{ marginBottom: 20 }}>
+              <div style={{ display: "flex", alignItems: "center", fontSize: 9 }}>
+                <span style={{ color: "var(--t2)" }}>{cap.allocators} allocators</span>
+                <span style={{ color: "var(--t3)", margin: "0 5px" }}>&middot;</span>
+                <span style={{ color: "var(--t2)" }}>{fmtFull(cap.deployed)} deployed</span>
+                <span style={{ color: "var(--t3)", margin: "0 5px" }}>&middot;</span>
+                <span style={{ color, fontWeight: 700 }}>{isLow ? `Only ${fmtFull(remaining)} left` : `${fmtFull(remaining)} max limit`}</span>
+              </div>
+              <div style={{ height: 4, background: "var(--bg3)", borderRadius: 2, marginTop: 6, overflow: "hidden" }}>
+                <div style={{ height: "100%", width: `${(cap.deployed / cap.capacity) * 100}%`, background: "#6a6a6a", borderRadius: 2 }} />
+              </div>
+            </div>
+          );
+        })()}
 
         {/* Inline wizard panel — slides down when open */}
         <div style={{

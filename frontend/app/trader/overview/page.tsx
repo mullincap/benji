@@ -1,40 +1,26 @@
 "use client";
 
-import { useState, useRef, useEffect } from "react";
+import { useState, useMemo } from "react";
 import { useRouter } from "next/navigation";
-import { useTrader, Position, Exchange, StrategyInstance, fmt, GHOST_CURVE, RISK_COLOR, RISK_DIM } from "../context";
+import { useTrader, Position, Exchange, StrategyInstance, StrategyType, STRATEGY_CATALOG, fmt, GHOST_CURVE, RISK_COLOR, RISK_DIM } from "../context";
 import EquityCurveSvg from "../equity-curve";
 import PerformanceChart from "../performance-chart";
 import TraderCard from "../components/TraderCard";
+import {
+  Chart as ChartJS,
+  LinearScale, PointElement, Tooltip,
+} from "chart.js";
+import { Bubble } from "react-chartjs-2";
 
-// ─── Toggle ─────────────────────────────────────────────────────────────────
+ChartJS.register(LinearScale, PointElement, Tooltip);
 
-function Toggle({ on, onColor, offColor, onToggle, label }: {
-  on: boolean; onColor: string; offColor: string; onToggle: () => void; label: string;
-}) {
-  return (
-    <button onClick={e => { e.stopPropagation(); onToggle(); }} style={{
-      display: "inline-flex", alignItems: "center", gap: 6,
-      background: "transparent", border: "none", cursor: "pointer",
-      fontSize: 9, fontWeight: 700, letterSpacing: "0.12em", textTransform: "uppercase",
-      color: on ? onColor : offColor,
-    }}>
-      <span style={{
-        width: 28, height: 14, borderRadius: 7,
-        background: on ? onColor : "var(--bg4)",
-        position: "relative", display: "inline-block", transition: "background 0.2s ease",
-      }}>
-        <span style={{
-          width: 10, height: 10, borderRadius: "50%",
-          background: on ? "var(--bg0)" : "var(--t2)",
-          position: "absolute", top: 2, left: on ? 16 : 2,
-          transition: "left 0.2s ease",
-        }} />
-      </span>
-      {label}
-    </button>
-  );
-}
+// ─── Bubble chart strategy data ──────────────────────────────────────────────
+
+const BUBBLE_STRATEGY_DATA: Record<StrategyType, { x: number; y: number; fill: string; border: string }> = {
+  "alpha-low":  { x: 8.2,  y: 14.2, fill: "#00c89625", border: "#00c896" },
+  "alpha-mid":  { x: 14.6, y: 38.2, fill: "#f0a50025", border: "#f0a500" },
+  "alpha-high": { x: 19.9, y: 91.4, fill: "#ff4d4d20", border: "#ff4d4d" },
+};
 
 // ─── Ghost mock data ─────────────────────────────────────────────────────────
 
@@ -64,7 +50,7 @@ function DashboardContent({ equity, dailyPnl, allocated, activeCount, totalAvail
   exchanges?: Exchange[];
   instances?: StrategyInstance[];
 }) {
-  const availableBalance = totalAvailable - allocated;
+  const availableBalance = Math.max(0, totalAvailable - allocated);
   const [exchangesOpen, setExchangesOpen] = useState(false);
   const [positionsOpen, setPositionsOpen] = useState(positions.length > 0);
   return (
@@ -241,55 +227,22 @@ function DashboardContent({ equity, dailyPnl, allocated, activeCount, totalAvail
 
 export default function OverviewPage() {
   const router = useRouter();
-  const { instances, exchanges, updateInstance } = useTrader();
+  const { instances, exchanges } = useTrader();
   const empty = instances.length === 0;
-  const totalAvailable = exchanges.reduce((s, e) => s + e.balance, 0);
-
-  const [editingId, setEditingId] = useState<string | null>(null);
-  const [editValue, setEditValue] = useState("");
-  const [flashId, setFlashId] = useState<string | null>(null);
-  const blurTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const exchangeBalance = exchanges.reduce((s, e) => s + e.balance, 0);
+  const totalAllocatedRaw = instances.reduce((s, i) => s + (i.allocation ?? 0), 0);
+  const totalAvailable = exchangeBalance > 0 ? exchangeBalance : totalAllocatedRaw;
 
   const totalEquity = instances.reduce((s, i) => s + i.equity, 0);
   const dailyPnl = instances.reduce((s, i) => s + i.dailyPnl, 0);
   const totalAllocated = instances.reduce((s, i) => s + (i.allocation ?? 0), 0);
   const activeCount = instances.filter(i => i.status === "live").length;
 
-  // Preview: swap the editing instance's allocation with editValue
-  const editNum = parseInt(editValue) || 0;
-  const previewAllocated = editingId
-    ? totalAllocated - (instances.find(i => i.id === editingId)?.allocation ?? 0) + editNum
-    : totalAllocated;
-
   const allPositions: (Position & { strategy: string; exchange: string })[] = [];
   for (const inst of instances) {
     for (const p of inst.positions) {
       allPositions.push({ ...p, strategy: inst.strategyName, exchange: inst.exchangeName ?? "" });
     }
-  }
-
-  function startEdit(inst: StrategyInstance) {
-    setEditingId(inst.id);
-    setEditValue(String(inst.allocation ?? 0));
-  }
-
-  function confirmEdit() {
-    if (!editingId) return;
-    const inst = instances.find(i => i.id === editingId);
-    if (!inst) return;
-    const val = parseInt(editValue) || 0;
-    const maxAlloc = totalAvailable - totalAllocated + (inst.allocation ?? 0);
-    if (val <= 0 || val > maxAlloc) return;
-    updateInstance(editingId, { allocation: val });
-    setFlashId(editingId);
-    setEditingId(null);
-    setEditValue("");
-    setTimeout(() => setFlashId(null), 500);
-  }
-
-  function cancelEdit() {
-    setEditingId(null);
-    setEditValue("");
   }
 
   return (
@@ -307,7 +260,7 @@ export default function OverviewPage() {
             {empty ? (
               <DashboardContent equity={293593} dailyPnl={14092} allocated={94000} activeCount={3} totalAvailable={totalAvailable} positions={GHOST_POSITIONS} showCurve />
             ) : (
-              <DashboardContent equity={totalEquity} dailyPnl={dailyPnl} allocated={previewAllocated} activeCount={activeCount} totalAvailable={totalAvailable} positions={allPositions} exchanges={exchanges} instances={instances} />
+              <DashboardContent equity={totalEquity} dailyPnl={dailyPnl} allocated={totalAllocated} activeCount={activeCount} totalAvailable={totalAvailable} positions={allPositions} exchanges={exchanges} instances={instances} />
             )}
           </div>
 
@@ -331,123 +284,184 @@ export default function OverviewPage() {
                   cursor: "pointer",
                 }}
               >
-                LAUNCH YOUR FIRST STRATEGY
+                SELECT A STRATEGY
               </button>
             </div>
           )}
         </div>
 
-        {/* Traders list — only when instances exist */}
-        {!empty && instances.length > 0 && (
-          <>
-            <div style={{ fontSize: 9, fontWeight: 700, letterSpacing: "0.12em", color: "var(--t3)", textTransform: "uppercase", marginTop: 24, marginBottom: 10 }}>
-              TRADERS
-            </div>
-            <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-              {instances.map(inst => {
-                const isEditing = editingId === inst.id;
-                const isFlash = flashId === inst.id;
-                const isLiveOrPaused = inst.status === "live" || inst.status === "paused";
-                const maxAlloc = totalAvailable - totalAllocated + (inst.allocation ?? 0);
-                const currentEditVal = parseInt(editValue) || 0;
-                const editValid = isEditing && currentEditVal > 0 && currentEditVal <= maxAlloc;
+        {/* Traders treemap — only when instances exist */}
+        {!empty && instances.length > 0 && (() => {
+          const activeInstances = instances.filter(i => i.status === "live" || i.status === "paused");
+          const unlinkedInstances = instances.filter(i => i.status === "unlinked");
+          const treemapTotal = totalAvailable > 0 ? totalAvailable : totalAllocated;
+          const unallocated = Math.max(0, totalAvailable - totalAllocated);
 
-                if (inst.status === "unlinked") {
-                  return <TraderCard key={inst.id} inst={inst} />;
+          return (
+            <>
+              <div style={{ fontSize: 9, fontWeight: 700, letterSpacing: "0.12em", color: "var(--t3)", textTransform: "uppercase", marginTop: 24, marginBottom: 10 }}>
+                TRADERS
+              </div>
+
+              {/* Treemap */}
+              {activeInstances.length > 0 && (
+                <div style={{ display: "flex", gap: 4, height: 200, marginBottom: unlinkedInstances.length > 0 ? 10 : 0 }}>
+                  {activeInstances.map(inst => {
+                    const isLive = inst.status === "live";
+                    const alloc = inst.allocation ?? 0;
+                    const pct = treemapTotal > 0 ? (alloc / treemapTotal) * 100 : 0;
+                    const allocPct = totalAllocated > 0 ? Math.round((alloc / totalAllocated) * 100) : 0;
+                    return (
+                      <div
+                        key={inst.id}
+                        onClick={() => router.push(`/trader/traders/${inst.id}`)}
+                        style={{
+                          width: `${pct}%`, minWidth: 60,
+                          background: isLive ? "var(--green-dim)" : "var(--bg3)",
+                          border: isLive ? "0.5px solid var(--green-mid)" : "0.5px solid var(--line)",
+                          borderRadius: 5, padding: 12,
+                          display: "flex", flexDirection: "column", justifyContent: "space-between",
+                          overflow: "hidden", cursor: "pointer",
+                          transition: "border-color 0.15s ease",
+                        }}
+                        onMouseEnter={e => { e.currentTarget.style.borderColor = isLive ? "var(--green)" : "var(--line2)"; }}
+                        onMouseLeave={e => { e.currentTarget.style.borderColor = isLive ? "var(--green-mid)" : "var(--line)"; }}
+                      >
+                        {/* Top: name + risk badge */}
+                        <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                          <span style={{ fontSize: 9, fontWeight: 700, textTransform: "uppercase", color: isLive ? "var(--green)" : "var(--t2)", letterSpacing: "0.06em", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{inst.strategyName}</span>
+                          <span style={{ fontSize: 8, fontWeight: 700, letterSpacing: "0.08em", textTransform: "uppercase", padding: "1px 5px", borderRadius: 2, background: RISK_DIM[inst.risk], color: RISK_COLOR[inst.risk], flexShrink: 0 }}>{inst.risk}</span>
+                        </div>
+                        {/* Bottom: allocation + pct + P&L */}
+                        <div>
+                          <div style={{ fontSize: 18, fontWeight: 700, color: isLive ? "var(--t0)" : "var(--t2)" }}>${fmt(alloc, 0)}</div>
+                          <div style={{ fontSize: 9, color: "var(--t3)" }}>{allocPct}% of total</div>
+                          <div style={{ fontSize: 9, color: !inst.dailyPnl ? "var(--t3)" : inst.dailyPnl > 0 ? "var(--green)" : "var(--red)" }}>
+                            {!inst.dailyPnl ? "\u2014" : `${inst.dailyPnl >= 0 ? "+" : ""}$${fmt(inst.dailyPnl)} today`}
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })}
+
+                  {/* Unallocated block */}
+                  {unallocated > 0 && (
+                    <div style={{
+                      width: `${(unallocated / treemapTotal) * 100}%`, minWidth: 50,
+                      background: "var(--bg2)", border: "0.5px solid var(--line)",
+                      borderRadius: 5, padding: 12,
+                      display: "flex", flexDirection: "column", justifyContent: "space-between",
+                      overflow: "hidden",
+                    }}>
+                      <span style={{ fontSize: 9, fontWeight: 700, textTransform: "uppercase", color: "var(--t3)", letterSpacing: "0.06em" }}>UNALLOCATED</span>
+                      <div>
+                        <div style={{ fontSize: 18, fontWeight: 700, color: "var(--t3)" }}>${fmt(unallocated, 0)}</div>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* Bubble chart — risk/return */}
+              {activeInstances.length > 0 && (() => {
+                // Group instances by strategy, only live
+                const liveByStrategy: Record<string, { alloc: number; inst: typeof activeInstances[0] }> = {};
+                for (const inst of activeInstances) {
+                  if (inst.status !== "live") continue;
+                  const key = inst.strategyType;
+                  if (!liveByStrategy[key]) liveByStrategy[key] = { alloc: 0, inst };
+                  liveByStrategy[key].alloc += inst.allocation ?? 0;
                 }
+                const datasets = Object.entries(liveByStrategy).map(([type, { alloc, inst }]) => {
+                  const bd = BUBBLE_STRATEGY_DATA[type as StrategyType];
+                  if (!bd) return null;
+                  const r = Math.max(6, Math.min(28, Math.sqrt(alloc / 1000)));
+                  return {
+                    label: inst.strategyName,
+                    data: [{ x: bd.x, y: bd.y, r }],
+                    backgroundColor: bd.fill,
+                    borderColor: bd.border,
+                    borderWidth: 1.5,
+                    hoverBackgroundColor: bd.border + "40",
+                    hoverBorderColor: bd.border,
+                    // stash for tooltip
+                    _meta: { name: inst.strategyName, exchange: inst.exchangeName, alloc },
+                  };
+                }).filter(Boolean) as any[];
 
                 return (
-                  <div key={inst.id}>
-                    <div
-                      onClick={() => { if (!isEditing) router.push(`/trader/traders/${inst.id}`); }}
-                      style={{
-                        background: "var(--bg2)", border: "1px solid var(--line)", borderRadius: 5,
-                        padding: "16px 18px", cursor: isEditing ? "default" : "pointer",
-                        opacity: inst.status === "live" ? 1 : 0.6,
-                        transition: "border-color 0.15s ease, opacity 0.2s ease",
-                      }}
-                      onMouseEnter={e => { if (!isEditing) e.currentTarget.style.borderColor = "var(--line2)"; }}
-                      onMouseLeave={e => (e.currentTarget.style.borderColor = "var(--line)")}
-                    >
-                      {/* Top row: name, badges, toggle */}
-                      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 12 }}>
-                        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                          <span style={{ fontSize: 14, fontWeight: 700, color: "var(--t0)" }}>{inst.strategyName}</span>
-                          {inst.exchangeName && (
-                            <span style={{ fontSize: 9, padding: "2px 6px", borderRadius: 2, background: "var(--bg3)", color: "var(--t1)", border: "1px solid var(--line)" }}>{inst.exchangeName}</span>
-                          )}
-                          <span style={{ fontSize: 9, fontWeight: 700, letterSpacing: "0.08em", textTransform: "uppercase", padding: "2px 6px", borderRadius: 2, background: RISK_DIM[inst.risk], color: RISK_COLOR[inst.risk] }}>{inst.risk}</span>
-                        </div>
-                        <Toggle
-                          on={inst.status === "live"}
-                          onColor="var(--green)"
-                          offColor="var(--t2)"
-                          onToggle={() => updateInstance(inst.id, { status: inst.status === "live" ? "paused" : "live" })}
-                          label={inst.status === "live" ? "Live" : "Paused"}
-                        />
-                      </div>
-                      {/* Bottom row: allocation (editable) + stats */}
-                      <div style={{ display: "flex", gap: 20, fontSize: 10, color: "var(--t2)", alignItems: "center" }}>
-                        {/* Allocation — editable */}
-                        <span style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
-                          <span style={{ fontSize: 9, color: "var(--t3)" }}>allocation</span>
-                          {isEditing ? (
-                            <span style={{ display: "inline-flex", alignItems: "center", gap: 4 }} onClick={e => e.stopPropagation()}>
-                              <input
-                                type="text"
-                                autoFocus
-                                value={editValue}
-                                onChange={e => {
-                                  const raw = e.target.value.replace(/[^0-9]/g, "");
-                                  setEditValue(raw);
-                                }}
-                                onBlur={() => { blurTimerRef.current = setTimeout(cancelEdit, 150); }}
-                                onKeyDown={e => { if (e.key === "Enter" && editValid) confirmEdit(); if (e.key === "Escape") cancelEdit(); }}
-                                style={{
-                                  width: 80, background: "var(--bg0)", border: "1px solid var(--green)",
-                                  borderRadius: 3, padding: "3px 6px", color: "var(--t0)",
-                                  fontSize: 10, outline: "none",
-                                }}
-                              />
-                              <span
-                                onMouseDown={e => { e.preventDefault(); if (blurTimerRef.current) clearTimeout(blurTimerRef.current); }}
-                                onClick={e => { e.stopPropagation(); if (editValid) confirmEdit(); }}
-                                style={{
-                                  fontSize: 11, color: "var(--green)", cursor: "pointer",
-                                  pointerEvents: editValid ? "auto" : "none",
-                                  opacity: editValid ? 1 : 0.3,
-                                }}
-                              >{"\u2713"}</span>
-                              <span
-                                onMouseDown={e => { e.preventDefault(); if (blurTimerRef.current) clearTimeout(blurTimerRef.current); }}
-                                onClick={e => { e.stopPropagation(); cancelEdit(); }}
-                                style={{ fontSize: 11, color: "var(--t3)", cursor: "pointer" }}
-                              >{"\u2715"}</span>
-                            </span>
-                          ) : (
-                            <span
-                              onClick={e => { e.stopPropagation(); startEdit(inst); }}
-                              style={{
-                                color: isFlash ? "var(--green)" : "var(--t2)",
-                                borderBottom: "1px dashed var(--line)",
-                                cursor: "pointer",
-                                transition: "color 0.3s ease",
-                              }}
-                            >${fmt(inst.allocation ?? 0, 0)}</span>
-                          )}
-                        </span>
-                        <span style={{ color: !inst.dailyPnl ? "var(--t2)" : inst.dailyPnl > 0 ? "var(--green)" : "var(--red)" }}>
-                          {!inst.dailyPnl ? "\u2014" : `${inst.dailyPnl >= 0 ? "+" : ""}$${fmt(inst.dailyPnl)}`} today
-                        </span>
-                        <span>{inst.positions.length} open</span>
-                      </div>
+                  <div style={{
+                    background: "var(--bg1)", border: "1px solid var(--line)", borderRadius: 6,
+                    padding: "10px 14px", marginTop: 8,
+                  }}>
+                    <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 6 }}>
+                      <span style={{ fontSize: 9, color: "var(--t3)", letterSpacing: "0.12em", fontWeight: 700, textTransform: "uppercase" }}>RISK / RETURN</span>
+                      <span style={{ fontSize: 9, color: "var(--t3)" }}>bubble size = allocation</span>
+                    </div>
+                    <div style={{ height: 180 }}>
+                      <Bubble
+                        data={{ datasets }}
+                        options={{
+                          responsive: true,
+                          maintainAspectRatio: false,
+                          scales: {
+                            x: {
+                              reverse: true,
+                              min: 0, max: 25,
+                              ticks: {
+                                color: "#35332f",
+                                font: { size: 9, family: "'Space Mono', monospace" },
+                                callback: (v) => `${v}%`,
+                              },
+                              grid: { color: "#141416" },
+                              border: { display: false },
+                            },
+                            y: {
+                              min: 0, max: 110,
+                              ticks: {
+                                color: "#35332f",
+                                font: { size: 9, family: "'Space Mono', monospace" },
+                                callback: (v) => `+${v}%`,
+                              },
+                              grid: { color: "#141416" },
+                              border: { display: false },
+                            },
+                          },
+                          plugins: {
+                            legend: { display: false },
+                            tooltip: {
+                              backgroundColor: "#141416",
+                              borderColor: "#242428",
+                              borderWidth: 1,
+                              titleFont: { size: 9, family: "'Space Mono', monospace" },
+                              bodyFont: { size: 9, family: "'Space Mono', monospace" },
+                              padding: 8,
+                              callbacks: {
+                                label: (ctx) => {
+                                  const meta = (ctx.dataset as any)._meta;
+                                  return `${meta.name} · ${meta.exchange} · $${meta.alloc.toLocaleString("en-US")}`;
+                                },
+                              },
+                            },
+                          },
+                        }}
+                      />
                     </div>
                   </div>
                 );
-              })}
-            </div>
-          </>
-        )}
+              })()}
+
+              {/* Unlinked instances still shown as cards */}
+              {unlinkedInstances.length > 0 && (
+                <div style={{ display: "flex", flexDirection: "column", gap: 10, marginTop: activeInstances.length > 0 ? 10 : 0 }}>
+                  {unlinkedInstances.map(inst => (
+                    <TraderCard key={inst.id} inst={inst} />
+                  ))}
+                </div>
+              )}
+            </>
+          );
+        })()}
       </div>
     </div>
   );

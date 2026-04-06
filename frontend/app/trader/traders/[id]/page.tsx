@@ -127,6 +127,7 @@ function LiveMode({ instanceId }: { instanceId: string }) {
   const editMaxAllocation = totalBalance - instances.filter(i => i.id !== instanceId).reduce((s, i) => s + (i.allocation ?? 0), 0);
 
   const [confirmPause, setConfirmPause] = useState(false);
+  const [exchangeLost, setExchangeLost] = useState(false);
   const [confirmClose, setConfirmClose] = useState(false);
   const [confirmRemoveTrader, setConfirmRemoveTrader] = useState(false);
   const [positionsOpen, setPositionsOpen] = useState(inst.positions.length > 0);
@@ -168,7 +169,11 @@ function LiveMode({ instanceId }: { instanceId: string }) {
           </div>
           <div style={{ display: "flex", gap: 14 }}>
             <Toggle on={isLive} onColor="var(--green)" offColor="var(--t2)" onToggle={() => {
-              if (isLive) { setConfirmPause(true); } else { updateInstance(inst.id, { status: "live" }); }
+              if (isLive) { setConfirmPause(true); } else {
+                const exExists = exchanges.some(e => e.name === inst.exchangeName);
+                if (exExists) { updateInstance(inst.id, { status: "live" }); setExchangeLost(false); }
+                else { setExchangeLost(true); }
+              }
             }} label={isLive ? "Live" : "Paused"} />
           </div>
         </div>
@@ -185,6 +190,22 @@ function LiveMode({ instanceId }: { instanceId: string }) {
               <button onClick={() => { updateInstance(inst.id, { status: "paused" }); setConfirmPause(false); }} style={{ background: "transparent", border: "none", color: "var(--t1)", fontSize: 9, cursor: "pointer", padding: 0 }}>Yes, pause</button>
               <span style={{ color: "var(--t3)" }}>&middot;</span>
               <button onClick={() => setConfirmPause(false)} style={{ background: "transparent", border: "none", color: "var(--t3)", fontSize: 9, cursor: "pointer", padding: 0 }}>Cancel</button>
+            </div>
+          </div>
+        )}
+
+        {/* Exchange lost error */}
+        {exchangeLost && (
+          <div style={{
+            background: "var(--bg2)", border: "0.5px solid #ff4d4d30", borderRadius: 6,
+            padding: "10px 12px", marginTop: -16, marginBottom: 24,
+          }}>
+            <div style={{ fontSize: 10, color: "var(--t2)", lineHeight: 1.6, marginBottom: 8 }}>
+              Exchange connection lost. The API keys for {inst.exchangeName} were removed. Re-link this exchange in Settings to resume.
+            </div>
+            <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+              <span onClick={() => router.push("/trader/settings")} style={{ fontSize: 10, color: "var(--green)", cursor: "pointer" }}>Go to Settings &rarr;</span>
+              <button onClick={() => setExchangeLost(false)} style={{ background: "transparent", border: "none", color: "var(--t3)", fontSize: 9, cursor: "pointer", padding: 0 }}>Dismiss</button>
             </div>
           </div>
         )}

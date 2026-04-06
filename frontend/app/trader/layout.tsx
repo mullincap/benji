@@ -7,14 +7,57 @@ import { TraderProvider, useTrader, STRATEGY_CATALOG, StrategyType } from "./con
 
 // ─── Nav item ────────────────────────────────────────────────────────────────
 
-function NavItem({ label, href, active }: { label: string; href: string; active: boolean }) {
+// ─── Sidebar icons ──────────────────────────────────────────────────────────
+
+function IconOverview({ color }: { color: string }) {
+  return (
+    <svg width="12" height="12" viewBox="0 0 12 12" fill="none">
+      <rect x="1" y="1" width="4" height="4" rx="1" stroke={color} strokeWidth="1.2" />
+      <rect x="7" y="1" width="4" height="4" rx="1" stroke={color} strokeWidth="1.2" />
+      <rect x="1" y="7" width="4" height="4" rx="1" stroke={color} strokeWidth="1.2" />
+      <rect x="7" y="7" width="4" height="4" rx="1" stroke={color} strokeWidth="1.2" />
+    </svg>
+  );
+}
+
+function IconStrategies({ color }: { color: string }) {
+  return (
+    <svg width="12" height="12" viewBox="0 0 12 12" fill="none">
+      <path d="M2 2L6 1L10 2V8L6 11L2 8V2Z" stroke={color} strokeWidth="1.2" strokeLinejoin="round" />
+      <path d="M6 1V11" stroke={color} strokeWidth="1" opacity="0.4" />
+    </svg>
+  );
+}
+
+function IconTraders({ color }: { color: string }) {
+  return (
+    <svg width="12" height="12" viewBox="0 0 12 12" fill="none">
+      <polyline points="1,9 3.5,4 6,6.5 8.5,2 11,5" stroke={color} strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" fill="none" />
+      <line x1="1" y1="11" x2="11" y2="11" stroke={color} strokeWidth="1" opacity="0.3" />
+    </svg>
+  );
+}
+
+function IconSettings({ color }: { color: string }) {
+  return (
+    <svg width="12" height="12" viewBox="0 0 12 12" fill="none">
+      <circle cx="6" cy="6" r="2" stroke={color} strokeWidth="1.2" />
+      <path d="M6 1V2.5M6 9.5V11M1 6H2.5M9.5 6H11M2.5 2.5L3.5 3.5M8.5 8.5L9.5 9.5M9.5 2.5L8.5 3.5M3.5 8.5L2.5 9.5" stroke={color} strokeWidth="1" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+// ─── Nav item ────────────────────────────────────────────────────────────────
+
+function NavItem({ label, href, active, icon }: { label: string; href: string; active: boolean; icon?: React.ReactNode }) {
   const router = useRouter();
   return (
     <button
       onClick={() => router.push(href)}
       style={{
-        display: "block", width: "100%",
-        padding: "5px 8px 5px 16px",
+        display: "flex", alignItems: "center", gap: 7,
+        width: "100%",
+        padding: "5px 8px 5px 14px",
         background: "transparent",
         borderLeft: "none",
         borderRight: "none", borderTop: "none", borderBottom: "none",
@@ -27,6 +70,7 @@ function NavItem({ label, href, active }: { label: string; href: string; active:
       onMouseEnter={e => { if (!active) e.currentTarget.style.color = "var(--t1)"; }}
       onMouseLeave={e => { if (!active) e.currentTarget.style.color = "var(--t2)"; }}
     >
+      {icon}
       {label}
     </button>
   );
@@ -137,7 +181,7 @@ function Sidebar() {
       {!collapsed && (
         <div style={{ flex: 1, overflowY: "auto", paddingTop: 4 }}>
           {/* TRADER section */}
-          <NavItem label="Overview" href="/trader/overview" active={pathname === "/trader/overview"} />
+          <NavItem label="Overview" href="/trader/overview" active={pathname === "/trader/overview"} icon={<IconOverview color={pathname === "/trader/overview" ? "var(--t0)" : "var(--t2)"} />} />
 
           {/* Divider */}
           <div style={{ borderTop: "1px solid var(--line)", margin: "8px 14px" }} />
@@ -157,10 +201,11 @@ function Sidebar() {
                   flex: 1, background: "transparent", border: "none", textAlign: "left",
                   padding: "0 0 0 14px", fontSize: 10, cursor: "pointer",
                   color: active ? "var(--t0)" : "var(--t2)", fontWeight: active ? 700 : 400,
+                  display: "flex", alignItems: "center", gap: 7,
                 }}
                   onMouseEnter={e => { if (!active) e.currentTarget.style.color = "var(--t1)"; }}
                   onMouseLeave={e => { if (!active) e.currentTarget.style.color = "var(--t2)"; }}
-                >Strategies</button>
+                ><IconStrategies color={active ? "var(--t0)" : "var(--t2)"} />Strategies</button>
                 <button onClick={() => setStrategiesOpen(v => !v)} style={{
                   background: "transparent", border: "none", padding: "2px 6px",
                   cursor: "pointer", display: "inline-flex", alignItems: "center",
@@ -197,10 +242,11 @@ function Sidebar() {
                   flex: 1, background: "transparent", border: "none", textAlign: "left",
                   padding: "0 0 0 14px", fontSize: 10, cursor: "pointer",
                   color: active ? "var(--t0)" : "var(--t2)", fontWeight: active ? 700 : 400,
+                  display: "flex", alignItems: "center", gap: 7,
                 }}
                   onMouseEnter={e => { if (!active) e.currentTarget.style.color = "var(--t1)"; }}
                   onMouseLeave={e => { if (!active) e.currentTarget.style.color = "var(--t2)"; }}
-                >Traders</button>
+                ><IconTraders color={active ? "var(--t0)" : "var(--t2)"} />Traders</button>
                 <button onClick={() => setTradersOpen(v => !v)} style={{
                   background: "transparent", border: "none", padding: "2px 6px",
                   cursor: "pointer", display: "inline-flex", alignItems: "center",
@@ -255,7 +301,7 @@ function Sidebar() {
       {/* Bottom pinned — Settings */}
       {!collapsed && (
         <div style={{ borderTop: "1px solid var(--line)", paddingTop: 4, paddingBottom: 4 }}>
-          <NavItem label="Settings" href="/trader/settings" active={pathname === "/trader/settings"} />
+          <NavItem label="Settings" href="/trader/settings" active={pathname === "/trader/settings"} icon={<IconSettings color={pathname === "/trader/settings" ? "var(--t0)" : "var(--t2)"} />} />
         </div>
       )}
     </div>

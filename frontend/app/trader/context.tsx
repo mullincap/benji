@@ -86,9 +86,15 @@ export const MOCK_POSITIONS_B: Position[] = [
 
 // ─── Initial state ───────────────────────────────────────────────────────────
 
-const INITIAL_EXCHANGES: Exchange[] = [];
+const INITIAL_EXCHANGES: Exchange[] = [
+  { id: "binance-1", name: "Binance", maskedKey: "aK3x9f\u2022\u2022\u2022\u2022\u2022\u2022mP7qL2", lastSynced: "2m ago", balance: 127369 },
+];
 
-const INITIAL_INSTANCES: StrategyInstance[] = [];
+const INITIAL_INSTANCES: StrategyInstance[] = [
+  { id: "alpha-mid-1", strategyType: "alpha-mid", strategyName: "Alpha Mid", exchangeId: "binance-1", exchangeName: "Binance", risk: "medium", status: "live", alerts: false, allocation: 25000, equity: 25850, dailyPnl: 342, positions: MOCK_POSITIONS_A },
+  { id: "alpha-low-1", strategyType: "alpha-low", strategyName: "Alpha Low", exchangeId: "binance-1", exchangeName: "Binance", risk: "low", status: "live", alerts: false, allocation: 15000, equity: 15210, dailyPnl: 89, positions: MOCK_POSITIONS_B },
+  { id: "alpha-high-1", strategyType: "alpha-high", strategyName: "Alpha High", exchangeId: "binance-1", exchangeName: "Binance", risk: "high", status: "paused", alerts: false, allocation: 20000, equity: 20680, dailyPnl: 0, positions: [] },
+];
 
 // ─── Context ─────────────────────────────────────────────────────────────────
 

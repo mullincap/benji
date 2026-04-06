@@ -6,6 +6,48 @@ import { useTrader, STRATEGY_CATALOG, StrategyType, StrategyInstance, fmt, RISK_
 
 const CATALOG_ENTRIES = Object.entries(STRATEGY_CATALOG) as [StrategyType, typeof STRATEGY_CATALOG[StrategyType]][];
 
+const CAPACITY_DATA: Record<StrategyType, { allocators: number; deployed: number; capacity: number }> = {
+  "alpha-low":  { allocators: 8,  deployed: 740000, capacity: 1000000 },
+  "alpha-mid":  { allocators: 31, deployed: 220000, capacity: 1000000 },
+  "alpha-high": { allocators: 47, deployed: 920000, capacity: 1000000 },
+};
+
+function fmtAbbrev(n: number): string {
+  if (n >= 1000000) return `$${(n / 1000000).toFixed(1)}m`;
+  if (n >= 1000) return `$${Math.round(n / 1000)}k`;
+  return `$${n}`;
+}
+
+function capacityColor(remaining: number, capacity: number): string {
+  const pct = remaining / capacity;
+  if (pct > 0.5) return "var(--green)";
+  if (pct >= 0.2) return "var(--amber)";
+  return "var(--red)";
+}
+
+function CapacityRow({ type, dominant }: { type: StrategyType; dominant: boolean }) {
+  const cap = CAPACITY_DATA[type];
+  const remaining = cap.capacity - cap.deployed;
+  const remainingPct = remaining / cap.capacity;
+  const color = capacityColor(remaining, cap.capacity);
+  const isLow = remainingPct < 0.2;
+
+  return (
+    <div style={{ marginTop: 10 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 0, fontSize: 9 }}>
+        <span style={{ color: dominant ? "var(--t2)" : "var(--t3)", transition: "color 0.15s ease" }}>{cap.allocators} allocators</span>
+        <span style={{ color: "var(--t3)", margin: "0 5px" }}>&middot;</span>
+        <span style={{ color: dominant ? "var(--t2)" : "var(--t3)", transition: "color 0.15s ease" }}>{fmtAbbrev(cap.deployed)} deployed</span>
+        <span style={{ color: "var(--t3)", margin: "0 5px" }}>&middot;</span>
+        <span style={{ color, fontWeight: 700 }}>{isLow ? `Only ${fmtAbbrev(remaining)} left` : `${fmtAbbrev(remaining)} max limit`}</span>
+      </div>
+      <div style={{ height: 3, background: "var(--bg3)", borderRadius: 2, marginTop: 6, overflow: "hidden" }}>
+        <div style={{ height: "100%", width: `${(cap.deployed / cap.capacity) * 100}%`, background: "#6a6a6a", borderRadius: 2 }} />
+      </div>
+    </div>
+  );
+}
+
 // ─── View toggle icons ───────────────────────────────────────────────────────
 
 function ListIcon({ color }: { color: string }) {
@@ -163,6 +205,9 @@ export default function StrategiesPage() {
                       </div>
                     ))}
                   </div>
+
+                  {/* Capacity row */}
+                  <CapacityRow type={type} dominant={dominant} />
                 </div>
               );
             }
@@ -210,8 +255,11 @@ export default function StrategiesPage() {
                   ))}
                 </div>
 
+                {/* Capacity row */}
+                <CapacityRow type={type} dominant={dominant} />
+
                 {/* YTD */}
-                <div style={{ fontSize: 18, fontWeight: 700, color: dominant ? "var(--green)" : "var(--t2)", marginBottom: 14, transition: trans }}>
+                <div style={{ fontSize: 18, fontWeight: 700, color: dominant ? "var(--green)" : "var(--t2)", marginTop: 14, marginBottom: 14, transition: trans }}>
                   +{fmt(cat.ytd, 1)}%
                   <span style={{ fontSize: 9, fontWeight: 400, color: "var(--t2)", marginLeft: 4 }}>YTD</span>
                 </div>
