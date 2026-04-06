@@ -10,3 +10,18 @@ dist/
 *.log
 celerybeat-schedule
 pipeline/audit_outputs_BEFORE/
+
+# Pipeline
+.env
+credentials/
+token.json
+credentials.json
+secrets.env
+quant-data/
+*.parquet
+*.csv
+pipeline/.venv/
+pipeline/**/__pycache__/
+pipeline/**/*.pyc
+checkpoint_*.txt
+*.log

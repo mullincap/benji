@@ -293,6 +293,54 @@ export default function SettingsPage() {
         ) : (
           <LinkWizard onComplete={ex => { addExchange(ex); setShowWizard(false); setConfirmRemove(null); }} onCancel={() => setShowWizard(false)} />
         )}
+
+        {/* Exchange accounts summary table */}
+        {exchanges.length > 0 && !showWizard && (
+          <div style={{ marginTop: 20 }}>
+            <div style={{ fontSize: 9, fontWeight: 700, letterSpacing: "0.12em", color: "var(--t3)", textTransform: "uppercase", marginBottom: 12 }}>
+              ACCOUNT SUMMARY
+            </div>
+            <div style={{ background: "var(--bg1)", border: "1px solid var(--line)", borderRadius: 6, overflow: "hidden" }}>
+              <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 10 }}>
+                <thead>
+                  <tr style={{ borderBottom: "1px solid var(--line)" }}>
+                    {["EXCHANGE", "BALANCE", "ALLOCATED", "TRADERS", "STATUS"].map(h => (
+                      <th key={h} style={{ padding: "7px 14px", textAlign: "left", fontSize: 9, color: "var(--t3)", fontWeight: 700, letterSpacing: "0.12em", textTransform: "uppercase" }}>{h}</th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {exchanges.map((ex, idx) => {
+                    const exInstances = instances.filter(i => i.exchangeName === ex.name && i.status === "live");
+                    const exAllocated = exInstances.reduce((s, i) => s + (i.allocation ?? 0), 0);
+                    const pctDeployed = ex.balance > 0 ? Math.min(100, (exAllocated / ex.balance) * 100).toFixed(1) : "0.0";
+                    return (
+                      <tr key={ex.id} style={{ borderBottom: idx < exchanges.length - 1 ? "1px solid var(--line)" : "none" }}>
+                        <td style={{ padding: "10px 14px" }}>
+                          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                            <span style={{ width: 5, height: 5, borderRadius: "50%", background: "var(--green)", flexShrink: 0 }} />
+                            <span style={{ fontSize: 10, fontWeight: 700, color: "var(--t0)" }}>{ex.name}</span>
+                          </div>
+                        </td>
+                        <td style={{ padding: "10px 14px" }}>
+                          <div style={{ fontSize: 10, color: "var(--t1)" }}>${ex.balance.toLocaleString("en-US")}</div>
+                        </td>
+                        <td style={{ padding: "10px 14px" }}>
+                          <div style={{ fontSize: 10, color: "var(--t1)" }}>${exAllocated.toLocaleString("en-US")}</div>
+                          <div style={{ fontSize: 9, color: "var(--t3)" }}>{exInstances.length} traders &middot; {pctDeployed}%</div>
+                        </td>
+                        <td style={{ padding: "10px 14px", fontSize: 10, color: "var(--t1)" }}>{exInstances.length}</td>
+                        <td style={{ padding: "10px 14px" }}>
+                          <span style={{ fontSize: 9, fontWeight: 700, padding: "2px 7px", borderRadius: 3, background: "var(--green-dim)", color: "var(--green)", border: "1px solid var(--green-mid)" }}>Connected</span>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );

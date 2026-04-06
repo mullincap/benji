@@ -1,27 +1,24 @@
 "use client";
 
-import { useState, useMemo } from "react";
+import { useState } from "react";
 import { useRouter } from "next/navigation";
-import { useTrader, Position, Exchange, StrategyInstance, StrategyType, STRATEGY_CATALOG, fmt, GHOST_CURVE, RISK_COLOR, RISK_DIM } from "../context";
+import { useTrader, Position, Exchange, StrategyInstance, StrategyType, fmt, GHOST_CURVE, RISK_COLOR, RISK_DIM } from "../context";
 import EquityCurveSvg from "../equity-curve";
 import PerformanceChart from "../performance-chart";
 import TraderCard from "../components/TraderCard";
 import {
   Chart as ChartJS,
-  LinearScale, PointElement, Tooltip,
+  RadialLinearScale, PointElement, LineElement, Filler, Tooltip,
 } from "chart.js";
-import { Bubble } from "react-chartjs-2";
+import { Radar } from "react-chartjs-2";
 
-ChartJS.register(LinearScale, PointElement, Tooltip);
+ChartJS.register(RadialLinearScale, PointElement, LineElement, Filler, Tooltip);
 
-// ─── Bubble chart strategy data ──────────────────────────────────────────────
-
-const BUBBLE_STRATEGY_DATA: Record<StrategyType, { x: number; y: number; fill: string; border: string }> = {
-  "alpha-low":  { x: 8.2,  y: 14.2, fill: "#00c89625", border: "#00c896" },
-  "alpha-mid":  { x: 14.6, y: 38.2, fill: "#f0a50025", border: "#f0a500" },
-  "alpha-high": { x: 19.9, y: 91.4, fill: "#ff4d4d20", border: "#ff4d4d" },
+const RADAR_DATA: Record<StrategyType, { data: number[]; fill: string; border: string; point: string }> = {
+  "alpha-low":  { data: [28, 37, 61, 90, 72], fill: "#00c89615", border: "#00c896", point: "#00c896" },
+  "alpha-mid":  { data: [54, 53, 63, 72, 64], fill: "#f0a50015", border: "#f0a500", point: "#f0a500" },
+  "alpha-high": { data: [91, 78, 67, 44, 58], fill: "#ff4d4d10", border: "#ff4d4d", point: "#ff4d4d" },
 };
-
 // ─── Ghost mock data ─────────────────────────────────────────────────────────
 
 const GHOST_POSITIONS: (Position & { strategy: string; exchange: string })[] = [
@@ -51,10 +48,13 @@ function DashboardContent({ equity, dailyPnl, allocated, activeCount, totalAvail
   instances?: StrategyInstance[];
 }) {
   const availableBalance = Math.max(0, totalAvailable - allocated);
-  const [exchangesOpen, setExchangesOpen] = useState(true);
-  const [positionsOpen, setPositionsOpen] = useState(positions.length > 0);
   return (
     <>
+      {/* Combined performance chart — live data only */}
+      {!showCurve && allocated > 0 && (
+        <PerformanceChart allocation={allocated} ytdReturn={28} title="COMBINED PERFORMANCE" />
+      )}
+
       {/* Hero cards */}
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 10, marginBottom: 8 }}>
         <MetricCard label="TOTAL EQUITY" value={`$${fmt(equity, 0)}`} />
@@ -103,120 +103,9 @@ function DashboardContent({ equity, dailyPnl, allocated, activeCount, totalAvail
         </div>
       )}
 
-      {/* Account status block — chart, exchanges, positions grouped tightly */}
+      {/* Account status block */}
       <div style={{ display: "flex", flexDirection: "column", gap: 6, marginBottom: 20 }}>
 
-      {/* Combined performance chart — live data only */}
-      {!showCurve && allocated > 0 && (
-        <div style={{ marginBottom: -14 }}>
-          <PerformanceChart allocation={allocated} ytdReturn={28} title="COMBINED PERFORMANCE" />
-        </div>
-      )}
-
-      {/* Exchange accounts table — collapsible */}
-      {exchanges && exchanges.length > 0 && instances && (
-        <div style={{ background: "var(--bg1)", border: "1px solid var(--line)", borderRadius: 6, overflow: "hidden" }}>
-          <div
-            onClick={() => setExchangesOpen(v => !v)}
-            style={{
-              padding: "10px 14px",
-              borderBottom: exchangesOpen ? "1px solid var(--line)" : "none",
-              display: "flex", alignItems: "center", justifyContent: "space-between",
-              cursor: "pointer",
-            }}
-          >
-            <span style={{ fontSize: 9, color: "var(--t3)", letterSpacing: "0.12em", fontWeight: 700, textTransform: "uppercase" }}>EXCHANGE ACCOUNTS</span>
-            <span style={{ fontSize: 9, color: "var(--t3)", transition: "transform 0.2s ease", display: "inline-block", transform: exchangesOpen ? "rotate(90deg)" : "rotate(0deg)" }}>{"\u25B6"}</span>
-          </div>
-          <div style={{ overflow: "hidden", maxHeight: exchangesOpen ? 1000 : 0, transition: "max-height 0.2s ease" }}>
-            <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 10 }}>
-              <thead>
-                <tr style={{ borderBottom: "1px solid var(--line)" }}>
-                  {["EXCHANGE", "ACCOUNT BALANCE", "ALLOCATED", "TRADERS", "STATUS"].map(h => (
-                    <th key={h} style={{ padding: "7px 14px", textAlign: "left", fontSize: 9, color: "var(--t3)", fontWeight: 700, letterSpacing: "0.12em", textTransform: "uppercase" }}>{h}</th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody>
-                {exchanges.map((ex, idx) => {
-                  const exInstances = instances.filter(i => i.exchangeName === ex.name && i.status === "live");
-                  const exAllocated = exInstances.reduce((s, i) => s + (i.allocation ?? 0), 0);
-                  const pctDeployed = ex.balance > 0 ? Math.min(100, (exAllocated / ex.balance) * 100).toFixed(1) : "0.0";
-                  return (
-                    <tr key={ex.id} style={{ borderBottom: idx < exchanges.length - 1 ? "1px solid var(--line)" : "none" }}>
-                      <td style={{ padding: "10px 14px" }}>
-                        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                          <span style={{ width: 5, height: 5, borderRadius: "50%", background: "var(--green)", flexShrink: 0 }} />
-                          <span style={{ fontSize: 10, fontWeight: 700, color: "var(--t0)" }}>{ex.name}</span>
-                        </div>
-                      </td>
-                      <td style={{ padding: "10px 14px" }}>
-                        <div style={{ fontSize: 10, color: "var(--t1)" }}>${ex.balance.toLocaleString("en-US")}</div>
-                        <div style={{ fontSize: 9, color: "var(--t3)" }}>{ex.maskedKey}</div>
-                      </td>
-                      <td style={{ padding: "10px 14px" }}>
-                        <div style={{ fontSize: 10, color: "var(--t1)" }}>${exAllocated.toLocaleString("en-US")}</div>
-                        <div style={{ fontSize: 9, color: "var(--t3)" }}>{exInstances.length} traders &middot; {pctDeployed}% deployed</div>
-                      </td>
-                      <td style={{ padding: "10px 14px", fontSize: 10, color: "var(--t1)" }}>{exInstances.length}</td>
-                      <td style={{ padding: "10px 14px" }}>
-                        <span style={{ fontSize: 9, fontWeight: 700, padding: "2px 7px", borderRadius: 3, background: "var(--green-dim)", color: "var(--green)", border: "1px solid var(--green-mid)" }}>Connected</span>
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          </div>
-        </div>
-      )}
-
-      {/* Positions table — collapsible */}
-      <div style={{ background: "var(--bg1)", border: "1px solid var(--line)", borderRadius: 6, overflow: "hidden" }}>
-
-        <div
-          onClick={() => setPositionsOpen(v => !v)}
-          style={{
-            padding: "10px 14px",
-            borderBottom: positionsOpen ? "1px solid var(--line)" : "none",
-            display: "flex", alignItems: "center", justifyContent: "space-between",
-            cursor: "pointer",
-          }}
-        >
-          <span style={{ fontSize: 9, color: "var(--t3)", letterSpacing: "0.12em", fontWeight: 700, textTransform: "uppercase" }}>OPEN POSITIONS</span>
-          <span style={{ fontSize: 9, color: "var(--t3)", transition: "transform 0.2s ease", display: "inline-block", transform: positionsOpen ? "rotate(90deg)" : "rotate(0deg)" }}>{"\u25B6"}</span>
-        </div>
-        <div style={{ overflow: "hidden", maxHeight: positionsOpen ? 1000 : 0, transition: "max-height 0.2s ease" }}>
-          <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 10 }}>
-            <thead>
-              <tr style={{ borderBottom: "1px solid var(--line)" }}>
-                {["SYMBOL", "STRATEGY", "EXCHANGE", "SIDE", "SIZE", "P&L"].map(h => (
-                  <th key={h} style={{ padding: "7px 14px", textAlign: h === "P&L" ? "right" : "left", color: "var(--t3)", fontSize: 9, fontWeight: 700, letterSpacing: "0.12em", textTransform: "uppercase" }}>{h}</th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {positions.length === 0 ? (
-                <tr><td colSpan={6} style={{ padding: "20px 14px", textAlign: "center", color: "var(--t2)", fontSize: 10 }}>No open positions</td></tr>
-              ) : positions.map((p, i) => (
-                <tr key={`${p.symbol}-${p.strategy}-${i}`} style={{ borderBottom: i < positions.length - 1 ? "1px solid var(--line)" : "none" }}>
-                  <td style={{ padding: "10px 14px", color: "var(--t0)" }}>{p.symbol}</td>
-                  <td style={{ padding: "10px 14px", color: "var(--t1)" }}>{p.strategy}</td>
-                  <td style={{ padding: "10px 14px", color: "var(--t1)" }}>{p.exchange}</td>
-                  <td style={{ padding: "10px 14px" }}>
-                    <span style={{ fontSize: 9, padding: "2px 6px", borderRadius: 2, background: p.side === "LONG" ? "var(--green-dim)" : "var(--red-dim)", color: p.side === "LONG" ? "var(--green)" : "var(--red)" }}>{p.side}</span>
-                  </td>
-                  <td style={{ padding: "10px 14px", color: "var(--t1)" }}>{p.size}</td>
-                  <td style={{ padding: "10px 14px", textAlign: "right", color: p.pnl >= 0 ? "var(--green)" : "var(--red)" }}>
-                    {p.pnl >= 0 ? "+" : ""}${fmt(p.pnl)}
-                    <span style={{ fontSize: 9, opacity: 0.7, marginLeft: 4 }}>({p.pnlPct >= 0 ? "+" : ""}{fmt(p.pnlPct)}%)</span>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      </div>
 
       </div>{/* end account status block */}
     </>
@@ -303,6 +192,99 @@ export default function OverviewPage() {
                 TRADERS
               </div>
 
+              {/* Allocation breakdown bands */}
+              {activeInstances.length > 0 && (() => {
+                const BAND_COLORS: Record<string, { bg: string; border: string; text: string }> = {
+                  low:    { bg: "var(--green-dim)", border: "var(--green-mid)", text: "var(--green)" },
+                  medium: { bg: "#f0a50015", border: "#f0a50030", text: "var(--amber)" },
+                  high:   { bg: "#ff4d4d10", border: "#ff4d4d25", text: "var(--red)" },
+                };
+                const BAR_FILL: Record<string, string> = { low: "var(--green)", medium: "var(--amber)", high: "var(--red)" };
+                const totalAlloc = activeInstances.reduce((s, i) => s + (i.allocation ?? 0), 0);
+                const unalloc = Math.max(0, treemapTotal - totalAlloc);
+                const fmtAbbrev = (n: number) => n >= 1000000 ? `$${(n / 1000000).toFixed(1)}m` : n >= 1000 ? `$${Math.round(n / 1000)}k` : `$${n}`;
+
+                return (
+                  <div style={{
+                    background: "var(--bg1)", border: "1px solid var(--line)", borderRadius: 6,
+                    padding: "10px 14px", marginBottom: 8,
+                  }}>
+                    <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 8 }}>
+                      <span style={{ fontSize: 9, color: "var(--t3)", letterSpacing: "0.12em", fontWeight: 700, textTransform: "uppercase" }}>ALLOCATION BREAKDOWN</span>
+                      <span style={{ fontSize: 9, color: "var(--t3)" }}>${fmt(treemapTotal, 0)} total</span>
+                    </div>
+                    <div style={{ display: "flex", gap: 4, height: 36, borderRadius: 5, overflow: "hidden", marginBottom: 6 }}>
+                      {activeInstances.map(inst => {
+                        const alloc = inst.allocation ?? 0;
+                        const pctWidth = treemapTotal > 0 ? (alloc / treemapTotal) * 100 : 0;
+                        const bc = BAND_COLORS[inst.risk] ?? BAND_COLORS.low;
+                        const showText = pctWidth >= 8;
+                        const pctOfTotal = treemapTotal > 0 ? ((alloc / treemapTotal) * 100).toFixed(1) : "0.0";
+                        return (
+                          <div key={inst.id} style={{
+                            width: `${pctWidth}%`, minWidth: 4,
+                            background: bc.bg, border: `0.5px solid ${bc.border}`,
+                            borderRadius: 3, padding: showText ? "0 10px" : 0,
+                            display: "flex", alignItems: "center", overflow: "hidden",
+                          }}>
+                            {showText && (
+                              <div style={{ overflow: "hidden" }}>
+                                <div style={{ fontSize: 9, fontWeight: 700, textTransform: "uppercase", color: bc.text, whiteSpace: "nowrap" }}>{inst.strategyName}</div>
+                                <div style={{ fontSize: 8, color: bc.text, opacity: 0.5, whiteSpace: "nowrap" }}>${fmt(alloc, 0)} &middot; {pctOfTotal}%</div>
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })}
+                      {unalloc > 0 && (
+                        <div style={{
+                          flex: 1, minWidth: 4,
+                          background: "var(--bg3)", border: "0.5px solid var(--line)",
+                          borderRadius: 3, padding: "0 8px",
+                          display: "flex", alignItems: "center",
+                        }}>
+                          <span style={{ fontSize: 9, color: "var(--t3)", whiteSpace: "nowrap" }}>IDLE</span>
+                        </div>
+                      )}
+                    </div>
+                    <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 10 }}>
+                      <span style={{ fontSize: 9, color: "var(--t3)" }}>$0</span>
+                      <span style={{ fontSize: 9, color: "var(--t3)" }}>{fmtAbbrev(Math.round(treemapTotal / 2))}</span>
+                      <span style={{ fontSize: 9, color: "var(--t3)" }}>{fmtAbbrev(treemapTotal)}</span>
+                    </div>
+                    <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                      {activeInstances.map(inst => {
+                        const alloc = inst.allocation ?? 0;
+                        const pct = treemapTotal > 0 ? ((alloc / treemapTotal) * 100).toFixed(1) : "0.0";
+                        const fillColor = BAR_FILL[inst.risk] ?? "var(--green)";
+                        return (
+                          <div key={inst.id} style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                            <span style={{ width: 7, height: 7, borderRadius: 2, background: fillColor, flexShrink: 0 }} />
+                            <span style={{ fontSize: 10, color: "var(--t2)", width: 80, flexShrink: 0, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{inst.strategyName}</span>
+                            <div style={{ flex: 1, height: 4, background: "var(--bg3)", borderRadius: 2, overflow: "hidden" }}>
+                              <div style={{ height: "100%", width: `${treemapTotal > 0 ? (alloc / treemapTotal) * 100 : 0}%`, background: fillColor, borderRadius: 2 }} />
+                            </div>
+                            <span style={{ fontSize: 10, fontWeight: 700, color: "var(--t0)", flexShrink: 0, textAlign: "right", width: 65 }}>${fmt(alloc, 0)}</span>
+                            <span style={{ fontSize: 9, color: "var(--t3)", flexShrink: 0, width: 35, textAlign: "right" }}>{pct}%</span>
+                          </div>
+                        );
+                      })}
+                      {unalloc > 0 && (
+                        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                          <span style={{ width: 7, height: 7, borderRadius: 2, background: "var(--bg3)", flexShrink: 0 }} />
+                          <span style={{ fontSize: 10, color: "var(--t3)", width: 80, flexShrink: 0 }}>Unallocated</span>
+                          <div style={{ flex: 1, height: 4, background: "var(--bg3)", borderRadius: 2, overflow: "hidden" }}>
+                            <div style={{ height: "100%", width: `${treemapTotal > 0 ? (unalloc / treemapTotal) * 100 : 0}%`, background: "var(--bg3)", borderRadius: 2 }} />
+                          </div>
+                          <span style={{ fontSize: 10, fontWeight: 700, color: "var(--t3)", flexShrink: 0, textAlign: "right", width: 65 }}>${fmt(unalloc, 0)}</span>
+                          <span style={{ fontSize: 9, color: "var(--t3)", flexShrink: 0, width: 35, textAlign: "right" }}>{treemapTotal > 0 ? ((unalloc / treemapTotal) * 100).toFixed(1) : "0.0"}%</span>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                );
+              })()}
+
               {/* Treemap */}
               {activeInstances.length > 0 && (
                 <div style={{ display: "flex", gap: 4, height: 200, marginBottom: unlinkedInstances.length > 0 ? 10 : 0 }}>
@@ -362,90 +344,101 @@ export default function OverviewPage() {
                 </div>
               )}
 
-              {/* Bubble chart — risk/return */}
+              {/* Radar chart — strategy profile */}
               {activeInstances.length > 0 && (() => {
-                // Group instances by strategy, only live
-                const liveByStrategy: Record<string, { alloc: number; inst: typeof activeInstances[0] }> = {};
-                for (const inst of activeInstances) {
-                  if (inst.status !== "live") continue;
-                  const key = inst.strategyType;
-                  if (!liveByStrategy[key]) liveByStrategy[key] = { alloc: 0, inst };
-                  liveByStrategy[key].alloc += inst.allocation ?? 0;
-                }
-                const datasets = Object.entries(liveByStrategy).map(([type, { alloc, inst }]) => {
-                  const bd = BUBBLE_STRATEGY_DATA[type as StrategyType];
-                  if (!bd) return null;
-                  const r = Math.max(6, Math.min(28, Math.sqrt(alloc / 1000)));
+                const liveTypes = new Set(activeInstances.filter(i => i.status === "live").map(i => i.strategyType));
+                const datasets = Array.from(liveTypes).map(type => {
+                  const rd = RADAR_DATA[type as StrategyType];
+                  if (!rd) return null;
+                  const inst = activeInstances.find(i => i.strategyType === type);
                   return {
-                    label: inst.strategyName,
-                    data: [{ x: bd.x, y: bd.y, r }],
-                    backgroundColor: bd.fill,
-                    borderColor: bd.border,
+                    label: inst?.strategyName ?? type,
+                    data: rd.data,
+                    backgroundColor: rd.fill,
+                    borderColor: rd.border,
                     borderWidth: 1.5,
-                    hoverBackgroundColor: bd.border + "40",
-                    hoverBorderColor: bd.border,
-                    // stash for tooltip
-                    _meta: { name: inst.strategyName, exchange: inst.exchangeName, alloc },
+                    pointBackgroundColor: rd.point,
+                    pointRadius: 3,
+                    pointHoverRadius: 4,
                   };
                 }).filter(Boolean) as any[];
+                if (datasets.length === 0) return null;
 
                 return (
                   <div style={{
                     background: "var(--bg1)", border: "1px solid var(--line)", borderRadius: 6,
-                    padding: "10px 14px", marginTop: 8,
+                    padding: "12px 16px", marginTop: 8,
+                    display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16, alignItems: "center",
                   }}>
-                    <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 6 }}>
-                      <span style={{ fontSize: 9, color: "var(--t3)", letterSpacing: "0.12em", fontWeight: 700, textTransform: "uppercase" }}>RISK / RETURN</span>
-                      <span style={{ fontSize: 9, color: "var(--t3)" }}>bubble size = allocation</span>
-                    </div>
-                    <div style={{ height: 180 }}>
-                      <Bubble
-                        data={{ datasets }}
-                        options={{
-                          responsive: true,
-                          maintainAspectRatio: false,
-                          scales: {
-                            x: {
-                              reverse: true,
-                              min: 0, max: 25,
-                              ticks: {
-                                color: "#35332f",
-                                font: { size: 9, family: "'Space Mono', monospace" },
-                                callback: (v) => `${v}%`,
-                              },
-                              grid: { color: "#141416" },
-                              border: { display: false },
-                            },
-                            y: {
-                              min: 0, max: 110,
-                              ticks: {
-                                color: "#35332f",
-                                font: { size: 9, family: "'Space Mono', monospace" },
-                                callback: (v) => `+${v}%`,
-                              },
-                              grid: { color: "#141416" },
-                              border: { display: false },
-                            },
-                          },
-                          plugins: {
-                            legend: { display: false },
-                            tooltip: {
-                              backgroundColor: "#141416",
-                              borderColor: "#242428",
-                              borderWidth: 1,
-                              titleFont: { size: 9, family: "'Space Mono', monospace" },
-                              bodyFont: { size: 9, family: "'Space Mono', monospace" },
-                              padding: 8,
-                              callbacks: {
-                                label: (ctx) => {
-                                  const meta = (ctx.dataset as any)._meta;
-                                  return `${meta.name} · ${meta.exchange} · $${meta.alloc.toLocaleString("en-US")}`;
+                    {/* Left: radar */}
+                    <div>
+                      <div style={{ fontSize: 9, color: "var(--t3)", letterSpacing: "0.12em", fontWeight: 700, textTransform: "uppercase", marginBottom: 6 }}>STRATEGY PROFILE</div>
+                      <div style={{ position: "relative", height: 180 }}>
+                        <Radar
+                          data={{
+                            labels: ["Return", "Sharpe", "Win Rate", "Stability", "Consistency"],
+                            datasets,
+                          }}
+                          options={{
+                            responsive: true,
+                            maintainAspectRatio: false,
+                            scales: {
+                              r: {
+                                min: 0, max: 100,
+                                ticks: { display: false },
+                                grid: { color: "#1a1a1d" },
+                                angleLines: { color: "#1a1a1d" },
+                                pointLabels: {
+                                  color: "#35332f",
+                                  font: { size: 8, family: "'Space Mono', monospace" },
                                 },
                               },
                             },
-                          },
-                        }}
-                      />
+                            plugins: {
+                              legend: { display: false },
+                              tooltip: {
+                                backgroundColor: "#141416",
+                                borderColor: "#242428",
+                                borderWidth: 1,
+                                titleFont: { size: 0 },
+                                bodyFont: { size: 9, family: "'Space Mono', monospace" },
+                                padding: 8,
+                                displayColors: false,
+                                callbacks: {
+                                  title: () => "",
+                                  label: (ctx) => `${ctx.dataset.label}: ${ctx.parsed.r}`,
+                                },
+                              },
+                            },
+                          }}
+                        />
+                      </div>
+                    </div>
+                    {/* Right: legend + axes */}
+                    <div>
+                      <div style={{ display: "flex", flexDirection: "column", gap: 6, marginBottom: 12 }}>
+                        {datasets.map((ds: any) => (
+                          <div key={ds.label} style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                            <span style={{ width: 8, height: 8, borderRadius: 2, background: ds.borderColor, flexShrink: 0 }} />
+                            <span style={{ fontSize: 10, color: "var(--t2)" }}>{ds.label}</span>
+                          </div>
+                        ))}
+                      </div>
+                      <div style={{ fontSize: 9, color: "var(--t3)", letterSpacing: "0.12em", fontWeight: 700, textTransform: "uppercase", marginBottom: 6 }}>AXES</div>
+                      <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                        {[
+                          { name: "Return", desc: "YTD %" },
+                          { name: "Sharpe", desc: "risk-adj return" },
+                          { name: "Win Rate", desc: "% winning days" },
+                          { name: "Stability", desc: "inverse of max DD" },
+                          { name: "Consistency", desc: "CAGR / volatility" },
+                        ].map(ax => (
+                          <div key={ax.name} style={{ display: "flex", gap: 6 }}>
+                            <span style={{ fontSize: 9, color: "var(--t2)" }}>{ax.name}</span>
+                            <span style={{ fontSize: 9, color: "var(--t3)" }}>&mdash; {ax.desc}</span>
+                          </div>
+                        ))}
+                      </div>
                     </div>
                   </div>
                 );

@@ -1,12 +1,25 @@
-numpy
-pandas
-pyarrow
-scipy
-scikit-learn
-matplotlib
-tqdm
-gspread
-google-auth
-google-auth-oauthlib
-yfinance
-requests
+# pipeline/requirements.txt
+# Python dependencies for the compiler and indexer modules.
+# Install into the pipeline virtual environment:
+#   python3.11 -m venv pipeline/.venv
+#   pipeline/.venv/bin/pip install -r pipeline/requirements.txt
+
+# ─── Core data ────────────────────────────────────────────────────────────────
+pandas>=2.0.0
+pyarrow>=14.0.0
+numpy>=1.26.0
+
+# ─── HTTP / API clients ───────────────────────────────────────────────────────
+requests>=2.31.0
+python-dateutil>=2.8.2
+
+# ─── Google Sheets (metl.py optional output) ──────────────────────────────────
+gspread>=6.0.0
+google-auth>=2.27.0
+google-auth-oauthlib>=1.2.0
+
+# ─── Database ─────────────────────────────────────────────────────────────────
+psycopg2-binary>=2.9.9
+
+# ─── Progress + logging ───────────────────────────────────────────────────────
+tqdm>=4.66.0

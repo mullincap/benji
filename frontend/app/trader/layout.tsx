@@ -189,7 +189,6 @@ function Sidebar() {
             const totalBalance = exchanges.reduce((s, e) => s + e.balance, 0);
             const totalAllocated = instances.filter(i => i.status === "live" || i.status === "paused").reduce((s, i) => s + (i.allocation ?? 0), 0);
             const available = Math.max(0, totalBalance - totalAllocated);
-            const pct = totalBalance > 0 ? Math.round((totalAllocated / totalBalance) * 100) : 0;
             const hasExchanges = exchanges.length > 0;
             const fmtAbbrev = (n: number) => n >= 1000000 ? `$${(n / 1000000).toFixed(1)}m` : n >= 1000 ? `$${Math.round(n / 1000)}k` : `$${n}`;
 
@@ -211,6 +210,8 @@ function Sidebar() {
               }],
             };
 
+            const fmtFull = (n: number) => "$" + n.toLocaleString("en-US");
+
             return (
               <div style={{ padding: "14px 12px 10px", borderBottom: "0.5px solid var(--line)", display: "flex", flexDirection: "column", alignItems: "center" }}>
                 <div style={{ position: "relative", width: 100, height: 100 }}>
@@ -227,20 +228,26 @@ function Sidebar() {
                     }}
                   />
                   <div style={{ position: "absolute", inset: 0, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", pointerEvents: "none" }}>
-                    <span style={{ fontSize: 13, fontWeight: 700, color: "var(--t0)" }}>{pct}%</span>
-                    <span style={{ fontSize: 8, color: "var(--t3)", marginTop: 1 }}>deployed</span>
+                    <span style={{ fontSize: 14, fontWeight: 700, color: "var(--t0)" }}>{fmtAbbrev(totalBalance)}</span>
+                    <span style={{ fontSize: 8, color: "var(--t3)", marginTop: 1 }}>balance</span>
                   </div>
                 </div>
                 {hasExchanges ? (
-                  <div style={{ display: "flex", alignItems: "center", gap: 10, marginTop: 8 }}>
-                    <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
-                      <span style={{ width: 6, height: 6, borderRadius: 1, background: "var(--green)", flexShrink: 0 }} />
-                      <span style={{ fontSize: 8, color: "var(--t2)" }}>{fmtAbbrev(totalAllocated)}</span>
-                    </div>
-                    <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
-                      <span style={{ width: 6, height: 6, borderRadius: 1, background: "var(--bg3)", flexShrink: 0 }} />
-                      <span style={{ fontSize: 8, color: "var(--t3)" }}>{fmtAbbrev(available)}</span>
-                    </div>
+                  <div style={{ width: "100%", marginTop: 10 }}>
+                    {[
+                      { label: "BALANCE", value: fmtFull(totalBalance), color: "var(--t0)" },
+                      { label: "DEPLOYED", value: fmtFull(totalAllocated), color: "var(--green)" },
+                      { label: "AVAILABLE", value: fmtFull(available), color: "var(--t2)" },
+                    ].map((row, i) => (
+                      <div key={row.label} style={{
+                        display: "flex", alignItems: "center", justifyContent: "space-between",
+                        padding: "5px 2px",
+                        borderTop: i > 0 ? "0.5px solid var(--line)" : "none",
+                      }}>
+                        <span style={{ fontSize: 8, color: "var(--t3)", textTransform: "uppercase", letterSpacing: "0.06em" }}>{row.label}</span>
+                        <span style={{ fontSize: 10, fontWeight: 700, color: row.color }}>{row.value}</span>
+                      </div>
+                    ))}
                   </div>
                 ) : (
                   <span style={{ fontSize: 8, color: "var(--t3)", marginTop: 8 }}>Link an exchange</span>
@@ -285,7 +292,7 @@ function Sidebar() {
               </div>
             );
           })()}
-          {strategiesOpen && CATALOG_ENTRIES.map(([type, cat]) => (
+          {strategiesOpen && CATALOG_ENTRIES.filter(([type]) => !instances.some(i => i.strategyType === type)).map(([type, cat]) => (
             <SubItem
               key={type}
               label={cat.name}

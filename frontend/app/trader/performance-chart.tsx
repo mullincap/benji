@@ -103,23 +103,29 @@ export default function PerformanceChart({ allocation, ytdReturn, title = "PERFO
   const xLabelIndices = data.labels.map((_, i) => i % step === 0 || i === data.labels.length - 1);
 
   // Shared hover handler
+  const hoverIdxRef = useRef<number | null>(null);
   const handleHover = useCallback((chart: ChartJS, event: MouseEvent) => {
     const points = chart.getElementsAtEventForMode(event, "index", { intersect: false }, false);
     if (points.length > 0 && containerRef.current) {
       const idx = points[0].index;
+      if (hoverIdxRef.current === idx) return;
+      hoverIdxRef.current = idx;
       const rect = containerRef.current.getBoundingClientRect();
       setHoverIdx(idx);
       setTooltipPos({ x: event.clientX - rect.left, y: event.clientY - rect.top });
     } else {
+      if (hoverIdxRef.current === null) return;
+      hoverIdxRef.current = null;
       setHoverIdx(null);
       setTooltipPos(null);
     }
-  }, [setHoverIdx, setTooltipPos]);
+  }, []);
 
   const handleLeave = useCallback(() => {
+    hoverIdxRef.current = null;
     setHoverIdx(null);
     setTooltipPos(null);
-  }, [setHoverIdx, setTooltipPos]);
+  }, []);
 
   // Equity chart config
   const equityData = {

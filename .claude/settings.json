@@ -18,7 +18,15 @@
       "Bash(/opt/homebrew/Caskroom/miniforge/base/bin/python -c ':*)",
       "Bash(npx tsc:*)",
       "Bash(git commit -m ':*)",
-      "Bash(git push:*)"
+      "Bash(git push:*)",
+      "WebFetch(domain:cdn.21st.dev)",
+      "Bash(npx next:*)",
+      "Bash(git add:*)",
+      "Bash(git commit -m 'Fix: force-recreate all containers on redeploy to prevent stale nginx routing:*)",
+      "Bash(npm run:*)"
+    ],
+    "additionalDirectories": [
+      "/Users/johnmullin/Projects/benji3m/frontend/app/trader/[id]"
     ]
   }
 }
