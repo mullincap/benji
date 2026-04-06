@@ -631,7 +631,7 @@ mountpoint -q "$DATA_ROOT" \
     && success "Volume: mounted at $DATA_ROOT ($(df -h $DATA_ROOT | tail -1 | awk '{print $4}') free)" \
     || warn "Volume: not mounted — data is on local disk"
 
-"$VENV_DIR/bin/python" -c "import pandas, pyarrow, requests" 2>/dev/null \
+"$VENV_DIR/bin/python" -c "import pandas, pyarrow, requests, psycopg2" 2>/dev/null \
     && success "Python: all pipeline dependencies installed" \
     || warn "Python: dependency check failed — run: $VENV_DIR/bin/pip install -r $PIPELINE_DIR/requirements.txt"
 
