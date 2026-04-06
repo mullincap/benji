@@ -473,6 +473,19 @@ if [[ "$NO_DOMAIN" == false ]]; then
         -d "www.$DOMAIN"
 
     success "SSL certificate obtained for $DOMAIN"
+
+    # Patch docker-compose.yml certbot volumes to use host paths
+    # (must happen before nginx restarts so it can find the certs)
+    sed -i "s|      - certbot_www:/var/www/certbot:ro|      - /var/www/certbot:/var/www/certbot:ro|g" "$REPO_DIR/docker-compose.yml"
+    sed -i "s|      - certbot_certs:/etc/letsencrypt:ro|      - /etc/letsencrypt:/etc/letsencrypt:ro|g" "$REPO_DIR/docker-compose.yml"
+
+    # Force-recreate nginx so it picks up the patched volumes and cert files
+    log "Restarting nginx with SSL certificate..."
+    docker compose -f "$REPO_DIR/docker-compose.yml" up -d --force-recreate nginx
+    sleep 3
+    docker ps --filter name=nginx --format "{{.Names}}  →  {{.Status}}" | grep -q "Up" \
+        && success "nginx restarted with SSL" \
+        || warn "nginx may still be starting — check: docker logs \$(docker ps -qf name=nginx)"
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -518,10 +531,14 @@ fi
 # 13. docker-compose.yml — patch volume mount to use DATA_ROOT
 # ─────────────────────────────────────────────────────────────────────────────
 if [[ "$SSL_ONLY" == false ]]; then
-    log "Patching docker-compose.yml volume mount..."
-    # Replace /data:/data with the actual volume path
+    log "Patching docker-compose.yml volume mounts..."
+    # Patch data volume: /data → actual volume path
     sed -i "s|      - /data:/data|      - ${DATA_ROOT}:/data|g" "$REPO_DIR/docker-compose.yml"
-    success "Volume mount patched → $DATA_ROOT:/data"
+    # Patch certbot volumes: replace Docker-managed volumes with host paths
+    # so nginx can read certificates written by certbot on the host
+    sed -i "s|      - certbot_www:/var/www/certbot:ro|      - /var/www/certbot:/var/www/certbot:ro|g" "$REPO_DIR/docker-compose.yml"
+    sed -i "s|      - certbot_certs:/etc/letsencrypt:ro|      - /etc/letsencrypt:/etc/letsencrypt:ro|g" "$REPO_DIR/docker-compose.yml"
+    success "Volume mounts patched"
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
