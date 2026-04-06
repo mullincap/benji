@@ -358,11 +358,6 @@ DATA_ROOT=${DATA_ROOT}
 EOF
     chmod 600 "$CREDS_DIR/secrets.env"
 
-    [[ -f "$REPO_DIR/credentials/token.json" ]] && \
-        cp "$REPO_DIR/credentials/token.json" "$CREDS_DIR/"
-    [[ -f "$REPO_DIR/credentials/credentials.json" ]] && \
-        cp "$REPO_DIR/credentials/credentials.json" "$CREDS_DIR/"
-
     success "Credentials written to $CREDS_DIR"
 fi
 
@@ -607,7 +602,7 @@ mountpoint -q "$DATA_ROOT" \
     && success "Volume: mounted at $DATA_ROOT ($(df -h $DATA_ROOT | tail -1 | awk '{print $4}') free)" \
     || warn "Volume: not mounted — data is on local disk"
 
-"$VENV_DIR/bin/python" -c "import pandas, pyarrow, requests, gspread" 2>/dev/null \
+"$VENV_DIR/bin/python" -c "import pandas, pyarrow, requests" 2>/dev/null \
     && success "Python: all pipeline dependencies installed" \
     || warn "Python: dependency check failed — run: $VENV_DIR/bin/pip install -r $PIPELINE_DIR/requirements.txt"
 
@@ -639,14 +634,11 @@ else
 fi
 
 echo ""
-echo "  Remaining manual steps:"
-echo "  1. Copy Google Sheets credentials to the server:"
-echo "     scp token.json credentials.json root@${SERVER_IP}:${DATA_ROOT}/credentials/"
-echo ""
-echo "  2. Run a historical data backfill:"
+echo "  Remaining steps:"
+echo "  1. Run a historical data backfill:"
 echo "     $VENV_DIR/bin/python $PIPELINE_DIR/compiler/binance_downloader.py \\"
 echo "         --market futures --symbols 500 --years 2"
 echo ""
-echo "  3. Watch the first nightly pipeline run (00:15 UTC):"
+echo "  2. Watch the first nightly pipeline run (00:15 UTC):"
 echo "     tail -f $DATA_ROOT/logs/amberdata/cron.log"
 echo ""
