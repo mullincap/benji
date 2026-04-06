@@ -19,7 +19,7 @@ function MetricCard({ label, value, color }: { label: string; value: string; col
 
 // ─── Calendar returns heatmap ────────────────────────────────────────────────
 
-interface DayData { date: string; day: number; dow: number; ret: number | null; }
+interface DayData { date: string; day: number; dow: number; ret: number | null; future?: boolean; }
 
 function generateMockCalendarData(): Record<string, DayData[]> {
   const months: Record<string, DayData[]> = {};
@@ -34,13 +34,13 @@ function generateMockCalendarData(): Record<string, DayData[]> {
     const days: DayData[] = [];
     for (let d = 1; d <= daysInMonth; d++) {
       const date = new Date(year, month, d);
-      if (date > now) break;
       const dow = date.getDay();
+      const isFuture = date > now;
       const isWeekend = dow === 0 || dow === 6;
       const seed = Math.sin(d * 7919 + month * 1031 + year) * 10000;
       const rand = seed - Math.floor(seed);
-      const ret = isWeekend ? null : Math.round(((rand - 0.38) * 4) * 100) / 100;
-      days.push({ date: date.toISOString().slice(0, 10), day: d, dow, ret });
+      const ret = isFuture ? null : isWeekend ? null : Math.round(((rand - 0.38) * 4) * 100) / 100;
+      days.push({ date: date.toISOString().slice(0, 10), day: d, dow, ret, future: isFuture });
     }
     months[key] = days;
   }
@@ -121,13 +121,13 @@ function CalendarHeatmap() {
                     {cells.map((cell, i) => (
                       <div
                         key={i}
-                        title={cell ? `${cell.date}: ${cell.ret !== null ? (cell.ret >= 0 ? "+" : "") + cell.ret.toFixed(2) + "%" : "weekend"}` : ""}
+                        title={cell ? (cell.future ? `${cell.date}: future` : `${cell.date}: ${cell.ret !== null ? (cell.ret >= 0 ? "+" : "") + cell.ret.toFixed(2) + "%" : "weekend"}`) : ""}
                         style={{
                           width: 20, height: 20, borderRadius: 2,
-                          background: cell ? getReturnColor(cell.ret) : "transparent",
+                          background: cell ? (cell.future ? "var(--bg3)" : getReturnColor(cell.ret)) : "transparent",
                           display: "flex", alignItems: "center", justifyContent: "center",
-                          fontSize: 7, color: cell ? getReturnTextColor(cell.ret) : "transparent",
-                          opacity: 0.6,
+                          fontSize: 7, color: cell ? (cell.future ? "var(--t3)" : getReturnTextColor(cell.ret)) : "transparent",
+                          opacity: cell?.future ? 0.4 : 0.6,
                         }}
                       >
                         {cell ? cell.day : ""}
