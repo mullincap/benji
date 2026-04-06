@@ -23,3 +23,6 @@ psycopg2-binary>=2.9.9
 
 # ─── Progress + logging ───────────────────────────────────────────────────────
 tqdm>=4.66.0
+
+# ─── AWS CLI (S3-compatible Object Storage) ──────────────────────────────────
+awscli>=1.32.0

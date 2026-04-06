@@ -120,7 +120,6 @@ if [[ "$SSL_ONLY" == false ]]; then
     apt-get install -y -qq \
         curl wget git unzip \
         python3 python3-pip python3-venv \
-        awscli \
         python3-dateutil \
         postgresql-client \
         cron \
@@ -328,6 +327,8 @@ if [[ "$SSL_ONLY" == false ]]; then
     python3 -m venv "$VENV_DIR"
     "$VENV_DIR/bin/pip" install --upgrade pip -q
     "$VENV_DIR/bin/pip" install -r "$PIPELINE_DIR/requirements.txt" -q
+    # awscli installed system-wide (needed outside venv for storage scripts)
+    pip install awscli --break-system-packages -q 2>/dev/null || true
     success "Python venv ready at $VENV_DIR"
 fi
 
