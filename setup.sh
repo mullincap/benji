@@ -245,6 +245,20 @@ fi
 # ─────────────────────────────────────────────────────────────────────────────
 if [[ "$SSL_ONLY" == false ]]; then
     log "Applying TimescaleDB schema..."
+
+    # Step 1: Install the extension. TimescaleDB restarts postgres internally
+    # after CREATE EXTENSION on first run — this is normal and expected.
+    docker exec -i timescaledb psql -U "$DB_USER" -d "$DB_NAME"         -c "CREATE EXTENSION IF NOT EXISTS timescaledb CASCADE;" 2>/dev/null || true
+
+    # Step 2: Wait for TimescaleDB to come back up after the internal restart
+    log "Waiting for TimescaleDB to recover after extension install..."
+    sleep 5
+    for i in $(seq 1 20); do
+        docker exec timescaledb pg_isready -U "$DB_USER" -d "$DB_NAME" &>/dev/null             && { success "TimescaleDB ready for schema"; break; } || sleep 3
+        [[ $i -eq 20 ]] && error "TimescaleDB did not recover — check: docker logs timescaledb"
+    done
+
+    # Step 3: Apply the full schema now that TimescaleDB is stable
     docker exec -i timescaledb psql -U "$DB_USER" -d "$DB_NAME" << 'SQL'
 CREATE EXTENSION IF NOT EXISTS timescaledb CASCADE;
 
