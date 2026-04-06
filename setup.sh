@@ -58,21 +58,24 @@ done
 # ─── Paths ────────────────────────────────────────────────────────────────────
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DATA_ROOT="/mnt/quant-data"
-VOLUME_DEVICE="/dev/disk/by-id/scsi-0HC_Volume_105339442"
-# Auto-detect the best available Python version (prefers 3.12, falls back to 3.11)
+TIMESCALE_VERSION="2.14.2-pg16"
+ENV_FILE="$REPO_DIR/.env"
+PIPELINE_DIR="$REPO_DIR/pipeline"
+VENV_DIR="$PIPELINE_DIR/.venv"
+
+# Auto-detect Python — prefer 3.12, fall back to 3.11, then system python3
 if command -v python3.12 &>/dev/null; then
     PYTHON_VERSION="3.12"
 elif command -v python3.11 &>/dev/null; then
     PYTHON_VERSION="3.11"
 else
     PYTHON_VERSION=$(python3 --version 2>&1 | grep -oP '3\.\d+' | head -1)
-    [[ -n "$PYTHON_VERSION" ]] || error "No Python 3 installation found"
+    [[ -n "$PYTHON_VERSION" ]] || { echo "No Python 3 found"; exit 1; }
 fi
-log "Python version: $PYTHON_VERSION"
-TIMESCALE_VERSION="2.14.2-pg16"
-ENV_FILE="$REPO_DIR/.env"
-PIPELINE_DIR="$REPO_DIR/pipeline"
-VENV_DIR="$PIPELINE_DIR/.venv"
+
+# Auto-detect Hetzner Volume — stable by-id path, falls back to /dev/sdb
+VOLUME_DEVICE=$(ls /dev/disk/by-id/scsi-0HC_Volume_* 2>/dev/null | head -1)
+[[ -z "$VOLUME_DEVICE" ]] && VOLUME_DEVICE="/dev/sdb"
 
 echo ""
 echo -e "${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
@@ -98,7 +101,7 @@ DOMAIN="${DOMAIN:-}"
 
 if [[ "$NO_DOMAIN" == true ]] || [[ -z "$DOMAIN" ]]; then
     NO_DOMAIN=true
-    warn "No DOMAIN set — HTTP-only mode. App will be at http://$(curl -s ifconfig.me 2>/dev/null || echo 'SERVER_IP')"
+    warn "No DOMAIN set — HTTP-only mode. App will be at http://$(curl -s ifconfig.me 2>/dev/null || curl -s api.ipify.org 2>/dev/null || hostname -I | awk '{print $1}')"
     warn "To add SSL later: set DOMAIN + SSL_EMAIL in .env, then run: bash setup.sh --ssl-only"
 else
     [[ -n "${SSL_EMAIL:-}" ]] || error "SSL_EMAIL not set in .env (required for Certbot)"
@@ -119,9 +122,23 @@ if [[ "$SSL_ONLY" == false ]]; then
         python3 python3-pip python3-venv \
         python3-dateutil \
         postgresql-client \
-        cron certbot \
+        cron \
         htop ncdu tree \
         ca-certificates gnupg lsb-release
+    # Certbot — prefer snap for latest version, fall back to apt
+    if ! command -v certbot &>/dev/null; then
+        if command -v snap &>/dev/null; then
+            snap install --classic certbot 2>/dev/null \
+                && ln -sf /snap/bin/certbot /usr/bin/certbot \
+                && success "Certbot installed via snap" \
+                || { apt-get install -y -qq certbot && success "Certbot installed via apt"; }
+        else
+            apt-get install -y -qq certbot
+            success "Certbot installed via apt"
+        fi
+    else
+        success "Certbot already installed ($(certbot --version 2>&1))"
+    fi
     success "System packages installed"
 fi
 
@@ -138,7 +155,7 @@ if [[ "$SSL_ONLY" == false ]]; then
             | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
         chmod a+r /etc/apt/keyrings/docker.gpg
         echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] \
-            https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" \
+            https://download.docker.com/linux/ubuntu $(lsb_release -cs 2>/dev/null || . /etc/os-release && echo $VERSION_CODENAME) stable" \
             > /etc/apt/sources.list.d/docker.list
         apt-get update -qq
         apt-get install -y -qq docker-ce docker-ce-cli containerd.io docker-compose-plugin
@@ -293,7 +310,7 @@ fi
 # ─────────────────────────────────────────────────────────────────────────────
 if [[ "$SSL_ONLY" == false ]]; then
     log "Setting up Python virtual environment..."
-    python${PYTHON_VERSION} -m venv "$VENV_DIR"
+    python3 -m venv "$VENV_DIR"
     "$VENV_DIR/bin/pip" install --upgrade pip -q
     "$VENV_DIR/bin/pip" install -r "$PIPELINE_DIR/requirements.txt" -q
     success "Python venv ready at $VENV_DIR"
@@ -559,7 +576,7 @@ echo -e "${BOLD}  Verification${RESET}"
 echo -e "${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
 echo ""
 
-SERVER_IP=$(curl -s ifconfig.me 2>/dev/null || echo "unknown")
+SERVER_IP=$(curl -s ifconfig.me 2>/dev/null || curl -s api.ipify.org 2>/dev/null || hostname -I | awk '{print $1}')
 
 echo "  Containers:"
 docker ps --format "    {{.Names}}  →  {{.Status}}" \
