@@ -46,12 +46,8 @@ API_KEY    = os.environ.get("BLOFIN_API_KEY",    "YOUR_API_KEY")
 API_SECRET = os.environ.get("BLOFIN_API_SECRET", "YOUR_API_SECRET")
 PASSPHRASE = os.environ.get("BLOFIN_PASSPHRASE", "YOUR_PASSPHRASE")
 
-API_KEY = "d5f31f7f8fb549d58fa07cc6d285e5da"
-API_SECRET = "64329aaa3e714d76942bae8a69e2d1c2"
-PASSPHRASE = "pass"
-
-
-
+if "YOUR_" in API_KEY or "YOUR_" in API_SECRET or not PASSPHRASE or PASSPHRASE == "pass":
+    raise RuntimeError("BloFin API credentials not set — check secrets.env")
 
 DEMO_MODE  = False   # True -> BloFin paper trading environment
 
@@ -112,7 +108,6 @@ FUNDING_RATE_DAILY_PCT = 0.0002   # ~0.02% per day (2 windows x ~0.01%)
 # -- Signal files ----------------------------------------------------------
 DEPLOYS_CSV   = Path("live_deploys_signal.csv")
 ACTIVE_FILTER = "Tail + Dispersion"
-ACTIVE_FILTER = "Tail Guardrail"
 SYMBOL_SUFFIX = "-USDT"
 
 # -- Price source for session monitoring (conviction, stops, fills) ----------

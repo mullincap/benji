@@ -98,7 +98,7 @@ MAX_RETRIES     = 3
 # -- Output -----------------------------------------------------------------
 DEPLOYS_CSV          = Path("live_deploys_signal.csv")
 DEPLOYS_RETAIN_DAYS  = 90     # prune rows older than this many days
-FILTER_NAME          = "Tail Guardrail"
+FILTER_NAME          = "Tail + Dispersion"
 LOG_FILE             = Path("daily_signal.log")
 
 
@@ -632,6 +632,93 @@ def write_deploys_csv(date_str: str, filter_name: str, symbols: list,
 
 
 # ==========================================================================
+# STEP 7b — WRITE TO DATABASE (additive — never blocks CSV write)
+# ==========================================================================
+
+def write_to_db(date_str: str, filter_name: str, overlap_pool: list,
+                sit_flat: bool, filter_reason: str):
+    """
+    Insert today's signal into user_mgmt.daily_signals + daily_signal_items.
+    Uses pipeline/db/connection.py. A DB failure is logged but never fatal.
+    """
+    try:
+        # Load STRATEGY_VERSION_ID from secrets.env
+        secrets_path = Path("/mnt/quant-data/credentials/secrets.env")
+        strategy_version_id = None
+        if secrets_path.exists():
+            for line in secrets_path.read_text().splitlines():
+                line = line.strip()
+                if line.startswith("STRATEGY_VERSION_ID="):
+                    strategy_version_id = line.split("=", 1)[1].strip()
+                    break
+
+        if not strategy_version_id:
+            log.warning("STRATEGY_VERSION_ID not set in secrets.env — skipping DB write")
+            return
+
+        # Import connection helper (add parent dir to path for pipeline.db)
+        script_dir = Path(__file__).resolve().parent
+        sys.path.insert(0, str(script_dir))
+        from pipeline.db.connection import get_conn
+
+        conn = get_conn()
+        cur = conn.cursor()
+
+        # Insert into user_mgmt.daily_signals
+        cur.execute("""
+            INSERT INTO user_mgmt.daily_signals
+                (signal_date, strategy_version_id, computed_at, sit_flat, filter_name, filter_reason)
+            VALUES (%s, %s, NOW(), %s, %s, %s)
+            ON CONFLICT (signal_date, strategy_version_id) DO NOTHING
+            RETURNING signal_batch_id
+        """, (date_str, strategy_version_id, sit_flat, filter_name, filter_reason))
+
+        row = cur.fetchone()
+        if row is None:
+            log.info("DB write: signal already exists for today — skipped")
+            conn.close()
+            return
+
+        signal_batch_id = row[0]
+
+        # Insert one row per symbol in overlap_pool into daily_signal_items
+        if overlap_pool and not sit_flat:
+            # Look up symbol_ids from market.symbols by base name
+            from psycopg2.extras import execute_values
+            cur.execute(
+                "SELECT base, symbol_id FROM market.symbols WHERE base = ANY(%s)",
+                ([sym for sym in overlap_pool],)
+            )
+            sym_map = dict(cur.fetchall())
+
+            rows = []
+            for rank, sym in enumerate(overlap_pool, start=1):
+                sid = sym_map.get(sym)
+                if sid is None:
+                    log.warning(f"DB write: symbol '{sym}' not found in market.symbols — skipped")
+                    continue
+                rows.append((signal_batch_id, sid, rank, None, True))
+
+            if rows:
+                execute_values(
+                    cur,
+                    """INSERT INTO user_mgmt.daily_signal_items
+                           (signal_batch_id, symbol_id, rank, weight, is_selected)
+                       VALUES %s
+                       ON CONFLICT DO NOTHING""",
+                    rows
+                )
+
+        conn.commit()
+        cur.close()
+        conn.close()
+        log.info(f"DB write: signal_batch_id={signal_batch_id}, {len(overlap_pool)} items")
+
+    except Exception as e:
+        log.warning(f"DB write failed (non-fatal): {e}")
+
+
+# ==========================================================================
 # MAIN
 # ==========================================================================
 
@@ -679,12 +766,15 @@ def main():
     if sit_flat:
         log.info(f"FILTER FIRED ({FILTER_NAME}) -- sit flat. Reason: {filter_reason}")
         write_deploys_csv(today_str, FILTER_NAME, [], True, filter_reason)
+        write_to_db(today_str, FILTER_NAME, [], True, filter_reason)
     elif not overlap_pool:
         log.info("Overlap pool empty -- no trade today.")
         write_deploys_csv(today_str, FILTER_NAME, [], True, "empty_overlap_pool")
+        write_to_db(today_str, FILTER_NAME, [], True, "empty_overlap_pool")
     else:
         log.info(f"TRADE TODAY -- {len(overlap_pool)} symbols: {overlap_pool}")
         write_deploys_csv(today_str, FILTER_NAME, overlap_pool, False, filter_reason)
+        write_to_db(today_str, FILTER_NAME, overlap_pool, False, filter_reason)
 
     log.info(f"Done. ({utcnow().strftime('%H:%M:%S')} UTC)")
     log.info("=" * 65)
