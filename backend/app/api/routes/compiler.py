@@ -116,6 +116,7 @@ def coverage(
                 "symbols_partial":       r["symbols_partial"],
                 "symbols_missing":       max(0, total_active - r["symbols_with_data"]),
                 "total_active_symbols":  total_active,
+                "completeness_pct":      round(r["symbols_complete"] / total_active * 100, 1) if total_active > 0 else 0.0,
             }
             for r in day_rows
         ],
@@ -173,8 +174,11 @@ _JOB_SELECT = """
         endpoints_enabled, symbols_total, symbols_done, rows_written,
         started_at, completed_at, last_heartbeat, error_msg,
         triggered_by, run_tag, created_at,
-        (status = 'running' AND last_heartbeat IS NOT NULL
-            AND last_heartbeat < NOW() - INTERVAL '2 hours') AS is_stale
+        (status = 'running' AND (
+            (last_heartbeat IS NOT NULL AND last_heartbeat < NOW() - INTERVAL '2 hours')
+            OR
+            (last_heartbeat IS NULL AND started_at < NOW() - INTERVAL '2 hours')
+        )) AS is_stale
     FROM market.compiler_jobs
 """
 
