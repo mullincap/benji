@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import { useRouter } from "next/navigation";
-import { useTrader, Position, Exchange, StrategyInstance, StrategyType, fmt, GHOST_CURVE, RISK_COLOR, RISK_DIM } from "../context";
+import { useTrader, Position, Exchange, StrategyInstance, StrategyType, STRATEGY_CATALOG, fmt, GHOST_CURVE, RISK_COLOR, RISK_DIM } from "../context";
 import EquityCurveSvg from "../equity-curve";
 import PerformanceChart from "../performance-chart";
 import TraderCard from "../components/TraderCard";
@@ -40,8 +40,9 @@ function MetricCard({ label, value, color }: { label: string; value: string; col
 
 // ─── Dashboard content ───────────────────────────────────────────────────────
 
-function DashboardContent({ equity, dailyPnl, allocated, activeCount, totalAvailable, positions, showCurve, exchanges, instances }: {
-  equity: number; dailyPnl: number; allocated: number; activeCount: number; totalAvailable: number;
+function DashboardContent({ equity, dailyPnl, allTimePnl, sharpe, allocated, activeCount, totalAvailable, positions, showCurve, exchanges, instances }: {
+  equity: number; dailyPnl: number; allTimePnl: number; sharpe: number;
+  allocated: number; activeCount: number; totalAvailable: number;
   positions: (Position & { strategy: string; exchange: string })[];
   showCurve?: boolean;
   exchanges?: Exchange[];
@@ -50,17 +51,19 @@ function DashboardContent({ equity, dailyPnl, allocated, activeCount, totalAvail
   const availableBalance = Math.max(0, totalAvailable - allocated);
   return (
     <>
+      {/* Hero cards */}
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(5, 1fr)", gap: 10, marginBottom: 20 }}>
+        <MetricCard label="TOTAL EQUITY" value={`$${fmt(equity, 0)}`} />
+        <MetricCard label="ALL-TIME P&L" value={allTimePnl === 0 ? "\u2014" : `${allTimePnl >= 0 ? "+" : ""}$${fmt(allTimePnl, 0)}`} color={allTimePnl === 0 ? "var(--t2)" : allTimePnl > 0 ? "var(--green)" : "var(--red)"} />
+        <MetricCard label="DAILY P&L" value={dailyPnl === 0 ? "\u2014" : `${dailyPnl >= 0 ? "+" : ""}$${fmt(dailyPnl, 0)}`} color={dailyPnl === 0 ? "var(--t2)" : dailyPnl > 0 ? "var(--green)" : "var(--red)"} />
+        <MetricCard label="SHARPE" value={sharpe > 0 ? fmt(sharpe, 2) : "\u2014"} color={sharpe > 0 ? "var(--t0)" : "var(--t2)"} />
+        <MetricCard label="ACTIVE TRADERS" value={String(activeCount)} />
+      </div>
+
       {/* Combined performance chart — live data only */}
       {!showCurve && allocated > 0 && (
         <PerformanceChart allocation={allocated} ytdReturn={28} title="COMBINED PERFORMANCE" />
       )}
-
-      {/* Hero cards */}
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 10, marginBottom: 8 }}>
-        <MetricCard label="TOTAL EQUITY" value={`$${fmt(equity, 0)}`} />
-        <MetricCard label="DAILY P&L" value={dailyPnl === 0 ? "\u2014" : `${dailyPnl >= 0 ? "+" : ""}$${fmt(dailyPnl, 0)}`} color={dailyPnl === 0 ? "var(--t2)" : dailyPnl > 0 ? "var(--green)" : "var(--red)"} />
-        <MetricCard label="ACTIVE TRADERS" value={String(activeCount)} />
-      </div>
 
       {/* Capital deployed bar */}
       <div style={{
@@ -127,6 +130,14 @@ export default function OverviewPage() {
   const totalAllocated = instances.reduce((s, i) => s + (i.allocation ?? 0), 0);
   const activeCount = instances.filter(i => i.status === "live").length;
 
+  // All-time P&L: equity above the originally allocated capital, summed across instances
+  const allTimePnl = instances.reduce((s, i) => s + (i.equity - (i.allocation ?? 0)), 0);
+
+  // Portfolio Sharpe: equity-weighted average of per-strategy Sharpe from STRATEGY_CATALOG
+  const sharpe = totalEquity > 0
+    ? instances.reduce((s, i) => s + (STRATEGY_CATALOG[i.strategyType].sharpe * i.equity), 0) / totalEquity
+    : 0;
+
   const allPositions: (Position & { strategy: string; exchange: string })[] = [];
   for (const inst of instances) {
     for (const p of inst.positions) {
@@ -147,9 +158,9 @@ export default function OverviewPage() {
 
           <div style={empty ? { filter: "blur(3.5px) brightness(0.75)", pointerEvents: "none" } : undefined}>
             {empty ? (
-              <DashboardContent equity={293593} dailyPnl={14092} allocated={94000} activeCount={3} totalAvailable={totalAvailable} positions={GHOST_POSITIONS} showCurve />
+              <DashboardContent equity={293593} dailyPnl={14092} allTimePnl={62847} sharpe={2.41} allocated={94000} activeCount={3} totalAvailable={totalAvailable} positions={GHOST_POSITIONS} showCurve />
             ) : (
-              <DashboardContent equity={totalEquity} dailyPnl={dailyPnl} allocated={totalAllocated} activeCount={activeCount} totalAvailable={totalAvailable} positions={allPositions} exchanges={exchanges} instances={instances} />
+              <DashboardContent equity={totalEquity} dailyPnl={dailyPnl} allTimePnl={allTimePnl} sharpe={sharpe} allocated={totalAllocated} activeCount={activeCount} totalAvailable={totalAvailable} positions={allPositions} exchanges={exchanges} instances={instances} />
             )}
           </div>
 

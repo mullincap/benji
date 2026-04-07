@@ -420,16 +420,6 @@ export default function MarketplaceDetailPage() {
           </div>
         </div>
 
-        {/* Stats strip — 6 cards */}
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(6, 1fr)", gap: 8, marginBottom: 20 }}>
-          <MetricCard label="YTD RETURN" value={`+${fmt(cat.ytd, 1)}%`} color="var(--green)" />
-          <MetricCard label="SHARPE" value={fmt(cat.sharpe, 2)} />
-          <MetricCard label="MAX DD" value={`-${fmt(cat.maxDd, 1)}%`} color="var(--red)" />
-          <MetricCard label="WIN RATE" value={`${fmt(cat.winRate, 0)}%`} />
-          <MetricCard label="CAGR" value={`${fmt(cat.cagr, 1)}%`} color="var(--green)" />
-          <MetricCard label="PROFIT FACTOR" value={`${fmt(cat.profitFactor, 2)}x`} />
-        </div>
-
         {/* Capacity + social proof */}
         {(() => {
           const cap = CAPACITY_DATA[id] ?? { allocators: 0, deployed: 0, capacity: 1 };
@@ -453,6 +443,16 @@ export default function MarketplaceDetailPage() {
             </div>
           );
         })()}
+
+        {/* Stats strip — 6 cards */}
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(6, 1fr)", gap: 8, marginBottom: 20 }}>
+          <MetricCard label="YTD RETURN" value={`+${fmt(cat.ytd, 1)}%`} color="var(--green)" />
+          <MetricCard label="SHARPE" value={fmt(cat.sharpe, 2)} />
+          <MetricCard label="MAX DD" value={`-${fmt(cat.maxDd, 1)}%`} color="var(--red)" />
+          <MetricCard label="WIN RATE" value={`${fmt(cat.winRate, 0)}%`} />
+          <MetricCard label="CAGR" value={`${fmt(cat.cagr, 1)}%`} color="var(--green)" />
+          <MetricCard label="PROFIT FACTOR" value={`${fmt(cat.profitFactor, 2)}x`} />
+        </div>
 
         {/* Inline wizard panel — slides down when open */}
         <div style={{
