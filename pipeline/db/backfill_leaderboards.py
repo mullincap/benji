@@ -2,16 +2,11 @@
 """
 pipeline/db/backfill_leaderboards.py
 ======================================
-Backfills market.leaderboards from the wide-format parquet files written
-by build_intraday_leaderboard.py.
+Backfills market.leaderboards from wide-format parquet files.
 
-Parquet format (wide):
-  Rows:    one per timestamp_utc (minute)
-  Columns: timestamp_utc, R1, R2, ..., R100
-  Values:  symbol string (e.g. 'BTCUSDT') at each rank position
-
-Uses pyarrow row-group reading to avoid OOM — never loads more than one
-row group (~100k rows) into memory at once regardless of file size.
+Memory strategy: reads ONE rank column at a time (e.g. just R1, then R2...).
+Peak memory = timestamp_utc column + one symbol column = ~10MB regardless
+of file size or number of ranks. No melt, no full file load.
 
 Safe to re-run — uses ON CONFLICT DO NOTHING.
 
@@ -44,22 +39,19 @@ BATCH_SIZE  = 50_000
 
 
 def build_symbol_map(cur) -> dict:
-    """binance_id → symbol_id"""
     cur.execute("SELECT binance_id, symbol_id FROM market.symbols WHERE binance_id IS NOT NULL")
     return {row[0]: row[1] for row in cur.fetchall()}
 
 
 def process_file(parquet_path: Path, metric: str, symbol_map: dict, cur, conn) -> tuple[int, int]:
     """
-    Read parquet one row group at a time using pyarrow.
-    Peak memory = one row group (~100k rows) not the full file.
-    Returns (inserted, skipped).
+    Process one rank column at a time — reads only timestamp_utc + R1,
+    inserts, then reads timestamp_utc + R2, etc.
+    Peak memory is ~10MB regardless of file size.
     """
-    print(f"  Opening {parquet_path.name} (pyarrow row-group mode)...")
+    print(f"  Opening {parquet_path.name} (column-by-column mode)...")
     pf = pq.ParquetFile(parquet_path)
-    num_groups = pf.num_row_groups
 
-    # Detect columns from schema — no full file load needed
     schema_names = pf.schema_arrow.names
     rank_cols = sorted(
         [c for c in schema_names if c.startswith("R") and c[1:].isdigit()],
@@ -73,31 +65,23 @@ def process_file(parquet_path: Path, metric: str, symbol_map: dict, cur, conn) -
         print(f"    ⚠ No rank columns found — skipping")
         return 0, 0
 
-    cols_to_read = ["timestamp_utc"] + rank_cols
-    print(f"    {num_groups} row groups × {len(rank_cols)} ranks")
+    print(f"    {len(rank_cols)} rank columns — processing one at a time...")
 
     inserted = 0
     skipped  = 0
     start    = time.time()
 
-    for g in range(num_groups):
-        # Read one row group only — typically ~100k rows
-        chunk = pf.read_row_group(g, columns=cols_to_read).to_pandas()
-        chunk["timestamp_utc"] = pd.to_datetime(chunk["timestamp_utc"], utc=True)
+    for i, rank_col in enumerate(rank_cols):
+        rank_num = int(rank_col[1:])
 
-        # Melt wide → long for this chunk only
-        df_long = chunk.melt(
-            id_vars="timestamp_utc",
-            value_vars=rank_cols,
-            var_name="rank_col",
-            value_name="symbol"
-        )
-        df_long = df_long.dropna(subset=["symbol"])
-        df_long["rank"] = df_long["rank_col"].str[1:].astype(int)
+        # Read only timestamp_utc + this one rank column — tiny memory footprint
+        df = pf.read(columns=["timestamp_utc", rank_col]).to_pandas()
+        df = df.dropna(subset=[rank_col])
+        df["timestamp_utc"] = pd.to_datetime(df["timestamp_utc"], utc=True)
 
         batch_rows = []
-        for row in df_long.itertuples(index=False):
-            symbol_id = symbol_map.get(row.symbol)
+        for row in df.itertuples(index=False):
+            symbol_id = symbol_map.get(getattr(row, rank_col))
             if symbol_id is None:
                 skipped += 1
                 continue
@@ -106,10 +90,22 @@ def process_file(parquet_path: Path, metric: str, symbol_map: dict, cur, conn) -
                 metric,
                 VARIANT,
                 ANCHOR_HOUR,
-                row.rank,
+                rank_num,
                 symbol_id,
-                None,  # pct_change — not in leaderboard parquets
+                None,
             ))
+
+            if len(batch_rows) >= BATCH_SIZE:
+                result = execute_values(cur, """
+                    INSERT INTO market.leaderboards
+                        (timestamp_utc, metric, variant, anchor_hour, rank, symbol_id, pct_change)
+                    VALUES %s
+                    ON CONFLICT (timestamp_utc, metric, variant, anchor_hour, rank) DO NOTHING
+                    RETURNING timestamp_utc
+                """, batch_rows, fetch=True)
+                inserted += len(result)
+                conn.commit()
+                batch_rows = []
 
         if batch_rows:
             result = execute_values(cur, """
@@ -122,12 +118,12 @@ def process_file(parquet_path: Path, metric: str, symbol_map: dict, cur, conn) -
             inserted += len(result)
             conn.commit()
 
-        elapsed = time.time() - start
-        pct = (g + 1) / num_groups * 100
-        print(f"    Group {g+1}/{num_groups} ({pct:.0f}%) — {inserted:,} inserted, {skipped:,} skipped — {elapsed:.0f}s")
-
-        del chunk, df_long, batch_rows
+        del df, batch_rows
         gc.collect()
+
+        elapsed = time.time() - start
+        pct = (i + 1) / len(rank_cols) * 100
+        print(f"    R{rank_num} [{i+1}/{len(rank_cols)}] ({pct:.0f}%) — {inserted:,} inserted, {skipped:,} skipped — {elapsed:.0f}s")
 
     return inserted, skipped
 
@@ -160,11 +156,11 @@ def main():
         metric_skipped  = 0
         start = time.time()
 
-        for pf in parquet_files:
-            ins, skp = process_file(pf, metric, symbol_map, cur, conn)
+        for pf_path in parquet_files:
+            ins, skp = process_file(pf_path, metric, symbol_map, cur, conn)
             metric_inserted += ins
             metric_skipped  += skp
-            print(f"    ✓ {pf.name}: {ins:,} inserted, {skp:,} skipped")
+            print(f"    ✓ {pf_path.name}: {ins:,} inserted, {skp:,} skipped")
 
         elapsed = time.time() - start
         print(f"  Metric total: {metric_inserted:,} inserted, {metric_skipped:,} skipped ({elapsed:.1f}s)")
