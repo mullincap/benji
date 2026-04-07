@@ -2,15 +2,21 @@
 """
 pipeline/db/backfill_futures_1m.py
 ====================================
-Migrates market_data_1m → market.futures_1m.
+Backfills market.futures_1m from the master parquet file using pyarrow
+row-group streaming (never loads the full 6GB file into memory).
+
+Source:  /mnt/quant-data/raw/amberdata/master_data_table.parquet
+         793 row groups, ~312M rows
+         Columns: timestamp_utc, symbol, price, volume,
+                  open_interest, funding_rate, long_short_ratio
 
 Column mapping:
-  price         → close
-  symbol (TEXT) → symbol_id via market.symbols lookup
+  price         -> close
+  symbol (TEXT) -> symbol_id via market.symbols.binance_id
   source_id     = 1 (amberdata_binance) for all rows
   open/high/low = NULL (not in source data)
 
-Safe to re-run — uses ON CONFLICT DO NOTHING.
+Safe to re-run -- uses ON CONFLICT DO NOTHING.
 
 Usage:
     python3 pipeline/db/backfill_futures_1m.py
@@ -20,156 +26,127 @@ import sys
 import time
 from pathlib import Path
 
-import psycopg2
+import pyarrow.parquet as pq
 from psycopg2.extras import execute_values
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from pipeline.db.connection import get_conn
 
-BATCH_SIZE  = 50_000
-SOURCE_ID   = 1  # amberdata_binance
+PARQUET_PATH = Path("/mnt/quant-data/raw/amberdata/master_data_table.parquet")
+SOURCE_ID    = 1  # amberdata_binance
+PAGE_SIZE    = 10_000
 
-# All columns that exist in both tables (excluding price→close and symbol→symbol_id)
-DIRECT_COLS = [
-    "volume", "quote_volume", "trades",
-    "taker_buy_base_vol", "taker_buy_quote_vol",
-    "open_interest", "funding_rate", "long_short_ratio",
-    "trade_delta", "long_liqs", "short_liqs",
-    "last_bid_depth", "last_ask_depth", "last_depth_imbalance",
-    "last_spread_pct", "spread_pct", "bid_ask_imbalance",
-    "basis_pct", "market_cap_usd", "market_cap_rank",
-]
+# Parquet columns that map directly to futures_1m columns (same name)
+DIRECT_COLS = ["volume", "open_interest", "funding_rate", "long_short_ratio"]
 
+INSERT_COLS = ["timestamp_utc", "symbol_id", "source_id", "close"] + DIRECT_COLS
 
-def get_existing_cols(cur) -> set:
-    """Return columns that actually exist in market_data_1m."""
-    cur.execute("""
-        SELECT column_name FROM information_schema.columns
-        WHERE table_name = 'market_data_1m'
-    """)
-    return {row[0] for row in cur.fetchall()}
+INSERT_SQL = f"""
+    INSERT INTO market.futures_1m ({', '.join(INSERT_COLS)})
+    VALUES %s
+    ON CONFLICT (timestamp_utc, symbol_id, source_id) DO NOTHING
+"""
 
 
 def build_symbol_map(cur) -> dict:
-    """Build symbol TEXT → symbol_id integer lookup."""
+    """Build binance_id TEXT -> symbol_id integer lookup."""
     cur.execute("SELECT binance_id, symbol_id FROM market.symbols WHERE binance_id IS NOT NULL")
     return {row[0]: row[1] for row in cur.fetchall()}
 
 
 def main():
+    if not PARQUET_PATH.exists():
+        print(f"Parquet file not found: {PARQUET_PATH}")
+        sys.exit(1)
+
+    pf = pq.ParquetFile(PARQUET_PATH)
+    num_rg    = pf.metadata.num_row_groups
+    total_rows = pf.metadata.num_rows
+    print(f"Parquet: {num_rg} row groups, {total_rows:,} rows")
+
     conn = get_conn()
     cur  = conn.cursor()
 
-    # Check old table exists
-    cur.execute("""
-        SELECT EXISTS (
-            SELECT 1 FROM information_schema.tables
-            WHERE table_name = 'market_data_1m'
-        )
-    """)
-    if not cur.fetchone()[0]:
-        print("market_data_1m does not exist — nothing to migrate.")
-        cur.close()
-        conn.close()
-        return
-
-    # Get actual columns in old table
-    existing_cols = get_existing_cols(cur)
-    use_cols = [c for c in DIRECT_COLS if c in existing_cols]
-    missing_cols = [c for c in DIRECT_COLS if c not in existing_cols]
-    if missing_cols:
-        print(f"  Note: {len(missing_cols)} columns not in source (will be NULL): {missing_cols}")
-
-    # Build symbol map
     symbol_map = build_symbol_map(cur)
-    print(f"  Symbol map: {len(symbol_map)} entries")
+    print(f"Symbol map: {len(symbol_map)} entries")
 
-    # Count total rows
-    cur.execute("SELECT COUNT(*) FROM market_data_1m")
-    total_rows = cur.fetchone()[0]
-    print(f"  Source rows: {total_rows:,}")
-
-    # Check already migrated
     cur.execute("SELECT COUNT(*) FROM market.futures_1m WHERE source_id = %s", (SOURCE_ID,))
-    already_done = cur.fetchone()[0]
-    if already_done > 0:
-        print(f"  Already migrated: {already_done:,} rows (will skip duplicates via ON CONFLICT)")
+    already = cur.fetchone()[0]
+    if already > 0:
+        print(f"Already in futures_1m: {already:,} rows (duplicates will be skipped)")
 
-    # Build SELECT query
-    col_select = ", ".join(use_cols)
-    query = f"SELECT timestamp_utc, symbol, price, {col_select} FROM market_data_1m ORDER BY timestamp_utc OFFSET %s LIMIT %s"
+    read_cols = ["timestamp_utc", "symbol", "price"] + DIRECT_COLS
 
-    # Build INSERT columns list
-    insert_cols = ["timestamp_utc", "symbol_id", "source_id", "close"] + use_cols
-    # Add NULL placeholders for missing direct cols (open, high, low not in source)
-    placeholders = "%s" + ", %s" * (len(insert_cols) - 1)
+    inserted_total = 0
+    skipped_total  = 0
+    rows_read      = 0
+    start          = time.time()
 
-    insert_sql = f"""
-        INSERT INTO market.futures_1m ({', '.join(insert_cols)})
-        VALUES %s
-        ON CONFLICT (timestamp_utc, symbol_id, source_id) DO NOTHING
-    """
+    print(f"\nStarting backfill from {PARQUET_PATH.name} ...")
 
-    inserted    = 0
-    skipped_sym = 0
-    offset      = 0
-    start       = time.time()
-    batch_num   = 0
+    for rg_idx in range(num_rg):
+        table = pf.read_row_group(rg_idx, columns=read_cols)
+        rg_rows = table.num_rows
+        rows_read += rg_rows
 
-    print(f"\nStarting migration in batches of {BATCH_SIZE:,}...")
+        # Convert to column arrays for fast access
+        ts_col    = table.column("timestamp_utc")
+        sym_col   = table.column("symbol")
+        price_col = table.column("price")
+        direct_arrays = [table.column(c) for c in DIRECT_COLS]
 
-    while True:
-        cur.execute(query, (offset, BATCH_SIZE))
-        rows = cur.fetchall()
-        if not rows:
-            break
+        batch = []
+        rg_skipped = 0
 
-        batch_num += 1
-        batch_rows = []
-        batch_skip = 0
-
-        for row in rows:
-            ts      = row[0]
-            symbol  = row[1]
-            price   = row[2]
-            rest    = row[3:]
-
+        for i in range(rg_rows):
+            symbol = sym_col[i].as_py()
             symbol_id = symbol_map.get(symbol)
             if symbol_id is None:
-                batch_skip += 1
+                rg_skipped += 1
                 continue
 
-            batch_rows.append((ts, symbol_id, SOURCE_ID, price) + rest)
+            row = (
+                ts_col[i].as_py(),       # timestamp_utc (string -> pg casts to timestamptz)
+                symbol_id,
+                SOURCE_ID,
+                price_col[i].as_py(),    # price -> close
+            ) + tuple(arr[i].as_py() for arr in direct_arrays)
 
-        if batch_rows:
-            result = execute_values(cur, insert_sql, batch_rows, fetch=True, page_size=10_000)
-            inserted += len(result)
-        skipped_sym += batch_skip
+            batch.append(row)
+
+            if len(batch) >= PAGE_SIZE:
+                execute_values(cur, INSERT_SQL, batch, page_size=PAGE_SIZE)
+                inserted_total += len(batch)
+                batch = []
+
+        # Flush remaining
+        if batch:
+            execute_values(cur, INSERT_SQL, batch, page_size=PAGE_SIZE)
+            inserted_total += len(batch)
+
+        skipped_total += rg_skipped
         conn.commit()
 
-        offset  += BATCH_SIZE
-        elapsed  = time.time() - start
-        pct      = min(offset / total_rows * 100, 100)
-        rate     = offset / elapsed if elapsed > 0 else 0
-        eta      = (total_rows - offset) / rate if rate > 0 else 0
+        elapsed = time.time() - start
+        rate    = rows_read / elapsed if elapsed > 0 else 0
+        eta     = (total_rows - rows_read) / rate if rate > 0 else 0
+        pct     = rows_read / total_rows * 100
 
         print(
-            f"  Batch {batch_num}: {offset:,}/{total_rows:,} ({pct:.1f}%) "
-            f"| inserted {inserted:,} | skipped {skipped_sym:,} "
+            f"  Row group {rg_idx + 1}/{num_rg} ({pct:.1f}%) "
+            f"| read {rows_read:,} | inserted {inserted_total:,} | skipped {skipped_total:,} "
             f"| {rate:,.0f} rows/s | ETA {eta:.0f}s"
         )
-
-        if len(rows) < BATCH_SIZE:
-            break
 
     elapsed = time.time() - start
     cur.execute("SELECT COUNT(*) FROM market.futures_1m")
     db_total = cur.fetchone()[0]
 
-    print(f"\n✅ Migration complete in {elapsed:.1f}s")
-    print(f"   Rows inserted this run: {inserted:,}")
-    print(f"   Rows skipped (no symbol match): {skipped_sym:,}")
-    print(f"   Total rows in market.futures_1m: {db_total:,}")
+    print(f"\nBackfill complete in {elapsed:.1f}s")
+    print(f"  Rows read:    {rows_read:,}")
+    print(f"  Rows sent:    {inserted_total:,}")
+    print(f"  Rows skipped: {skipped_total:,} (no symbol match)")
+    print(f"  Total in market.futures_1m: {db_total:,}")
 
     cur.close()
     conn.close()
