@@ -6,9 +6,9 @@
 
 ## Current State
 
-**Last updated:** Phase 2 complete. Deferred Phase 1 corrections applied + admin auth fully implemented and smoke-tested.
-**Next action:** Phase 3 — frontend shell (compiler layout + login + sidebar nav + redirect from /compiler to /compiler/coverage). Awaiting user ack before starting.
-**Resume command for next session:** "Resume the compiler build from `docs/builds/compiler-page-build.md`. Start at Phase 3 (frontend shell)."
+**Last updated:** Phase 3 complete. Frontend shell + auth flow built using Next.js route groups (Option A). All 5 compiler routes compile cleanly via `next build`. Placeholder pages render in the protected layout for Phases 4-6 to fill in.
+**Next action:** Phase 4 — Coverage page (KPI cards + calendar heatmap + gap table). Replaces the placeholder in `app/compiler/(protected)/coverage/page.tsx`.
+**Resume command for next session:** "Resume the compiler build from `docs/builds/compiler-page-build.md`. Start at Phase 4 (Coverage page)."
 
 ### Phase 2 entry tasks (deferred Phase 1 corrections — apply BEFORE auth work)
 
@@ -159,11 +159,20 @@ After applying #1 and #2 above and re-running the smoke tests against the live D
   - [x] `Depends(require_admin)` dependency that compiler routes can use
   - [x] Wire compiler routes to require admin (router-level dependency)
   - [x] Smoke test full auth flow with FastAPI TestClient (8/8 tests pass)
-- [ ] **Phase 3** — Frontend shell
-  - [ ] `frontend/app/compiler/layout.tsx` — sidebar + topbar + auth check
-  - [ ] `frontend/app/compiler/login/page.tsx` — passphrase form
-  - [ ] `frontend/app/compiler/page.tsx` — redirect to `/compiler/coverage`
-  - [ ] Sidebar with text-only nav: COVERAGE / JOBS / SYMBOLS
+- [x] **Phase 3** — Frontend shell (route groups, auth flow, placeholders)
+  - [x] Decided structure: Next.js route groups `(protected)` + `(public)` (Option A)
+  - [x] `frontend/app/compiler/(protected)/layout.tsx` — whoami check + redirect + Topbar + sidebar
+  - [x] `frontend/app/compiler/(protected)/page.tsx` — server-side redirect to `/coverage`
+  - [x] `frontend/app/compiler/(protected)/coverage/page.tsx` — Phase 4 placeholder
+  - [x] `frontend/app/compiler/(protected)/jobs/page.tsx` — Phase 5 placeholder
+  - [x] `frontend/app/compiler/(protected)/symbols/page.tsx` — Phase 6 placeholder
+  - [x] `frontend/app/compiler/(public)/layout.tsx` — minimal, no chrome, no auth
+  - [x] `frontend/app/compiler/(public)/login/page.tsx` — passphrase form
+  - [x] Inline `CompilerSidebar` in protected layout: text-only nav with 2px amber active border
+  - [x] `frontend/app/components/Topbar.tsx` — added compiler href + amber accent override
+  - [x] `backend/requirements.txt` — added `psycopg2-binary==2.9.11`
+  - [x] Verified via `next build` — all 5 compiler routes compile and appear in route table
+  - [x] TypeScript clean (`tsc --noEmit` exit 0)
 - [ ] **Phase 4** — Coverage page (`/compiler/coverage`)
   - [ ] 4 KPI cards
   - [ ] Calendar heatmap component
@@ -194,6 +203,15 @@ After applying #1 and #2 above and re-running the smoke tests against the live D
 | 2 | `backend/app/main.py` | Modified — registered admin_router |
 | 2 | `backend/app/core/config.py` | Modified — added ADMIN_PASSPHRASE + ADMIN_SESSIONS_FILE |
 | 2 | `backend/data/.gitignore` | Created — excludes admin_sessions.json from git |
+| 3 | `backend/requirements.txt` | Modified — added `psycopg2-binary==2.9.11` |
+| 3 | `frontend/app/components/Topbar.tsx` | Modified — compiler href + MODULE_ACCENT_OVERRIDE for amber |
+| 3 | `frontend/app/compiler/(public)/layout.tsx` | Created — minimal, centered, no chrome |
+| 3 | `frontend/app/compiler/(public)/login/page.tsx` | Created — passphrase form, whoami pre-check, fetch with credentials |
+| 3 | `frontend/app/compiler/(protected)/layout.tsx` | Created — whoami check + redirect + Topbar + inline CompilerSidebar |
+| 3 | `frontend/app/compiler/(protected)/page.tsx` | Created — server redirect to /compiler/coverage |
+| 3 | `frontend/app/compiler/(protected)/coverage/page.tsx` | Created — Phase 4 placeholder |
+| 3 | `frontend/app/compiler/(protected)/jobs/page.tsx` | Created — Phase 5 placeholder |
+| 3 | `frontend/app/compiler/(protected)/symbols/page.tsx` | Created — Phase 6 placeholder |
 
 ---
 
@@ -334,6 +352,30 @@ Verified live: test job `5cda1821-...` now correctly returns `is_stale=true`.
 
 ### TODO #3 — `total_rows` off-by-one (1441 instead of 1440)
 The day-range filter includes a boundary minute. Cosmetic, fix when adding the materialized view.
+
+### TODO #4 — CSRF protection (deferred to first POST endpoint phase)
+The Phase 2 admin auth uses cookie-based sessions, which means a malicious site could in theory trick a logged-in admin into making unwanted POST requests (logout, future trigger endpoints, etc.). The compiler routes in this round are all GETs so there's no CSRF surface yet, but **the moment we add the first POST/trigger endpoint** (likely the "run a backfill job" feature in a follow-up phase) we need to add CSRF token validation. Recommended approach: double-submit cookie pattern — issue a `csrf_token` cookie on login (separate from the session cookie, NOT httpOnly), require the same value in an `X-CSRF-Token` header on POST requests, validate they match server-side. Cheap to add (~30 lines), important to do before any state-changing endpoint ships.
+
+### TODO #5 — Logout button in the compiler UI (deferred)
+The backend exposes `POST /api/admin/logout` which invalidates the server-side token and clears the cookie, but Phase 3 didn't add a logout button to the UI. The user can clear the cookie manually or wait for the 24h expiry. Add a small "LOGOUT" link to the protected layout's topbar/sidebar in a follow-up — not blocking Phases 4-6.
+
+## Deployment checklist (compiler admin pages)
+
+When deploying the backend to production, in addition to the existing database setup:
+
+1. **Set `ADMIN_PASSPHRASE`** in the production `.env` (or environment variable). This is the shared secret the admin types into the login form. Use a long random string — this is the only thing protecting the compiler admin pages. If empty, `POST /api/admin/login` returns 503 and the compiler UI is effectively disabled.
+
+2. **Set `COOKIE_SECURE=true`** so the session cookie only flows over HTTPS. Default is false for local dev.
+
+3. **Set `DB_PASSWORD`** so the compiler endpoints can reach TimescaleDB. On the production server this is the same value already in `/mnt/quant-data/credentials/secrets.env`.
+
+4. **Verify `backend/data/` is writable** by the process running uvicorn — the admin sessions file lives there. The directory is in git but `admin_sessions.json` is gitignored.
+
+5. **Verify CORS** — production frontend origin needs to be in `CORS_ORIGINS` (comma-separated list, env var). The default is `http://localhost:3000`.
+
+6. **Frontend `NEXT_PUBLIC_API_BASE`** must point at the public backend URL. For local dev that's `http://localhost:8000`. In production it's whatever the backend is reachable at from the user's browser.
+
+7. **Reverse proxy `Set-Cookie` passthrough** — if there's an Nginx/Caddy in front of uvicorn, make sure it doesn't strip cookies. The session cookie has `HttpOnly`, `SameSite=lax`, `Path=/`, and (in production) `Secure`.
 
 ---
 
