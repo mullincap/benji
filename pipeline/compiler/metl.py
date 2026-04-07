@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 """ amber_oi_backfill_to_sheets.py - Backfill 1-minute Binance Open Interest from Amberdata → Google Sheets """
 import os
+import sys
 import csv
 import time
 import argparse
 import requests
 import gspread
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 from google.auth.transport.requests import Request
@@ -15,8 +17,29 @@ import threading
 from requests.adapters import HTTPAdapter
 from bisect import bisect_left
 
+# DB connection helper for compiler_jobs tracking
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from pipeline.db.connection import get_conn
+
 SCRIPT_START_TIME = time.time()
-AMBER_API_KEY = "UAOe71417c00ce76b0327db7f30133c7c72"
+
+
+def _load_amber_api_key():
+    key = os.environ.get("AMBER_API_KEY")
+    if key:
+        return key
+    secrets_path = Path("/mnt/quant-data/credentials/secrets.env")
+    if secrets_path.exists():
+        for line in secrets_path.read_text().splitlines():
+            line = line.strip()
+            if line.startswith("AMBER_API_KEY="):
+                return line.split("=", 1)[1].strip()
+    return None
+
+
+AMBER_API_KEY = _load_amber_api_key()
+if not AMBER_API_KEY:
+    raise RuntimeError("AMBER_API_KEY not set — add to secrets.env")
 BASE_URL = "https://api.amberdata.com/markets/futures/open-interest"
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets","https://www.googleapis.com/auth/drive"]
 SHEET_ID = "1fhBWdMx9TsntKK8kVkAsTkax3Fwatg28xWCj_hGWgzI"
@@ -209,6 +232,115 @@ def safe_result(futures, key, default):
 def pct(a,b):
     if a == 0: return None   # or np.nan
     return (b-a)/a*100
+# ============================================================
+# DB JOB TRACKING — market.compiler_jobs
+# All operations are best-effort: a DB failure must never interrupt
+# the existing CSV/parquet write path.
+# ============================================================
+def _get_enabled_endpoints():
+    """Return list of enabled endpoint names based on FETCH_* flags."""
+    enabled = []
+    for name, ep in ENDPOINTS.items():
+        if ep.get("enabled"):
+            enabled.append(name)
+    return enabled
+
+def job_create(date_from, date_to, triggered_by='cli', run_tag=None):
+    """Insert a new compiler job row, return job_id UUID string."""
+    enabled = _get_enabled_endpoints()
+    try:
+        conn = get_conn()
+        cur = conn.cursor()
+        cur.execute("""
+            INSERT INTO market.compiler_jobs
+                (source_id, status, date_from, date_to, endpoints_enabled,
+                 triggered_by, run_tag, started_at)
+            VALUES (1, 'running', %s, %s, %s, %s, %s, NOW())
+            RETURNING job_id
+        """, (date_from, date_to, enabled, triggered_by, run_tag))
+        job_id = str(cur.fetchone()[0])
+        conn.commit()
+        cur.close()
+        conn.close()
+        print(f"   📋 Job created → {job_id}")
+        return job_id
+    except Exception as e:
+        print(f"⚠️ job_create failed → {e}")
+        return None
+
+def job_set_total(job_id, total):
+    """Set symbols_total once symbol list is known."""
+    if not job_id:
+        return
+    try:
+        conn = get_conn()
+        cur = conn.cursor()
+        cur.execute("UPDATE market.compiler_jobs SET symbols_total=%s WHERE job_id=%s",
+                    (total, job_id))
+        conn.commit()
+        cur.close()
+        conn.close()
+    except Exception as e:
+        print(f"⚠️ job_set_total failed → {e}")
+
+def job_increment(job_id, rows_added):
+    """Atomically increment symbols_done by 1 and rows_written by rows_added."""
+    if not job_id:
+        return
+    try:
+        conn = get_conn()
+        cur = conn.cursor()
+        cur.execute("""
+            UPDATE market.compiler_jobs
+            SET symbols_done = symbols_done + 1,
+                rows_written  = rows_written  + %s
+            WHERE job_id = %s
+        """, (rows_added, job_id))
+        conn.commit()
+        cur.close()
+        conn.close()
+    except Exception as e:
+        print(f"⚠️ job_increment failed → {e}")
+
+def job_complete(job_id):
+    """Mark job as complete."""
+    if not job_id:
+        return
+    try:
+        conn = get_conn()
+        cur = conn.cursor()
+        cur.execute("""
+            UPDATE market.compiler_jobs
+            SET status='complete', completed_at=NOW()
+            WHERE job_id=%s
+        """, (job_id,))
+        conn.commit()
+        cur.close()
+        conn.close()
+        print(f"   ✅ Job complete → {job_id}")
+    except Exception as e:
+        print(f"⚠️ job_complete failed → {e}")
+
+def job_fail(job_id, error_msg):
+    """Mark job as failed with error message."""
+    if not job_id:
+        return
+    try:
+        conn = get_conn()
+        cur = conn.cursor()
+        cur.execute("""
+            UPDATE market.compiler_jobs
+            SET status='failed', completed_at=NOW(), error_msg=%s
+            WHERE job_id=%s
+        """, (str(error_msg)[:2000], job_id))
+        conn.commit()
+        cur.close()
+        conn.close()
+        print(f"   ❌ Job failed → {job_id}")
+    except Exception as e:
+        print(f"⚠️ job_fail failed → {e}")
+
+
 def compute_slope(series):
     """Linear regression slope of a time series, series = list[float]"""
     n = len(series)
@@ -1163,101 +1295,119 @@ def process_symbol(symb, start_ts, end_ts, mcap_day=None):
         elap = datetime.now() - start
         return {"symbol": symb,"rows": rows,"elapsed": elap,"success": True}
     except Exception as e: return {"symbol": symb,"rows": [],"elapsed": 0,"success": False,"error": str(e)}
-def main(start_date, end_date):
-    for day in daterange(start_date, end_date):
-        ws = None
-        if PRINT_RAW_SHEETS:ws = connect_daily_sheet(day)
-        expected_header = build_header()
-        if PRINT_RAW_SHEETS:
-            current = ws.row_values(1)
-            if not current:ws.append_row(expected_header)
-            elif current != expected_header:
-                print("⚠️ Header mismatch — clearing and rewriting")
-                ws.clear()
-                ws.append_row(expected_header)
-        day_start_time = time.time()
-        print(f"\n📅 {day.date()}")
+def main(start_date, end_date, job_id=None, triggered_by='cli', run_tag=None):
+    if job_id is None:
+        job_id = job_create(start_date.date(), end_date.date(), triggered_by, run_tag)
 
-        if AUTO_RESUME and csv_exists_for_day(day):
-            print(f"\n⏭ Skipping {day.date()} → CSV already exists")
-            continue
+    try:
+        for day in daterange(start_date, end_date):
+            ws = None
+            if PRINT_RAW_SHEETS:ws = connect_daily_sheet(day)
+            expected_header = build_header()
+            if PRINT_RAW_SHEETS:
+                current = ws.row_values(1)
+                if not current:ws.append_row(expected_header)
+                elif current != expected_header:
+                    print("⚠️ Header mismatch — clearing and rewriting")
+                    ws.clear()
+                    ws.append_row(expected_header)
+            day_start_time = time.time()
+            print(f"\n📅 {day.date()}")
 
-        day_utc = datetime(year=day.year,month=day.month,day=day.day,tzinfo=timezone.utc)
-        start_ts = int(day_utc.timestamp() * 1000)
-        end_ts = int((day_utc + timedelta(days=1) - timedelta(seconds=1)).timestamp() * 1000)
-
-        print("   🔎 Fetching instrument universe for date...")
-        symbols = get_symbols_for_date(day)
-        total_symbs = len(symbols)
-        print(f"   ✅ {total_symbs} symbols active\n")
-        print("  Batch write mode ENABLED (streaming CSV)")
-
-        # Load CoinGecko market cap for this day once — shared across all symbols
-        mcap_day = load_marketcap_day(day) if FETCH_MARKETCAP else {}
-
-        all_rows_day = []
-        script_start = datetime.now()
-        print("  script_start:", script_start, "\n")
-
-        print(f"\n⚡ Parallel mode ENABLED ({MAX_WORKERS} workers)\n")
-        with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-            futures = {executor.submit(process_symbol,symb,start_ts,end_ts,mcap_day): symb for symb in symbols}
-            completed = 0
-            for future in as_completed(futures):
-                result = future.result()
-                completed += 1
-                symb = result["symbol"]
-                rows = result["rows"]
-                elap = result["elapsed"]
-                progress = round((completed / total_symbs) * 100,2)
-                if result["success"]:
-                    print(f"   ✅ {symb} done → {elap} ({progress}%)")
-                    all_rows_day.extend(rows)
-                    if len(all_rows_day) >= CSV_FLUSH_CHUNK:
-                        file_path = os.path.join(CSV_BACKUP_DIR, f"oi_{day.strftime('%Y%m%d')}.csv")
-                        append_day_csv(day,expected_header,all_rows_day,write_header=not os.path.exists(file_path))
-                        all_rows_day.clear()   # frees RAM
-                else: print(f"   ❌ {symb} failed → {result['error']}")
-
-                total_elap = datetime.now() - script_start
-                avg_cycle = (total_elap / completed if completed else timedelta(0))
-                rem_syms = total_symbs - completed
-                rem_time = rem_syms * avg_cycle
-                # print(f"                total elap: {total_elap}")
-                # print(f"                remaining: {rem_time}\n")
-
-        if all_rows_day:
-            print(f"\n💾 Final CSV flush → {len(all_rows_day):,} rows")
-            file_path = os.path.join(CSV_BACKUP_DIR, f"oi_{day.strftime('%Y%m%d')}.csv")
-            append_day_csv(day,expected_header,all_rows_day,write_header=not os.path.exists(file_path))
-            all_rows_day.clear()
-
-        if PRINT_SUMMARY_SHEETS:
-            date_str = day.strftime("%Y-%m-%d")
-            print("\n📊 Building summary from CSV...")
-            csv_path = os.path.join(CSV_BACKUP_DIR,f"oi_{day.strftime('%Y%m%d')}.csv")
-            if not os.path.exists(csv_path):
-                print("⚠️ CSV missing — summary skipped")
+            if AUTO_RESUME and csv_exists_for_day(day):
+                print(f"\n⏭ Skipping {day.date()} → CSV already exists")
                 continue
-            rows = []
-            with open(csv_path, newline="") as f:
-                reader = csv.reader(f)
-                header = next(reader)
-                for r in reader:rows.append(r)
-            summary = create_daily_summary_from_rows(rows,header,date_str)
-            summary_header = build_summary_header()
-            write_summary_csv(day,summary_header,summary)
 
-        print_day_runtime(str(day.date()), day_start_time)
-        print_runtime()
+            day_utc = datetime(year=day.year,month=day.month,day=day.day,tzinfo=timezone.utc)
+            start_ts = int(day_utc.timestamp() * 1000)
+            end_ts = int((day_utc + timedelta(days=1) - timedelta(seconds=1)).timestamp() * 1000)
+
+            print("   🔎 Fetching instrument universe for date...")
+            symbols = get_symbols_for_date(day)
+            total_symbs = len(symbols)
+            job_set_total(job_id, total_symbs)
+            print(f"   ✅ {total_symbs} symbols active\n")
+            print("  Batch write mode ENABLED (streaming CSV)")
+
+            # Load CoinGecko market cap for this day once — shared across all symbols
+            mcap_day = load_marketcap_day(day) if FETCH_MARKETCAP else {}
+
+            all_rows_day = []
+            script_start = datetime.now()
+            print("  script_start:", script_start, "\n")
+
+            print(f"\n⚡ Parallel mode ENABLED ({MAX_WORKERS} workers)\n")
+            with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+                futures = {executor.submit(process_symbol,symb,start_ts,end_ts,mcap_day): symb for symb in symbols}
+                completed = 0
+                for future in as_completed(futures):
+                    result = future.result()
+                    completed += 1
+                    symb = result["symbol"]
+                    rows = result["rows"]
+                    elap = result["elapsed"]
+                    progress = round((completed / total_symbs) * 100,2)
+                    if result["success"]:
+                        print(f"   ✅ {symb} done → {elap} ({progress}%)")
+                        all_rows_day.extend(rows)
+                        job_increment(job_id, len(rows))
+                        if len(all_rows_day) >= CSV_FLUSH_CHUNK:
+                            file_path = os.path.join(CSV_BACKUP_DIR, f"oi_{day.strftime('%Y%m%d')}.csv")
+                            append_day_csv(day,expected_header,all_rows_day,write_header=not os.path.exists(file_path))
+                            all_rows_day.clear()   # frees RAM
+                    else: print(f"   ❌ {symb} failed → {result['error']}")
+
+                    total_elap = datetime.now() - script_start
+                    avg_cycle = (total_elap / completed if completed else timedelta(0))
+                    rem_syms = total_symbs - completed
+                    rem_time = rem_syms * avg_cycle
+                    # print(f"                total elap: {total_elap}")
+                    # print(f"                remaining: {rem_time}\n")
+
+            if all_rows_day:
+                print(f"\n💾 Final CSV flush → {len(all_rows_day):,} rows")
+                file_path = os.path.join(CSV_BACKUP_DIR, f"oi_{day.strftime('%Y%m%d')}.csv")
+                append_day_csv(day,expected_header,all_rows_day,write_header=not os.path.exists(file_path))
+                all_rows_day.clear()
+
+            if PRINT_SUMMARY_SHEETS:
+                date_str = day.strftime("%Y-%m-%d")
+                print("\n📊 Building summary from CSV...")
+                csv_path = os.path.join(CSV_BACKUP_DIR,f"oi_{day.strftime('%Y%m%d')}.csv")
+                if not os.path.exists(csv_path):
+                    print("⚠️ CSV missing — summary skipped")
+                    continue
+                rows = []
+                with open(csv_path, newline="") as f:
+                    reader = csv.reader(f)
+                    header = next(reader)
+                    for r in reader:rows.append(r)
+                summary = create_daily_summary_from_rows(rows,header,date_str)
+                summary_header = build_summary_header()
+                write_summary_csv(day,summary_header,summary)
+
+            print_day_runtime(str(day.date()), day_start_time)
+            print_runtime()
+    except Exception as e:
+        job_fail(job_id, str(e))
+        raise
+
+    job_complete(job_id)
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--start", required=True)
     parser.add_argument("--end", required=False)
+    parser.add_argument("--job-id", type=str, default=None, dest="job_id")
+    parser.add_argument("--triggered-by", type=str, default="cli",
+                        choices=["ui", "cli", "scheduler"], dest="triggered_by")
+    parser.add_argument("--run-tag", type=str, default=None, dest="run_tag")
     args = parser.parse_args()
-    start_date = datetime.strptime(args.start,"%Y-%m-%d").replace(tzinfo=timezone.utc)
-    if args.end:end_date = datetime.strptime(args.end,"%Y-%m-%d").replace(tzinfo=timezone.utc)
-    else: end_date = start_date
+    start_date = datetime.strptime(args.start, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+    end_date = datetime.strptime(args.end, "%Y-%m-%d").replace(tzinfo=timezone.utc) \
+               if args.end else start_date
     print(f"\n📆 Backfill Range: {start_date.date()} → {end_date.date()}")
-    main(start_date, end_date)
+    main(start_date, end_date,
+         job_id=args.job_id,
+         triggered_by=args.triggered_by,
+         run_tag=args.run_tag)
