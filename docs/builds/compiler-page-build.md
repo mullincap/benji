@@ -6,9 +6,47 @@
 
 ## Current State
 
-**Last updated:** Phase 1 complete (5 endpoints implemented, smoke-tested via psql, committed).
-**Next action:** User verifies response shapes (see "Phase 1 smoke test results" section), then ack to proceed to Phase 2 (auth).
-**Resume command for next session:** "Resume the compiler build from `docs/builds/compiler-page-build.md`. Start at the first unchecked phase."
+**Last updated:** Phase 1 complete + verified by user. Phase 2 decisions captured below.
+**Next action:** Phase 2 — auth + apply 3 deferred Phase 1 corrections (see "Phase 2 entry tasks" below). **Do not skip these corrections** — they were verified and locked but not yet applied to code.
+**Resume command for next session:** "Resume the compiler build from `docs/builds/compiler-page-build.md`. Start with the Phase 2 entry tasks (the 3 deferred Phase 1 corrections), then proceed to the auth work."
+
+### Phase 2 entry tasks (deferred Phase 1 corrections — apply BEFORE auth work)
+
+These are user-locked decisions captured at the end of the Phase 1 verification round. They were not committed during Phase 1 because the session was nearly full. Phase 2 must apply them as its first action.
+
+1. **Fix `is_stale` semantics in `backend/app/api/routes/compiler.py`** (TODO #2 from below — now resolved with locked rule). Replace the existing `_JOB_SELECT` `is_stale` clause with this rule:
+   ```sql
+   (status = 'running' AND (
+       (last_heartbeat IS NOT NULL AND last_heartbeat < NOW() - INTERVAL '2 hours')
+       OR
+       (last_heartbeat IS NULL AND started_at < NOW() - INTERVAL '2 hours')
+   )) AS is_stale
+   ```
+   This catches both jobs that lost their heartbeat AND legacy jobs (like our test row) that never had a heartbeat at all.
+
+2. **Add `completeness_pct` to each day object in `GET /api/compiler/coverage`**. The day dict in the response is currently:
+   ```python
+   {"date", "symbols_complete", "symbols_partial", "symbols_missing", "total_active_symbols"}
+   ```
+   Add a 6th field:
+   ```python
+   "completeness_pct": round(symbols_complete / total_active_symbols * 100, 1) if total_active_symbols > 0 else 0.0
+   ```
+   Example value: `27.2`. **Note**: this is `symbols_complete / total`, not `(complete + partial) / total`. The frontend coverage map needs this for the heatmap cell color decision.
+
+3. **Verify `status` field exists on each day in `GET /api/compiler/gaps`**. The current code already adds this — see `backend/app/api/routes/compiler.py` `gap_days.append(...)` block. The rule is `"missing"` if `completeness_pct == 0` else `"partial"`. **Action**: just confirm during Phase 2 that the field is still there (don't accidentally remove it). Locked rule matches existing behavior — no code change needed for #3, only #1 and #2.
+
+After applying #1 and #2 above and re-running the smoke tests against the live DB to confirm shapes, proceed to the auth work (`backend/data/admin_sessions.json`, `POST /api/admin/login`, `Depends(require_admin)`, etc.).
+
+### Phase 1 verification — user decisions locked
+
+| Decision | Resolution |
+|---|---|
+| **Materialized view (TODO #1)** | **Defer until after Phase 4.** Get the slow version end-to-end first, then optimize once we know exactly what the UI hits. The current 3.7s coverage query is acceptable for an admin tool with a loading spinner. |
+| **Stale-without-heartbeat (TODO #2)** | **Fix in Phase 2.** Rule locked above. |
+| **Coverage `completeness_pct` field** | **Add in Phase 2** — see correction #2 above. |
+| **Gaps `status` field** | **Already present in current code** — verify during Phase 2, no change needed. |
+| **Phase 1 response shapes** | **Approved as-is** modulo the two corrections above. Frontend can be built against these shapes once Phase 2 corrections land. |
 
 ---
 
@@ -106,8 +144,13 @@
   - [x] `GET /api/compiler/jobs/{job_id}` — single job
   - [x] `GET /api/compiler/symbols/{symbol}` — symbol inspector
   - [x] Register router in `backend/app/main.py`
-  - [x] Smoke test each endpoint via psql (curl pending user verification)
-- [ ] **Phase 2** — Auth: random token sessions
+  - [x] Smoke test each endpoint via psql
+  - [x] User verified response shapes (with 2 corrections deferred to Phase 2)
+- [ ] **Phase 2** — Deferred Phase 1 corrections + auth
+  - [ ] **Apply `is_stale` rule fix** (TODO #2 — locked rule above)
+  - [ ] **Add `completeness_pct` to coverage day objects**
+  - [ ] **Verify `status` field still present in /gaps**
+  - [ ] **Re-smoke test corrected endpoints**
   - [ ] `backend/app/services/admin_sessions.py` — flat-file token store
   - [ ] `backend/data/.gitignore`
   - [ ] `ADMIN_PASSPHRASE` env var loading via `core/config.py`
@@ -271,8 +314,16 @@ GROUP BY 1, 2, 3;
 ```
 Then the coverage endpoint just queries this view and groups by `day` — should be sub-100ms. Defer to after the frontend works against the slow version so we know what we're optimizing for.
 
-### TODO #2 — `is_stale` for jobs without heartbeat
-The current `is_stale` logic requires a non-null `last_heartbeat`. This means jobs that ran before the column existed (or jobs whose `metl.py` failed before `job_increment()` was first called) will never be marked stale. **Possible fix:** also flag as stale if `status = 'running' AND last_heartbeat IS NULL AND started_at < NOW() - INTERVAL '2 hours'`. Confirm semantics with user before changing.
+### TODO #2 — `is_stale` for jobs without heartbeat — ✅ RESOLVED, applies in Phase 2
+**Locked rule** (apply as first action in Phase 2):
+```sql
+(status = 'running' AND (
+    (last_heartbeat IS NOT NULL AND last_heartbeat < NOW() - INTERVAL '2 hours')
+    OR
+    (last_heartbeat IS NULL AND started_at < NOW() - INTERVAL '2 hours')
+)) AS is_stale
+```
+See "Phase 2 entry tasks" in the Current State section above.
 
 ### TODO #3 — `total_rows` off-by-one (1441 instead of 1440)
 The day-range filter includes a boundary minute. Cosmetic, fix when adding the materialized view.
