@@ -6,9 +6,9 @@
 
 ## Current State
 
-**Last updated:** Phase 4 complete. Coverage page replaces the Phase 3 placeholder with the real KPI cards + calendar heatmap + gap table, fetching from /api/compiler/coverage and /api/compiler/gaps in parallel. Pre-Phase-4 cleanup also done: dirty schema.sql + metl.py committed, hardcoded amber accent removed (compiler now follows the active theme).
-**Next action:** Phase 5 — Jobs page. Table from /api/compiler/jobs with status badges (COMPLETE / RUNNING / FAILED / STALE), 10s polling when any job is running, progress bar for in-flight jobs.
-**Resume command for next session:** "Resume the compiler build from `docs/builds/compiler-page-build.md`. Start at Phase 5 (Jobs page)."
+**Last updated:** Phase 5 complete. Jobs page renders the real run history table with status badges, progress bars, polling, and live-updating duration column.
+**Next action:** Phase 6 — Symbols page (the last phase). Search input + 15 per-endpoint completeness bars + 30-day row count sparkline. Reads from /api/compiler/symbols/{symbol}.
+**Resume command for next session:** "Resume the compiler build from `docs/builds/compiler-page-build.md`. Start at Phase 6 (Symbols page)."
 
 ### Phase 2 entry tasks (deferred Phase 1 corrections — apply BEFORE auth work)
 
@@ -181,10 +181,18 @@ After applying #1 and #2 above and re-running the smoke tests against the live D
   - [x] Calendar heatmap component (14x14 cells, reversed oldest-first, color-coded by completeness_pct)
   - [x] Gap table with status badges, complete/total, completeness_pct
   - [x] Verified via `next build` — coverage page compiles, route still listed
-- [ ] **Phase 5** — Jobs page (`/compiler/jobs`)
-  - [ ] Job table with status badges
-  - [ ] 10s polling when any job running
-  - [ ] Progress bar for in-flight jobs
+- [x] **Phase 5** — Jobs page (`/compiler/jobs`)
+  - [x] TypeScript types matching FastAPI _serialize_job() output
+  - [x] Job table with status badges (COMPLETE / RUNNING / FAILED / STALE / CANCELLED / QUEUED)
+  - [x] STALE overrides RUNNING when is_stale === true
+  - [x] RUNNING badge has pulsing dot via @keyframes pulse-dot
+  - [x] 10s polling when any job has status === 'running'
+  - [x] document.visibilityState handling: pauses on tab hide, resumes with fetch on tab show
+  - [x] Live duration ticker: 1s setInterval bumps nowMs only while visible+running
+  - [x] Duration formatter: 12s / 2m 14s / 1h 22m / 1d 4h (matches build doc smoke test format)
+  - [x] Progress bar for in-flight jobs (4px tall, amber, with symbols_done/total label)
+  - [x] Hardcoded SOURCE_NAMES lookup (replace with API call if sources go dynamic)
+  - [x] Verified via `next build` — jobs page compiles, route still listed
 - [ ] **Phase 6** — Symbols page (`/compiler/symbols`)
   - [ ] Search input
   - [ ] Endpoint completeness bars (15 columns)
@@ -215,6 +223,7 @@ After applying #1 and #2 above and re-running the smoke tests against the live D
 | 3 | `frontend/app/compiler/(protected)/page.tsx` | Created — server redirect to /compiler/coverage |
 | 3 | `frontend/app/compiler/(protected)/coverage/page.tsx` | Created — Phase 4 placeholder |
 | 4 | `frontend/app/compiler/(protected)/coverage/page.tsx` | Replaced — real Coverage page (KPI cards, heatmap, gap table) |
+| 5 | `frontend/app/compiler/(protected)/jobs/page.tsx` | Replaced — real Jobs page (table, polling, live duration ticker) |
 | 3 | `frontend/app/compiler/(protected)/jobs/page.tsx` | Created — Phase 5 placeholder |
 | 3 | `frontend/app/compiler/(protected)/symbols/page.tsx` | Created — Phase 6 placeholder |
 
