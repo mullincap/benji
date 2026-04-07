@@ -2,14 +2,39 @@
 # ============================================================
 # Intraday Leaderboard Builder — VECTORIZED
 # Metric toggle: price / open_interest / volume
+#
+# Outputs (in order of authority, all per day):
+#   1. INSERT INTO market.leaderboards   ← canonical, source of truth
+#   2. Wide parquet master file          ← cache for the simulator
+#   3. Per-day CSV files                 ← optional debugging output
+#
+# Re-runs are checkpointed against market.leaderboards: a date is skipped
+# if it already has rows for the current (metric, anchor_hour) combination.
+# Use --force to bypass the checkpoint and reprocess every date.
+#
+# Each invocation creates a row in market.indexer_jobs and updates it
+# with progress (symbols_done, rows_written, last_heartbeat) as the loop
+# advances. Per-day failures increment a counter; the final job status
+# is "complete" if all dates succeeded, otherwise "failed" with an
+# error_msg listing the failures.
 # ============================================================
 
 import os
+import sys
+import json
 from pathlib import Path
 from tqdm import tqdm
 import pandas as pd
 from datetime import datetime
 import argparse
+
+# DB connection helper for indexer_jobs tracking + leaderboard writes.
+# Note: this MUST come after the existing `from config import` because the
+# config module is found via the legacy CWD-relative import that the cron
+# already uses. Adding parents[2] (project root) to sys.path lets us also
+# import from `pipeline.db.connection` without breaking the legacy import.
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+
 from config import (
     COMPILED_DIR, LOG_INDEXER, ensure_dirs,
     leaderboard_dir_for_metric,
@@ -92,6 +117,66 @@ parser.add_argument(
          "Default: 6."
 )
 
+# ─── Date range filter ──────────────────────────────────────────────────────
+# Optional. If supplied, only dates in [start, end] inclusive are processed.
+# Without these, every date in the parquet (or every date=* partition) is
+# processed, which is the legacy behaviour.
+parser.add_argument(
+    "--start",
+    type=str,
+    default=None,
+    help="Optional start date YYYY-MM-DD. If supplied, dates before this are skipped."
+)
+parser.add_argument(
+    "--end",
+    type=str,
+    default=None,
+    help="Optional end date YYYY-MM-DD inclusive. If supplied, dates after this are skipped."
+)
+
+# ─── Checkpointing + DB write toggles ───────────────────────────────────────
+parser.add_argument(
+    "--force",
+    action="store_true",
+    default=False,
+    help="Reprocess dates even if rows already exist in market.leaderboards. "
+         "Default: skip dates that already have rows for (metric, anchor_hour)."
+)
+parser.add_argument(
+    "--no-db-write",
+    action="store_true",
+    default=False,
+    dest="no_db_write",
+    help="Skip writing to market.leaderboards. Parquet/CSV output still happens. "
+         "Useful for testing the pivot logic without touching the DB."
+)
+
+# ─── Job tracking (mirrors metl.py shape) ───────────────────────────────────
+parser.add_argument(
+    "--job-id",
+    type=str,
+    default=None,
+    dest="job_id",
+    help="UUID of an existing market.indexer_jobs row to update. "
+         "If not provided, a new job row is created automatically."
+)
+parser.add_argument(
+    "--triggered-by",
+    type=str,
+    default="cli",
+    choices=["ui", "cli", "scheduler"],
+    dest="triggered_by",
+    help="Who triggered this run. Recorded in indexer_jobs.triggered_by."
+)
+parser.add_argument(
+    "--run-tag",
+    type=str,
+    default=None,
+    dest="run_tag",
+    help="Optional human label e.g. 'nightly' or 'backfill-march'. "
+         "Recorded in indexer_jobs.run_tag."
+)
+
 args = parser.parse_args()
 RANK_METRIC = args.metric.lower()
 if args.output_dir:
@@ -99,6 +184,262 @@ if args.output_dir:
 else:
     OUTPUT_DIR = leaderboard_dir_for_metric(RANK_METRIC)
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+
+# ─── DB write toggle ────────────────────────────────────────────────────────
+WRITE_TO_DB = not args.no_db_write
+# Variant column on market.leaderboards. Currently the only variant in use
+# is "close" — see backfill_leaderboards.py for the same constant. If we
+# ever add e.g. "vwap" or "twap", they would be separate variants.
+VARIANT = "close"
+
+
+# ============================================================
+# DB JOB TRACKING — market.indexer_jobs
+# All operations are best-effort: a DB failure must never interrupt the
+# existing parquet/CSV write path.
+# ============================================================
+def job_create(date_from, date_to, triggered_by="cli", run_tag=None,
+               params: dict | None = None):
+    """Insert a new indexer job row, return job_id UUID string."""
+    try:
+        from pipeline.db.connection import get_conn
+        conn = get_conn()
+        cur = conn.cursor()
+        cur.execute("""
+            INSERT INTO market.indexer_jobs
+                (job_type, status, metric, date_from, date_to,
+                 params, triggered_by, run_tag, started_at, last_heartbeat)
+            VALUES ('leaderboard', 'running', %s, %s, %s, %s::jsonb, %s, %s, NOW(), NOW())
+            RETURNING job_id
+        """, (
+            RANK_METRIC,
+            date_from,
+            date_to,
+            json.dumps(params or {}),
+            triggered_by,
+            run_tag,
+        ))
+        job_id = str(cur.fetchone()[0])
+        conn.commit()
+        cur.close()
+        conn.close()
+        print(f"   📋 Job created → {job_id}")
+        return job_id
+    except Exception as e:
+        print(f"⚠️ job_create failed → {e}")
+        return None
+
+
+def job_set_total(job_id, total_dates):
+    """Set symbols_total once the date list is known. We use this column to
+    record the number of dates in the run, since the indexer_jobs table has
+    no dedicated 'dates_total' column."""
+    if not job_id:
+        return
+    try:
+        from pipeline.db.connection import get_conn
+        conn = get_conn()
+        cur = conn.cursor()
+        cur.execute(
+            "UPDATE market.indexer_jobs SET symbols_total=%s, last_heartbeat=NOW() WHERE job_id=%s",
+            (total_dates, job_id),
+        )
+        conn.commit()
+        cur.close()
+        conn.close()
+    except Exception as e:
+        print(f"⚠️ job_set_total failed → {e}")
+
+
+def job_increment(job_id, rows_added):
+    """Atomically increment symbols_done by 1 and rows_written by rows_added,
+    and bump last_heartbeat. Called after each successful date OR each skipped
+    date — both count as 'progress' from the job's perspective."""
+    if not job_id:
+        return
+    try:
+        from pipeline.db.connection import get_conn
+        conn = get_conn()
+        cur = conn.cursor()
+        cur.execute("""
+            UPDATE market.indexer_jobs
+            SET symbols_done   = symbols_done + 1,
+                rows_written   = rows_written + %s,
+                last_heartbeat = NOW()
+            WHERE job_id = %s
+        """, (rows_added, job_id))
+        conn.commit()
+        cur.close()
+        conn.close()
+    except Exception as e:
+        print(f"⚠️ job_increment failed → {e}")
+
+
+def job_complete(job_id):
+    """Mark job as complete. Called only when all dates succeeded."""
+    if not job_id:
+        return
+    try:
+        from pipeline.db.connection import get_conn
+        conn = get_conn()
+        cur = conn.cursor()
+        cur.execute("""
+            UPDATE market.indexer_jobs
+            SET status='complete', completed_at=NOW(), last_heartbeat=NOW()
+            WHERE job_id=%s
+        """, (job_id,))
+        conn.commit()
+        cur.close()
+        conn.close()
+        print(f"   ✅ Job complete → {job_id}")
+    except Exception as e:
+        print(f"⚠️ job_complete failed → {e}")
+
+
+def job_fail(job_id, error_msg):
+    """Mark job as failed with error message. Called when one or more dates
+    failed (per-day failures are aggregated into the message by the caller)
+    or when something catastrophic happened outside the loop."""
+    if not job_id:
+        return
+    try:
+        from pipeline.db.connection import get_conn
+        conn = get_conn()
+        cur = conn.cursor()
+        cur.execute("""
+            UPDATE market.indexer_jobs
+            SET status='failed', completed_at=NOW(), last_heartbeat=NOW(), error_msg=%s
+            WHERE job_id=%s
+        """, (str(error_msg)[:2000], job_id))
+        conn.commit()
+        cur.close()
+        conn.close()
+        print(f"   ❌ Job failed → {job_id}")
+    except Exception as e:
+        print(f"⚠️ job_fail failed → {e}")
+
+
+# ============================================================
+# DB CHECKPOINT + LEADERBOARD WRITE
+# ============================================================
+# Module-level cache: built lazily on first need, reused across days.
+# binance_id (e.g. "BTCUSDT") → symbol_id (integer FK).
+_SYMBOL_MAP_CACHE: dict[str, int] | None = None
+
+
+def _build_symbol_map() -> dict[str, int]:
+    global _SYMBOL_MAP_CACHE
+    if _SYMBOL_MAP_CACHE is not None:
+        return _SYMBOL_MAP_CACHE
+    try:
+        from pipeline.db.connection import get_conn
+        conn = get_conn()
+        cur = conn.cursor()
+        cur.execute("SELECT binance_id, symbol_id FROM market.symbols WHERE binance_id IS NOT NULL")
+        _SYMBOL_MAP_CACHE = {row[0]: row[1] for row in cur.fetchall()}
+        cur.close()
+        conn.close()
+        print(f"   🔑 Symbol map cached: {len(_SYMBOL_MAP_CACHE)} entries")
+    except Exception as e:
+        print(f"⚠️ _build_symbol_map failed → {e}")
+        _SYMBOL_MAP_CACHE = {}
+    return _SYMBOL_MAP_CACHE
+
+
+def date_already_in_db(date_str: str) -> int:
+    """Return the count of rows already in market.leaderboards for this
+    date + RANK_METRIC + ANCHOR_HOUR. Returns -1 on DB failure (which the
+    caller treats as 'fall through and process anyway')."""
+    try:
+        from pipeline.db.connection import get_conn
+        conn = get_conn()
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT COUNT(*) FROM market.leaderboards
+            WHERE metric = %s
+              AND variant = %s
+              AND anchor_hour = %s
+              AND timestamp_utc >= %s::date
+              AND timestamp_utc <  (%s::date + INTERVAL '1 day')
+        """, (RANK_METRIC, VARIANT, ANCHOR_HOUR, date_str, date_str))
+        existing_rows = cur.fetchone()[0]
+        cur.close()
+        conn.close()
+        return existing_rows
+    except Exception as e:
+        tqdm.write(f"⚠ checkpoint DB check failed ({e}) — processing anyway")
+        return -1
+
+
+def write_leaders_to_db(leaders_long: pd.DataFrame, date_str: str) -> int:
+    """Insert the long-format leaders dataframe into market.leaderboards.
+    Called BEFORE the pivot so we still have pct_change_midnight available.
+
+    Expected columns on `leaders_long`:
+        - minute (timestamp)
+        - symbol (string, binance_id format e.g. 'BTCUSDT')
+        - rank (int)
+        - pct_change_midnight (float)
+
+    Returns the number of rows successfully inserted (after ON CONFLICT
+    DO NOTHING dedupe). Returns 0 on any failure — does NOT raise.
+    """
+    try:
+        from pipeline.db.connection import get_conn
+        from psycopg2.extras import execute_values
+    except Exception as e:
+        tqdm.write(f"⚠ DB write skipped for {date_str}: import failed ({e})")
+        return 0
+
+    sym_map = _build_symbol_map()
+    if not sym_map:
+        tqdm.write(f"⚠ DB write skipped for {date_str}: empty symbol map")
+        return 0
+
+    rows = []
+    skipped_no_symbol_id = 0
+    for r in leaders_long.itertuples(index=False):
+        sid = sym_map.get(getattr(r, "symbol"))
+        if sid is None:
+            skipped_no_symbol_id += 1
+            continue
+        rows.append((
+            r.minute,
+            RANK_METRIC,
+            VARIANT,
+            ANCHOR_HOUR,
+            int(r.rank),
+            sid,
+            None if pd.isna(getattr(r, "pct_change_midnight", None)) else float(r.pct_change_midnight),
+        ))
+
+    if not rows:
+        tqdm.write(f"⚠ DB write for {date_str}: 0 rows after symbol mapping (skipped {skipped_no_symbol_id})")
+        return 0
+
+    try:
+        conn = get_conn()
+        cur = conn.cursor()
+        result = execute_values(cur, """
+            INSERT INTO market.leaderboards
+                (timestamp_utc, metric, variant, anchor_hour, rank, symbol_id, pct_change)
+            VALUES %s
+            ON CONFLICT (timestamp_utc, metric, variant, anchor_hour, rank) DO NOTHING
+            RETURNING timestamp_utc
+        """, rows, page_size=10_000, fetch=True)
+        inserted = len(result)
+        conn.commit()
+        cur.close()
+        conn.close()
+        if skipped_no_symbol_id > 0:
+            tqdm.write(f"  💾 DB: {inserted:,} rows inserted ({skipped_no_symbol_id:,} skipped — symbol not in market.symbols)")
+        else:
+            tqdm.write(f"  💾 DB: {inserted:,} rows inserted")
+        return inserted
+    except Exception as e:
+        tqdm.write(f"⚠ DB write failed for {date_str}: {e}")
+        return 0
+
 
 # ============================================================
 # VALIDATE METRIC
@@ -162,22 +503,95 @@ else:
     print(f"📂 Partitions found: {len(partitions)}\n")
     _date_groups = partitions
 
+# ─── Apply --start / --end filter to _date_groups ───────────────────────────
+# Both bounds are inclusive. Filtering happens before the main loop so the
+# tqdm progress bar reflects only the dates we'll actually process.
+def _date_of(group) -> "datetime.date":
+    """Extract a python date from a _date_groups entry, regardless of mode."""
+    if USE_SINGLE_FILE:
+        return group  # already a python date from .dt.date.unique()
+    # Partition mode: group is a Path like date=2025-04-05
+    return datetime.strptime(group.name.split("=")[1], "%Y-%m-%d").date()
+
+if args.start or args.end:
+    _start_date = datetime.strptime(args.start, "%Y-%m-%d").date() if args.start else None
+    _end_date   = datetime.strptime(args.end,   "%Y-%m-%d").date() if args.end   else None
+    _before = len(_date_groups)
+    _date_groups = [
+        g for g in _date_groups
+        if (_start_date is None or _date_of(g) >= _start_date)
+           and (_end_date is None or _date_of(g) <= _end_date)
+    ]
+    print(f"📅 Date filter: {args.start or 'beginning'} → {args.end or 'end'} "
+          f"({len(_date_groups)} of {_before} dates kept)\n")
+
+# ============================================================
+# JOB TRACKING — create row in market.indexer_jobs for this run
+# ============================================================
+# Either reuse the user-supplied --job-id (e.g. when invoked by the UI)
+# or create a fresh row. Failures are tolerated — job_id may be None and
+# all subsequent helpers no-op when given None.
+_first_date = _date_of(_date_groups[0]) if _date_groups else None
+_last_date  = _date_of(_date_groups[-1]) if _date_groups else None
+
+JOB_ID = args.job_id
+if JOB_ID is None:
+    JOB_ID = job_create(
+        date_from=_first_date,
+        date_to=_last_date,
+        triggered_by=args.triggered_by,
+        run_tag=args.run_tag,
+        params={
+            "metric": RANK_METRIC,
+            "anchor_hour": ANCHOR_HOUR,
+            "deployment_start_hour": DEPLOYMENT_START_HOUR,
+            "index_lookback": INDEX_LOOKBACK,
+            "force": bool(args.force),
+            "no_db_write": bool(args.no_db_write),
+            "parquet_path": str(args.parquet_path) if args.parquet_path else None,
+        },
+    )
+
+job_set_total(JOB_ID, len(_date_groups))
+
+# Per-day failure tracking. Used to decide final job status (complete vs failed)
+# and to populate error_msg with up to the first 5 failure summaries.
+_failure_count = 0
+_failure_summaries: list[str] = []
+
 # ============================================================
 # LOOP DATES
 # ============================================================
 
 for _day_key in tqdm(_date_groups, desc="Processing days"):
 
+    # ─── Resolve date_str up-front so the checkpoint and per-iteration
+    # diagnostics have it available before any processing happens. ────
+    if USE_SINGLE_FILE:
+        date_str = str(_day_key)
+    else:
+        date_str = _day_key.name.split("=")[1]
+
+    # ─── DB checkpoint ─────────────────────────────────────────────────
+    # If this date already has rows in market.leaderboards for the current
+    # (metric, variant, anchor_hour) combination, skip it unless --force is
+    # set. The DB is the canonical source of truth — file existence is not
+    # checked. A DB error in the checkpoint query falls through and processes
+    # the date anyway (better to do duplicate work than skip a real gap).
+    if not args.force and WRITE_TO_DB:
+        existing_rows = date_already_in_db(date_str)
+        if existing_rows > 0:
+            tqdm.write(f"⏭  {date_str} → skipping ({existing_rows:,} rows already in DB, use --force to reprocess)")
+            job_increment(JOB_ID, 0)  # progress without rows
+            continue
+
     try:
 
         if USE_SINGLE_FILE:
-            import datetime as _dt
-            date_str = str(_day_key)
             df = _master_df[_master_df["_date"] == _day_key][[
                 "timestamp_utc", "symbol", RANK_METRIC
             ]].copy()
         else:
-            date_str = _day_key.name.split("=")[1]
             df = pd.read_parquet(
                 _day_key,
                 columns=["timestamp_utc", "symbol", RANK_METRIC]
@@ -413,6 +827,17 @@ for _day_key in tqdm(_date_groups, desc="Processing days"):
         leaders = df[df["rank"] <= TOP_N]
 
         # ----------------------------------------------------
+        # WRITE TO DB (long format, before the pivot)
+        # ----------------------------------------------------
+        # The pivot below collapses long → wide and discards pct_change_midnight.
+        # We write the long-format rows to market.leaderboards here while
+        # everything is still available. Failures are non-fatal — the parquet/CSV
+        # write below still happens regardless.
+        _rows_inserted_today = 0
+        if WRITE_TO_DB:
+            _rows_inserted_today = write_leaders_to_db(leaders, date_str)
+
+        # ----------------------------------------------------
         # Pivot leaderboard
         # ----------------------------------------------------
 
@@ -492,9 +917,19 @@ for _day_key in tqdm(_date_groups, desc="Processing days"):
             f"{len(out_df)} minutes"
         )
 
+        # Per-day success — bump job progress with rows actually inserted
+        # this iteration (0 if --no-db-write or write_leaders_to_db failed).
+        job_increment(JOB_ID, _rows_inserted_today)
+
     except Exception as e:
         _day_label = date_str if 'date_str' in dir() else str(_day_key)
         tqdm.write(f"❌ Failed → {_day_label} | {e}")
+        _failure_count += 1
+        if len(_failure_summaries) < 5:
+            _failure_summaries.append(f"{_day_label}: {type(e).__name__}: {e}")
+        # Still call job_increment so the progress bar advances honestly —
+        # the job knows this date was attempted, just didn't write any rows.
+        job_increment(JOB_ID, 0)
 
 
 # ============================================================
@@ -527,6 +962,23 @@ if BUILD_MASTER_FILE:
         )
 
 # ============================================================
+# JOB FINAL STATUS — option (c): counter-based decision
+# ============================================================
+# If any per-day failures happened, the job is marked failed with up to
+# the first 5 failures listed in error_msg. Otherwise it's complete.
+# This is a more honest signal than "any failure = fatal" or "swallow all
+# failures" — the master file may still have been built with the surviving
+# days, and the user needs to know whether there's anything to investigate.
+if _failure_count > 0:
+    _summary = (
+        f"{_failure_count} of {len(_date_groups)} dates failed. "
+        f"First failures: " + " | ".join(_failure_summaries)
+    )
+    job_fail(JOB_ID, _summary)
+else:
+    job_complete(JOB_ID)
+
+# ============================================================
 # DONE
 # ============================================================
 
@@ -536,3 +988,5 @@ print("\n✅ Leaderboard build complete")
 print("Start :", script_start)
 print("End   :", end_time)
 print("Elapsed:", end_time - script_start)
+if _failure_count > 0:
+    print(f"⚠️  {_failure_count} of {len(_date_groups)} dates failed — see indexer_jobs row {JOB_ID} for details")

@@ -828,6 +828,7 @@ def run(min_mcap: float, freq_width: int, marketcap_dir: Path,
         sample_interval: int = SAMPLE_INTERVAL_MINUTES, leaderboard_index: int = LEADERBOARD_INDEX,
         audit: bool = False, audit_script: Path = None, audit_args: list = None,
         confluence_path: Path = None, drop_unverified: bool = False, max_mcap: float = 0.0,
+        force: bool = False,
 ):
     mcap_label      = f"{int(min_mcap / 1_000_000)}M"
     marketcap_path  = marketcap_dir / "marketcap_daily.parquet"
@@ -872,6 +873,11 @@ def run(min_mcap: float, freq_width: int, marketcap_dir: Path,
                 "--output-dir",              str(BASE_DIR),
                 "--parquet-path",            LEADERBOARD_PARQUET_PATH,
             ]
+            # Auto-build (file missing) does NOT pass --force — that's the
+            # whole point of the checkpoint. The user-driven --force flag is
+            # propagated only for explicit rebuild requests from the UI.
+            if force:
+                _build_cmd.append("--force")
             _cmd_str = " ".join(_build_cmd)
             log.info(f"  CMD: {_cmd_str}")
             _sp.run(_build_cmd, check=True)
@@ -1245,6 +1251,10 @@ if __name__ == "__main__":
                              "(resolves to deployment_start_hour hours). "
                              "If start_hour - N < 0, the window wraps to the previous "
                              "calendar day. Default: 6.")
+    parser.add_argument("--force", action="store_true", default=False,
+                        help="Force a leaderboard rebuild even if the parquet exists. "
+                             "Passes --force through to build_intraday_leaderboard.py "
+                             "so it bypasses its own DB checkpoint as well.")
     args = parser.parse_args()
 
     audit_args = []
@@ -1300,6 +1310,7 @@ if __name__ == "__main__":
         confluence_path = Path(args.confluence) if args.confluence else None,
         drop_unverified = args.drop_unverified,
         max_mcap        = args.max_mcap,
+        force           = args.force,
     )
 
     elapsed = _time.time() - _start

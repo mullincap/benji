@@ -216,6 +216,7 @@ CREATE TABLE IF NOT EXISTS market.indexer_jobs (
     rows_written        BIGINT      DEFAULT 0,
     started_at          TIMESTAMPTZ,
     completed_at        TIMESTAMPTZ,
+    last_heartbeat      TIMESTAMPTZ,
     error_msg           TEXT,
     triggered_by        TEXT        DEFAULT 'ui'
                             CHECK (triggered_by IN ('ui', 'cli', 'scheduler')),
