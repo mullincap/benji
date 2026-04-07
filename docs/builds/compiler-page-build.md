@@ -6,9 +6,9 @@
 
 ## Current State
 
-**Last updated:** Phase 1 complete + verified by user. Phase 2 decisions captured below.
-**Next action:** Phase 2 — auth + apply 3 deferred Phase 1 corrections (see "Phase 2 entry tasks" below). **Do not skip these corrections** — they were verified and locked but not yet applied to code.
-**Resume command for next session:** "Resume the compiler build from `docs/builds/compiler-page-build.md`. Start with the Phase 2 entry tasks (the 3 deferred Phase 1 corrections), then proceed to the auth work."
+**Last updated:** Phase 2 complete. Deferred Phase 1 corrections applied + admin auth fully implemented and smoke-tested.
+**Next action:** Phase 3 — frontend shell (compiler layout + login + sidebar nav + redirect from /compiler to /compiler/coverage). Awaiting user ack before starting.
+**Resume command for next session:** "Resume the compiler build from `docs/builds/compiler-page-build.md`. Start at Phase 3 (frontend shell)."
 
 ### Phase 2 entry tasks (deferred Phase 1 corrections — apply BEFORE auth work)
 
@@ -146,18 +146,19 @@ After applying #1 and #2 above and re-running the smoke tests against the live D
   - [x] Register router in `backend/app/main.py`
   - [x] Smoke test each endpoint via psql
   - [x] User verified response shapes (with 2 corrections deferred to Phase 2)
-- [ ] **Phase 2** — Deferred Phase 1 corrections + auth
-  - [ ] **Apply `is_stale` rule fix** (TODO #2 — locked rule above)
-  - [ ] **Add `completeness_pct` to coverage day objects**
-  - [ ] **Verify `status` field still present in /gaps**
-  - [ ] **Re-smoke test corrected endpoints**
-  - [ ] `backend/app/services/admin_sessions.py` — flat-file token store
-  - [ ] `backend/data/.gitignore`
-  - [ ] `ADMIN_PASSPHRASE` env var loading via `core/config.py`
-  - [ ] `POST /api/admin/login` — accepts passphrase, sets cookie
-  - [ ] `POST /api/admin/logout` — clears cookie + deletes token
-  - [ ] `Depends(require_admin)` dependency that compiler routes can use
-  - [ ] Wire compiler routes to require admin
+- [x] **Phase 2** — Deferred Phase 1 corrections + auth
+  - [x] **Apply `is_stale` rule fix** (TODO #2 — locked rule above)
+  - [x] **Add `completeness_pct` to coverage day objects**
+  - [x] **Verify `status` field still present in /gaps**
+  - [x] **Re-smoke test corrected endpoints** (psql against live DB — 27.2% computed for 2026-03-19, matches the user's example value exactly)
+  - [x] `backend/app/services/admin_sessions.py` — flat-file token store
+  - [x] `backend/data/.gitignore`
+  - [x] `ADMIN_PASSPHRASE` env var loading via `core/config.py`
+  - [x] `POST /api/admin/login` — accepts passphrase, sets cookie
+  - [x] `POST /api/admin/logout` — clears cookie + deletes token
+  - [x] `Depends(require_admin)` dependency that compiler routes can use
+  - [x] Wire compiler routes to require admin (router-level dependency)
+  - [x] Smoke test full auth flow with FastAPI TestClient (8/8 tests pass)
 - [ ] **Phase 3** — Frontend shell
   - [ ] `frontend/app/compiler/layout.tsx` — sidebar + topbar + auth check
   - [ ] `frontend/app/compiler/login/page.tsx` — passphrase form
@@ -187,6 +188,12 @@ After applying #1 and #2 above and re-running the smoke tests against the live D
 | 1 | `backend/app/db.py` | Created — psycopg2 helper + `get_cursor()` dependency |
 | 1 | `backend/app/api/routes/compiler.py` | Created — 5 read-only endpoints |
 | 1 | `backend/app/main.py` | Modified — registered compiler router |
+| 2 | `backend/app/api/routes/compiler.py` | Modified — is_stale rule fix + completeness_pct + router-level Depends(require_admin) |
+| 2 | `backend/app/services/admin_sessions.py` | Created — flat-file token store with fcntl locks |
+| 2 | `backend/app/api/routes/admin.py` | Created — login/logout/whoami + require_admin dependency |
+| 2 | `backend/app/main.py` | Modified — registered admin_router |
+| 2 | `backend/app/core/config.py` | Modified — added ADMIN_PASSPHRASE + ADMIN_SESSIONS_FILE |
+| 2 | `backend/data/.gitignore` | Created — excludes admin_sessions.json from git |
 
 ---
 
@@ -314,8 +321,8 @@ GROUP BY 1, 2, 3;
 ```
 Then the coverage endpoint just queries this view and groups by `day` — should be sub-100ms. Defer to after the frontend works against the slow version so we know what we're optimizing for.
 
-### TODO #2 — `is_stale` for jobs without heartbeat — ✅ RESOLVED, applies in Phase 2
-**Locked rule** (apply as first action in Phase 2):
+### TODO #2 — `is_stale` for jobs without heartbeat — ✅ RESOLVED, applied in Phase 2 (commit 5cbb131)
+**Locked rule** (now in `_JOB_SELECT`):
 ```sql
 (status = 'running' AND (
     (last_heartbeat IS NOT NULL AND last_heartbeat < NOW() - INTERVAL '2 hours')
@@ -323,7 +330,7 @@ Then the coverage endpoint just queries this view and groups by `day` — should
     (last_heartbeat IS NULL AND started_at < NOW() - INTERVAL '2 hours')
 )) AS is_stale
 ```
-See "Phase 2 entry tasks" in the Current State section above.
+Verified live: test job `5cda1821-...` now correctly returns `is_stale=true`.
 
 ### TODO #3 — `total_rows` off-by-one (1441 instead of 1440)
 The day-range filter includes a boundary minute. Cosmetic, fix when adding the materialized view.
