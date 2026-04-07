@@ -6,9 +6,9 @@
 
 ## Current State
 
-**Last updated:** Phase 3 complete. Frontend shell + auth flow built using Next.js route groups (Option A). All 5 compiler routes compile cleanly via `next build`. Placeholder pages render in the protected layout for Phases 4-6 to fill in.
-**Next action:** Phase 4 — Coverage page (KPI cards + calendar heatmap + gap table). Replaces the placeholder in `app/compiler/(protected)/coverage/page.tsx`.
-**Resume command for next session:** "Resume the compiler build from `docs/builds/compiler-page-build.md`. Start at Phase 4 (Coverage page)."
+**Last updated:** Phase 4 complete. Coverage page replaces the Phase 3 placeholder with the real KPI cards + calendar heatmap + gap table, fetching from /api/compiler/coverage and /api/compiler/gaps in parallel. Pre-Phase-4 cleanup also done: dirty schema.sql + metl.py committed, hardcoded amber accent removed (compiler now follows the active theme).
+**Next action:** Phase 5 — Jobs page. Table from /api/compiler/jobs with status badges (COMPLETE / RUNNING / FAILED / STALE), 10s polling when any job is running, progress bar for in-flight jobs.
+**Resume command for next session:** "Resume the compiler build from `docs/builds/compiler-page-build.md`. Start at Phase 5 (Jobs page)."
 
 ### Phase 2 entry tasks (deferred Phase 1 corrections — apply BEFORE auth work)
 
@@ -173,10 +173,14 @@ After applying #1 and #2 above and re-running the smoke tests against the live D
   - [x] `backend/requirements.txt` — added `psycopg2-binary==2.9.11`
   - [x] Verified via `next build` — all 5 compiler routes compile and appear in route table
   - [x] TypeScript clean (`tsc --noEmit` exit 0)
-- [ ] **Phase 4** — Coverage page (`/compiler/coverage`)
-  - [ ] 4 KPI cards
-  - [ ] Calendar heatmap component
-  - [ ] Gap table
+- [x] **Phase 4** — Coverage page (`/compiler/coverage`)
+  - [x] TypeScript types matching FastAPI response shapes (CoverageDay/Response, GapDay/Response)
+  - [x] Parallel fetch via Promise.all with credentials: 'include'
+  - [x] Loading + error states (401 → "Session expired", non-2xx, network errors)
+  - [x] 4 KPI cards: Total Symbols / Days Complete / Days With Gaps / Days Missing
+  - [x] Calendar heatmap component (14x14 cells, reversed oldest-first, color-coded by completeness_pct)
+  - [x] Gap table with status badges, complete/total, completeness_pct
+  - [x] Verified via `next build` — coverage page compiles, route still listed
 - [ ] **Phase 5** — Jobs page (`/compiler/jobs`)
   - [ ] Job table with status badges
   - [ ] 10s polling when any job running
@@ -210,6 +214,7 @@ After applying #1 and #2 above and re-running the smoke tests against the live D
 | 3 | `frontend/app/compiler/(protected)/layout.tsx` | Created — whoami check + redirect + Topbar + inline CompilerSidebar |
 | 3 | `frontend/app/compiler/(protected)/page.tsx` | Created — server redirect to /compiler/coverage |
 | 3 | `frontend/app/compiler/(protected)/coverage/page.tsx` | Created — Phase 4 placeholder |
+| 4 | `frontend/app/compiler/(protected)/coverage/page.tsx` | Replaced — real Coverage page (KPI cards, heatmap, gap table) |
 | 3 | `frontend/app/compiler/(protected)/jobs/page.tsx` | Created — Phase 5 placeholder |
 | 3 | `frontend/app/compiler/(protected)/symbols/page.tsx` | Created — Phase 6 placeholder |
 
