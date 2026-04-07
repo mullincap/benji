@@ -25,3 +25,4 @@ pipeline/**/__pycache__/
 pipeline/**/*.pyc
 checkpoint_*.txt
 *.log
+.claude/
