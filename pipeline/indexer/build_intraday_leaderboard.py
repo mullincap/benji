@@ -28,12 +28,20 @@ import pandas as pd
 from datetime import datetime
 import argparse
 
-# DB connection helper for indexer_jobs tracking + leaderboard writes.
-# Note: this MUST come after the existing `from config import` because the
-# config module is found via the legacy CWD-relative import that the cron
-# already uses. Adding parents[2] (project root) to sys.path lets us also
-# import from `pipeline.db.connection` without breaking the legacy import.
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+# Two sys.path entries are needed:
+#   - parents[1] = pipeline/      → for the legacy `from config import ...`
+#                                   (config.py lives at pipeline/config.py).
+#                                   The original script relied on this being
+#                                   CWD-relative, which silently broke when
+#                                   the cron invoked the script via absolute
+#                                   path. Adding it explicitly fixes that bug.
+#   - parents[2] = project root   → for `from pipeline.db.connection import`
+_PIPELINE_DIR = str(Path(__file__).resolve().parents[1])
+_PROJECT_ROOT = str(Path(__file__).resolve().parents[2])
+if _PIPELINE_DIR not in sys.path:
+    sys.path.insert(0, _PIPELINE_DIR)
+if _PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, _PROJECT_ROOT)
 
 from config import (
     COMPILED_DIR, LOG_INDEXER, ensure_dirs,
