@@ -1,0 +1,6 @@
+# Live runtime state — never commit
+admin_sessions.json
+admin_sessions.json.tmp
+
+# Allow this .gitignore itself
+!.gitignore

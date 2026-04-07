@@ -19,8 +19,17 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException, Query
 
 from ...db import get_cursor
+from .admin import require_admin
 
-router = APIRouter(prefix="/api/compiler", tags=["compiler"])
+# All compiler endpoints require an admin session. The dependency raises
+# HTTP 401 if the compiler_session cookie is missing or invalid. The
+# frontend layout uses GET /api/admin/whoami to detect this and redirect
+# to /compiler/login before rendering the protected pages.
+router = APIRouter(
+    prefix="/api/compiler",
+    tags=["compiler"],
+    dependencies=[Depends(require_admin)],
+)
 
 
 # ─── Per-symbol-day endpoint columns (used by /symbols/{symbol}) ──────────────

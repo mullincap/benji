@@ -34,6 +34,15 @@ class Settings(BaseSettings):
     DB_USER: str = "quant"
     DB_PASSWORD: str = ""  # required for local dev — set in .env or environment
 
+    # ─── Admin auth (compiler + indexer admin pages) ─────────────────────────
+    # ADMIN_PASSPHRASE: shared secret the admin types into the login form.
+    # ADMIN_SESSIONS_FILE: flat JSON file backing the random-token session
+    # store (see backend/app/services/admin_sessions.py). Defaults to
+    # backend/data/admin_sessions.json relative to this file's grandparent
+    # (the backend/ directory). The file is git-ignored.
+    ADMIN_PASSPHRASE: str = ""  # empty = login disabled (returns 503)
+    ADMIN_SESSIONS_FILE: Path = Path(__file__).resolve().parents[2] / "data" / "admin_sessions.json"
+
     class Config:
         env_file = str(_ENV_FILE)
 
