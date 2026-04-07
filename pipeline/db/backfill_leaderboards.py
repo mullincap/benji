@@ -10,12 +10,8 @@ Parquet format (wide):
   Columns: timestamp_utc, R1, R2, ..., R100
   Values:  symbol string (e.g. 'BTCUSDT') at each rank position
 
-Converts to long format:
-  (timestamp_utc, metric, variant, anchor_hour, rank, symbol_id, pct_change)
-
-pct_change is not in the leaderboard parquets (they store rank position only,
-not the underlying return). We insert NULL for pct_change — it can be
-backfilled later from futures_1m if needed.
+Uses pyarrow row-group reading to avoid OOM — never loads more than one
+row group (~100k rows) into memory at once regardless of file size.
 
 Safe to re-run — uses ON CONFLICT DO NOTHING.
 
@@ -23,11 +19,13 @@ Usage:
     python3 pipeline/db/backfill_leaderboards.py
 """
 
+import gc
 import sys
 import time
 from pathlib import Path
 
 import pandas as pd
+import pyarrow.parquet as pq
 from psycopg2.extras import execute_values
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
@@ -35,14 +33,14 @@ from pipeline.db.connection import get_conn
 
 LEADERBOARD_BASE = Path("/mnt/quant-data/leaderboards")
 METRIC_DIRS = {
-    "price":          LEADERBOARD_BASE / "price",
-    "open_interest":  LEADERBOARD_BASE / "open_interest",
-    "volume":         LEADERBOARD_BASE / "volume",
+    "price":         LEADERBOARD_BASE / "price",
+    "open_interest": LEADERBOARD_BASE / "open_interest",
+    "volume":        LEADERBOARD_BASE / "volume",
 }
 
-VARIANT      = "close"
-ANCHOR_HOUR  = 0
-BATCH_SIZE   = 50_000
+VARIANT     = "close"
+ANCHOR_HOUR = 0
+BATCH_SIZE  = 50_000
 
 
 def build_symbol_map(cur) -> dict:
@@ -53,46 +51,44 @@ def build_symbol_map(cur) -> dict:
 
 def process_file(parquet_path: Path, metric: str, symbol_map: dict, cur, conn) -> tuple[int, int]:
     """
-    Read one wide-format parquet file, process in date chunks to avoid OOM.
+    Read parquet one row group at a time using pyarrow.
+    Peak memory = one row group (~100k rows) not the full file.
     Returns (inserted, skipped).
     """
-    import gc
-    DATE_CHUNK_DAYS = 30  # process 30 days at a time to keep memory low
+    print(f"  Opening {parquet_path.name} (pyarrow row-group mode)...")
+    pf = pq.ParquetFile(parquet_path)
+    num_groups = pf.num_row_groups
 
-    print(f"  Reading {parquet_path.name} (chunked mode)...")
-    df = pd.read_parquet(parquet_path)
+    # Detect columns from schema — no full file load needed
+    schema_names = pf.schema_arrow.names
+    rank_cols = sorted(
+        [c for c in schema_names if c.startswith("R") and c[1:].isdigit()],
+        key=lambda x: int(x[1:])
+    )
 
-    if "timestamp_utc" not in df.columns:
-        print(f"    ⚠ No timestamp_utc column — skipping {parquet_path.name}")
+    if "timestamp_utc" not in schema_names:
+        print(f"    ⚠ No timestamp_utc column — skipping")
         return 0, 0
-
-    rank_cols = [c for c in df.columns if c.startswith("R") and c[1:].isdigit()]
     if not rank_cols:
-        print(f"    ⚠ No rank columns found — skipping {parquet_path.name}")
+        print(f"    ⚠ No rank columns found — skipping")
         return 0, 0
 
-    rank_cols_sorted = sorted(rank_cols, key=lambda x: int(x[1:]))
-    df["timestamp_utc"] = pd.to_datetime(df["timestamp_utc"], utc=True)
-    df["_date"] = df["timestamp_utc"].dt.date
-
-    dates = sorted(df["_date"].unique())
-    total_dates = len(dates)
-    print(f"    {len(df):,} timestamps × {len(rank_cols_sorted)} ranks × {total_dates} dates")
-    print(f"    Processing in {DATE_CHUNK_DAYS}-day chunks...")
+    cols_to_read = ["timestamp_utc"] + rank_cols
+    print(f"    {num_groups} row groups × {len(rank_cols)} ranks")
 
     inserted = 0
     skipped  = 0
     start    = time.time()
 
-    # Process in date chunks
-    for chunk_start in range(0, total_dates, DATE_CHUNK_DAYS):
-        chunk_dates = dates[chunk_start:chunk_start + DATE_CHUNK_DAYS]
-        chunk_df = df[df["_date"].isin(chunk_dates)][["timestamp_utc"] + rank_cols_sorted].copy()
+    for g in range(num_groups):
+        # Read one row group only — typically ~100k rows
+        chunk = pf.read_row_group(g, columns=cols_to_read).to_pandas()
+        chunk["timestamp_utc"] = pd.to_datetime(chunk["timestamp_utc"], utc=True)
 
-        # Melt this chunk only
-        df_long = chunk_df.melt(
+        # Melt wide → long for this chunk only
+        df_long = chunk.melt(
             id_vars="timestamp_utc",
-            value_vars=rank_cols_sorted,
+            value_vars=rank_cols,
             var_name="rank_col",
             value_name="symbol"
         )
@@ -112,7 +108,7 @@ def process_file(parquet_path: Path, metric: str, symbol_map: dict, cur, conn) -
                 ANCHOR_HOUR,
                 row.rank,
                 symbol_id,
-                None,
+                None,  # pct_change — not in leaderboard parquets
             ))
 
         if batch_rows:
@@ -127,15 +123,12 @@ def process_file(parquet_path: Path, metric: str, symbol_map: dict, cur, conn) -
             conn.commit()
 
         elapsed = time.time() - start
-        pct = min((chunk_start + DATE_CHUNK_DAYS) / total_dates * 100, 100)
-        print(f"    {min(chunk_start + DATE_CHUNK_DAYS, total_dates)}/{total_dates} dates ({pct:.0f}%) — {inserted:,} inserted — {elapsed:.0f}s")
+        pct = (g + 1) / num_groups * 100
+        print(f"    Group {g+1}/{num_groups} ({pct:.0f}%) — {inserted:,} inserted, {skipped:,} skipped — {elapsed:.0f}s")
 
-        # Free memory
-        del chunk_df, df_long, batch_rows
+        del chunk, df_long, batch_rows
         gc.collect()
 
-    del df
-    gc.collect()
     return inserted, skipped
 
 

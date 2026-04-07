@@ -50,9 +50,11 @@ error()   { echo -e "${RED}${BOLD}[✗]${RESET} $*"; exit 1; }
 # ─── Flags ────────────────────────────────────────────────────────────────────
 SSL_ONLY=false
 NO_DOMAIN=false
+SKIP_CRONS=false
 for arg in "$@"; do
-    [[ "$arg" == "--ssl-only" ]]  && SSL_ONLY=true
-    [[ "$arg" == "--no-domain" ]] && NO_DOMAIN=true
+    [[ "$arg" == "--ssl-only" ]]   && SSL_ONLY=true
+    [[ "$arg" == "--no-domain" ]]  && NO_DOMAIN=true
+    [[ "$arg" == "--skip-crons" ]] && SKIP_CRONS=true
 done
 
 # ─── Paths ────────────────────────────────────────────────────────────────────
@@ -596,7 +598,11 @@ success "App stack running"
 # ─────────────────────────────────────────────────────────────────────────────
 # 15. Pipeline cron jobs
 # ─────────────────────────────────────────────────────────────────────────────
-if [[ "$SSL_ONLY" == false ]]; then
+# Use --skip-crons on first provision to defer cron installation until after
+# the backfill completes. This prevents metl.py firing at 00:15 UTC and
+# competing for memory with the backfill scripts.
+# After backfill is verified: run setup.sh again without --skip-crons.
+if [[ "$SSL_ONLY" == false && "$SKIP_CRONS" == false ]]; then
     log "Installing pipeline cron jobs..."
     PYTHON="$VENV_DIR/bin/python"
     SECRETS="$DATA_ROOT/credentials/secrets.env"
