@@ -18,7 +18,7 @@ from requests.adapters import HTTPAdapter
 from bisect import bisect_left
 
 # DB connection helper for compiler_jobs tracking
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from pipeline.db.connection import get_conn
 
 SCRIPT_START_TIME = time.time()
