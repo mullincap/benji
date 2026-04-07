@@ -44,13 +44,18 @@ const THEMES: Record<string, ThemeDef> = {
       manager: '#C96060',
     },
   },
+  electric: {
+    label: 'Electric',
+    colors: {
+      compiler: '#00C2FF',
+      indexer: '#00E5C8',
+      simulator: '#39FF85',
+      allocator: '#A78BFF',
+      manager: '#7B5FFF',
+    },
+  },
   oxide: {
     label: 'Oxide',
-    colors: { compiler: '', indexer: '', simulator: '', allocator: '', manager: '' },
-    disabled: true,
-  },
-  polar: {
-    label: 'Polar',
     colors: { compiler: '', indexer: '', simulator: '', allocator: '', manager: '' },
     disabled: true,
   },
@@ -98,12 +103,20 @@ function applyBaseTheme(id: string) {
 // ─── Module items ────────────────────────────────────────────────────────────
 
 const MODULES: Array<{ key: ModuleKey; icon: string; href?: string }> = [
-  { key: 'compiler', icon: '</>' },
+  { key: 'compiler', icon: '</>', href: '/compiler' },
   { key: 'indexer', icon: '⌕' },
   { key: 'simulator', icon: '◴', href: '/simulator' },
   { key: 'allocator', icon: '⚙', href: '/trader' },
   { key: 'manager', icon: '▣' },
 ];
+
+// ─── Module accent overrides ────────────────────────────────────────────────
+// Some modules ignore the user's selected theme and force a specific accent.
+// The compiler module is hardcoded to amber regardless of which theme the
+// user picked — see docs/builds/compiler-page-build.md (locked decision).
+const MODULE_ACCENT_OVERRIDE: Partial<Record<ModuleKey, string>> = {
+  compiler: '#f0a500',
+};
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -112,9 +125,16 @@ function getActiveModule(pathname: string): ModuleKey | null {
   return match?.key ?? null;
 }
 
-function applyAccent(themeId: string, moduleKey: ModuleKey | null) {
+function resolveAccent(themeId: string, moduleKey: ModuleKey | null): string {
+  if (!moduleKey) return '';
+  const override = MODULE_ACCENT_OVERRIDE[moduleKey];
+  if (override) return override;
   const theme = THEMES[themeId] ?? THEMES.spectrum;
-  const color = moduleKey ? theme.colors[moduleKey] : '';
+  return theme.colors[moduleKey];
+}
+
+function applyAccent(themeId: string, moduleKey: ModuleKey | null) {
+  const color = resolveAccent(themeId, moduleKey);
   document.documentElement.style.setProperty('--module-accent', color || 'var(--t0)');
 }
 
@@ -134,7 +154,7 @@ export default function Topbar() {
 
   const activeModule = getActiveModule(pathname);
   const theme = THEMES[themeId] ?? THEMES.spectrum;
-  const accentColor = activeModule ? theme.colors[activeModule] : '';
+  const accentColor = resolveAccent(themeId, activeModule);
 
   // Load theme + target + base from localStorage on mount
   useEffect(() => {
@@ -425,7 +445,7 @@ export default function Topbar() {
             >
               {MODULES.map((item) => {
                 const isActive = item.href && pathname.startsWith(item.href);
-                const itemAccent = theme.colors[item.key];
+                const itemAccent = resolveAccent(themeId, item.key);
                 return (
                   <button
                     key={item.key}
@@ -475,10 +495,10 @@ export default function Topbar() {
           onClick={() => router.push('/')}
           style={{
             background: 'transparent', border: '1px solid var(--line)',
-            borderRadius: 3, padding: '3px 8px',
+            borderRadius: 3, height: 28, padding: '0 10px',
             fontSize: 9, color: 'var(--t3)', cursor: 'pointer',
             transition: 'all 0.15s ease',
-            display: 'flex', alignItems: 'center', gap: 4,
+            display: 'inline-flex', alignItems: 'center', gap: 4,
           }}
           onMouseEnter={e => { e.currentTarget.style.borderColor = 'var(--line2)'; e.currentTarget.style.color = 'var(--t2)'; }}
           onMouseLeave={e => { e.currentTarget.style.borderColor = 'var(--line)'; e.currentTarget.style.color = 'var(--t3)'; }}
