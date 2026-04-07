@@ -53,57 +53,69 @@ def build_symbol_map(cur) -> dict:
 
 def process_file(parquet_path: Path, metric: str, symbol_map: dict, cur, conn) -> tuple[int, int]:
     """
-    Read one wide-format parquet file, melt to long format, insert to DB.
+    Read one wide-format parquet file, process in date chunks to avoid OOM.
     Returns (inserted, skipped).
     """
-    print(f"  Reading {parquet_path.name}...")
+    import gc
+    DATE_CHUNK_DAYS = 30  # process 30 days at a time to keep memory low
+
+    print(f"  Reading {parquet_path.name} (chunked mode)...")
     df = pd.read_parquet(parquet_path)
 
     if "timestamp_utc" not in df.columns:
         print(f"    ⚠ No timestamp_utc column — skipping {parquet_path.name}")
         return 0, 0
 
-    # Identify rank columns: R1, R2, ... R100
     rank_cols = [c for c in df.columns if c.startswith("R") and c[1:].isdigit()]
     if not rank_cols:
         print(f"    ⚠ No rank columns found — skipping {parquet_path.name}")
         return 0, 0
 
     rank_cols_sorted = sorted(rank_cols, key=lambda x: int(x[1:]))
-    print(f"    {len(df):,} timestamps × {len(rank_cols_sorted)} ranks")
+    df["timestamp_utc"] = pd.to_datetime(df["timestamp_utc"], utc=True)
+    df["_date"] = df["timestamp_utc"].dt.date
 
-    # Melt wide → long
-    df_long = df[["timestamp_utc"] + rank_cols_sorted].melt(
-        id_vars="timestamp_utc",
-        value_vars=rank_cols_sorted,
-        var_name="rank_col",
-        value_name="symbol"
-    )
-    df_long = df_long.dropna(subset=["symbol"])
-    df_long["rank"] = df_long["rank_col"].str[1:].astype(int)
-    df_long["timestamp_utc"] = pd.to_datetime(df_long["timestamp_utc"], utc=True)
+    dates = sorted(df["_date"].unique())
+    total_dates = len(dates)
+    print(f"    {len(df):,} timestamps × {len(rank_cols_sorted)} ranks × {total_dates} dates")
+    print(f"    Processing in {DATE_CHUNK_DAYS}-day chunks...")
 
-    inserted    = 0
-    skipped     = 0
-    batch_rows  = []
+    inserted = 0
+    skipped  = 0
+    start    = time.time()
 
-    for row in df_long.itertuples(index=False):
-        symbol_id = symbol_map.get(row.symbol)
-        if symbol_id is None:
-            skipped += 1
-            continue
+    # Process in date chunks
+    for chunk_start in range(0, total_dates, DATE_CHUNK_DAYS):
+        chunk_dates = dates[chunk_start:chunk_start + DATE_CHUNK_DAYS]
+        chunk_df = df[df["_date"].isin(chunk_dates)][["timestamp_utc"] + rank_cols_sorted].copy()
 
-        batch_rows.append((
-            row.timestamp_utc,
-            metric,
-            VARIANT,
-            ANCHOR_HOUR,
-            row.rank,
-            symbol_id,
-            None,  # pct_change — not in leaderboard parquets
-        ))
+        # Melt this chunk only
+        df_long = chunk_df.melt(
+            id_vars="timestamp_utc",
+            value_vars=rank_cols_sorted,
+            var_name="rank_col",
+            value_name="symbol"
+        )
+        df_long = df_long.dropna(subset=["symbol"])
+        df_long["rank"] = df_long["rank_col"].str[1:].astype(int)
 
-        if len(batch_rows) >= BATCH_SIZE:
+        batch_rows = []
+        for row in df_long.itertuples(index=False):
+            symbol_id = symbol_map.get(row.symbol)
+            if symbol_id is None:
+                skipped += 1
+                continue
+            batch_rows.append((
+                row.timestamp_utc,
+                metric,
+                VARIANT,
+                ANCHOR_HOUR,
+                row.rank,
+                symbol_id,
+                None,
+            ))
+
+        if batch_rows:
             result = execute_values(cur, """
                 INSERT INTO market.leaderboards
                     (timestamp_utc, metric, variant, anchor_hour, rank, symbol_id, pct_change)
@@ -113,19 +125,17 @@ def process_file(parquet_path: Path, metric: str, symbol_map: dict, cur, conn) -
             """, batch_rows, fetch=True)
             inserted += len(result)
             conn.commit()
-            batch_rows = []
 
-    if batch_rows:
-        result = execute_values(cur, """
-            INSERT INTO market.leaderboards
-                (timestamp_utc, metric, variant, anchor_hour, rank, symbol_id, pct_change)
-            VALUES %s
-            ON CONFLICT (timestamp_utc, metric, variant, anchor_hour, rank) DO NOTHING
-            RETURNING timestamp_utc
-        """, batch_rows, fetch=True)
-        inserted += len(result)
-        conn.commit()
+        elapsed = time.time() - start
+        pct = min((chunk_start + DATE_CHUNK_DAYS) / total_dates * 100, 100)
+        print(f"    {min(chunk_start + DATE_CHUNK_DAYS, total_dates)}/{total_dates} dates ({pct:.0f}%) — {inserted:,} inserted — {elapsed:.0f}s")
 
+        # Free memory
+        del chunk_df, df_long, batch_rows
+        gc.collect()
+
+    del df
+    gc.collect()
     return inserted, skipped
 
 

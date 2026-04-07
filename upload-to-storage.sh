@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 set -euo pipefail
 
 # =============================================================================
@@ -97,26 +97,37 @@ fi
 echo ""
 echo "→ [3/5] Uploading leaderboard parquets..."
 
-declare -A LB_MAP=(
-    ["price"]="intraday_pct_leaderboard_price_top333_anchor0000_ALL.parquet leaderboard_price_top100_filtered_0M.parquet leaderboard_price_top100_filtered_0M_5m.parquet leaderboard_price_top100_filtered_0M_max2000M.parquet leaderboard_price_top100_filtered_0M_max2000M_5m.parquet"
-    ["open_interest"]="intraday_pct_leaderboard_open_interest_top333_anchor0000_ALL.parquet leaderboard_open_interest_top100_filtered_0M.parquet leaderboard_open_interest_top100_filtered_0M_5m.parquet leaderboard_open_interest_top100_filtered_0M_max2000M.parquet leaderboard_open_interest_top100_filtered_0M_max2000M_5m.parquet"
-)
-
 LB_UPLOADED=0
 LB_MISSING=0
-for metric in "${!LB_MAP[@]}"; do
-    for f in ${LB_MAP[$metric]}; do
-        src="$BASE/$f"
-        if [ -f "$src" ]; then
-            $S3 cp "$src" "s3://$BUCKET/leaderboards/$metric/$f" --no-progress
-            echo "  ✓ $metric/$f"
-            LB_UPLOADED=$((LB_UPLOADED + 1))
-        else
-            echo "  ⚠ Not found: $f"
-            LB_MISSING=$((LB_MISSING + 1))
-        fi
-    done
-done
+
+upload_lb() {
+    local metric="$1"
+    local f="$2"
+    local filepath="$BASE/$f"
+    if [ -f "$filepath" ]; then
+        $S3 cp "$filepath" "s3://$BUCKET/leaderboards/$metric/$f" --no-progress
+        echo "  ✓ $metric/$f"
+        LB_UPLOADED=$((LB_UPLOADED + 1))
+    else
+        echo "  ⚠ Not found: $f"
+        LB_MISSING=$((LB_MISSING + 1))
+    fi
+}
+
+# Price leaderboards
+upload_lb "price" "intraday_pct_leaderboard_price_top333_anchor0000_ALL.parquet"
+upload_lb "price" "leaderboard_price_top100_filtered_0M.parquet"
+upload_lb "price" "leaderboard_price_top100_filtered_0M_5m.parquet"
+upload_lb "price" "leaderboard_price_top100_filtered_0M_max2000M.parquet"
+upload_lb "price" "leaderboard_price_top100_filtered_0M_max2000M_5m.parquet"
+
+# Open interest leaderboards
+upload_lb "open_interest" "intraday_pct_leaderboard_open_interest_top333_anchor0000_ALL.parquet"
+upload_lb "open_interest" "leaderboard_open_interest_top100_filtered_0M.parquet"
+upload_lb "open_interest" "leaderboard_open_interest_top100_filtered_0M_5m.parquet"
+upload_lb "open_interest" "leaderboard_open_interest_top100_filtered_0M_max2000M.parquet"
+upload_lb "open_interest" "leaderboard_open_interest_top100_filtered_0M_max2000M_5m.parquet"
+
 echo "  Leaderboards: $LB_UPLOADED uploaded, $LB_MISSING not found"
 
 # ── [4] Pipeline working files ────────────────────────────────────────────
