@@ -292,8 +292,9 @@ def job_increment(job_id, rows_added):
         cur = conn.cursor()
         cur.execute("""
             UPDATE market.compiler_jobs
-            SET symbols_done = symbols_done + 1,
-                rows_written  = rows_written  + %s
+            SET symbols_done   = symbols_done + 1,
+                rows_written   = rows_written + %s,
+                last_heartbeat = NOW()
             WHERE job_id = %s
         """, (rows_added, job_id))
         conn.commit()

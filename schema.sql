@@ -174,6 +174,59 @@ CREATE INDEX IF NOT EXISTS idx_leaderboards_metric
 CREATE INDEX IF NOT EXISTS idx_leaderboards_symbol_metric_ts
     ON market.leaderboards (symbol_id, metric, timestamp_utc DESC);
 
+-- ─── Compiler jobs — ETL run tracking ────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS market.compiler_jobs (
+    job_id              UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+    source_id           SMALLINT    NOT NULL REFERENCES market.sources(source_id),
+    status              TEXT        NOT NULL DEFAULT 'queued'
+                            CHECK (status IN ('queued','running','complete','failed','cancelled')),
+    date_from           DATE        NOT NULL,
+    date_to             DATE        NOT NULL,
+    endpoints_enabled   TEXT[]      NOT NULL,
+    symbols_total       INTEGER,
+    symbols_done        INTEGER     DEFAULT 0,
+    rows_written        BIGINT      DEFAULT 0,
+    started_at          TIMESTAMPTZ,
+    completed_at        TIMESTAMPTZ,
+    last_heartbeat      TIMESTAMPTZ,
+    error_msg           TEXT,
+    triggered_by        TEXT        DEFAULT 'cli'
+                            CHECK (triggered_by IN ('ui', 'cli', 'scheduler')),
+    run_tag             TEXT,
+    created_at          TIMESTAMPTZ DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_compiler_jobs_status
+    ON market.compiler_jobs (status, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_compiler_jobs_dates
+    ON market.compiler_jobs (date_from, date_to);
+
+-- ─── Indexer jobs — leaderboard + overlap run tracking ───────────────────────
+CREATE TABLE IF NOT EXISTS market.indexer_jobs (
+    job_id              UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+    job_type            TEXT        NOT NULL
+                            CHECK (job_type IN ('leaderboard', 'overlap', 'full')),
+    status              TEXT        NOT NULL DEFAULT 'queued'
+                            CHECK (status IN ('queued','running','complete','failed','cancelled')),
+    metric              TEXT,
+    date_from           DATE        NOT NULL,
+    date_to             DATE        NOT NULL,
+    params              JSONB,
+    symbols_total       INTEGER,
+    symbols_done        INTEGER     DEFAULT 0,
+    rows_written        BIGINT      DEFAULT 0,
+    started_at          TIMESTAMPTZ,
+    completed_at        TIMESTAMPTZ,
+    error_msg           TEXT,
+    triggered_by        TEXT        DEFAULT 'ui'
+                            CHECK (triggered_by IN ('ui', 'cli', 'scheduler')),
+    run_tag             TEXT,
+    created_at          TIMESTAMPTZ DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_indexer_jobs_status
+    ON market.indexer_jobs (status, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_indexer_jobs_type_dates
+    ON market.indexer_jobs (job_type, date_from, date_to);
+
 -- ─── Spot 1-minute data — future layer ────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS market.spot_1m (
     timestamp_utc   TIMESTAMPTZ      NOT NULL,
@@ -549,8 +602,13 @@ CREATE TABLE IF NOT EXISTS user_mgmt.daily_signals (
     sit_flat             BOOLEAN NOT NULL DEFAULT FALSE,
     filter_name          TEXT,
     filter_reason        TEXT,
+    signal_source        TEXT    NOT NULL DEFAULT 'live'
+                            CHECK (signal_source IN ('live', 'backtest', 'research')),
     UNIQUE (signal_date, strategy_version_id)
 );
+
+CREATE INDEX IF NOT EXISTS idx_daily_signals_source
+    ON user_mgmt.daily_signals (signal_source, signal_date DESC);
 
 -- ─── Daily signal items — per-symbol rows ─────────────────────────────────────
 -- Normalized from the JSONB symbols array in v1.
