@@ -143,6 +143,41 @@
 
 ---
 
+## Query Reference
+
+### Coverage query — use in `GET /api/compiler/coverage`
+
+Optimized to scan `market.futures_1m` only once. The inner subquery groups by `(day, symbol_id)` to get per-symbol-per-day row counts, then the outer query collapses to per-day stats using `FILTER` clauses (single pass instead of three).
+
+```sql
+SELECT day, symbols_with_data, symbols_complete, symbols_partial
+FROM (
+  SELECT
+    time_bucket('1 day', timestamp_utc) AS day,
+    COUNT(DISTINCT symbol_id) AS symbols_with_data,
+    COUNT(DISTINCT symbol_id) FILTER (WHERE cnt >= 1440) AS symbols_complete,
+    COUNT(DISTINCT symbol_id) FILTER (WHERE cnt BETWEEN 1 AND 1439) AS symbols_partial
+  FROM (
+    SELECT time_bucket('1 day', timestamp_utc) AS day, symbol_id, COUNT(*) AS cnt
+    FROM market.futures_1m
+    WHERE source_id = 1 AND timestamp_utc >= NOW() - INTERVAL '90 days'
+    GROUP BY 1, 2
+  ) sub
+  GROUP BY day
+  ORDER BY day DESC
+) coverage;
+```
+
+Get the total active symbol count separately (cheap — 756 rows max):
+
+```sql
+SELECT COUNT(*) FROM market.symbols WHERE active = TRUE;
+```
+
+Then in Python: `symbols_missing = total_active - symbols_with_data` per day.
+
+This means the coverage endpoint does **two** DB round-trips: one for the per-day stats above, one for the active total. Both are cached-friendly — the active count rarely changes and could be cached for 60s.
+
 ## Open questions / mid-build TODOs
 
 (none yet)
