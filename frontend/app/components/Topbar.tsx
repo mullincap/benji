@@ -110,14 +110,6 @@ const MODULES: Array<{ key: ModuleKey; icon: string; href?: string }> = [
   { key: 'manager', icon: '▣' },
 ];
 
-// ─── Module accent overrides ────────────────────────────────────────────────
-// Some modules ignore the user's selected theme and force a specific accent.
-// The compiler module is hardcoded to amber regardless of which theme the
-// user picked — see docs/builds/compiler-page-build.md (locked decision).
-const MODULE_ACCENT_OVERRIDE: Partial<Record<ModuleKey, string>> = {
-  compiler: '#f0a500',
-};
-
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
 function getActiveModule(pathname: string): ModuleKey | null {
@@ -127,8 +119,6 @@ function getActiveModule(pathname: string): ModuleKey | null {
 
 function resolveAccent(themeId: string, moduleKey: ModuleKey | null): string {
   if (!moduleKey) return '';
-  const override = MODULE_ACCENT_OVERRIDE[moduleKey];
-  if (override) return override;
   const theme = THEMES[themeId] ?? THEMES.spectrum;
   return theme.colors[moduleKey];
 }

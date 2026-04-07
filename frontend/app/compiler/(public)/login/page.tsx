@@ -23,7 +23,10 @@ import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE || "";
-const COMPILER_ACCENT = "#f0a500"; // amber — locked accent for the compiler module
+// The accent color comes from the active theme via the --module-accent CSS
+// variable. Topbar.tsx sets this on :root when the active route is under
+// /compiler/*. We deliberately do NOT hardcode a hex here — the compiler
+// module follows the user's selected theme like every other module.
 
 export default function CompilerLoginPage() {
   const router = useRouter();
@@ -138,7 +141,7 @@ export default function CompilerLoginPage() {
           fontFamily: "var(--font-space-mono), Space Mono, monospace",
           outline: "none",
         }}
-        onFocus={(e) => { e.currentTarget.style.borderColor = COMPILER_ACCENT; }}
+        onFocus={(e) => { e.currentTarget.style.borderColor = "var(--module-accent)"; }}
         onBlur={(e) => { e.currentTarget.style.borderColor = "var(--line)"; }}
       />
 
@@ -146,7 +149,7 @@ export default function CompilerLoginPage() {
         type="submit"
         disabled={!passphrase || submitting}
         style={{
-          background: passphrase && !submitting ? COMPILER_ACCENT : "var(--bg3)",
+          background: passphrase && !submitting ? "var(--module-accent)" : "var(--bg3)",
           color: passphrase && !submitting ? "#0a0a0a" : "var(--t2)",
           border: "none",
           borderRadius: 6,

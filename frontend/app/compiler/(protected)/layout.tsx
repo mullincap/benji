@@ -24,7 +24,11 @@ import { usePathname, useRouter } from "next/navigation";
 import Topbar from "../../components/Topbar";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE || "";
-const COMPILER_ACCENT = "#f0a500"; // amber — locked accent for the compiler module
+
+// The compiler module's accent comes from the active theme via the
+// `--module-accent` CSS variable that Topbar.tsx sets on :root whenever the
+// active route is under /compiler/*. We don't hardcode a hex here — that
+// would diverge from the theme system the user controls.
 
 type AuthState = "loading" | "authed" | "unauthed";
 
@@ -40,7 +44,7 @@ function NavItem({ label, href, active }: { label: string; href: string; active:
         width: "100%",
         background: "transparent",
         border: "none",
-        borderLeft: `2px solid ${active ? COMPILER_ACCENT : "transparent"}`,
+        borderLeft: `2px solid ${active ? "var(--module-accent)" : "transparent"}`,
         color: active ? "var(--t0)" : "var(--t2)",
         fontSize: 10,
         fontWeight: active ? 700 : 400,

@@ -69,7 +69,7 @@ After applying #1 and #2 above and re-running the smoke tests against the live D
 
 | # | Decision |
 |---|---|
-| **Accent color** | Hard-pin to amber `#f0a500`. Ignore the user's selected navbar theme. |
+| **Accent color** | ~~Hard-pin to amber `#f0a500`. Ignore the user's selected navbar theme.~~ **REVERSED 2026-04-08:** Compiler module follows the active theme like every other module — uses `theme.colors['compiler']` from `Topbar.tsx`. The login page renders the Topbar so `--module-accent` is correctly set on the public route as well. No hardcoded hex anywhere. |
 | **Route location** | `frontend/app/compiler/*` — top-level peer to `trader/`. Do NOT nest under `admin/`. |
 | **Auth** | Random server-side token in flat file at `backend/data/admin_sessions.json`. Do NOT use SHA256-of-passphrase. |
 | **Completeness math** | A symbol-day is "complete" if `COUNT(*) >= 1440` rows in `market.futures_1m` (any row, not per-column null check). A day is "green" if ≥95% of `market.symbols WHERE active = TRUE` reach 1440 rows. |
@@ -204,7 +204,7 @@ After applying #1 and #2 above and re-running the smoke tests against the live D
 | 2 | `backend/app/core/config.py` | Modified — added ADMIN_PASSPHRASE + ADMIN_SESSIONS_FILE |
 | 2 | `backend/data/.gitignore` | Created — excludes admin_sessions.json from git |
 | 3 | `backend/requirements.txt` | Modified — added `psycopg2-binary==2.9.11` |
-| 3 | `frontend/app/components/Topbar.tsx` | Modified — compiler href + MODULE_ACCENT_OVERRIDE for amber |
+| 3 | `frontend/app/components/Topbar.tsx` | Modified — added compiler href + resolveAccent helper. (MODULE_ACCENT_OVERRIDE was added then removed in same phase — compiler follows the active theme.) |
 | 3 | `frontend/app/compiler/(public)/layout.tsx` | Created — minimal, centered, no chrome |
 | 3 | `frontend/app/compiler/(public)/login/page.tsx` | Created — passphrase form, whoami pre-check, fetch with credentials |
 | 3 | `frontend/app/compiler/(protected)/layout.tsx` | Created — whoami check + redirect + Topbar + inline CompilerSidebar |
