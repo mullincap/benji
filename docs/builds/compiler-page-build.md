@@ -6,9 +6,9 @@
 
 ## Current State
 
-**Last updated:** Phase 5 complete. Jobs page renders the real run history table with status badges, progress bars, polling, and live-updating duration column.
-**Next action:** Phase 6 — Symbols page (the last phase). Search input + 15 per-endpoint completeness bars + 30-day row count sparkline. Reads from /api/compiler/symbols/{symbol}.
-**Resume command for next session:** "Resume the compiler build from `docs/builds/compiler-page-build.md`. Start at Phase 6 (Symbols page)."
+**🎉 Compiler page build complete.** All 6 phases shipped. The compiler module is end-to-end usable: login, sidebar navigation, coverage map, jobs table with live polling, and symbol inspector with L1/L2/L3 tier grouping.
+**Next module:** Indexer page. Same architectural pattern (FastAPI router + auth-protected route group + sub-pages) but reading from `market.leaderboards`, `market.indexer_jobs`, `user_mgmt.daily_signals`. The follow-up session can use this build doc as a template.
+**Resume command for next session:** "Build the Indexer page using the same pattern as the Compiler page (see `docs/builds/compiler-page-build.md`). Start with Phase 0 — read existing conventions and create a new build doc at `docs/builds/indexer-page-build.md`."
 
 ### Phase 2 entry tasks (deferred Phase 1 corrections — apply BEFORE auth work)
 
@@ -193,10 +193,16 @@ After applying #1 and #2 above and re-running the smoke tests against the live D
   - [x] Progress bar for in-flight jobs (4px tall, amber, with symbols_done/total label)
   - [x] Hardcoded SOURCE_NAMES lookup (replace with API call if sources go dynamic)
   - [x] Verified via `next build` — jobs page compiles, route still listed
-- [ ] **Phase 6** — Symbols page (`/compiler/symbols`)
-  - [ ] Search input
-  - [ ] Endpoint completeness bars (15 columns)
-  - [ ] 30-day sparkline
+- [x] **Phase 6** — Symbols page (`/compiler/symbols`)
+  - [x] TypeScript types matching FastAPI symbol_inspector() output
+  - [x] Search input with autofocus, submit on Enter
+  - [x] Header card (4-column grid: Symbol / Source / Latest Date / Total Rows)
+  - [x] 30-day inline SVG sparkline (filled area + line + per-point title tooltips)
+  - [x] L1/L2/L3 tier grouping above the endpoint bars (mirrors metl.py FETCH_* layers)
+  - [x] 15 endpoint completeness bars across 3 tier sections
+  - [x] Color thresholds: >=95% green, 50-94% amber, <50% red, total=0 muted
+  - [x] Idle / loading / 404 / 401 / error / empty-data states all handled
+  - [x] Verified via `next build` — symbols page compiles, route still listed
 
 ---
 
@@ -224,6 +230,7 @@ After applying #1 and #2 above and re-running the smoke tests against the live D
 | 3 | `frontend/app/compiler/(protected)/coverage/page.tsx` | Created — Phase 4 placeholder |
 | 4 | `frontend/app/compiler/(protected)/coverage/page.tsx` | Replaced — real Coverage page (KPI cards, heatmap, gap table) |
 | 5 | `frontend/app/compiler/(protected)/jobs/page.tsx` | Replaced — real Jobs page (table, polling, live duration ticker) |
+| 6 | `frontend/app/compiler/(protected)/symbols/page.tsx` | Replaced — real Symbol Inspector (search + L1/L2/L3 tier grouping + SVG sparkline) |
 | 3 | `frontend/app/compiler/(protected)/jobs/page.tsx` | Created — Phase 5 placeholder |
 | 3 | `frontend/app/compiler/(protected)/symbols/page.tsx` | Created — Phase 6 placeholder |
 
