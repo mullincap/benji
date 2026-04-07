@@ -1,20 +1,432 @@
+"use client";
+
 /**
  * frontend/app/compiler/(protected)/jobs/page.tsx
  * ===============================================
- * Phase 3 placeholder. The real Jobs page is built in Phase 5.
+ * Compiler Jobs page — read-only monitor for market.compiler_jobs runs.
+ *
+ * Data source:
+ *   GET /api/compiler/jobs?limit=50  (sorted DESC by created_at)
+ *
+ * Polling behavior:
+ *   - Initial fetch on mount
+ *   - If any job in the latest batch has status === "running", schedule the
+ *     next fetch in 10 seconds. Otherwise stop polling until the user navigates.
+ *   - Pauses entirely when document.visibilityState === "hidden". Resumes with
+ *     an immediate fetch when the tab becomes visible again.
+ *   - is_stale jobs (running but no heartbeat for 2h) still trigger polling —
+ *     a stale job might catch up, and the user wants to see that update live.
+ *
+ * Live duration ticker:
+ *   - Independent 1s setInterval that bumps a `nowMs` state, ONLY active when
+ *     the tab is visible AND at least one job is running.
+ *   - The duration cells read `nowMs - started_at` so they tick up live for
+ *     in-flight jobs without needing to refetch the API every second.
+ *
+ * Status badges:
+ *   COMPLETE   → --green
+ *   RUNNING    → --amber + pulsing dot (uses globals.css @keyframes pulse-dot)
+ *   FAILED     → --red
+ *   STALE      → --red with explicit "STALE" label (overrides RUNNING)
+ *   QUEUED     → --t2
+ *   CANCELLED  → --t2
  */
 
+import { useCallback, useEffect, useRef, useState } from "react";
+
+const API_BASE = process.env.NEXT_PUBLIC_API_BASE || "";
+const POLL_INTERVAL_MS = 10_000;
+
+// ─── Source registry ────────────────────────────────────────────────────────
+// Hardcoded mirror of market.sources. The table is essentially static (6 rows,
+// changes once per year at most). If we ever need it dynamic, expose
+// GET /api/compiler/sources and replace this with a fetch.
+const SOURCE_NAMES: Record<number, string> = {
+  1: "amberdata_binance",
+  2: "binance_direct",
+  3: "blofin_direct",
+  4: "coingecko",
+  5: "amberdata_spot",
+  6: "amberdata_options",
+};
+
+// ─── Response types ─────────────────────────────────────────────────────────
+// Mirrors the FastAPI router exactly. See backend/app/api/routes/compiler.py
+// _serialize_job() — these types are the contract.
+
+type JobStatus = "queued" | "running" | "complete" | "failed" | "cancelled";
+
+type CompilerJob = {
+  job_id: string;
+  source_id: number;
+  status: JobStatus;
+  date_from: string | null;
+  date_to: string | null;
+  endpoints_enabled: string[] | null;
+  symbols_total: number | null;
+  symbols_done: number | null;
+  rows_written: number | null;
+  started_at: string | null;
+  completed_at: string | null;
+  last_heartbeat: string | null;
+  error_msg: string | null;
+  triggered_by: string | null;
+  run_tag: string | null;
+  created_at: string | null;
+  is_stale: boolean;
+};
+
+type JobsResponse = {
+  jobs_returned: number;
+  jobs: CompilerJob[];
+};
+
+type LoadState =
+  | { kind: "loading" }
+  | { kind: "error"; message: string }
+  | { kind: "ready"; jobs: CompilerJob[] };
+
+// ─── Duration formatter ─────────────────────────────────────────────────────
+// Format relative time spans the way the build doc shows them in smoke test
+// results: "12s" / "2m 14s" / "1h 22m" / "1d 4h". The biggest unit always
+// shows two parts of detail, smaller units show whole seconds.
+
+function formatDuration(ms: number): string {
+  if (ms < 0) return "—";
+  const seconds = Math.floor(ms / 1000);
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  const remSec = seconds % 60;
+  if (minutes < 60) return remSec === 0 ? `${minutes}m` : `${minutes}m ${remSec}s`;
+  const hours = Math.floor(minutes / 60);
+  const remMin = minutes % 60;
+  if (hours < 24) return remMin === 0 ? `${hours}h` : `${hours}h ${remMin}m`;
+  const days = Math.floor(hours / 24);
+  const remHr = hours % 24;
+  return remHr === 0 ? `${days}d` : `${days}d ${remHr}h`;
+}
+
+function jobDuration(job: CompilerJob, nowMs: number): string {
+  if (!job.started_at) return "—";
+  const startMs = Date.parse(job.started_at);
+  if (Number.isNaN(startMs)) return "—";
+  const endMs = job.completed_at ? Date.parse(job.completed_at) : nowMs;
+  if (Number.isNaN(endMs)) return "—";
+  return formatDuration(endMs - startMs);
+}
+
+// ─── Subcomponents ───────────────────────────────────────────────────────────
+
+function SectionLabel({ children }: { children: React.ReactNode }) {
+  return (
+    <div style={{
+      fontSize: 9, fontWeight: 700, letterSpacing: "0.12em",
+      color: "var(--t3)", textTransform: "uppercase",
+      marginBottom: 8,
+    }}>
+      {children}
+    </div>
+  );
+}
+
+function StatusBadge({ job }: { job: CompilerJob }) {
+  // Stale takes precedence over running
+  const display: { label: string; color: string; bg: string; pulse: boolean } = (() => {
+    if (job.is_stale) {
+      return { label: "STALE", color: "var(--red)", bg: "var(--red-dim)", pulse: false };
+    }
+    switch (job.status) {
+      case "complete":
+        return { label: "COMPLETE", color: "var(--green)", bg: "var(--green-dim)", pulse: false };
+      case "running":
+        return { label: "RUNNING", color: "var(--amber)", bg: "var(--amber-dim)", pulse: true };
+      case "failed":
+        return { label: "FAILED", color: "var(--red)", bg: "var(--red-dim)", pulse: false };
+      case "cancelled":
+        return { label: "CANCELLED", color: "var(--t2)", bg: "var(--bg3)", pulse: false };
+      case "queued":
+      default:
+        return { label: "QUEUED", color: "var(--t2)", bg: "var(--bg3)", pulse: false };
+    }
+  })();
+
+  return (
+    <span style={{
+      display: "inline-flex",
+      alignItems: "center",
+      gap: 5,
+      fontSize: 9,
+      fontWeight: 700,
+      letterSpacing: "0.08em",
+      textTransform: "uppercase",
+      color: display.color,
+      background: display.bg,
+      border: `1px solid ${display.color}`,
+      borderRadius: 3,
+      padding: "2px 6px",
+    }}>
+      {display.pulse && (
+        <span style={{
+          width: 5, height: 5,
+          borderRadius: "50%",
+          background: display.color,
+          animation: "pulse-dot 1.4s ease-in-out infinite",
+        }} />
+      )}
+      {display.label}
+    </span>
+  );
+}
+
+function ProgressBar({ done, total }: { done: number; total: number }) {
+  if (total <= 0) {
+    return <span style={{ color: "var(--t3)" }}>—</span>;
+  }
+  const pct = Math.min(100, (done / total) * 100);
+  return (
+    <div style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 120 }}>
+      <div style={{
+        flex: 1,
+        height: 4,
+        background: "var(--bg3)",
+        borderRadius: 2,
+        overflow: "hidden",
+      }}>
+        <div style={{
+          height: "100%",
+          width: `${pct}%`,
+          background: "var(--amber)",
+          borderRadius: 2,
+          transition: "width 0.3s ease",
+        }} />
+      </div>
+      <span style={{ fontSize: 9, color: "var(--t2)", whiteSpace: "nowrap" }}>
+        {done.toLocaleString("en-US")} / {total.toLocaleString("en-US")}
+      </span>
+    </div>
+  );
+}
+
+function Th({ children, align = "left" }: { children: React.ReactNode; align?: "left" | "right" }) {
+  return (
+    <th style={{
+      fontSize: 9, fontWeight: 700, letterSpacing: "0.12em",
+      color: "var(--t3)", textTransform: "uppercase",
+      textAlign: align,
+      padding: "8px 10px",
+      borderBottom: "1px solid var(--line)",
+    }}>
+      {children}
+    </th>
+  );
+}
+
+function Td({ children, align = "left" }: { children: React.ReactNode; align?: "left" | "right" }) {
+  return (
+    <td style={{
+      fontSize: 10,
+      color: "var(--t1)",
+      textAlign: align,
+      padding: "10px 10px",
+      verticalAlign: "middle",
+    }}>
+      {children}
+    </td>
+  );
+}
+
+function JobRow({ job, nowMs }: { job: CompilerJob; nowMs: number }) {
+  const sourceName = SOURCE_NAMES[job.source_id] ?? `source ${job.source_id}`;
+  const dateRange =
+    job.date_from && job.date_to
+      ? job.date_from === job.date_to
+        ? job.date_from
+        : `${job.date_from} → ${job.date_to}`
+      : "—";
+  const done = job.symbols_done ?? 0;
+  const total = job.symbols_total ?? 0;
+  const rowsWritten = (job.rows_written ?? 0).toLocaleString("en-US");
+  const triggeredBy = job.triggered_by ?? "—";
+  const isInFlight = job.status === "running";
+
+  return (
+    <tr style={{ borderTop: "1px solid var(--line)" }}>
+      <Td>{dateRange}</Td>
+      <Td>{sourceName}</Td>
+      <Td><StatusBadge job={job} /></Td>
+      <Td>
+        {isInFlight
+          ? <ProgressBar done={done} total={total} />
+          : <span>{done.toLocaleString("en-US")} / {total.toLocaleString("en-US")}</span>}
+      </Td>
+      <Td align="right">{rowsWritten}</Td>
+      <Td align="right">{jobDuration(job, nowMs)}</Td>
+      <Td>{triggeredBy}</Td>
+    </tr>
+  );
+}
+
+function JobsTable({ jobs, nowMs }: { jobs: CompilerJob[]; nowMs: number }) {
+  if (jobs.length === 0) {
+    return (
+      <div style={{
+        background: "var(--bg2)",
+        border: "1px solid var(--line)",
+        borderRadius: 6,
+        padding: "20px 24px",
+        fontSize: 10,
+        color: "var(--t2)",
+      }}>
+        No compiler jobs have run yet. Trigger one via{" "}
+        <code style={{ color: "var(--t1)" }}>
+          python pipeline/compiler/metl.py --start &lt;date&gt; --end &lt;date&gt;
+        </code>{" "}
+        on the server.
+      </div>
+    );
+  }
+
+  return (
+    <div style={{
+      background: "var(--bg2)",
+      border: "1px solid var(--line)",
+      borderRadius: 6,
+      overflow: "hidden",
+    }}>
+      <table style={{
+        width: "100%",
+        borderCollapse: "collapse",
+        fontFamily: "var(--font-space-mono), Space Mono, monospace",
+      }}>
+        <thead>
+          <tr>
+            <Th>Date Range</Th>
+            <Th>Source</Th>
+            <Th>Status</Th>
+            <Th>Symbols Done / Total</Th>
+            <Th align="right">Rows Written</Th>
+            <Th align="right">Duration</Th>
+            <Th>Triggered By</Th>
+          </tr>
+        </thead>
+        <tbody>
+          {jobs.map((job) => (
+            <JobRow key={job.job_id} job={job} nowMs={nowMs} />
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+// ─── Page ────────────────────────────────────────────────────────────────────
+
 export default function CompilerJobsPage() {
+  const [state, setState] = useState<LoadState>({ kind: "loading" });
+  const [nowMs, setNowMs] = useState(() => Date.now());
+  const pollTimerRef = useRef<number | null>(null);
+  const tickerRef = useRef<number | null>(null);
+
+  const fetchJobs = useCallback(async () => {
+    try {
+      const res = await fetch(`${API_BASE}/api/compiler/jobs?limit=50`, {
+        credentials: "include",
+      });
+      if (res.status === 401) {
+        setState({ kind: "error", message: "Session expired. Please log in again." });
+        return null;
+      }
+      if (!res.ok) {
+        setState({ kind: "error", message: `Jobs endpoint returned ${res.status}` });
+        return null;
+      }
+      const data = (await res.json()) as JobsResponse;
+      setState({ kind: "ready", jobs: data.jobs });
+      setNowMs(Date.now());
+      return data.jobs;
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      setState({ kind: "error", message: `Network error: ${message}` });
+      return null;
+    }
+  }, []);
+
+  // Polling loop: re-fetch every 10s if (a) any job is running and
+  // (b) the tab is visible. Pauses entirely on tab hide; resumes with an
+  // immediate fetch on tab show.
+  useEffect(() => {
+    let cancelled = false;
+
+    function clearPoll() {
+      if (pollTimerRef.current !== null) {
+        window.clearTimeout(pollTimerRef.current);
+        pollTimerRef.current = null;
+      }
+    }
+
+    function clearTicker() {
+      if (tickerRef.current !== null) {
+        window.clearInterval(tickerRef.current);
+        tickerRef.current = null;
+      }
+    }
+
+    function schedulePollIfNeeded(jobs: CompilerJob[] | null) {
+      clearPoll();
+      if (cancelled) return;
+      if (document.visibilityState === "hidden") return;
+      if (!jobs) return;
+      const anyRunning = jobs.some((j) => j.status === "running");
+      if (!anyRunning) {
+        clearTicker();
+        return;
+      }
+      // Live elapsed-time ticker — bump nowMs every second so duration
+      // cells re-render. Only runs while visible AND running.
+      if (tickerRef.current === null) {
+        tickerRef.current = window.setInterval(() => {
+          if (document.visibilityState === "visible") {
+            setNowMs(Date.now());
+          }
+        }, 1000);
+      }
+      pollTimerRef.current = window.setTimeout(async () => {
+        const next = await fetchJobs();
+        schedulePollIfNeeded(next);
+      }, POLL_INTERVAL_MS);
+    }
+
+    async function initialLoad() {
+      const jobs = await fetchJobs();
+      schedulePollIfNeeded(jobs);
+    }
+
+    function onVisibilityChange() {
+      if (document.visibilityState === "visible") {
+        // Tab came back into focus — fetch fresh and resume polling
+        fetchJobs().then((jobs) => schedulePollIfNeeded(jobs));
+      } else {
+        // Tab hidden — stop both timers
+        clearPoll();
+        clearTicker();
+      }
+    }
+
+    initialLoad();
+    document.addEventListener("visibilitychange", onVisibilityChange);
+
+    return () => {
+      cancelled = true;
+      clearPoll();
+      clearTicker();
+      document.removeEventListener("visibilitychange", onVisibilityChange);
+    };
+  }, [fetchJobs]);
+
   return (
     <div style={{ background: "var(--bg0)", padding: 28, minHeight: "100%" }}>
       <div style={{ maxWidth: 960, margin: "0 auto" }}>
-        <div style={{
-          fontSize: 9, fontWeight: 700, letterSpacing: "0.12em",
-          color: "var(--t3)", textTransform: "uppercase", marginBottom: 12,
-        }}>
-          Compiler · Jobs
-        </div>
-
+        <SectionLabel>Compiler · Jobs</SectionLabel>
         <h1 style={{
           fontSize: 24, fontWeight: 700, color: "var(--t0)",
           margin: 0, marginBottom: 24,
@@ -23,26 +435,32 @@ export default function CompilerJobsPage() {
           Job Runs
         </h1>
 
-        <div style={{
-          background: "var(--bg2)",
-          border: "1px solid var(--line)",
-          borderRadius: 6,
-          padding: "20px 24px",
-          fontSize: 10,
-          color: "var(--t1)",
-          lineHeight: 1.6,
-        }}>
+        {state.kind === "loading" && (
           <div style={{
-            fontSize: 9, fontWeight: 700, letterSpacing: "0.12em",
-            color: "var(--t3)", textTransform: "uppercase", marginBottom: 8,
+            fontSize: 9, color: "var(--t3)",
+            textTransform: "uppercase", letterSpacing: "0.12em",
+            padding: "40px 0",
           }}>
-            Phase 5 Placeholder
+            Loading jobs…
           </div>
-          The Jobs page will render here in Phase 5: a sortable table of recent
-          compiler runs with status badges (COMPLETE / RUNNING / FAILED / STALE),
-          progress bars for in-flight jobs, and 10s polling. Data source:{" "}
-          <code style={{ color: "var(--t0)" }}>GET /api/compiler/jobs</code>.
-        </div>
+        )}
+
+        {state.kind === "error" && (
+          <div style={{
+            background: "var(--red-dim)",
+            border: "1px solid var(--red)",
+            borderRadius: 6,
+            padding: "14px 18px",
+            fontSize: 10,
+            color: "var(--red)",
+          }}>
+            {state.message}
+          </div>
+        )}
+
+        {state.kind === "ready" && (
+          <JobsTable jobs={state.jobs} nowMs={nowMs} />
+        )}
       </div>
     </div>
   );
