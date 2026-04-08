@@ -144,8 +144,11 @@ INDEX_LOOKBACK            = int(_os.environ.get("INDEX_LOOKBACK", "6"))         
                                       # anchor = deployment_start_hour - index_lookback
 
 LEADERBOARD_BUILDER       = "build_intraday_leaderboard.py"  # path to builder script
-LEADERBOARD_PARQUET_PATH  = "/Users/johnmullin/Desktop/desk/import/oi_logger/backfills/1raws/oi_raw/master_oi_training_table.parquet"  # raw data for builder
-LEADERBOARD_PARQUET_PATH  = _os.environ.get("PARQUET_PATH", "/Users/johnmullin/Desktop/desk/import/oi_logger/backfills/1raws/oi_raw/master_data_table.parquet")
+# Path to the master parquet feeding the leaderboard builder. PARQUET_PATH
+# must be set in the environment (.env / .env.production / shell). No
+# fallback — if it's missing the script fails loudly at the first parquet
+# read instead of silently pointing at a stale Mac-local path.
+LEADERBOARD_PARQUET_PATH  = os.environ.get("PARQUET_PATH")
 LEADERBOARD_TOP_N         = int(_os.environ.get("LEADERBOARD_TOP_N", "333"))  # TOP_N used by build_intraday_leaderboard.py
                                   # (independent of LEADERBOARD_INDEX which controls
                                   #  how many symbols are considered in the overlap)
