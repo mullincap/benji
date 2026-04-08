@@ -8,9 +8,71 @@
 
 ## Current State
 
-**Last updated:** Phase 1 complete. All 3 entry tasks applied (docstring fix, cookie rename to `admin_session`, `last_heartbeat` verified). 6 FastAPI endpoints built and registered. Smoke tests pass: 6/6 TestClient (auth + routing) and 4/4 SQL against live DB.
-**Next action:** Wait for user ack on Phase 1 report, then begin Phase 2 (frontend shell mirroring the compiler page structure with route groups, login passthrough, and 4 placeholder pages for Coverage / Jobs / Signals / Strategies).
+**Last updated:** Phase 1 complete. Phase 2 not yet started — work paused at this checkpoint.
+**Next action:** Phase 2 — frontend shell. Build it using the same pattern as the compiler shell (commit `7da2c64`). Specifics locked below in "Phase 2 plan".
 **Resume command for next session:** "Resume the indexer build from `docs/builds/indexer-page-build.md`. Start at Phase 2 (frontend shell)."
+
+### Phase 1 — what shipped (commits `f73083c` and `b95db30`)
+
+- All 3 entry tasks applied (docstring fix, cookie rename to `admin_session`, `last_heartbeat` verified)
+- 6 read-only FastAPI endpoints built in `backend/app/api/routes/indexer.py` and registered in `main.py`:
+  - `GET /api/indexer/coverage?days=N` — per-day, per-metric leaderboard completeness, strict math `1440 × 333 = 479520`
+  - `GET /api/indexer/jobs?limit=50` — recent `market.indexer_jobs` rows with computed `is_stale`
+  - `GET /api/indexer/jobs/{job_id}` — single job by UUID
+  - `GET /api/indexer/signals?days=N&source=live|backtest|research` — daily signals with symbol list pre-aggregated via LATERAL/jsonb_agg
+  - `GET /api/indexer/signals/{signal_batch_id}` — single batch with full symbol list
+  - `GET /api/indexer/strategies` — all strategies with versions nested via LATERAL/jsonb_agg
+- All 6 endpoints wired with `dependencies=[Depends(require_admin)]` at the router level — same auth as compiler, sharing the renamed `admin_session` cookie
+- Smoke tests: 6/6 TestClient (route registration + auth + cookie rename verification) + 4/4 SQL against live DB (all 4 query patterns return real data with the expected shapes)
+- Build doc updated with the cron diagnostic findings (cron has been a no-op since creation, master parquets stale at 2026-04-06, OOM bug B blocks the cron fix)
+
+### Phase 2 plan (locked)
+
+**Goal**: build the frontend shell so all 6 indexer routes are reachable in `next build` with the proper auth gating, sidebar navigation, and theme accent. No data fetching yet — Phases 3-6 will fill in the data pages against the real API endpoints from Phase 1.
+
+**File structure** — same as the compiler shell (Option A: Next.js route groups):
+
+```
+frontend/app/indexer/
+├── (protected)/
+│   ├── layout.tsx                     ← whoami check, redirect to login if unauth, Topbar + sidebar
+│   ├── page.tsx                       ← server-side redirect to /indexer/coverage
+│   ├── coverage/page.tsx              ← Phase 3 placeholder
+│   ├── jobs/page.tsx                  ← Phase 4 placeholder
+│   ├── signals/page.tsx               ← Phase 5 placeholder
+│   └── strategies/page.tsx            ← Phase 6 placeholder
+└── (public)/
+    ├── layout.tsx                     ← minimal centered, renders Topbar so --module-accent is set
+    └── login/page.tsx                 ← passphrase form (or just redirect to /compiler/login — see decision below)
+```
+
+**Login page reuse decision**: the auth backend is shared (same `require_admin` dependency, same `admin_session` cookie, same `POST /api/admin/login`). The user instruction is **"reuse the existing /compiler/login page"** — so the indexer's `(public)/login/page.tsx` should be a tiny stub that **redirects to `/compiler/login`** rather than duplicating the form. After successful login at `/compiler/login`, the user is redirected back to `/compiler` per the existing code; they would then have to manually navigate to `/indexer`. This is acceptable for now (admin-only tool, single user). If this UX is annoying, a small enhancement can pass a `?return_to=/indexer` query param to the compiler login page in a follow-up — but not in this round.
+
+**Sidebar nav** (4 items, mirroring compiler's text-only style):
+- **COVERAGE** → `/indexer/coverage`
+- **JOBS** → `/indexer/jobs`
+- **SIGNALS** → `/indexer/signals`
+- **STRATEGIES** → `/indexer/strategies`
+
+200px wide, 9px section label "INDEXER" at top, 10px nav items, 2px left border in `var(--module-accent)` for the active item. Identical structure to `frontend/app/compiler/(protected)/layout.tsx` `CompilerSidebar` component — just renamed and with 4 items instead of 3.
+
+**Topbar integration**: add `href: '/indexer'` to the indexer entry in the `MODULES` array in `frontend/app/components/Topbar.tsx`. The indexer module already has theme colors in every theme entry — the navbar will pick up the active theme's `theme.colors.indexer` automatically when the user navigates to `/indexer/*`. **No hardcoded accent color** — the locked decision in this build doc is "follow the active theme like every other module, no override."
+
+**Module accent inheritance**: the protected layout's sidebar active border uses `var(--module-accent)`, which the Topbar's `applyAccent()` sets on `:root` whenever the active route is under `/indexer/*`. Same mechanism the compiler uses — no extra wiring needed beyond the `MODULES` href update.
+
+**Placeholder page convention** (lifted from compiler Phase 3):
+- 9px section label (e.g. "Indexer · Coverage")
+- 24px page title (e.g. "Coverage Map")
+- One `--bg2` card with a "Phase X Placeholder" label and a one-paragraph description of what will render there
+
+**Verification**:
+- `tsc --noEmit` clean
+- `next build` succeeds
+- All 6 indexer routes appear in the static route table: `/indexer`, `/indexer/coverage`, `/indexer/jobs`, `/indexer/signals`, `/indexer/strategies`, `/indexer/login`
+
+### Things to flag before Phase 2 starts (none currently — checkpoint clean)
+
+The Phase 1 entry tasks were all resolved during Phase 1. No new issues surfaced that need user input. Phase 2 should be heads-down execution following the compiler shell template.
 
 ### Phase 1 entry tasks (small fixes flagged during Phase 0)
 
