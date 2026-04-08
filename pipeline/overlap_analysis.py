@@ -76,11 +76,16 @@ log = logging.getLogger(__name__)
 import os as _os
 BASE_DIR = Path(_os.environ.get("BASE_DATA_DIR", "/Users/johnmullin/Desktop/desk/benji3m"))
 
+# Per-metric leaderboard directory helper from pipeline/config.py.
+# Used by _leaderboard_paths() below to resolve master-parquet input files
+# to the canonical /mnt/quant-data/leaderboards/<metric>/ path on prod
+# (or whatever LEADERBOARDS_DIR is in config.py — derived from BASE_DATA_DIR).
+# Replaces the previous flat BASE_DIR / filename construction, which only
+# worked when BASE_DIR happened to point at the per-metric subdirectory.
+from config import leaderboard_dir_for_metric
+
 # Index size for both leaderboards: 100, 300, or 1000
 LEADERBOARD_INDEX = int(_os.environ.get("LEADERBOARD_INDEX", "100"))
-
-PRICE_INPUT = BASE_DIR / f"intraday_pct_leaderboard_price_top{LEADERBOARD_INDEX}_ALL.parquet"
-OI_INPUT    = BASE_DIR / f"intraday_pct_leaderboard_open_interest_top{LEADERBOARD_INDEX}_ALL.parquet"
 
 # ─────────────────────────────────────────────
 # Config
@@ -104,21 +109,31 @@ def _anchor_hhmm() -> str:
     return f"{(DEPLOYMENT_START_HOUR - INDEX_LOOKBACK) % 24:02d}00"
 
 
-def _leaderboard_paths(leaderboard_index: int, base_dir: Path):
+def _leaderboard_paths(leaderboard_index: int):
     """Return (price_path, oi_path) for the current INDEX_LOOKBACK setting.
 
     When INDEX_LOOKBACK == DEPLOYMENT_START_HOUR the anchor is midnight (00:00),
     which matches the existing files built without the anchor suffix.
     All other anchor times get an explicit _anchor{HHMM} suffix so they are
     stored as distinct cached files.
+
+    The directory is resolved per-metric via leaderboard_dir_for_metric()
+    from pipeline/config.py — which on prod points at
+    /mnt/quant-data/leaderboards/<metric>/, the canonical home for master
+    parquet files. Until 2026-04-08 this used a single flat BASE_DIR
+    parameter (= /data, ephemeral scratch), which never matched where the
+    builder actually wrote files and forced the simulator to repeatedly
+    re-build the master parquet from scratch.
+
+    The leaderboard_index parameter is preserved for call-site compatibility
+    but is currently unused — the filename uses LEADERBOARD_TOP_N instead.
     """
+    del leaderboard_index  # legacy parameter, kept for API compatibility
     idx    = f"top{LEADERBOARD_TOP_N}"
     anchor = _anchor_hhmm()
-    # Use original filenames for the midnight anchor (existing files)
-    # is_midnight = (anchor == "0000")
     suffix = f"_anchor{anchor}"  # always included, matches builder output
-    price = base_dir / f"intraday_pct_leaderboard_price_{idx}{suffix}_ALL.parquet"
-    oi    = base_dir / f"intraday_pct_leaderboard_open_interest_{idx}{suffix}_ALL.parquet"
+    price = leaderboard_dir_for_metric("price")         / f"intraday_pct_leaderboard_price_{idx}{suffix}_ALL.parquet"
+    oi    = leaderboard_dir_for_metric("open_interest") / f"intraday_pct_leaderboard_open_interest_{idx}{suffix}_ALL.parquet"
     return price, oi
 
 
@@ -845,7 +860,7 @@ def run(min_mcap: float, freq_width: int, marketcap_dir: Path,
     mcap_label      = f"{int(min_mcap / 1_000_000)}M"
     marketcap_path  = marketcap_dir / "marketcap_daily.parquet"
     idx_label       = f"top{leaderboard_index}"
-    price_input, oi_input = _leaderboard_paths(leaderboard_index, BASE_DIR)
+    price_input, oi_input = _leaderboard_paths(leaderboard_index)
 
     # ── Validate sort_lookback ≤ index_lookback ───────────────────────────────
     # sort_lookback scans the leaderboard going back from deployment_start_hour.
@@ -882,7 +897,14 @@ def run(min_mcap: float, freq_width: int, marketcap_dir: Path,
                 "--metric",                  _metric,
                 "--deployment-start-hour",   str(DEPLOYMENT_START_HOUR),
                 "--index-lookback",          str(INDEX_LOOKBACK),
-                "--output-dir",              str(BASE_DIR),
+                # Write to the canonical per-metric directory so the master
+                # parquet ends up where _leaderboard_paths() looks for it
+                # (and where the indexer cron also writes its outputs).
+                # Until 2026-04-08 this was str(BASE_DIR) (= /data, ephemeral
+                # scratch), which meant the build subprocess wrote to one
+                # place and the input lookup checked another, breaking
+                # idempotency on every run.
+                "--output-dir",              str(leaderboard_dir_for_metric(_metric)),
                 "--parquet-path",            LEADERBOARD_PARQUET_PATH,
             ]
             # Auto-build (file missing) does NOT pass --force — that's the
