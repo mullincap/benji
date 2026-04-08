@@ -8,7 +8,7 @@
  * UX:
  *   - Single passphrase input field, centered, dark theme
  *   - Submit POSTs to /api/admin/login (credentials: include) so the
- *     compiler_session cookie is captured by the browser
+ *     admin_session cookie is captured by the browser
  *   - On success → router.push('/compiler') which redirects to /coverage
  *   - On 401 → shows "Invalid passphrase" in --red below the field
  *   - On mount, calls /api/admin/whoami; if already authed, redirects

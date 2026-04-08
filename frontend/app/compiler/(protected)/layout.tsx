@@ -10,8 +10,10 @@
  * resolves so we never flash protected content to an unauthenticated user.
  *
  * The layout chrome:
- *   - Topbar (shared component, hardcoded amber accent for compiler module)
- *   - CompilerSidebar (text-only nav: COVERAGE / JOBS / SYMBOLS, amber active border)
+ *   - Topbar (shared component; module accent comes from the active theme via
+ *     var(--module-accent), set by Topbar.applyAccent() on every pathname change)
+ *   - CompilerSidebar (text-only nav: COVERAGE / JOBS / SYMBOLS, active item
+ *     left border uses var(--module-accent) so it follows the theme)
  *   - Content area (children render here)
  *
  * Sibling layout: app/compiler/(public)/layout.tsx wraps /compiler/login

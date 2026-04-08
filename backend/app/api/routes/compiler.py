@@ -22,7 +22,7 @@ from ...db import get_cursor
 from .admin import require_admin
 
 # All compiler endpoints require an admin session. The dependency raises
-# HTTP 401 if the compiler_session cookie is missing or invalid. The
+# HTTP 401 if the admin_session cookie is missing or invalid. The
 # frontend layout uses GET /api/admin/whoami to detect this and redirect
 # to /compiler/login before rendering the protected pages.
 router = APIRouter(

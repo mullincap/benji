@@ -5,12 +5,12 @@ Admin auth routes and the require_admin dependency used by other admin
 routers (compiler, indexer).
 
 Endpoints:
-  POST /api/admin/login    — body {passphrase}; sets compiler_session cookie on match
+  POST /api/admin/login    — body {passphrase}; sets admin_session cookie on match
   POST /api/admin/logout   — invalidates current session, clears cookie
   GET  /api/admin/whoami   — returns {authenticated: bool, expires_at?: ...}
 
 Cookie:
-  name:     compiler_session
+  name:     admin_session
   value:    64-hex-char random token (NOT a passphrase derivative)
   httpOnly: true
   secure:   false in dev (localhost), true in production via env var
@@ -41,7 +41,7 @@ from ...services.admin_sessions import (
 
 router = APIRouter(prefix="/api/admin", tags=["admin"])
 
-COOKIE_NAME = "compiler_session"
+COOKIE_NAME = "admin_session"
 COOKIE_MAX_AGE = SESSION_TTL_HOURS * 3600
 
 

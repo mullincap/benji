@@ -201,6 +201,41 @@ These are not blockers — they're cleanups I noticed while reading the existing
 
 ---
 
+## Cron situation (as of 2026-04-08)
+
+Diagnosed before Phase 1 started. Important context for the Coverage page's "honest empty state" later in this build.
+
+### Current state
+
+- **The indexer cron has been a no-op since creation.** The crontab entries (3 lines, one per metric) invoke `build_intraday_leaderboard.py --metric <m>` with **no `--parquet-path` arg**. Without that arg the script falls into partition mode, scans `/mnt/quant-data/compiled/` for `date=*` directories, finds zero, and exits cleanly with no work done. No log file is ever produced because there's no stdout/stderr in the empty-input path.
+- **The master leaderboard parquets that DO exist** at `/mnt/quant-data/leaderboards/{price,open_interest}/intraday_pct_leaderboard_*_top333_anchor0000_ALL.parquet` (229 MB and 227 MB) were written by a **single manual run on 2026-04-06** (mtimes 23:08 / 23:37 UTC). Both files contain `573,120` rows spanning **2025-02-13 → 2026-03-19** (1440 min/day × 398 days). They have not been modified by any cron run.
+- **The `volume` master parquet has never been built.** `/mnt/quant-data/leaderboards/volume/` is empty. The volume cron line has never produced output. Cause is the same as the other two metrics (no `--parquet-path`) plus possibly a separate volume-specific bug in the cumsum logic.
+- **`market.leaderboards`** therefore has data only from the one-shot historical backfill via `pipeline/db/backfill_leaderboards.py` (run manually on 2026-04-06): `31,938,971` rows of `(price, anchor_hour=0)` covering the same 2025-02-13 → 2026-03-19 range as the parquets. **The DB is frozen at 2026-03-19** — 19+ days stale and growing every day until the cron is fixed.
+- **`market.indexer_jobs`** is empty (`0` rows after the smoke-test cleanup).
+
+### Bug B (OOM) blocks the cron fix
+
+`build_intraday_leaderboard.py` cannot safely use `--parquet-path /mnt/quant-data/raw/amberdata/master_data_table.parquet` because `pd.read_parquet(path, columns=[...])` loads all 312M rows into RAM before the column filter takes effect, OOM-killing the kernel (verified `exit=137` on the server). The script needs row-group iteration like `pipeline/db/backfill_futures_1m.py` uses before this is viable.
+
+### Workaround until Bug B is fixed
+
+To populate `market.leaderboards` with new data, manually:
+
+1. Run `build_intraday_leaderboard.py` against a dated subset of the master parquet (or against a smaller compiled-by-day file if one exists)
+2. Run `pipeline/db/backfill_leaderboards.py` to load the resulting parquet into TimescaleDB
+
+This is what was done on 2026-04-06 to produce the current data. There is no automation for this step yet.
+
+### Cron fix is deferred
+
+Updating the crontab to pass `--parquet-path` would just cause OOM kills every night. The fix sequence is:
+
+1. **First**: rewrite `build_intraday_leaderboard.py` to read the master parquet via row-group iteration (separate task, not in scope for the indexer page build)
+2. **Then**: update the crontab to pass `--parquet-path` and chain the three metrics sequentially (proposed in the cron diagnostic, not yet applied)
+3. **Then**: the nightly indexer cron starts producing fresh `market.leaderboards` data automatically, with the new checkpointing skipping any dates already processed
+
+**Until that sequence is complete, the Indexer Coverage page will show this honest "stale at 2026-03-19" reality.** That's the intended behavior — the page is supposed to surface broken pipeline state, not hide it.
+
 ## Open questions / mid-build TODOs
 
 (none yet beyond the Phase 1 entry tasks above and the decisions inside the "Things to flag" section)
