@@ -25,6 +25,7 @@ import json
 from pathlib import Path
 from tqdm import tqdm
 import pandas as pd
+import pyarrow as pa
 import pyarrow.parquet as pq
 from datetime import datetime
 import argparse
@@ -68,8 +69,17 @@ TOP_N = int(os.environ.get("LEADERBOARD_TOP_N", "333"))
 
 SAVE_DAILY_FILES = os.environ.get("SAVE_DAILY_FILES", "0") == "1"     # True = write per-day CSVs
 BUILD_MASTER_FILE = os.environ.get("BUILD_MASTER_FILE", "1") == "1"    # True = build merged master
-MASTER_FILE_CSV = False
-master_frames = []
+
+# Streaming-write state for the master parquet. The writer is opened lazily
+# on the first day that produces a frame so we can pin the schema from real
+# data, then closed in a finally block after the per-day loop. Days are
+# written one row group at a time — each day's wide-format DataFrame is
+# ~1440 rows and ~5 MB on disk, so memory stays bounded regardless of how
+# many days are in the run. Replaces the previous master_frames list which
+# accumulated every day's DataFrame in RAM and OOM-killed on full backlogs.
+_master_writer: pq.ParquetWriter | None = None
+_master_path: Path | None = None
+_master_rows_written = 0
 
 # ============================================================
 # CLI ARGUMENTS
@@ -491,6 +501,20 @@ script_start = datetime.now()
 
 print(f"\n🚀 Building intraday leaderboards")
 print(f"Start → {script_start}\n")
+
+# ── Helper: stable schema for the streamed master parquet ───────────────
+# Pinned up-front so every day's row group writes against the same schema.
+# Without this, pyarrow infers each column's dtype from the first day's
+# data — and a day where (e.g.) R333 is all-null would lock that column
+# to the null type and fail when a later day tries to write strings into
+# it. The reindex above guarantees R1..R{TOP_N} all exist on every day.
+
+def _master_schema(top_n: int) -> pa.Schema:
+    fields = [pa.field("timestamp_utc", pa.timestamp("ns"))]
+    for i in range(1, top_n + 1):
+        fields.append(pa.field(f"R{i}", pa.string()))
+    return pa.schema(fields)
+
 
 # ── Helpers: row-group streaming for the single-file mode ────────────────
 # Avoids loading the entire master parquet into RAM (was OOM-killing the
@@ -978,7 +1002,29 @@ for _day_key in tqdm(_date_groups, desc="Processing days"):
             out_df.to_csv(out_file, index=False)
 
         if BUILD_MASTER_FILE:
-            master_frames.append(out_df)
+            # Lazy-open the writer on the first day so the path is known
+            # and the schema is fixed once. After that, every day writes
+            # one row group (1440 rows) directly to disk.
+            if _master_writer is None:
+                _master_path = OUTPUT_DIR / (
+                    f"intraday_pct_leaderboard_{RANK_METRIC}_top{TOP_N}_anchor{ANCHOR_HHMM}_ALL.parquet"
+                )
+                _master_writer = pq.ParquetWriter(
+                    _master_path,
+                    _master_schema(TOP_N),
+                    compression="snappy",
+                )
+            # Cast the day's wide-format DataFrame to the pinned schema.
+            # preserve_index=False keeps the writer aligned with the column
+            # list, and the schema= arg coerces nullable rank columns to
+            # the canonical string type even if a day has all-null entries.
+            _day_table = pa.Table.from_pandas(
+                out_df,
+                schema=_master_schema(TOP_N),
+                preserve_index=False,
+            )
+            _master_writer.write_table(_day_table)
+            _master_rows_written += _day_table.num_rows
 
         tqdm.write(
             f"✔ {date_str} → "
@@ -1002,33 +1048,24 @@ for _day_key in tqdm(_date_groups, desc="Processing days"):
 
 
 # ============================================================
-# BUILD MASTER FILE (ALL DAYS)
+# CLOSE MASTER FILE
 # ============================================================
+# The master parquet was streamed one day at a time inside the loop above,
+# so all that remains is to close the writer. The previous all-at-once
+# pd.concat + to_parquet path OOM-killed at ~10 GB on full-backlog runs.
 
 if BUILD_MASTER_FILE:
-
-    print("\n🧩 Building MASTER leaderboard file...")
-
-    if not master_frames:
-        print("⚠️ No dataframes accumulated.")
-    else:
-
-        master_df = (
-            pd.concat(master_frames, ignore_index=True)
-              .sort_values("timestamp_utc")
-        )
-
-        if MASTER_FILE_CSV:
-            master_file = OUTPUT_DIR / (f"intraday_pct_leaderboard_{RANK_METRIC}_top{TOP_N}_anchor{ANCHOR_HHMM}_ALL.csv")
-            master_df.to_csv(master_file, index=False)
-        else:
-            master_file = OUTPUT_DIR / (f"intraday_pct_leaderboard_{RANK_METRIC}_top{TOP_N}_anchor{ANCHOR_HHMM}_ALL.parquet")
-            master_df.to_parquet(master_file, compression="snappy", row_group_size=500_000)
-
+    if _master_writer is not None:
+        _master_writer.close()
         print(
-            f"\n✅ Master file built → {master_file.name}\n"
-            f"Rows: {len(master_df):,}"
+            f"\n✅ Master file built → {_master_path.name}\n"
+            f"Rows: {_master_rows_written:,}"
         )
+    else:
+        # No frame ever produced — every day either failed or was skipped
+        # by the checkpoint. The file does NOT exist on disk; downstream
+        # consumers (overlap_analysis.py) must check for its presence.
+        print("⚠️  No dataframes produced — master parquet was not written.")
 
 # ============================================================
 # JOB FINAL STATUS — option (c): counter-based decision
