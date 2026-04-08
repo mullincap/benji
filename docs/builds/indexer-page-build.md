@@ -8,9 +8,17 @@
 
 ## Current State
 
-**Last updated:** Phase 2 complete. Phase 3 not yet started — work paused at this checkpoint.
-**Next action:** Phase 3 — Coverage page. Replace the `/indexer/coverage` placeholder with KPI cards, three stacked heatmaps (price · open_interest · volume), and a per-metric gap table, all driven by `GET /api/indexer/coverage?days=N`.
-**Resume command for next session:** "Resume the indexer build from `docs/builds/indexer-page-build.md`. Start at Phase 3 (Coverage page)."
+**Last updated:** Phase 3 complete. Phase 4 not yet started — work paused at this checkpoint.
+**Next action:** Phase 4 — Jobs page. Replace the `/indexer/jobs` placeholder with the real jobs table: `job_type` filter chips (leaderboard / overlap / full / all), status badges, 10s polling while any job is running, live duration column. Lift the polling + status badge + duration formatter patterns verbatim from `frontend/app/compiler/(protected)/jobs/page.tsx`. Driven by `GET /api/indexer/jobs?limit=50`. Build the empty state in from day one (the table is currently 0 rows).
+**Resume command for next session:** "Resume the indexer build from `docs/builds/indexer-page-build.md`. Start at Phase 4 (Jobs page)."
+
+### Phase 3 — what shipped
+
+- `frontend/app/indexer/(protected)/coverage/page.tsx` — full Coverage page replacing the placeholder. Renders one block per metric (Price / Open Interest / Volume), each with 4 KPI cards (Days Complete / Days Partial / Days Missing / Most Recent Day) plus a calendar heatmap. Below all three: a 4-state legend and a gap table grouped by metric (most recent 50 rows).
+- The frontend synthesizes the full date axis from `today - lookback_days` so days the API omits (because the indexer never wrote any rows for that metric on that date) still render as "no-data" cells. This is the honest "broken state" visualization specified in the build doc.
+- Thresholds: ≥ 95% = complete (green), 5–94% = partial (amber), < 5% = missing (red), no row at all = no-data (bg2/line).
+- Single fetch to `GET /api/indexer/coverage?days=90`. No polling — coverage moves at most once a day.
+- Build verification: `next build` clean. All 6 indexer routes still present.
 
 ### Phase 2 — what shipped
 
@@ -246,10 +254,10 @@ These are not blockers — they're cleanups I noticed while reading the existing
   - [x] `frontend/app/indexer/(public)/login/page.tsx` — redirect stub to `/compiler/login`
   - [x] `Topbar.tsx` — add `href: '/indexer'` to the indexer MODULES entry
   - [x] Verified via `next build` that all 6 indexer routes appear
-- [ ] **Phase 3** — Coverage page (`/indexer/coverage`)
-  - [ ] KPI cards (Total Days / Days Complete / Days With Gaps / Days Missing) per metric
-  - [ ] Per-metric heatmap (3 heatmaps stacked: price, open_interest, volume)
-  - [ ] Gap table grouped by metric
+- [x] **Phase 3** — Coverage page (`/indexer/coverage`)
+  - [x] KPI cards (Days Complete / Days Partial / Days Missing / Most Recent Day) per metric
+  - [x] Per-metric heatmap (3 heatmaps stacked: price, open_interest, volume)
+  - [x] Gap table grouped by metric
 - [ ] **Phase 4** — Jobs page (`/indexer/jobs`)
   - [ ] Empty state for the current 0-row reality
   - [ ] Job table with `job_type` filter chips (leaderboard / overlap / full / all)
@@ -285,6 +293,7 @@ These are not blockers — they're cleanups I noticed while reading the existing
 | 2 | `frontend/app/indexer/(protected)/strategies/page.tsx` | Created — Phase 6 placeholder |
 | 2 | `frontend/app/indexer/(public)/layout.tsx` | Created — minimal centered + Topbar |
 | 2 | `frontend/app/indexer/(public)/login/page.tsx` | Created — redirect stub to /compiler/login |
+| 3 | `frontend/app/indexer/(protected)/coverage/page.tsx` | Replaced placeholder — full Coverage page (per-metric KPIs + heatmaps + gap table) |
 
 ---
 
