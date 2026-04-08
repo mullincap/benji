@@ -143,7 +143,16 @@ INDEX_LOOKBACK            = int(_os.environ.get("INDEX_LOOKBACK", "6"))         
                                       # 6 = midnight when start_hour=6 (default behaviour).
                                       # anchor = deployment_start_hour - index_lookback
 
-LEADERBOARD_BUILDER       = "build_intraday_leaderboard.py"  # path to builder script
+# Absolute path to the canonical 1098-line builder. Computed from this file's
+# own location so cwd doesn't matter when overlap_analysis.py is invoked as a
+# subprocess from elsewhere (the celery worker, the simulator UI path, etc).
+# Until 2026-04-08 this was the bare filename "build_intraday_leaderboard.py",
+# which resolved against cwd to a STALE 414-line ancestor sitting at
+# pipeline/build_intraday_leaderboard.py — a file that lacked both today's
+# OOM fixes and was OOM-killing the celery worker on every simulator click.
+# That stale file has now been deleted; this absolute path makes the
+# correct file unambiguous.
+LEADERBOARD_BUILDER       = str(Path(__file__).resolve().parent / "indexer" / "build_intraday_leaderboard.py")
 # Path to the master parquet feeding the leaderboard builder. PARQUET_PATH
 # must be set in the environment (.env / .env.production / shell). No
 # fallback — if it's missing the script fails loudly at the first parquet

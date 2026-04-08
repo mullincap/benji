@@ -45,7 +45,12 @@ def test_no_config_panel_noops_in_pipeline():
     audit_py = _read("pipeline/audit.py")
     overlap_py = _read("pipeline/overlap_analysis.py")
     rebuild_py = _read("pipeline/rebuild_portfolio_matrix.py")
-    leaderboard_py = _read("pipeline/build_intraday_leaderboard.py")
+    # Canonical 1098-line builder. The 414-line ancestor at
+    # pipeline/build_intraday_leaderboard.py was deleted on 2026-04-08
+    # because it was the OOM-killer the simulator was hitting (it lacked
+    # both today's row-group input streaming and ParquetWriter output
+    # streaming). The 1098-line successor lives under pipeline/indexer/.
+    leaderboard_py = _read("pipeline/indexer/build_intraday_leaderboard.py")
 
     default_keys = _frontend_default_keys(frontend_page)
     param_to_env = _worker_param_to_env(worker_py)
