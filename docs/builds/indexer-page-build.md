@@ -8,9 +8,26 @@
 
 ## Current State
 
-**Last updated:** Phase 4 complete. Phase 5 not yet started — work paused at this checkpoint.
-**Next action:** Phase 5 — Signals page. Replace the `/indexer/signals` placeholder with: source filter chips (live / backtest / research / all), date column, strategy version label, sit_flat badge, filter_name, and a click-row detail showing the symbol list. Driven by `GET /api/indexer/signals?days=N&source=...` and `GET /api/indexer/signals/{signal_batch_id}` (the list endpoint already pre-aggregates symbols, so the detail call may be unnecessary — decide while building).
-**Resume command for next session:** "Resume the indexer build from `docs/builds/indexer-page-build.md`. Start at Phase 5 (Signals page)."
+**Last updated:** Phases 5 and 6 complete. **All phases of the indexer page build are shipped.**
+**Next action:** None — the indexer admin page is feature-complete for this round (read-only). Follow-up work (out of scope here) is tracked separately:
+  1. Wire `build_intraday_leaderboard.py` to record runs in `market.indexer_jobs` (mirror what was done for `metl.py → compiler_jobs`)
+  2. Fix Bug B (OOM in row-group iteration) so the cron can pass `--parquet-path` and produce fresh leaderboards nightly
+  3. Add POST/trigger endpoints for ad-hoc job runs from the UI (this entire round was read-only by design)
+**Resume command for next session:** N/A — build is complete. If further indexer work is needed, start a new build doc or extend this one with a Phase 7+ section.
+
+### Phase 5 — what shipped
+
+- `frontend/app/indexer/(protected)/signals/page.tsx` — full Signals page replacing the placeholder. Source filter chips (All · Live · Backtest · Research) trigger a re-fetch with the `source=` query param so the server filters at the SQL layer.
+- Table columns: Date · Source · Status (sit_flat badge) · Filter · Version · Symbols (count). Click-row toggles inline expand showing the full symbol list with rank/base/weight chips, plus the `filter_reason` if present.
+- The list endpoint already pre-aggregates symbols via LATERAL/jsonb_agg, so the inline expand uses the row's existing `symbols` array — no second fetch to `/api/indexer/signals/{id}` needed.
+- No polling — daily_signals advances at most a few times a day; manual refresh is fine.
+
+### Phase 6 — what shipped
+
+- `frontend/app/indexer/(protected)/strategies/page.tsx` — full Strategies page replacing the placeholder. One card per strategy, each showing the display_name (or name fallback), Published/Draft badge, strategy_id, description, and a 4-field metadata grid (Filter Mode · Capital Cap · Created · Updated).
+- Versions section under each strategy lists every version with its label (or first 8 chars of UUID), Active badge if `is_active`, published_at + created_at dates, and a `config_excerpt` `<pre>` block (first 200 chars of the JSONB config, server-side truncation).
+- Single fetch on mount, no polling. Read-only — no edit affordances this round.
+- Build verification: `next build` clean, all 6 indexer routes present.
 
 ### Phase 4 — what shipped
 
@@ -270,14 +287,14 @@ These are not blockers — they're cleanups I noticed while reading the existing
   - [x] Empty state for the current 0-row reality
   - [x] Job table with `job_type` filter chips (leaderboard / overlap / full / all)
   - [x] Status badges + polling + live duration (lifted from compiler/jobs)
-- [ ] **Phase 5** — Signals page (`/indexer/signals`)
-  - [ ] Filter chips: source (live / backtest / research / all)
-  - [ ] Date column + strategy version label + sit_flat badge + filter_name
-  - [ ] Click row → detail view showing signal items (symbol + rank)
-- [ ] **Phase 6** — Strategies page (`/indexer/strategies`)
-  - [ ] Strategy list with versions nested under each
-  - [ ] Show `is_active`, `published_at`, `config` JSONB excerpt
-  - [ ] Read-only — no edit affordances this round
+- [x] **Phase 5** — Signals page (`/indexer/signals`)
+  - [x] Filter chips: source (live / backtest / research / all)
+  - [x] Date column + strategy version label + sit_flat badge + filter_name
+  - [x] Click row → inline expand showing symbol list (uses pre-aggregated data, no detail fetch)
+- [x] **Phase 6** — Strategies page (`/indexer/strategies`)
+  - [x] Strategy list with versions nested under each
+  - [x] Show `is_active`, `published_at`, `config` JSONB excerpt
+  - [x] Read-only — no edit affordances this round
 
 ---
 
@@ -303,6 +320,8 @@ These are not blockers — they're cleanups I noticed while reading the existing
 | 2 | `frontend/app/indexer/(public)/login/page.tsx` | Created — redirect stub to /compiler/login |
 | 3 | `frontend/app/indexer/(protected)/coverage/page.tsx` | Replaced placeholder — full Coverage page (per-metric KPIs + heatmaps + gap table) |
 | 4 | `frontend/app/indexer/(protected)/jobs/page.tsx` | Replaced placeholder — full Jobs page (filter chips + polling table + empty state) |
+| 5 | `frontend/app/indexer/(protected)/signals/page.tsx` | Replaced placeholder — full Signals page (source chips + click-to-expand symbol list) |
+| 6 | `frontend/app/indexer/(protected)/strategies/page.tsx` | Replaced placeholder — full Strategies page (cards with nested versions + config excerpts) |
 
 ---
 
