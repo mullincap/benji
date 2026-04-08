@@ -327,6 +327,32 @@ These are not blockers — they're cleanups I noticed while reading the existing
 
 ## Known issues / deferred follow-ups
 
+### Indexer Coverage page slow to switch lookback presets (2026-04-08)
+
+After today's price backfill grew `market.leaderboards` from 31.9M to 189.9M rows, the segment control on `/indexer/coverage` (the `[30] [90] [365] [ALL]` pills shipped in commit `3441baf`) takes several seconds to repaint when the user switches preset — especially when clicking `[ALL]`.
+
+**Root cause:** the `GET /api/indexer/coverage?days=N` endpoint runs
+
+```sql
+SELECT time_bucket('1 day', timestamp_utc)::date AS day,
+       metric, COUNT(*)
+FROM market.leaderboards
+WHERE timestamp_utc >= NOW() - <interval>
+GROUP BY 1, 2
+```
+
+with no covering index for the `(day, metric)` aggregation. Each click does a GROUP BY scan over every row in the lookback window. For `[ALL]` that's the full ~190M rows of price (and eventually ~190M each of OI and volume too once those are backfilled). Index `idx_leaderboards_metric` is on `(metric, variant, timestamp_utc DESC)` which helps the WHERE filter but doesn't avoid the per-row aggregation.
+
+**Three possible fixes, in order of effort:**
+
+1. **Frontend cache** (~5 min) — store each `?days=N` response in a `useRef` so flipping back and forth between presets is instant after the first hit. Doesn't help the cold first click on `[ALL]`.
+
+2. **Covering index** (~30 sec to create) — add `(metric, variant, anchor_hour, timestamp_utc)` so the per-day count is an index-only scan. Should give ~10-50× speedup on the count query.
+
+3. **TimescaleDB continuous aggregate** (~30 min, the right answer) — `CREATE MATERIALIZED VIEW market.leaderboards_daily_count_per_metric WITH (timescaledb.continuous) AS SELECT time_bucket('1 day', timestamp_utc)::date AS day, metric, variant, anchor_hour, COUNT(*) FROM market.leaderboards GROUP BY 1, 2, 3, 4`. Add a refresh policy so it auto-updates as new rows land. The Coverage endpoint queries the cagg instead of the raw hypertable. Sub-100ms responses regardless of lookback. This is the production-grade solution and the natural fit for a TimescaleDB hypertable.
+
+**Why deferred:** the immediate fix today was to ship the segment control so the user could see the full backfilled history. Performance is a UX wart, not a correctness bug. The right fix (option 3) is a small standalone task that can be done independently in a future session.
+
 ### Historical OOM kills in pipeline cron scripts (2026-04-07)
 
 While diagnosing the simulator's `subprocess.CalledProcessError ... <Signals.SIGKILL: 9>` failure on 2026-04-08, `dmesg -T` on the prod EC2 host showed a pattern of **prior OOM-killer events on 2026-04-07** that are unrelated to either the indexer page build or to today's two `build_intraday_leaderboard.py` OOM fixes (Bug B input bulk-read, Bug C output bulk-concat).
