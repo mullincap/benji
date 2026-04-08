@@ -325,6 +325,47 @@ These are not blockers — they're cleanups I noticed while reading the existing
 
 ---
 
+## Known issues / deferred follow-ups
+
+### Historical OOM kills in pipeline cron scripts (2026-04-07)
+
+While diagnosing the simulator's `subprocess.CalledProcessError ... <Signals.SIGKILL: 9>` failure on 2026-04-08, `dmesg -T` on the prod EC2 host showed a pattern of **prior OOM-killer events on 2026-04-07** that are unrelated to either the indexer page build or to today's two `build_intraday_leaderboard.py` OOM fixes (Bug B input bulk-read, Bug C output bulk-concat).
+
+Sample (`dmesg | grep "Killed process"`):
+
+```
+[Tue Apr  7 00:03:10 2026] Killed process 79586  (python3) anon-rss:14945708kB  oom_score_adj:0
+[Tue Apr  7 00:15:24 2026] Killed process 81433  (python3) anon-rss:14803604kB
+[Tue Apr  7 00:25:46 2026] Killed process 86523  (python3) anon-rss:14431776kB
+[Tue Apr  7 01:13:45 2026] Killed process 99472  (python3) anon-rss:13441992kB
+[Tue Apr  7 23:48:31 2026] Killed process 288048 (python)  anon-rss:10952960kB
+[Tue Apr  7 23:49:06 2026] Killed process 288178 (python)  anon-rss:10956852kB
+[Tue Apr  7 23:49:37 2026] Killed process 288334 (python)  anon-rss:10957472kB
+```
+
+Each kill shows ~10-15 GB of resident memory on the 15 GB host. The timestamps are suspiciously close to known cron schedules:
+- **00:15 UTC** → matches `metl.py` (`pipeline/compiler/metl.py`) Amberdata ETL cron exactly
+- **01:13 UTC** → close to the (commented-out at the time) **01:00 UTC** indexer cron — possibly a manual run of `backfill_leaderboards.py` or `backfill_futures_1m.py` that someone kicked off
+- **23:48-49 UTC** → no matching cron entry; most likely a manual investigation session
+
+**Hypothesis:** `metl.py` and/or `pipeline/db/backfill_futures_1m.py` may have their own all-at-once `pd.read_parquet()` or `pd.concat()` patterns that allocate 10-15 GB on full-history runs. The 2026-04-07 events suggest both may have been silently OOMing for some time. The `backfill_futures_1m.py` script in particular is the same script that `build_intraday_leaderboard.py` was patterned after for the row-group iteration fix — but that doesn't mean its other code paths are OOM-safe.
+
+**Why it's deferred:**
+- Out of scope for the indexer page build proper
+- Not blocking the simulator (which is now fixed by the streaming-write)
+- The two indexer cron scripts (`build_intraday_leaderboard.py` for all 3 metrics) are now safe — verified at peak RSS ~366 MB (Bug B fix smoke test) and ~809 MB (Bug C fix full-backlog smoke test)
+- The pattern is well-understood and the fix template is now established (row-group streaming for reads, ParquetWriter streaming for writes)
+
+**To investigate:**
+1. Run `metl.py` in isolation under memory observation (`/usr/bin/time -v` or a watcher script like the one used in the Bug B/C smoke tests in conversation history) on a representative date range
+2. Same for `pipeline/db/backfill_futures_1m.py` (the `for rg_idx in range(num_rg):` loop already streams the read, but the `batch.append(row)` accumulator inside might still OOM on a fresh run with no checkpoint)
+3. Check `metl.py`'s output paths to see if it does any all-at-once concat/save like the pre-fix `build_intraday_leaderboard.py` did
+4. Check whether the `00:15` cron has been silently failing for weeks — `tail -200 /mnt/quant-data/logs/amberdata/cron.log` should reveal recent traceback patterns
+
+**Anti-recommendation:** do NOT just bump the EC2 instance memory. The OOMs are evidence of unbounded allocations in batch scripts; throwing RAM at them only delays the next failure to a larger dataset.
+
+---
+
 ## Cron situation (as of 2026-04-08)
 
 Diagnosed before Phase 1 started. Important context for the Coverage page's "honest empty state" later in this build.
