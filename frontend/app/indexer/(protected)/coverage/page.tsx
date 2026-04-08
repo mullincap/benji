@@ -35,7 +35,19 @@ import { useEffect, useMemo, useState } from "react";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE || "";
 
-const LOOKBACK_DAYS = 90;
+// Lookback presets shown in the segment control. The "ALL" preset sends a
+// large numeric value upstream — the API clamps to whatever's actually in
+// market.leaderboards via the SQL `>= NOW() - <interval>` filter, so a value
+// of 10000 effectively means "everything we have."
+const LOOKBACK_PRESETS = [
+  { label: "30",  days: 30 },
+  { label: "90",  days: 90 },
+  { label: "365", days: 365 },
+  { label: "ALL", days: 10000 },
+] as const;
+type LookbackPreset = (typeof LOOKBACK_PRESETS)[number];
+const DEFAULT_PRESET: LookbackPreset = LOOKBACK_PRESETS[1]; // 90
+
 const COMPLETE_THRESHOLD_PCT = 95;
 const PARTIAL_THRESHOLD_PCT = 5;
 
@@ -89,6 +101,28 @@ function buildDateAxis(days: number): string[] {
     out.push(d.toISOString().slice(0, 10));
   }
   return out;
+}
+
+/** Build the date axis bounded by what the API actually returned. Used for
+ * the "ALL" preset where requesting the literal lookback (e.g. 10000 days)
+ * would produce a 27-year axis with mostly empty cells. We anchor on the
+ * earliest date the API returned and walk forward to today. */
+function buildDateAxisFromData(coverageDays: { date: string }[]): string[] {
+  if (coverageDays.length === 0) return buildDateAxis(0);
+  let earliest = coverageDays[0].date;
+  for (const d of coverageDays) {
+    if (d.date < earliest) earliest = d.date;
+  }
+  // Compute number of days between `earliest` and today (inclusive, UTC)
+  const start = new Date(earliest + "T00:00:00Z");
+  const today = new Date();
+  const todayUtc = Date.UTC(
+    today.getUTCFullYear(),
+    today.getUTCMonth(),
+    today.getUTCDate(),
+  );
+  const diffDays = Math.floor((todayUtc - start.getTime()) / (24 * 60 * 60 * 1000)) + 1;
+  return buildDateAxis(Math.max(diffDays, 1));
 }
 
 // ─── Heatmap colour ──────────────────────────────────────────────────────────
@@ -424,17 +458,88 @@ function StatusBadge({ state }: { state: CellState }) {
   );
 }
 
+// ─── Lookback segment control ────────────────────────────────────────────────
+
+function LookbackSegmentControl({
+  value,
+  onChange,
+  disabled,
+}: {
+  value: LookbackPreset;
+  onChange: (next: LookbackPreset) => void;
+  disabled: boolean;
+}) {
+  return (
+    <div
+      role="tablist"
+      aria-label="Lookback range"
+      style={{
+        display: "inline-flex",
+        background: "var(--bg2)",
+        border: "1px solid var(--line)",
+        borderRadius: 4,
+        overflow: "hidden",
+        opacity: disabled ? 0.5 : 1,
+      }}
+    >
+      {LOOKBACK_PRESETS.map((preset) => {
+        const active = preset.label === value.label;
+        return (
+          <button
+            key={preset.label}
+            type="button"
+            role="tab"
+            aria-selected={active}
+            disabled={disabled}
+            onClick={() => onChange(preset)}
+            style={{
+              background: active ? "var(--bg4)" : "transparent",
+              color: active ? "var(--t0)" : "var(--t2)",
+              border: "none",
+              borderLeft: preset === LOOKBACK_PRESETS[0]
+                ? "none"
+                : "1px solid var(--line)",
+              padding: "6px 14px",
+              fontSize: 9,
+              fontWeight: 700,
+              letterSpacing: "0.12em",
+              textTransform: "uppercase",
+              fontFamily: "var(--font-space-mono), Space Mono, monospace",
+              cursor: disabled ? "not-allowed" : "pointer",
+              transition: "background 0.15s ease, color 0.15s ease",
+            }}
+            onMouseEnter={(e) => {
+              if (!active && !disabled) {
+                e.currentTarget.style.color = "var(--t1)";
+              }
+            }}
+            onMouseLeave={(e) => {
+              if (!active && !disabled) {
+                e.currentTarget.style.color = "var(--t2)";
+              }
+            }}
+          >
+            {preset.label}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
 // ─── Page ────────────────────────────────────────────────────────────────────
 
 export default function IndexerCoveragePage() {
   const [state, setState] = useState<LoadState>({ kind: "loading" });
+  const [preset, setPreset] = useState<LookbackPreset>(DEFAULT_PRESET);
 
   useEffect(() => {
     let cancelled = false;
+    setState({ kind: "loading" });
     async function load() {
       try {
         const res = await fetch(
-          `${API_BASE}/api/indexer/coverage?days=${LOOKBACK_DAYS}`,
+          `${API_BASE}/api/indexer/coverage?days=${preset.days}`,
           { credentials: "include" },
         );
         if (cancelled) return;
@@ -459,24 +564,39 @@ export default function IndexerCoveragePage() {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [preset]);
 
   return (
     <div style={{ background: "var(--bg0)", padding: 28, minHeight: "100%" }}>
       <div style={{ maxWidth: 960, margin: "0 auto" }}>
         <SectionLabel>Indexer · Coverage</SectionLabel>
-        <h1 style={{
-          fontSize: 24, fontWeight: 700, color: "var(--t0)",
-          margin: 0, marginBottom: 8,
-          letterSpacing: "-0.01em",
+        <div style={{
+          display: "flex",
+          alignItems: "flex-start",
+          justifyContent: "space-between",
+          gap: 16,
+          marginBottom: 8,
         }}>
-          Coverage Map
-        </h1>
+          <h1 style={{
+            fontSize: 24, fontWeight: 700, color: "var(--t0)",
+            margin: 0,
+            letterSpacing: "-0.01em",
+          }}>
+            Coverage Map
+          </h1>
+          <LookbackSegmentControl
+            value={preset}
+            onChange={setPreset}
+            disabled={state.kind === "loading"}
+          />
+        </div>
         <div style={{
           fontSize: 10, color: "var(--t2)",
           marginBottom: 24,
         }}>
-          Per-metric leaderboard completeness · last {LOOKBACK_DAYS} days · expected{" "}
+          Per-metric leaderboard completeness · {preset.label === "ALL"
+            ? "all available days"
+            : `last ${preset.label} days`} · expected{" "}
           {(1440 * 333).toLocaleString("en-US")} rows/day (1440 × 333)
         </div>
 
@@ -511,7 +631,11 @@ export default function IndexerCoveragePage() {
 
 function CoverageContent({ coverage }: { coverage: CoverageResponse }) {
   const { dateAxis, byMetric } = useMemo(() => {
-    const dateAxis = buildDateAxis(coverage.lookback_days);
+    // If the lookback is unbounded ("ALL", > 1 year), bound the axis to the
+    // actual data window so we don't render thousands of empty cells.
+    const dateAxis = coverage.lookback_days > 365
+      ? buildDateAxisFromData(coverage.days)
+      : buildDateAxis(coverage.lookback_days);
     const byMetric = new Map<Metric, Map<string, CoverageDay>>();
     for (const m of METRICS) byMetric.set(m, new Map());
     for (const d of coverage.days) {

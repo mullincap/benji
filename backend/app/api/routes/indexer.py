@@ -71,7 +71,7 @@ def _serialize_indexer_job(r: dict) -> dict[str, Any]:
 
 @router.get("/coverage")
 def coverage(
-    days: int = Query(90, ge=1, le=365, description="Lookback window in days (1-365, default 90)"),
+    days: int = Query(90, ge=1, le=10000, description="Lookback window in days (1-10000, default 90; the frontend uses a large value to represent ALL)"),
     cur=Depends(get_cursor),
 ) -> dict[str, Any]:
     """
