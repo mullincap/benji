@@ -11,14 +11,26 @@ numpy>=1.26.0
 
 # ─── Scientific (audit.py + institutional_audit.py) ──────────────────────────
 # Required by pipeline/audit.py and pipeline/institutional_audit.py for the
-# simulator's --audit step. matplotlib drives the chart generation,
-# scikit-learn provides LinearRegression for the rolling-fit diagnostics,
-# scipy.stats provides spearmanr / scipy_stats for the rank-correlation and
-# significance tests. Adding these grew the celery+backend image by ~500 MB
-# uncompressed but is non-optional — audit.py imports them at module load.
+# simulator's --audit step.
+#   matplotlib   — chart generation (pyplot, patches, gridspec, dates, etc.)
+#   scipy        — scipy.stats.spearmanr + scipy_stats for rank-correlation
+#                  and significance tests
+#   scikit-learn — LinearRegression (rolling-fit diagnostics) + ensemble.
+#                  RandomForestClassifier (regime classification path)
+#   yfinance     — BTC OHLCV fetcher for the V4 ADX/rvol regime signal.
+#                  Wrapped in try/except at module load (YFINANCE_AVAILABLE)
+#                  but the V4 code path raises ImportError when reached, so
+#                  it's effectively required for any --audit run.
+#   hmmlearn     — GaussianHMM for the optional regime-classification path.
+#                  Wrapped in try/except, optional, but added defensively.
+#   seaborn      — optional plotting (HAS_SNS gate). Added defensively.
+# Adding these adds ~600 MB uncompressed to the celery+backend image.
 matplotlib>=3.8.0
 scipy>=1.11.0
 scikit-learn>=1.3.0
+yfinance>=0.2.40
+hmmlearn>=0.3.0
+seaborn>=0.13.0
 
 # ─── HTTP / API clients ───────────────────────────────────────────────────────
 requests>=2.31.0
