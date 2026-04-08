@@ -25,6 +25,7 @@ import json
 from pathlib import Path
 from tqdm import tqdm
 import pandas as pd
+import pyarrow.parquet as pq
 from datetime import datetime
 import argparse
 
@@ -491,20 +492,79 @@ script_start = datetime.now()
 print(f"\n🚀 Building intraday leaderboards")
 print(f"Start → {script_start}\n")
 
+# ── Helpers: row-group streaming for the single-file mode ────────────────
+# Avoids loading the entire master parquet into RAM (was OOM-killing the
+# server at 312M rows). Same iteration pattern as
+# pipeline/db/backfill_futures_1m.py.
+
+def _build_date_to_rg_map(pf: pq.ParquetFile) -> tuple[dict, list]:
+    """Pass 1: scan ONLY the timestamp_utc column from every row group and
+    build a map of date → list of row group indices that contain rows for
+    that date. Also returns the sorted list of unique dates.
+
+    Memory cost per row group: one column of timestamps (~3 MB for ~393K
+    rows). Discarded immediately after extracting unique dates. Total
+    pass-1 footprint is bounded by one row group, not the whole file.
+    """
+    date_to_rg: dict = {}
+    for rg_idx in range(pf.num_row_groups):
+        tbl = pf.read_row_group(rg_idx, columns=["timestamp_utc"])
+        ts = pd.to_datetime(tbl.column("timestamp_utc").to_pandas())
+        for d in ts.dt.date.unique():
+            date_to_rg.setdefault(d, []).append(rg_idx)
+    return date_to_rg, sorted(date_to_rg.keys())
+
+
+def _load_day_from_parquet(
+    pf: pq.ParquetFile,
+    date_to_rg_map: dict,
+    target_date,
+    columns: list[str],
+) -> pd.DataFrame:
+    """Read all rows for `target_date` by iterating only the row groups
+    that contain it (lookup via date_to_rg_map). Returns a DataFrame with
+    the requested columns plus a `timestamp_utc` column converted to
+    pandas datetime. Returns an empty DataFrame if the date isn't in the
+    map.
+
+    Per-day memory: 1-2 row groups × 3 columns ≈ 25-50 MB peak. Far below
+    the ~2-4 GB the all-at-once read used to require.
+    """
+    row_groups = date_to_rg_map.get(target_date, [])
+    if not row_groups:
+        return pd.DataFrame(columns=columns)
+    frames = []
+    for rg_idx in row_groups:
+        tbl = pf.read_row_group(rg_idx, columns=columns)
+        df = tbl.to_pandas()
+        df["timestamp_utc"] = pd.to_datetime(df["timestamp_utc"])
+        df = df[df["timestamp_utc"].dt.date == target_date]
+        if not df.empty:
+            frames.append(df)
+    if not frames:
+        return pd.DataFrame(columns=columns)
+    return pd.concat(frames, ignore_index=True)
+
+
 # ── Determine data source ─────────────────────────────────────────────────
-# Single-file mode: read entire parquet, group by date
+# Single-file mode: row-group streaming (memory-bounded, OOM-safe)
 # Partition mode:   scan PARQUET_DIR for date=* subdirectories (original)
 USE_SINGLE_FILE = args.parquet_path is not None
 
+# Module-level handles populated only in single-file mode. Both stay None
+# in partition mode and are not referenced from that branch.
+_PF: pq.ParquetFile | None = None
+_DATE_TO_RG: dict = {}
+
 if USE_SINGLE_FILE:
-    print(f"📂 Single-file mode: {args.parquet_path}")
-    _master_df = pd.read_parquet(
-        args.parquet_path,
-        columns=["timestamp_utc", "symbol", RANK_METRIC]
+    print(f"📂 Single-file mode (row-group streaming): {args.parquet_path}")
+    _PF = pq.ParquetFile(args.parquet_path)
+    print(
+        f"   row groups: {_PF.num_row_groups:,} | "
+        f"total rows: {_PF.metadata.num_rows:,}"
     )
-    _master_df["timestamp_utc"] = pd.to_datetime(_master_df["timestamp_utc"])
-    _master_df["_date"] = _master_df["timestamp_utc"].dt.date
-    _date_groups = sorted(_master_df["_date"].unique())
+    print("   pass 1: scanning timestamps to build date → row-group map ...")
+    _DATE_TO_RG, _date_groups = _build_date_to_rg_map(_PF)
     print(f"📂 Dates found: {len(_date_groups)}\n")
 else:
     partitions = sorted(PARQUET_DIR.glob("date=*"))
@@ -596,9 +656,10 @@ for _day_key in tqdm(_date_groups, desc="Processing days"):
     try:
 
         if USE_SINGLE_FILE:
-            df = _master_df[_master_df["_date"] == _day_key][[
-                "timestamp_utc", "symbol", RANK_METRIC
-            ]].copy()
+            df = _load_day_from_parquet(
+                _PF, _DATE_TO_RG, _day_key,
+                columns=["timestamp_utc", "symbol", RANK_METRIC],
+            )
         else:
             df = pd.read_parquet(
                 _day_key,
@@ -649,16 +710,16 @@ for _day_key in tqdm(_date_groups, desc="Processing days"):
                 ).strftime("%Y-%m-%d")
                 _prev_date_key = pd.Timestamp(prev_date_str).date()
                 _prev_exists = (
-                    (USE_SINGLE_FILE and
-                     _prev_date_key in set(_master_df["_date"])) or
+                    (USE_SINGLE_FILE and _prev_date_key in _DATE_TO_RG) or
                     (not USE_SINGLE_FILE and
                      (PARQUET_DIR / f"date={prev_date_str}").exists())
                 )
                 if _prev_exists:
                     if USE_SINGLE_FILE:
-                        prev_df = _master_df[
-                            _master_df["_date"] == _prev_date_key
-                        ][["timestamp_utc", "symbol", "volume"]].copy()
+                        prev_df = _load_day_from_parquet(
+                            _PF, _DATE_TO_RG, _prev_date_key,
+                            columns=["timestamp_utc", "symbol", "volume"],
+                        )
                     else:
                         prev_df = pd.read_parquet(
                             PARQUET_DIR / f"date={prev_date_str}",
@@ -770,16 +831,16 @@ for _day_key in tqdm(_date_groups, desc="Processing days"):
                 ).strftime("%Y-%m-%d")
                 _prev_date_key = pd.Timestamp(prev_date_str).date()
                 _prev_exists = (
-                    (USE_SINGLE_FILE and
-                     _prev_date_key in set(_master_df["_date"])) or
+                    (USE_SINGLE_FILE and _prev_date_key in _DATE_TO_RG) or
                     (not USE_SINGLE_FILE and
                      (PARQUET_DIR / f"date={prev_date_str}").exists())
                 )
                 if _prev_exists:
                     if USE_SINGLE_FILE:
-                        prev_df = _master_df[
-                            _master_df["_date"] == _prev_date_key
-                        ][["timestamp_utc", "symbol", RANK_METRIC]].copy()
+                        prev_df = _load_day_from_parquet(
+                            _PF, _DATE_TO_RG, _prev_date_key,
+                            columns=["timestamp_utc", "symbol", RANK_METRIC],
+                        )
                     else:
                         prev_df = pd.read_parquet(
                             PARQUET_DIR / f"date={prev_date_str}",
