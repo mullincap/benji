@@ -8,9 +8,17 @@
 
 ## Current State
 
-**Last updated:** Phase 3 complete. Phase 4 not yet started — work paused at this checkpoint.
-**Next action:** Phase 4 — Jobs page. Replace the `/indexer/jobs` placeholder with the real jobs table: `job_type` filter chips (leaderboard / overlap / full / all), status badges, 10s polling while any job is running, live duration column. Lift the polling + status badge + duration formatter patterns verbatim from `frontend/app/compiler/(protected)/jobs/page.tsx`. Driven by `GET /api/indexer/jobs?limit=50`. Build the empty state in from day one (the table is currently 0 rows).
-**Resume command for next session:** "Resume the indexer build from `docs/builds/indexer-page-build.md`. Start at Phase 4 (Jobs page)."
+**Last updated:** Phase 4 complete. Phase 5 not yet started — work paused at this checkpoint.
+**Next action:** Phase 5 — Signals page. Replace the `/indexer/signals` placeholder with: source filter chips (live / backtest / research / all), date column, strategy version label, sit_flat badge, filter_name, and a click-row detail showing the symbol list. Driven by `GET /api/indexer/signals?days=N&source=...` and `GET /api/indexer/signals/{signal_batch_id}` (the list endpoint already pre-aggregates symbols, so the detail call may be unnecessary — decide while building).
+**Resume command for next session:** "Resume the indexer build from `docs/builds/indexer-page-build.md`. Start at Phase 5 (Signals page)."
+
+### Phase 4 — what shipped
+
+- `frontend/app/indexer/(protected)/jobs/page.tsx` — full Jobs page replacing the placeholder. Polling loop, 1s ticker, status badges, duration formatter all lifted verbatim from `compiler/(protected)/jobs/page.tsx`.
+- Filter chips: All · Leaderboard · Overlap · Full. Counts shown per chip, computed from the unfiltered job list. Active chip uses `var(--module-accent)` border.
+- Table columns: Type · Metric · Date Range · Status · Symbols Done/Total · Rows Written · Duration · Triggered By. Running jobs render a `ProgressBar` instead of a flat fraction.
+- Empty state: dedicated card explaining that `market.indexer_jobs` is currently empty because no script writes to it yet, with the wiring follow-up referenced. Renders day one without implying user error.
+- Build verification: `next build` clean, all 6 indexer routes still present.
 
 ### Phase 3 — what shipped
 
@@ -258,10 +266,10 @@ These are not blockers — they're cleanups I noticed while reading the existing
   - [x] KPI cards (Days Complete / Days Partial / Days Missing / Most Recent Day) per metric
   - [x] Per-metric heatmap (3 heatmaps stacked: price, open_interest, volume)
   - [x] Gap table grouped by metric
-- [ ] **Phase 4** — Jobs page (`/indexer/jobs`)
-  - [ ] Empty state for the current 0-row reality
-  - [ ] Job table with `job_type` filter chips (leaderboard / overlap / full / all)
-  - [ ] Status badges + polling + live duration (lifted from compiler/jobs)
+- [x] **Phase 4** — Jobs page (`/indexer/jobs`)
+  - [x] Empty state for the current 0-row reality
+  - [x] Job table with `job_type` filter chips (leaderboard / overlap / full / all)
+  - [x] Status badges + polling + live duration (lifted from compiler/jobs)
 - [ ] **Phase 5** — Signals page (`/indexer/signals`)
   - [ ] Filter chips: source (live / backtest / research / all)
   - [ ] Date column + strategy version label + sit_flat badge + filter_name
@@ -294,6 +302,7 @@ These are not blockers — they're cleanups I noticed while reading the existing
 | 2 | `frontend/app/indexer/(public)/layout.tsx` | Created — minimal centered + Topbar |
 | 2 | `frontend/app/indexer/(public)/login/page.tsx` | Created — redirect stub to /compiler/login |
 | 3 | `frontend/app/indexer/(protected)/coverage/page.tsx` | Replaced placeholder — full Coverage page (per-metric KPIs + heatmaps + gap table) |
+| 4 | `frontend/app/indexer/(protected)/jobs/page.tsx` | Replaced placeholder — full Jobs page (filter chips + polling table + empty state) |
 
 ---
 
