@@ -104,7 +104,7 @@ function applyBaseTheme(id: string) {
 
 const MODULES: Array<{ key: ModuleKey; icon: string; href?: string }> = [
   { key: 'compiler', icon: '</>', href: '/compiler' },
-  { key: 'indexer', icon: '⌕' },
+  { key: 'indexer', icon: '⌕', href: '/indexer' },
   { key: 'simulator', icon: '◴', href: '/simulator' },
   { key: 'allocator', icon: '⚙', href: '/trader' },
   { key: 'manager', icon: '▣' },

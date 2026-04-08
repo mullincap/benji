@@ -8,9 +8,19 @@
 
 ## Current State
 
-**Last updated:** Phase 1 complete. Phase 2 not yet started — work paused at this checkpoint.
-**Next action:** Phase 2 — frontend shell. Build it using the same pattern as the compiler shell (commit `7da2c64`). Specifics locked below in "Phase 2 plan".
-**Resume command for next session:** "Resume the indexer build from `docs/builds/indexer-page-build.md`. Start at Phase 2 (frontend shell)."
+**Last updated:** Phase 2 complete. Phase 3 not yet started — work paused at this checkpoint.
+**Next action:** Phase 3 — Coverage page. Replace the `/indexer/coverage` placeholder with KPI cards, three stacked heatmaps (price · open_interest · volume), and a per-metric gap table, all driven by `GET /api/indexer/coverage?days=N`.
+**Resume command for next session:** "Resume the indexer build from `docs/builds/indexer-page-build.md`. Start at Phase 3 (Coverage page)."
+
+### Phase 2 — what shipped
+
+- `frontend/app/components/Topbar.tsx` — added `href: '/indexer'` to the indexer entry in `MODULES`. The active-route accent now picks up `theme.colors.indexer` automatically when the user navigates to `/indexer/*`.
+- `frontend/app/indexer/(protected)/layout.tsx` — auth-checked layout with `IndexerSidebar` (200px, 9px "INDEXER" label, 4 nav items, 2px left border in `var(--module-accent)` for active). Verifies session via `GET /api/admin/whoami`, redirects unauth users to `/indexer/login`.
+- `frontend/app/indexer/(protected)/page.tsx` — server-side redirect to `/indexer/coverage`.
+- `frontend/app/indexer/(protected)/{coverage,jobs,signals,strategies}/page.tsx` — four placeholder pages, each with the locked convention (9px section label, 24px page title, one `--bg2` card describing what the corresponding phase will render).
+- `frontend/app/indexer/(public)/layout.tsx` — minimal centered layout that renders Topbar so `--module-accent` is set on the login redirect path.
+- `frontend/app/indexer/(public)/login/page.tsx` — stub that `router.replace('/compiler/login')`. Auth is shared (same `admin_session` cookie), so duplicating the form would be churn.
+- Verification: `next build` clean. All 6 indexer routes appear in the static route table: `/indexer`, `/indexer/coverage`, `/indexer/jobs`, `/indexer/signals`, `/indexer/strategies`, `/indexer/login`.
 
 ### Phase 1 — what shipped (commits `f73083c` and `b95db30`)
 
@@ -225,17 +235,17 @@ These are not blockers — they're cleanups I noticed while reading the existing
   - [x] Register router in `backend/app/main.py`
   - [x] TestClient smoke test 6/6 PASS (route registration, auth 401, login, cookie rename, post-login 503-on-DB)
   - [x] SQL smoke test 4/4 PASS against live DB (real response shapes captured)
-- [ ] **Phase 2** — Frontend shell
-  - [ ] `frontend/app/indexer/(protected)/layout.tsx` — auth check + Topbar + sidebar
-  - [ ] `frontend/app/indexer/(protected)/page.tsx` — server redirect to `/indexer/coverage`
-  - [ ] `frontend/app/indexer/(protected)/coverage/page.tsx` — Phase 3 placeholder
-  - [ ] `frontend/app/indexer/(protected)/jobs/page.tsx` — Phase 4 placeholder
-  - [ ] `frontend/app/indexer/(protected)/signals/page.tsx` — Phase 5 placeholder
-  - [ ] `frontend/app/indexer/(protected)/strategies/page.tsx` — Phase 6 placeholder
-  - [ ] `frontend/app/indexer/(public)/layout.tsx` — minimal centered (renders Topbar)
-  - [ ] `frontend/app/indexer/(public)/login/page.tsx` — passphrase form (or just redirect to /compiler/login if cookie is shared)
-  - [ ] `Topbar.tsx` — add `href: '/indexer'` to the indexer MODULES entry
-  - [ ] Verify via `next build` that all 6 indexer routes appear
+- [x] **Phase 2** — Frontend shell
+  - [x] `frontend/app/indexer/(protected)/layout.tsx` — auth check + Topbar + sidebar
+  - [x] `frontend/app/indexer/(protected)/page.tsx` — server redirect to `/indexer/coverage`
+  - [x] `frontend/app/indexer/(protected)/coverage/page.tsx` — Phase 3 placeholder
+  - [x] `frontend/app/indexer/(protected)/jobs/page.tsx` — Phase 4 placeholder
+  - [x] `frontend/app/indexer/(protected)/signals/page.tsx` — Phase 5 placeholder
+  - [x] `frontend/app/indexer/(protected)/strategies/page.tsx` — Phase 6 placeholder
+  - [x] `frontend/app/indexer/(public)/layout.tsx` — minimal centered (renders Topbar)
+  - [x] `frontend/app/indexer/(public)/login/page.tsx` — redirect stub to `/compiler/login`
+  - [x] `Topbar.tsx` — add `href: '/indexer'` to the indexer MODULES entry
+  - [x] Verified via `next build` that all 6 indexer routes appear
 - [ ] **Phase 3** — Coverage page (`/indexer/coverage`)
   - [ ] KPI cards (Total Days / Days Complete / Days With Gaps / Days Missing) per metric
   - [ ] Per-metric heatmap (3 heatmaps stacked: price, open_interest, volume)
@@ -266,6 +276,15 @@ These are not blockers — they're cleanups I noticed while reading the existing
 | 1 | `frontend/app/compiler/(public)/login/page.tsx` | Modified — updated stale comment to match new cookie name |
 | 1 | `backend/app/api/routes/indexer.py` | Created — 6 read-only endpoints (coverage, jobs, jobs/{id}, signals, signals/{id}, strategies) |
 | 1 | `backend/app/main.py` | Modified — registered indexer_router |
+| 2 | `frontend/app/components/Topbar.tsx` | Modified — added `href: '/indexer'` to MODULES |
+| 2 | `frontend/app/indexer/(protected)/layout.tsx` | Created — auth check + IndexerSidebar (4 nav items) |
+| 2 | `frontend/app/indexer/(protected)/page.tsx` | Created — server redirect to /indexer/coverage |
+| 2 | `frontend/app/indexer/(protected)/coverage/page.tsx` | Created — Phase 3 placeholder |
+| 2 | `frontend/app/indexer/(protected)/jobs/page.tsx` | Created — Phase 4 placeholder |
+| 2 | `frontend/app/indexer/(protected)/signals/page.tsx` | Created — Phase 5 placeholder |
+| 2 | `frontend/app/indexer/(protected)/strategies/page.tsx` | Created — Phase 6 placeholder |
+| 2 | `frontend/app/indexer/(public)/layout.tsx` | Created — minimal centered + Topbar |
+| 2 | `frontend/app/indexer/(public)/login/page.tsx` | Created — redirect stub to /compiler/login |
 
 ---
 
