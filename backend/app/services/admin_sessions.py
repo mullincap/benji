@@ -8,8 +8,8 @@ Why flat file (not DB, not Redis):
   - Survives uvicorn --reload (DB tables are stable, Redis would lose state)
   - Zero new dependencies
   - Easy to inspect/wipe by hand (just edit/delete the JSON file)
-  - Single-process model — fcntl advisory locking handles the rare concurrent
-    writes that come from --reload spawning two workers briefly
+  - Single-process model — concurrent writes are rare enough (one admin) that
+    we rely on os.replace's atomic rename for crash safety, no advisory locks
 
 File format (backend/data/admin_sessions.json):
   {
@@ -34,7 +34,6 @@ Expired tokens are pruned lazily on every access — no background job needed.
 
 from __future__ import annotations
 
-import fcntl
 import json
 import secrets
 from datetime import datetime, timedelta, timezone
@@ -58,31 +57,20 @@ def _ensure_file(path: Path) -> None:
 
 
 def _load(path: Path) -> dict:
-    """Read sessions file with shared lock. Returns {tokens: {...}} dict."""
+    """Read sessions file. Returns {tokens: {...}} dict."""
     _ensure_file(path)
-    with path.open("r") as f:
-        fcntl.flock(f.fileno(), fcntl.LOCK_SH)
-        try:
-            data = json.load(f)
-        finally:
-            fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+    data = json.loads(path.read_text())
     if not isinstance(data, dict) or "tokens" not in data:
         return {"tokens": {}}
     return data
 
 
 def _save(path: Path, data: dict) -> None:
-    """Write sessions file with exclusive lock + atomic rename."""
+    import os
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    with tmp.open("w") as f:
-        fcntl.flock(f.fileno(), fcntl.LOCK_EX)
-        try:
-            json.dump(data, f, indent=2)
-            f.flush()
-        finally:
-            fcntl.flock(f.fileno(), fcntl.LOCK_UN)
-    tmp.replace(path)  # atomic on POSIX
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(json.dumps(data, indent=2))
+    os.replace(tmp, path)
 
 
 def _prune_expired(data: dict) -> dict:
