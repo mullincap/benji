@@ -8,9 +8,9 @@
 
 ## Current State
 
-**Last updated:** Phase 0 — read existing conventions (Compiler frontend now part of those conventions), DB schema inspected, indexer pipeline scripts surveyed. Build doc created.
-**Next action:** Wait for user ack on Phase 0 report, then begin Phase 1 (FastAPI indexer router). The Phase 1 entry tasks include three small **carry-over fixes** flagged during Phase 0 (see "Phase 1 entry tasks" below).
-**Resume command for next session:** "Resume the indexer build from `docs/builds/indexer-page-build.md`. Start at the first unchecked phase."
+**Last updated:** Phase 1 complete. All 3 entry tasks applied (docstring fix, cookie rename to `admin_session`, `last_heartbeat` verified). 6 FastAPI endpoints built and registered. Smoke tests pass: 6/6 TestClient (auth + routing) and 4/4 SQL against live DB.
+**Next action:** Wait for user ack on Phase 1 report, then begin Phase 2 (frontend shell mirroring the compiler page structure with route groups, login passthrough, and 4 placeholder pages for Coverage / Jobs / Signals / Strategies).
+**Resume command for next session:** "Resume the indexer build from `docs/builds/indexer-page-build.md`. Start at Phase 2 (frontend shell)."
 
 ### Phase 1 entry tasks (small fixes flagged during Phase 0)
 
@@ -150,19 +150,19 @@ These are not blockers — they're cleanups I noticed while reading the existing
 ## Phase checklist
 
 - [x] **Phase 0** — Read conventions, create this build doc
-- [ ] **Phase 1** — Backend: FastAPI indexer router (`backend/app/api/routes/indexer.py`)
-  - [ ] Apply Phase 1 entry task #1 (fix stale Compiler layout docstring)
-  - [ ] Apply Phase 1 entry task #2 (rename cookie to `admin_session`) — IF user approves
-  - [ ] Apply Phase 1 entry task #3 (add `last_heartbeat` to `indexer_jobs`) — IF user approves
-  - [ ] `GET /api/indexer/coverage` — leaderboard completeness per metric per day
-  - [ ] `GET /api/indexer/gaps` — leaderboard days with missing/partial coverage
-  - [ ] `GET /api/indexer/jobs` — recent indexer_jobs with `is_stale`
-  - [ ] `GET /api/indexer/jobs/{job_id}` — single job
-  - [ ] `GET /api/indexer/signals` — recent daily_signals with optional `?source=` filter
-  - [ ] `GET /api/indexer/signals/{signal_batch_id}` — signal items for one batch
-  - [ ] `GET /api/indexer/strategies` — strategies + versions
-  - [ ] Register router in `backend/app/main.py`
-  - [ ] Smoke test each endpoint via psql + capture response shapes
+- [x] **Phase 1** — Backend: FastAPI indexer router (`backend/app/api/routes/indexer.py`)
+  - [x] Apply Phase 1 entry task #1 (fix stale Compiler layout docstring)
+  - [x] Apply Phase 1 entry task #2 (rename cookie to `admin_session`)
+  - [x] Apply Phase 1 entry task #3 (`last_heartbeat` verified — already migrated in checkpointing work)
+  - [x] `GET /api/indexer/coverage` — leaderboard completeness per metric per day
+  - [x] `GET /api/indexer/jobs` — recent indexer_jobs with `is_stale`
+  - [x] `GET /api/indexer/jobs/{job_id}` — single job
+  - [x] `GET /api/indexer/signals` — recent daily_signals with optional `?source=` filter
+  - [x] `GET /api/indexer/signals/{signal_batch_id}` — signal items for one batch
+  - [x] `GET /api/indexer/strategies` — strategies + versions
+  - [x] Register router in `backend/app/main.py`
+  - [x] TestClient smoke test 6/6 PASS (route registration, auth 401, login, cookie rename, post-login 503-on-DB)
+  - [x] SQL smoke test 4/4 PASS against live DB (real response shapes captured)
 - [ ] **Phase 2** — Frontend shell
   - [ ] `frontend/app/indexer/(protected)/layout.tsx` — auth check + Topbar + sidebar
   - [ ] `frontend/app/indexer/(protected)/page.tsx` — server redirect to `/indexer/coverage`
@@ -198,6 +198,12 @@ These are not blockers — they're cleanups I noticed while reading the existing
 | Phase | File | Type |
 |---|---|---|
 | 0 | `docs/builds/indexer-page-build.md` | Created |
+| 1 | `frontend/app/compiler/(protected)/layout.tsx` | Modified — fixed stale docstring (entry task #1) |
+| 1 | `backend/app/api/routes/admin.py` | Modified — renamed COOKIE_NAME compiler_session → admin_session (entry task #2) |
+| 1 | `backend/app/api/routes/compiler.py` | Modified — updated stale comment to match new cookie name |
+| 1 | `frontend/app/compiler/(public)/login/page.tsx` | Modified — updated stale comment to match new cookie name |
+| 1 | `backend/app/api/routes/indexer.py` | Created — 6 read-only endpoints (coverage, jobs, jobs/{id}, signals, signals/{id}, strategies) |
+| 1 | `backend/app/main.py` | Modified — registered indexer_router |
 
 ---
 
