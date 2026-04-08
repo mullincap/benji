@@ -23,6 +23,7 @@ services:
       - NODE_BIN=node
     volumes:
       - jobs_data:/app/backend/jobs
+      - backend_data:/app/backend/data
       - /data:/data
     depends_on:
       redis:
@@ -75,5 +76,6 @@ services:
 volumes:
   redis_data:
   jobs_data:
+  backend_data:
   certbot_www:
   certbot_certs:

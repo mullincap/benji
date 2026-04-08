@@ -28,8 +28,8 @@ RUN cd /app/pipeline && npm install --production 2>/dev/null || true
 COPY backend/ /app/backend/
 COPY pipeline/ /app/pipeline/
 
-# Create jobs directory
-RUN mkdir -p /app/backend/jobs
+# Create jobs + data directories (data holds admin_sessions.json)
+RUN mkdir -p /app/backend/jobs /app/backend/data
 
 ENV PYTHONPATH=/app/backend
 ENV PIPELINE_PYTHON=python

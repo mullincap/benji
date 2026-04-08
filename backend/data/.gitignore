@@ -1,6 +1,8 @@
 # Live runtime state — never commit
 admin_sessions.json
-admin_sessions.json.tmp
+*.tmp
 
-# Allow this .gitignore itself
+# Allow this .gitignore itself + the .gitkeep marker so the directory
+# is tracked even though all real contents are ignored
 !.gitignore
+!.gitkeep
