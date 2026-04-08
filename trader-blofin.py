@@ -36,6 +36,18 @@ import numpy as np
 import pandas as pd
 from pathlib import Path
 
+# Self-load secrets.env so the script works regardless of how it's invoked
+# (cron without `set -a`, manual shell, systemd, etc). Plain KEY=VALUE lines
+# only — no `export` prefix support, no shell interpolation. Existing env
+# vars take precedence (setdefault), so callers can still override per-run.
+_SECRETS = Path("/mnt/quant-data/credentials/secrets.env")
+if _SECRETS.exists():
+    for _line in _SECRETS.read_text().splitlines():
+        _line = _line.strip()
+        if _line and not _line.startswith("#") and "=" in _line:
+            _k, _, _v = _line.partition("=")
+            os.environ.setdefault(_k.strip(), _v.strip())
+
 
 # ==========================================================================
 # CONFIGURATION
