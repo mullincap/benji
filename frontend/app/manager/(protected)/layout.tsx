@@ -257,9 +257,10 @@ function ManagerSidebar({
                     whiteSpace: "nowrap",
                     overflow: "hidden",
                     textOverflow: "ellipsis",
+                    maxWidth: 160,
                   }}
                 >
-                  {c.title ? truncate(c.title, 24) : "Untitled"}
+                  {c.title || "Untitled"}
                 </div>
                 <div style={{ fontSize: 9, color: "var(--t3)", marginTop: 2 }}>
                   {relativeTime(c.updated_at)}

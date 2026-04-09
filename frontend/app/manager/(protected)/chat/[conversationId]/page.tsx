@@ -13,6 +13,44 @@ interface Message {
   created_at: string;
 }
 
+// ── Markdown components for assistant messages ──────────────────────────────
+
+const mdComponents = {
+  p: ({ children }: { children?: React.ReactNode }) => (
+    <p style={{ fontSize: 10, color: "var(--t2)", lineHeight: 1.7, margin: "0 0 8px" }}>
+      {children}
+    </p>
+  ),
+  strong: ({ children }: { children?: React.ReactNode }) => (
+    <strong style={{ color: "var(--t0)", fontWeight: 700 }}>{children}</strong>
+  ),
+  ul: ({ children }: { children?: React.ReactNode }) => (
+    <ul style={{ margin: "6px 0 8px", paddingLeft: 16, display: "flex", flexDirection: "column" as const, gap: 3, listStyle: "disc" }}>
+      {children}
+    </ul>
+  ),
+  ol: ({ children }: { children?: React.ReactNode }) => (
+    <ol style={{ margin: "6px 0 8px", paddingLeft: 16, display: "flex", flexDirection: "column" as const, gap: 3 }}>
+      {children}
+    </ol>
+  ),
+  li: ({ children }: { children?: React.ReactNode }) => (
+    <li style={{ fontSize: 10, color: "var(--t2)", lineHeight: 1.6 }}>{children}</li>
+  ),
+  code: ({ children }: { children?: React.ReactNode }) => (
+    <code style={{ background: "var(--bg3)", padding: "1px 4px", borderRadius: 3, fontSize: 10 }}>{children}</code>
+  ),
+  h1: ({ children }: { children?: React.ReactNode }) => (
+    <h1 style={{ fontSize: 11, fontWeight: 700, color: "var(--t0)", margin: "12px 0 4px" }}>{children}</h1>
+  ),
+  h2: ({ children }: { children?: React.ReactNode }) => (
+    <h2 style={{ fontSize: 11, fontWeight: 700, color: "var(--t0)", margin: "12px 0 4px" }}>{children}</h2>
+  ),
+  h3: ({ children }: { children?: React.ReactNode }) => (
+    <h3 style={{ fontSize: 11, fontWeight: 700, color: "var(--t0)", margin: "12px 0 4px" }}>{children}</h3>
+  ),
+};
+
 export default function ConversationPage() {
   const { conversationId } = useParams<{ conversationId: string }>();
   const [messages, setMessages] = useState<Message[]>([]);
@@ -93,19 +131,51 @@ export default function ConversationPage() {
     } finally {
       setSending(false);
     }
-  }, [input, sending, conversationId]);
+  }, [input, sending, conversationId, refreshSidebar]);
 
-  // Parse action blocks from assistant messages
+  // ── Parse action blocks from assistant messages ───────────────────────────
+
   function renderMessage(msg: Message) {
-    if (msg.role !== "assistant") {
+    if (msg.role === "user") {
       return (
-        <div style={{ fontSize: 10, color: "var(--t0)", whiteSpace: "pre-wrap", lineHeight: 1.6 }}>
-          {msg.content}
+        <div
+          style={{
+            display: "flex",
+            flexDirection: "column",
+            alignItems: "flex-end",
+          }}
+        >
+          <div
+            style={{
+              fontSize: 8,
+              fontWeight: 700,
+              letterSpacing: "0.08em",
+              color: "var(--t3)",
+              textTransform: "uppercase",
+              marginBottom: 2,
+              textAlign: "right",
+            }}
+          >
+            You
+          </div>
+          <div
+            style={{
+              background: "var(--bg2)",
+              border: "0.5px solid var(--line)",
+              borderRadius: 6,
+              padding: "8px 12px",
+              maxWidth: "60%",
+            }}
+          >
+            <div style={{ fontSize: 10, color: "var(--t0)", lineHeight: 1.6, whiteSpace: "pre-wrap" }}>
+              {msg.content}
+            </div>
+          </div>
         </div>
       );
     }
 
-    // Check for trailing JSON action block
+    // Assistant message — check for trailing JSON action block
     const actionMatch = msg.content.match(
       /\n?\{"action":\s*true[^}]*\}\s*$/
     );
@@ -121,54 +191,82 @@ export default function ConversationPage() {
       }
     }
 
+    const actionLabel = actionBlock?.type
+      ? `Proposed Action \u00b7 ${actionBlock.type.replace(/_/g, " ").toUpperCase()}`
+      : "Proposed Action";
+
     return (
-      <>
-        <div className="manager-md" style={{ fontSize: 10, color: "var(--t0)", lineHeight: 1.6 }}>
-          <ReactMarkdown>{displayContent}</ReactMarkdown>
+      <div style={{ display: "flex", flexDirection: "column" }}>
+        <div
+          style={{
+            fontSize: 8,
+            fontWeight: 700,
+            letterSpacing: "0.08em",
+            color: "var(--green)",
+            textTransform: "uppercase",
+            marginBottom: 2,
+          }}
+        >
+          3M
+        </div>
+        <div
+          style={{
+            borderLeft: "2px solid var(--line)",
+            paddingLeft: 14,
+          }}
+        >
+          <ReactMarkdown components={mdComponents}>{displayContent}</ReactMarkdown>
         </div>
         {actionBlock && (
           <div
             style={{
               marginTop: 10,
-              background: "var(--bg3)",
-              border: "1px solid var(--line2)",
-              borderRadius: 5,
-              padding: 12,
+              marginLeft: 16,
+              background: "var(--bg1)",
+              border: "0.5px solid var(--line)",
+              borderRadius: 6,
+              padding: "12px 14px",
             }}
           >
             <div
               style={{
-                fontSize: 9,
+                fontSize: 8,
                 fontWeight: 700,
-                letterSpacing: "0.12em",
-                color: "var(--amber)",
+                letterSpacing: "0.08em",
+                color: "var(--t3)",
                 textTransform: "uppercase",
                 marginBottom: 6,
               }}
             >
-              Proposed Action
+              {actionLabel}
             </div>
-            <div style={{ fontSize: 10, color: "var(--t1)", marginBottom: 10 }}>
+            <div
+              style={{
+                fontSize: 10,
+                color: "var(--t0)",
+                lineHeight: 1.5,
+                marginBottom: 10,
+              }}
+            >
               {actionBlock.summary}
             </div>
             <div style={{ display: "flex", gap: 8 }}>
               <button
                 onClick={() => {
                   setInput("Confirmed \u2014 please proceed");
-                  // Auto-send confirmation
                   setTimeout(() => {
                     const btn = document.querySelector("[data-send-btn]") as HTMLButtonElement;
                     btn?.click();
                   }, 50);
                 }}
                 style={{
-                  background: "var(--green-dim)",
-                  border: "1px solid var(--green)",
+                  background: "var(--bg1)",
+                  border: "1px solid rgba(0, 200, 150, 0.4)",
                   color: "var(--green)",
                   fontSize: 9,
                   fontWeight: 700,
-                  padding: "4px 12px",
-                  borderRadius: 3,
+                  padding: "5px 14px",
+                  borderRadius: 4,
                   cursor: "pointer",
                   fontFamily: "var(--font-space-mono), Space Mono, monospace",
                 }}
@@ -184,13 +282,13 @@ export default function ConversationPage() {
                   }, 50);
                 }}
                 style={{
-                  background: "var(--red-dim)",
-                  border: "1px solid var(--red)",
-                  color: "var(--red)",
+                  background: "transparent",
+                  border: "1px solid var(--line)",
+                  color: "var(--t3)",
                   fontSize: 9,
                   fontWeight: 700,
-                  padding: "4px 12px",
-                  borderRadius: 3,
+                  padding: "5px 14px",
+                  borderRadius: 4,
                   cursor: "pointer",
                   fontFamily: "var(--font-space-mono), Space Mono, monospace",
                 }}
@@ -200,9 +298,11 @@ export default function ConversationPage() {
             </div>
           </div>
         )}
-      </>
+      </div>
     );
   }
+
+  // ── Loading state ─────────────────────────────────────────────────────────
 
   if (loading) {
     return (
@@ -223,6 +323,8 @@ export default function ConversationPage() {
     );
   }
 
+  // ── Render ────────────────────────────────────────────────────────────────
+
   return (
     <div
       style={{
@@ -235,7 +337,7 @@ export default function ConversationPage() {
       <div
         style={{
           padding: "12px 20px",
-          borderBottom: "1px solid var(--line)",
+          borderBottom: "0.5px solid var(--line)",
           fontSize: 10,
           fontWeight: 700,
           color: "var(--t1)",
@@ -245,57 +347,47 @@ export default function ConversationPage() {
       </div>
 
       {/* Messages */}
-      <div style={{ flex: 1, overflowY: "auto", padding: "16px 20px" }}>
-        {messages.map((msg) => (
-          <div
-            key={msg.message_id}
-            style={{
-              marginBottom: 16,
-              display: "flex",
-              flexDirection: "column",
-            }}
-          >
-            <div
-              style={{
-                fontSize: 9,
-                fontWeight: 700,
-                letterSpacing: "0.1em",
-                color: msg.role === "user" ? "var(--t2)" : "var(--module-accent)",
-                textTransform: "uppercase",
-                marginBottom: 4,
-              }}
-            >
-              {msg.role === "user" ? "You" : "3M"}
+      <div style={{ flex: 1, overflowY: "auto", padding: "20px 24px" }}>
+        <div style={{ display: "flex", flexDirection: "column", gap: 24 }}>
+          {messages.map((msg) => (
+            <div key={msg.message_id}>
+              {renderMessage(msg)}
             </div>
-            {renderMessage(msg)}
-          </div>
-        ))}
+          ))}
 
-        {sending && (
-          <div style={{ marginBottom: 16 }}>
-            <div
-              style={{
-                fontSize: 9,
-                fontWeight: 700,
-                letterSpacing: "0.1em",
-                color: "var(--module-accent)",
-                textTransform: "uppercase",
-                marginBottom: 4,
-              }}
-            >
-              3M
+          {sending && (
+            <div style={{ display: "flex", flexDirection: "column" }}>
+              <div
+                style={{
+                  fontSize: 8,
+                  fontWeight: 700,
+                  letterSpacing: "0.08em",
+                  color: "var(--green)",
+                  textTransform: "uppercase",
+                  marginBottom: 2,
+                }}
+              >
+                3M
+              </div>
+              <div
+                style={{
+                  borderLeft: "2px solid var(--line)",
+                  paddingLeft: 14,
+                }}
+              >
+                <span
+                  style={{
+                    fontSize: 10,
+                    color: "var(--t3)",
+                    animation: "pulse-dot 1.5s ease-in-out infinite",
+                  }}
+                >
+                  thinking...
+                </span>
+              </div>
             </div>
-            <div
-              style={{
-                fontSize: 10,
-                color: "var(--t2)",
-                animation: "pulse-dot 1.5s ease-in-out infinite",
-              }}
-            >
-              thinking...
-            </div>
-          </div>
-        )}
+          )}
+        </div>
 
         <div ref={bottomRef} />
       </div>
@@ -304,7 +396,7 @@ export default function ConversationPage() {
       <div
         style={{
           padding: "12px 20px",
-          borderTop: "1px solid var(--line)",
+          borderTop: "0.5px solid var(--line)",
           display: "flex",
           gap: 8,
         }}
