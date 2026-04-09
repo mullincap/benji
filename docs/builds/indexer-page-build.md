@@ -327,6 +327,39 @@ These are not blockers — they're cleanups I noticed while reading the existing
 
 ## Known issues / deferred follow-ups
 
+### BloFin exchange logger — tabled mid-design (2026-04-08)
+
+Started building `pipeline/allocator/blofin_logger.py` (a 5-min cron job that snapshots BloFin balance + open positions into `user_mgmt.exchange_snapshots` for the manager module). Stopped before writing any code because the prerequisites aren't in place and the spec has gaps that need user input.
+
+**Blockers found during pre-flight:**
+
+1. **`user_mgmt.users` is empty (0 rows) and `user_mgmt.exchange_connections` is empty (0 rows).** The script's first action is to query `WHERE exchange='blofin' AND status='active'`; with no rows it would exit 1 and never insert a snapshot. The smoke test cannot succeed until at least one active connection exists, which itself requires at least one user row, which requires deciding what "system user" identity to use. No proper signup/admin flow exists for `exchange_connections` yet — the only way to populate it today is a manual `INSERT`.
+
+2. **The spec requires populating `entry_price`, `mark_price`, `unrealized_pnl`, `leverage`, `margin_mode`, `side` in the per-position JSONB**, but `trader-blofin.py` (the source of truth for "as observed" field names per the spec) only ever reads `instId` and `positions`/`pos`. It doesn't touch any of the other fields. So "use exact field names as observed in trader-blofin.py" is under-specified for 6 of the 7 position fields. To do this honestly we'd need to either:
+   - Probe the live API once and dump a raw position object to confirm the actual field names BloFin V1 returns, OR
+   - Trust BloFin V1 documentation field names without source verification, OR
+   - Ship a minimal JSONB with just `symbol` and `size` (the two fields trader-blofin.py actually reads).
+
+3. **`trader-blofin.py` has its own auth implementation in a `BlofinREST` class** (lines 309-380) — extracting it to `pipeline/allocator/blofin_auth.py` is straightforward, but `trader-blofin.py` then needs its import path updated AND we'd want to verify the trader still works after the refactor. Doable, just non-trivial.
+
+**Decisions deferred until this is picked up:**
+- How to populate `user_mgmt.users` + `exchange_connections` with at least one active BloFin row (placeholder system user vs real signup flow vs admin endpoint)
+- How to source the position field mapping (live probe vs docs vs minimal JSONB)
+- Whether to ship cron entry immediately or defer until real connection rows exist
+
+**What WAS confirmed during pre-flight (don't re-verify on resume):**
+- All 3 BloFin secrets (`BLOFIN_API_KEY`, `BLOFIN_API_SECRET`, `BLOFIN_PASSPHRASE`) are present in `/mnt/quant-data/credentials/secrets.env`
+- `user_mgmt.exchange_connections` table exists with the expected shape (encrypted credential columns + status enum + status check constraint)
+- `user_mgmt.users` table exists but is empty
+- `trader-blofin.py` lives at `/root/benji/trader-blofin.py` (project root, one level above `pipeline/`)
+- BloFin V1 endpoint paths in trader-blofin.py: `GET /api/v1/account/balance`, `GET /api/v1/account/positions`
+- BloFin auth headers: `ACCESS-KEY`, `ACCESS-SIGN`, `ACCESS-TIMESTAMP`, `ACCESS-NONCE`, `ACCESS-PASSPHRASE`, `Content-Type`
+- Balance response shape: `data.totalEquity` (or `totalEq`) at top, plus `data.details[]` with `currency`/`ccy` and `availableEquity`/`available`/`availBal`
+- Position response shape per-row (only confirmed fields): `instId`, `positions` (or `pos`)
+- DDL spec: `user_mgmt.exchange_snapshots(snapshot_id, connection_id, snapshot_at, total_equity_usd, available_usd, used_margin_usd, unrealized_pnl, positions JSONB, fetch_ok, error_msg)` + 2 indexes
+
+**To resume:** make decisions on the 3 deferred questions above, then this is ~1-2 hours of work (DDL + auth extraction + logger script + smoke test + cron).
+
 ### Indexer Coverage page slow to switch lookback presets (2026-04-08)
 
 After today's price backfill grew `market.leaderboards` from 31.9M to 189.9M rows, the segment control on `/indexer/coverage` (the `[30] [90] [365] [ALL]` pills shipped in commit `3441baf`) takes several seconds to repaint when the user switches preset — especially when clicking `[ALL]`.
