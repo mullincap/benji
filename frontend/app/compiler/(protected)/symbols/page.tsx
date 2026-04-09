@@ -36,7 +36,7 @@
  *   total = 0   → muted (no data for this symbol-day at all)
  */
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE || "";
 
@@ -317,17 +317,19 @@ function SectionLabel({ children }: { children: React.ReactNode }) {
 function SearchBar({
   onSubmit,
   loading,
-  initialValue,
+  value,
+  setValue,
+  inputRef,
 }: {
   onSubmit: (symbol: string) => void;
   loading: boolean;
-  initialValue?: string;
+  value: string;
+  setValue: (v: string) => void;
+  inputRef: React.RefObject<HTMLInputElement | null>;
 }) {
-  const [value, setValue] = useState(initialValue ?? "");
-  const inputRef = useRef<HTMLInputElement>(null);
-
   useEffect(() => {
     inputRef.current?.focus();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   function handleSubmit(e: React.FormEvent) {
@@ -464,6 +466,20 @@ function ResultHeader({ data }: { data: SymbolResponse }) {
 
 export default function CompilerSymbolsPage() {
   const [state, setState] = useState<LoadState>({ kind: "idle" });
+  const [searchValue, setSearchValue] = useState("");
+  const searchInputRef = useRef<HTMLInputElement>(null);
+
+  // Click-row-from-table handler: scroll to the search bar, populate it,
+  // and trigger the existing detail fetch as if the user typed and pressed
+  // Enter. Same UX as the search form path. Declared as a regular function
+  // (not useCallback) so it can reference `search` declared below.
+  function handleSelectFromTable(symbol: string) {
+    const upper = symbol.toUpperCase();
+    setSearchValue(upper);
+    searchInputRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+    searchInputRef.current?.focus();
+    void search(upper);
+  }
 
   async function search(symbol: string) {
     setState({ kind: "loading", query: symbol });
@@ -492,11 +508,17 @@ export default function CompilerSymbolsPage() {
     }
   }
 
-  const lastQuery =
-    state.kind === "loading" ? state.query :
-    state.kind === "notfound" ? state.query :
-    state.kind === "ready" ? state.data.symbol :
-    undefined;
+  // Sync the search input value with the latest known query so the
+  // input shows the current symbol after a fetch resolves (e.g. clicking
+  // a row in the coverage table populates the input AND triggers a search).
+  useEffect(() => {
+    const next =
+      state.kind === "loading" ? state.query :
+      state.kind === "notfound" ? state.query :
+      state.kind === "ready" ? state.data.symbol :
+      null;
+    if (next) setSearchValue(next);
+  }, [state]);
 
   const isLoading = state.kind === "loading";
 
@@ -512,7 +534,13 @@ export default function CompilerSymbolsPage() {
           Symbol Inspector
         </h1>
 
-        <SearchBar onSubmit={search} loading={isLoading} initialValue={lastQuery} />
+        <SearchBar
+          onSubmit={search}
+          loading={isLoading}
+          value={searchValue}
+          setValue={setSearchValue}
+          inputRef={searchInputRef}
+        />
 
         {state.kind === "idle" && (
           <div style={{
@@ -571,8 +599,453 @@ export default function CompilerSymbolsPage() {
         {state.kind === "ready" && (
           <ResultBody data={state.data} />
         )}
+
+        <div style={{ marginTop: 32 }}>
+          <CoverageTable onSelectSymbol={handleSelectFromTable} />
+        </div>
       </div>
     </div>
+  );
+}
+
+// ─── Coverage table — list view of all symbols ──────────────────────────────
+//
+// Fetches GET /api/compiler/symbols on mount (cagg-backed, ~300ms response).
+// Renders a sortable + filterable + paginated table of every active symbol
+// with its most-recent-day coverage for price / OI / volume. Click a row
+// to scroll up to the search bar and trigger the existing detail fetch.
+
+type CoverageStatus = "complete" | "partial" | "missing";
+
+type CoverageSymbol = {
+  symbol:         string;
+  symbol_id:      number;
+  days_with_data: number;
+  latest_date:    string | null;
+  price_pct:      number;
+  oi_pct:         number;
+  volume_pct:     number;
+  status:         CoverageStatus;
+};
+
+type CoverageState =
+  | { kind: "loading" }
+  | { kind: "error"; message: string }
+  | { kind: "ready"; symbols: CoverageSymbol[] };
+
+type FilterKey = "all" | "complete" | "partial" | "missing";
+type SortKey   = "price_pct" | "oi_pct" | "volume_pct" | "symbol" | "days_with_data";
+
+const PAGE_SIZE = 20;
+
+const FILTER_CHIPS: { key: FilterKey; label: string }[] = [
+  { key: "all",      label: "All" },
+  { key: "complete", label: "Complete" },
+  { key: "partial",  label: "Partial" },
+  { key: "missing",  label: "Missing" },
+];
+
+const SORT_CHIPS: { key: SortKey; label: string }[] = [
+  { key: "price_pct",      label: "Price %" },
+  { key: "oi_pct",         label: "OI %" },
+  { key: "volume_pct",     label: "Volume %" },
+  { key: "symbol",         label: "Symbol" },
+  { key: "days_with_data", label: "Days" },
+];
+
+function CoverageTable({ onSelectSymbol }: { onSelectSymbol: (symbol: string) => void }) {
+  const [state, setState] = useState<CoverageState>({ kind: "loading" });
+  const [filter, setFilter] = useState<FilterKey>("all");
+  const [sort, setSort]     = useState<SortKey>("days_with_data");
+  const [page, setPage]     = useState(0);
+
+  useEffect(() => {
+    let cancelled = false;
+    async function load() {
+      try {
+        const res = await fetch(`${API_BASE}/api/compiler/symbols`, { credentials: "include" });
+        if (cancelled) return;
+        if (res.status === 401) {
+          setState({ kind: "error", message: "Session expired. Please log in again." });
+          return;
+        }
+        if (!res.ok) {
+          setState({ kind: "error", message: `Symbol list endpoint returned ${res.status}` });
+          return;
+        }
+        const data = await res.json();
+        setState({ kind: "ready", symbols: data.symbols || [] });
+      } catch (err) {
+        if (cancelled) return;
+        setState({ kind: "error", message: `Network error: ${err instanceof Error ? err.message : String(err)}` });
+      }
+    }
+    load();
+    return () => { cancelled = true; };
+  }, []);
+
+  // Reset to page 0 whenever the filter or sort changes — no point being on
+  // page 5 of a filtered subset that may only have 2 pages.
+  useEffect(() => { setPage(0); }, [filter, sort]);
+
+  const allSymbols = state.kind === "ready" ? state.symbols : [];
+
+  const filtered = useMemo(() => {
+    if (filter === "all") return allSymbols;
+    return allSymbols.filter((s) => s.status === filter);
+  }, [allSymbols, filter]);
+
+  const sorted = useMemo(() => {
+    const arr = [...filtered];
+    arr.sort((a, b) => {
+      if (sort === "symbol") return a.symbol.localeCompare(b.symbol);
+      if (sort === "days_with_data") return b.days_with_data - a.days_with_data;
+      // numeric pcts: descending (highest coverage first)
+      return (b[sort] as number) - (a[sort] as number);
+    });
+    return arr;
+  }, [filtered, sort]);
+
+  const totalPages = Math.max(1, Math.ceil(sorted.length / PAGE_SIZE));
+  const pageSlice  = sorted.slice(page * PAGE_SIZE, page * PAGE_SIZE + PAGE_SIZE);
+
+  // Counts per filter chip — computed from the unfiltered set so chip
+  // labels reflect the full universe.
+  const counts = useMemo(() => {
+    const c: Record<FilterKey, number> = { all: allSymbols.length, complete: 0, partial: 0, missing: 0 };
+    for (const s of allSymbols) c[s.status]++;
+    return c;
+  }, [allSymbols]);
+
+  return (
+    <div>
+      <SectionLabel>Symbol Coverage</SectionLabel>
+
+      {state.kind === "loading" && (
+        <div style={{
+          background: "var(--bg2)",
+          border: "1px solid var(--line)",
+          borderRadius: 6,
+          padding: "20px 24px",
+          fontSize: 9,
+          color: "var(--t3)",
+          textTransform: "uppercase",
+          letterSpacing: "0.12em",
+        }}>
+          Loading symbol coverage…
+        </div>
+      )}
+
+      {state.kind === "error" && (
+        <div style={{
+          background: "var(--red-dim)",
+          border: "1px solid var(--red)",
+          borderRadius: 6,
+          padding: "14px 18px",
+          fontSize: 10,
+          color: "var(--red)",
+        }}>
+          {state.message}
+        </div>
+      )}
+
+      {state.kind === "ready" && (
+        <>
+          <div style={{
+            display: "flex",
+            gap: 6,
+            marginBottom: 10,
+            flexWrap: "wrap",
+            alignItems: "center",
+          }}>
+            <span style={{
+              fontSize: 9, color: "var(--t3)", letterSpacing: "0.12em",
+              textTransform: "uppercase", marginRight: 4,
+            }}>Filter</span>
+            {FILTER_CHIPS.map((chip) => (
+              <CoverageChip
+                key={chip.key}
+                label={chip.label}
+                count={counts[chip.key]}
+                active={filter === chip.key}
+                onClick={() => setFilter(chip.key)}
+              />
+            ))}
+          </div>
+
+          <div style={{
+            display: "flex",
+            gap: 6,
+            marginBottom: 12,
+            flexWrap: "wrap",
+            alignItems: "center",
+          }}>
+            <span style={{
+              fontSize: 9, color: "var(--t3)", letterSpacing: "0.12em",
+              textTransform: "uppercase", marginRight: 4,
+            }}>Sort</span>
+            {SORT_CHIPS.map((chip) => (
+              <CoverageChip
+                key={chip.key}
+                label={chip.label}
+                active={sort === chip.key}
+                onClick={() => setSort(chip.key)}
+              />
+            ))}
+          </div>
+
+          <div style={{
+            background: "var(--bg2)",
+            border: "1px solid var(--line)",
+            borderRadius: 6,
+            overflow: "hidden",
+          }}>
+            <table style={{
+              width: "100%",
+              borderCollapse: "collapse",
+              fontFamily: "var(--font-space-mono), Space Mono, monospace",
+            }}>
+              <thead>
+                <tr>
+                  <CovTh>Symbol</CovTh>
+                  <CovTh>Price</CovTh>
+                  <CovTh>Open Interest</CovTh>
+                  <CovTh>Volume</CovTh>
+                  <CovTh align="right">Days</CovTh>
+                  <CovTh align="right">Latest</CovTh>
+                  <CovTh>Status</CovTh>
+                </tr>
+              </thead>
+              <tbody>
+                {pageSlice.length === 0 && (
+                  <tr>
+                    <td colSpan={7} style={{
+                      padding: "20px 14px",
+                      fontSize: 10,
+                      color: "var(--t2)",
+                      textAlign: "center",
+                    }}>
+                      No symbols match the active filter.
+                    </td>
+                  </tr>
+                )}
+                {pageSlice.map((s) => (
+                  <CoverageRow key={s.symbol_id} sym={s} onClick={() => onSelectSymbol(s.symbol)} />
+                ))}
+              </tbody>
+            </table>
+          </div>
+
+          <div style={{
+            display: "flex",
+            justifyContent: "space-between",
+            alignItems: "center",
+            marginTop: 10,
+            fontSize: 9,
+            color: "var(--t2)",
+            letterSpacing: "0.08em",
+            textTransform: "uppercase",
+          }}>
+            <span>
+              {sorted.length === 0
+                ? "0 symbols"
+                : `${page * PAGE_SIZE + 1}–${Math.min(sorted.length, (page + 1) * PAGE_SIZE)} of ${sorted.length} symbols`}
+            </span>
+            <span style={{ display: "flex", gap: 6 }}>
+              <CoveragePagerButton disabled={page === 0} onClick={() => setPage((p) => Math.max(0, p - 1))}>‹ Prev</CoveragePagerButton>
+              <span style={{ alignSelf: "center" }}>Page {page + 1} / {totalPages}</span>
+              <CoveragePagerButton disabled={page >= totalPages - 1} onClick={() => setPage((p) => Math.min(totalPages - 1, p + 1))}>Next ›</CoveragePagerButton>
+            </span>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+function CoverageChip({
+  label, count, active, onClick,
+}: {
+  label: string;
+  count?: number;
+  active: boolean;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      style={{
+        display: "inline-flex",
+        alignItems: "center",
+        gap: 6,
+        background: active ? "var(--bg4)" : "var(--bg2)",
+        border: `1px solid ${active ? "var(--module-accent)" : "var(--line)"}`,
+        borderRadius: 4,
+        padding: "5px 10px",
+        fontSize: 9,
+        fontWeight: 700,
+        letterSpacing: "0.08em",
+        textTransform: "uppercase",
+        color: active ? "var(--t0)" : "var(--t2)",
+        cursor: "pointer",
+        fontFamily: "var(--font-space-mono), Space Mono, monospace",
+        transition: "all 0.15s ease",
+      }}
+      onMouseEnter={(e) => { if (!active) e.currentTarget.style.color = "var(--t1)"; }}
+      onMouseLeave={(e) => { if (!active) e.currentTarget.style.color = "var(--t2)"; }}
+    >
+      <span>{label}</span>
+      {typeof count === "number" && (
+        <span style={{ fontSize: 9, fontWeight: 400, color: active ? "var(--t1)" : "var(--t3)" }}>{count}</span>
+      )}
+    </button>
+  );
+}
+
+function CoveragePagerButton({
+  disabled, onClick, children,
+}: {
+  disabled: boolean;
+  onClick: () => void;
+  children: React.ReactNode;
+}) {
+  return (
+    <button
+      type="button"
+      disabled={disabled}
+      onClick={onClick}
+      style={{
+        background: "var(--bg2)",
+        border: "1px solid var(--line)",
+        borderRadius: 4,
+        padding: "5px 10px",
+        fontSize: 9,
+        fontWeight: 700,
+        letterSpacing: "0.08em",
+        textTransform: "uppercase",
+        color: disabled ? "var(--t3)" : "var(--t1)",
+        cursor: disabled ? "not-allowed" : "pointer",
+        fontFamily: "var(--font-space-mono), Space Mono, monospace",
+      }}
+    >
+      {children}
+    </button>
+  );
+}
+
+function CovTh({ children, align = "left" }: { children: React.ReactNode; align?: "left" | "right" }) {
+  return (
+    <th style={{
+      fontSize: 9, fontWeight: 700, letterSpacing: "0.12em",
+      color: "var(--t3)", textTransform: "uppercase",
+      textAlign: align,
+      padding: "10px 14px",
+      borderBottom: "1px solid var(--line)",
+    }}>
+      {children}
+    </th>
+  );
+}
+
+function CovTd({ children, align = "left" }: { children: React.ReactNode; align?: "left" | "right" }) {
+  return (
+    <td style={{
+      fontSize: 10,
+      color: "var(--t1)",
+      textAlign: align,
+      padding: "8px 14px",
+      verticalAlign: "middle",
+    }}>
+      {children}
+    </td>
+  );
+}
+
+function CoverageBar({ pct }: { pct: number }) {
+  const colors = (() => {
+    if (pct >= 95) return { fill: "var(--green)",  bg: "var(--green-dim)" };
+    if (pct >= 50) return { fill: "var(--amber)",  bg: "var(--amber-dim)" };
+    return { fill: "var(--red)", bg: "var(--red-dim)" };
+  })();
+  const width = Math.max(0, Math.min(100, pct));
+  return (
+    <div style={{ display: "flex", alignItems: "center", gap: 6, minWidth: 120 }}>
+      <div style={{
+        flex: 1,
+        height: 6,
+        background: colors.bg,
+        border: "1px solid var(--line)",
+        borderRadius: 2,
+        overflow: "hidden",
+      }}>
+        <div style={{
+          height: "100%",
+          width: `${width}%`,
+          background: colors.fill,
+          transition: "width 0.2s ease",
+        }} />
+      </div>
+      <span style={{
+        fontSize: 9,
+        color: "var(--t2)",
+        minWidth: 32,
+        textAlign: "right",
+        whiteSpace: "nowrap",
+      }}>
+        {pct.toFixed(0)}%
+      </span>
+    </div>
+  );
+}
+
+function CoverageStatusBadge({ status }: { status: CoverageStatus }) {
+  const map: Record<CoverageStatus, { color: string; bg: string }> = {
+    complete: { color: "var(--green)", bg: "var(--green-dim)" },
+    partial:  { color: "var(--amber)", bg: "var(--amber-dim)" },
+    missing:  { color: "var(--red)",   bg: "var(--red-dim)" },
+  };
+  const c = map[status];
+  return (
+    <span style={{
+      display: "inline-block",
+      fontSize: 9,
+      fontWeight: 700,
+      letterSpacing: "0.08em",
+      textTransform: "uppercase",
+      color: c.color,
+      background: c.bg,
+      border: `1px solid ${c.color}`,
+      borderRadius: 3,
+      padding: "2px 6px",
+    }}>
+      {status}
+    </span>
+  );
+}
+
+function CoverageRow({ sym, onClick }: { sym: CoverageSymbol; onClick: () => void }) {
+  return (
+    <tr
+      onClick={onClick}
+      style={{
+        borderTop: "1px solid var(--line)",
+        cursor: "pointer",
+        transition: "background 0.1s ease",
+      }}
+      onMouseEnter={(e) => { e.currentTarget.style.background = "var(--bg3)"; }}
+      onMouseLeave={(e) => { e.currentTarget.style.background = "transparent"; }}
+    >
+      <CovTd>
+        <span style={{ color: "var(--t0)", fontWeight: 700 }}>{sym.symbol}</span>
+      </CovTd>
+      <CovTd><CoverageBar pct={sym.price_pct} /></CovTd>
+      <CovTd><CoverageBar pct={sym.oi_pct} /></CovTd>
+      <CovTd><CoverageBar pct={sym.volume_pct} /></CovTd>
+      <CovTd align="right">{sym.days_with_data}</CovTd>
+      <CovTd align="right">{sym.latest_date ?? "—"}</CovTd>
+      <CovTd><CoverageStatusBadge status={sym.status} /></CovTd>
+    </tr>
   );
 }
 
