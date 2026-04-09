@@ -97,16 +97,22 @@ def coverage(
     """
     interval_str = f"{days} days"
 
+    # Query the continuous aggregate `market.leaderboards_daily_count` instead
+    # of the raw hypertable. The cagg is a pre-materialized per-day per-metric
+    # row count maintained by a TimescaleDB refresh policy (every 1 hour). It
+    # contains ~1k rows for ~400 days × 3 metrics, so even the [ALL] preset
+    # responds in <100ms instead of scanning ~570M rows.
     cur.execute(
         """
         SELECT
-            time_bucket('1 day', timestamp_utc)::date AS day,
+            day::date AS day,
             metric,
-            COUNT(*) AS rows_actual
-        FROM market.leaderboards
-        WHERE timestamp_utc >= NOW() - %s::interval
-        GROUP BY 1, 2
-        ORDER BY 1 DESC, 2
+            rows_actual
+        FROM market.leaderboards_daily_count
+        WHERE day >= NOW() - %s::interval
+          AND anchor_hour = 0
+          AND variant = 'close'
+        ORDER BY day DESC, metric
         """,
         (interval_str,),
     )
@@ -116,8 +122,11 @@ def coverage(
     for r in rows:
         rows_actual = int(r["rows_actual"])
         completeness_pct = round(rows_actual / ROWS_PER_FULL_DAY * 100, 1) if ROWS_PER_FULL_DAY > 0 else 0.0
+        # The cagg's `day` column comes back as a python date already
+        day_val = r["day"]
+        day_iso = day_val.isoformat() if hasattr(day_val, "isoformat") else str(day_val)
         days_payload.append({
-            "date":             r["day"].isoformat(),
+            "date":             day_iso,
             "metric":           r["metric"],
             "rows_actual":      rows_actual,
             "rows_expected":    ROWS_PER_FULL_DAY,
