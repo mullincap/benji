@@ -305,65 +305,43 @@ def list_symbols(
     most-recent-day completeness for price (close), open_interest, and
     volume, plus a 90-day count of distinct days with any data.
 
-    NOTE — performance: this query touches market.futures_1m which is
-    currently a ~558M-row hypertable. The query is gated by a hard
-    90-day window in the WHERE clause to prevent a full-table scan,
-    so worst case it scans ~90 × 1440 × 756 ≈ 98M rows. Real
-    runtime is much smaller because the (symbol_id, source_id,
-    timestamp_utc DESC) index is selective per symbol.
+    Backed by `market.symbol_day_counts` continuous aggregate (created
+    2026-04-08) which pre-aggregates per-day-per-symbol-per-source row
+    counts. The cagg refresh policy runs every 1 hour, so the displayed
+    "latest day" can be up to 1h stale relative to live ingest. ~223k
+    rows in the cagg vs ~558M in the underlying futures_1m hypertable.
 
-    LONG-TERM FIX (deferred): a per-day per-symbol coverage materialized
-    view (or TimescaleDB continuous aggregate) would reduce this to a
-    sub-100ms point query. Mirrors the cagg fix we did for
-    market.leaderboards in commit 7589194. Out of scope for this round.
-
-    Implementation strategy: a single SQL with two CTEs to avoid the
-    naive "4 correlated subqueries per symbol" pattern:
-      latest_per_symbol — finds MAX(timestamp_utc::date) per symbol
-                          inside the 90-day window
-      latest_day_counts — joins back and counts NOT NULL per column
-                          for that latest day only
+    Without the cagg, the equivalent query against compressed futures_1m
+    chunks took ~152s (decompression overhead per symbol × 658 symbols).
+    With the cagg this query is sub-50ms.
     """
     cur.execute(
         """
         WITH latest_per_symbol AS (
             SELECT
-                f.symbol_id,
-                MAX(time_bucket('1 day', f.timestamp_utc))::date AS latest_date,
-                COUNT(DISTINCT time_bucket('1 day', f.timestamp_utc)) AS days_with_data
-            FROM market.futures_1m f
-            WHERE f.source_id = %s
-              AND f.timestamp_utc >= NOW() - INTERVAL '90 days'
-            GROUP BY f.symbol_id
-        ),
-        latest_day_counts AS (
-            SELECT
-                lps.symbol_id,
-                lps.latest_date,
-                lps.days_with_data,
-                COUNT(*) AS total_rows,
-                COUNT(f.close)         AS price_rows,
-                COUNT(f.open_interest) AS oi_rows,
-                COUNT(f.volume)        AS volume_rows
-            FROM latest_per_symbol lps
-            JOIN market.futures_1m f
-              ON f.symbol_id = lps.symbol_id
-             AND f.source_id = %s
-             AND f.timestamp_utc >= lps.latest_date::timestamptz
-             AND f.timestamp_utc <  (lps.latest_date + INTERVAL '1 day')::timestamptz
-            GROUP BY lps.symbol_id, lps.latest_date, lps.days_with_data
+                symbol_id,
+                MAX(day)::date AS latest_date,
+                COUNT(DISTINCT day) AS days_with_data
+            FROM market.symbol_day_counts
+            WHERE source_id = %s
+              AND day >= NOW() - INTERVAL '90 days'
+            GROUP BY symbol_id
         )
         SELECT
             s.symbol_id,
             s.base AS symbol,
-            COALESCE(ldc.days_with_data, 0) AS days_with_data,
-            ldc.latest_date,
-            COALESCE(ldc.total_rows,  0) AS total_rows,
-            COALESCE(ldc.price_rows,  0) AS price_rows,
-            COALESCE(ldc.oi_rows,     0) AS oi_rows,
-            COALESCE(ldc.volume_rows, 0) AS volume_rows
+            COALESCE(lps.days_with_data, 0) AS days_with_data,
+            lps.latest_date,
+            COALESCE(sdc.total_rows,  0) AS total_rows,
+            COALESCE(sdc.price_rows,  0) AS price_rows,
+            COALESCE(sdc.oi_rows,     0) AS oi_rows,
+            COALESCE(sdc.volume_rows, 0) AS volume_rows
         FROM market.symbols s
-        LEFT JOIN latest_day_counts ldc ON ldc.symbol_id = s.symbol_id
+        LEFT JOIN latest_per_symbol lps ON lps.symbol_id = s.symbol_id
+        LEFT JOIN market.symbol_day_counts sdc
+          ON sdc.symbol_id = lps.symbol_id
+         AND sdc.source_id = %s
+         AND sdc.day::date = lps.latest_date
         WHERE s.active = TRUE
         ORDER BY days_with_data DESC, s.base ASC
         """,
