@@ -17,6 +17,7 @@ Constraints (per build doc):
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import BaseModel
 
 from ...db import get_cursor
 from .admin import require_admin
@@ -217,6 +218,79 @@ def get_job(job_id: str, cur=Depends(get_cursor)) -> dict[str, Any]:
     if not row:
         raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
     return _serialize_job(row)
+
+
+# ─── /runs (UI-triggered script runs via market.run_jobs) ──────────────────
+
+class RunRequest(BaseModel):
+    script: str           # one of SCRIPT_REGISTRY keys: metl | coingecko_marketcap | backfill_futures_1m
+    params: dict[str, Any] = {}
+
+
+def _serialize_run(r: dict) -> dict[str, Any]:
+    return {
+        "run_id":         str(r["run_id"]),
+        "script_name":    r["script_name"],
+        "module":         r["module"],
+        "status":         r["status"],
+        "triggered_by":   r["triggered_by"],
+        "params":         r["params"],
+        "started_at":     r["started_at"].isoformat()    if r["started_at"]    else None,
+        "completed_at":   r["completed_at"].isoformat()  if r["completed_at"]  else None,
+        "last_heartbeat": r["last_heartbeat"].isoformat() if r["last_heartbeat"] else None,
+        "exit_code":      r["exit_code"],
+        "rows_written":   int(r["rows_written"]) if r["rows_written"] is not None else 0,
+        "error_msg":      r["error_msg"],
+        "stdout_tail":    r["stdout_tail"],
+        "stderr_tail":    r["stderr_tail"],
+        "created_at":     r["created_at"].isoformat() if r["created_at"] else None,
+    }
+
+
+@router.post("/runs")
+def create_run(body: RunRequest) -> dict[str, Any]:
+    """Enqueue a celery task that runs the requested registered script.
+    Returns the celery task_id immediately. Progress is tracked in
+    market.run_jobs and visible via GET /api/compiler/runs (polled by the
+    Compiler Jobs page)."""
+    from app.workers.run_jobs_worker import SCRIPT_REGISTRY, run_script
+    if body.script not in SCRIPT_REGISTRY:
+        raise HTTPException(
+            status_code=400,
+            detail=f"unknown script {body.script!r}, must be one of {list(SCRIPT_REGISTRY.keys())}",
+        )
+    async_result = run_script.delay(body.script, body.params, "ui")
+    return {
+        "ok": True,
+        "script": body.script,
+        "celery_task_id": async_result.id,
+    }
+
+
+@router.get("/runs")
+def list_runs(
+    limit: int = Query(20, ge=1, le=200),
+    cur=Depends(get_cursor),
+) -> dict[str, Any]:
+    """List recent UI-triggered runs from market.run_jobs filtered to
+    module='compiler'. Polled by the Compiler Jobs page."""
+    cur.execute(
+        """
+        SELECT run_id, script_name, module, status, triggered_by, params,
+               started_at, completed_at, last_heartbeat, exit_code,
+               rows_written, error_msg, stdout_tail, stderr_tail, created_at
+        FROM market.run_jobs
+        WHERE module = 'compiler'
+        ORDER BY created_at DESC
+        LIMIT %s
+        """,
+        (limit,),
+    )
+    rows = cur.fetchall()
+    return {
+        "runs_returned": len(rows),
+        "runs": [_serialize_run(r) for r in rows],
+    }
 
 
 # ─── /symbols/{symbol} ────────────────────────────────────────────────────────

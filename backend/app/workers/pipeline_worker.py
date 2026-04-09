@@ -871,3 +871,4 @@ def run_pipeline(self, job_id: str, params: dict) -> dict:
 # command was changed to load multiple modules. Keep this at the bottom of
 # the file so it runs after `celery_app` is fully constructed.
 import app.workers.indexer_backfill_worker  # noqa: E402,F401
+import app.workers.run_jobs_worker  # noqa: E402,F401

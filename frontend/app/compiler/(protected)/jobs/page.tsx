@@ -266,6 +266,335 @@ function JobRow({ job, nowMs }: { job: CompilerJob; nowMs: number }) {
   );
 }
 
+// ─── Run panel — POST /api/compiler/runs + recent runs from /runs ─────────
+// Generic UI surface for triggering pipeline scripts. Shipped scripts:
+//   - metl                 → Amberdata ETL (metl.py --start <yesterday>)
+//   - coingecko_marketcap  → Daily marketcap snapshot
+//   - backfill_futures_1m  → Bulk loader from master parquet (slow!)
+// Each click opens a confirmation modal. Recent runs panel polls every 10s
+// while any run is active so the user can watch status without leaving
+// the page.
+
+type RunRow = {
+  run_id:       string;
+  script_name:  string;
+  module:       string;
+  status:       "queued" | "running" | "complete" | "failed" | "cancelled";
+  triggered_by: string;
+  params:       Record<string, unknown>;
+  started_at:   string | null;
+  completed_at: string | null;
+  exit_code:    number | null;
+  rows_written: number;
+  error_msg:    string | null;
+  stdout_tail:  string | null;
+  stderr_tail:  string | null;
+  created_at:   string | null;
+};
+
+const RUN_BUTTONS: { script: string; label: string; warning: string }[] = [
+  {
+    script: "metl",
+    label:  "Run Amberdata ETL",
+    warning: "Runs metl.py for yesterday's date. Reads from Amberdata API, writes to market.futures_1m. Typically completes in ~10–20 min. Idempotent — re-running is safe.",
+  },
+  {
+    script: "coingecko_marketcap",
+    label:  "Run CoinGecko Daily",
+    warning: "Runs coingecko_marketcap.py --mode daily. Fetches the top 2000 coin universe and writes a daily snapshot to /mnt/quant-data/raw/coingecko. Takes ~2 min. Safe to re-run.",
+  },
+  {
+    script: "backfill_futures_1m",
+    label:  "Backfill futures_1m",
+    warning: "⚠ HEAVY OPERATION. Runs backfill_futures_1m.py against the full master parquet (~312M rows). Can take HOURS and will compete with the simulator + other queries for DB resources. Only run if you know futures_1m has missing data. Idempotent (ON CONFLICT DO NOTHING) but expensive.",
+  },
+];
+
+function RunPanel() {
+  const [pending, setPending] = useState<{ script: string; warning: string } | null>(null);
+  const [submitting, setSubmitting] = useState(false);
+  const [feedback, setFeedback] = useState<string | null>(null);
+  const [runs, setRuns] = useState<RunRow[]>([]);
+
+  const fetchRuns = useCallback(async () => {
+    try {
+      const res = await fetch(`${API_BASE}/api/compiler/runs?limit=10`, { credentials: "include" });
+      if (!res.ok) return;
+      const data = await res.json();
+      setRuns(data.runs || []);
+    } catch {
+      // ignore — non-fatal
+    }
+  }, []);
+
+  // Initial load + 10s poll while any run is active
+  useEffect(() => {
+    let cancelled = false;
+    let timer: number | null = null;
+    async function loop() {
+      if (cancelled) return;
+      await fetchRuns();
+      const anyActive = runs.some((r) => r.status === "running" || r.status === "queued");
+      timer = window.setTimeout(loop, anyActive ? 5000 : 30000);
+    }
+    loop();
+    return () => {
+      cancelled = true;
+      if (timer !== null) window.clearTimeout(timer);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [fetchRuns]);
+
+  async function trigger(script: string) {
+    setSubmitting(true);
+    setFeedback(null);
+    try {
+      const res = await fetch(`${API_BASE}/api/compiler/runs`, {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ script, params: {} }),
+      });
+      if (res.status === 401) {
+        setFeedback("Session expired. Please log in again.");
+        return;
+      }
+      if (!res.ok) {
+        const txt = await res.text();
+        setFeedback(`POST returned ${res.status}: ${txt.slice(0, 200)}`);
+        return;
+      }
+      const data = await res.json();
+      setFeedback(`✓ Enqueued ${script} — task ${data.celery_task_id?.slice(0, 8) ?? "?"}…`);
+      await fetchRuns();
+    } catch (err) {
+      setFeedback(`Network error: ${err instanceof Error ? err.message : String(err)}`);
+    } finally {
+      setSubmitting(false);
+      setPending(null);
+    }
+  }
+
+  return (
+    <div style={{
+      background: "var(--bg2)",
+      border: "1px solid var(--line)",
+      borderRadius: 6,
+      padding: "14px 16px",
+      marginBottom: 16,
+    }}>
+      <div style={{
+        fontSize: 9, fontWeight: 700, letterSpacing: "0.12em",
+        color: "var(--t3)", textTransform: "uppercase",
+        marginBottom: 10,
+      }}>
+        Run Manager
+      </div>
+      <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center", marginBottom: 12 }}>
+        {RUN_BUTTONS.map((b) => (
+          <button
+            key={b.script}
+            type="button"
+            disabled={submitting}
+            onClick={() => setPending({ script: b.script, warning: b.warning })}
+            style={{
+              background: "var(--bg3)",
+              border: "1px solid var(--line2)",
+              borderRadius: 4,
+              padding: "8px 14px",
+              fontSize: 9,
+              fontWeight: 700,
+              letterSpacing: "0.12em",
+              textTransform: "uppercase",
+              color: "var(--t1)",
+              cursor: submitting ? "not-allowed" : "pointer",
+              fontFamily: "var(--font-space-mono), Space Mono, monospace",
+              transition: "all 0.15s ease",
+            }}
+            onMouseEnter={(e) => { if (!submitting) e.currentTarget.style.color = "var(--t0)"; }}
+            onMouseLeave={(e) => { if (!submitting) e.currentTarget.style.color = "var(--t1)"; }}
+          >
+            {b.label}
+          </button>
+        ))}
+        {feedback && (
+          <span style={{
+            fontSize: 10,
+            color: feedback.startsWith("✓") ? "var(--green)" : "var(--red)",
+            marginLeft: 4,
+          }}>
+            {feedback}
+          </span>
+        )}
+      </div>
+
+      {runs.length > 0 && (
+        <div style={{
+          fontSize: 9, fontWeight: 700, letterSpacing: "0.12em",
+          color: "var(--t3)", textTransform: "uppercase",
+          marginBottom: 6,
+        }}>
+          Recent Runs
+        </div>
+      )}
+      {runs.length > 0 && (
+        <table style={{
+          width: "100%",
+          borderCollapse: "collapse",
+          fontFamily: "var(--font-space-mono), Space Mono, monospace",
+        }}>
+          <thead>
+            <tr>
+              <Th>Script</Th>
+              <Th>Status</Th>
+              <Th align="right">Exit</Th>
+              <Th>Started</Th>
+              <Th>Triggered</Th>
+            </tr>
+          </thead>
+          <tbody>
+            {runs.map((r) => (
+              <tr key={r.run_id} style={{ borderTop: "1px solid var(--line)" }}>
+                <Td>{r.script_name}</Td>
+                <Td><RunStatusBadge status={r.status} /></Td>
+                <Td align="right">{r.exit_code !== null ? r.exit_code : "—"}</Td>
+                <Td>{r.started_at ? r.started_at.slice(11, 19) + " UTC" : "—"}</Td>
+                <Td>{r.triggered_by}</Td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+
+      {pending && (
+        <RunConfirmModal
+          script={pending.script}
+          warning={pending.warning}
+          submitting={submitting}
+          onCancel={() => setPending(null)}
+          onConfirm={() => trigger(pending.script)}
+        />
+      )}
+    </div>
+  );
+}
+
+function RunStatusBadge({ status }: { status: RunRow["status"] }) {
+  const map: Record<RunRow["status"], { color: string; bg: string }> = {
+    running:   { color: "var(--amber)", bg: "var(--amber-dim)" },
+    queued:    { color: "var(--t2)",    bg: "var(--bg3)" },
+    complete:  { color: "var(--green)", bg: "var(--green-dim)" },
+    failed:    { color: "var(--red)",   bg: "var(--red-dim)" },
+    cancelled: { color: "var(--t2)",    bg: "var(--bg3)" },
+  };
+  const c = map[status] ?? map.queued;
+  return (
+    <span style={{
+      display: "inline-block",
+      fontSize: 9,
+      fontWeight: 700,
+      letterSpacing: "0.08em",
+      textTransform: "uppercase",
+      color: c.color,
+      background: c.bg,
+      border: `1px solid ${c.color}`,
+      borderRadius: 3,
+      padding: "2px 6px",
+    }}>
+      {status}
+    </span>
+  );
+}
+
+function RunConfirmModal({
+  script, warning, submitting, onCancel, onConfirm,
+}: {
+  script: string;
+  warning: string;
+  submitting: boolean;
+  onCancel: () => void;
+  onConfirm: () => void;
+}) {
+  return (
+    <div
+      role="dialog"
+      aria-modal="true"
+      onClick={onCancel}
+      style={{
+        position: "fixed", inset: 0,
+        background: "rgba(0,0,0,0.7)",
+        display: "flex", alignItems: "center", justifyContent: "center",
+        zIndex: 1000,
+      }}
+    >
+      <div
+        onClick={(e) => e.stopPropagation()}
+        style={{
+          background: "var(--bg2)",
+          border: "1px solid var(--line2)",
+          borderRadius: 6,
+          padding: "20px 24px",
+          maxWidth: 480,
+          fontFamily: "var(--font-space-mono), Space Mono, monospace",
+        }}
+      >
+        <div style={{
+          fontSize: 9, fontWeight: 700, letterSpacing: "0.12em",
+          color: "var(--t3)", textTransform: "uppercase",
+          marginBottom: 10,
+        }}>
+          Confirm Run
+        </div>
+        <div style={{ fontSize: 11, color: "var(--t1)", lineHeight: 1.6, marginBottom: 16 }}>
+          {warning}
+        </div>
+        <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
+          <button
+            type="button"
+            disabled={submitting}
+            onClick={onCancel}
+            style={{
+              background: "transparent",
+              border: "1px solid var(--line2)",
+              borderRadius: 4,
+              padding: "8px 16px",
+              fontSize: 9,
+              fontWeight: 700,
+              letterSpacing: "0.12em",
+              textTransform: "uppercase",
+              color: "var(--t2)",
+              cursor: submitting ? "not-allowed" : "pointer",
+              fontFamily: "var(--font-space-mono), Space Mono, monospace",
+            }}
+          >
+            Cancel
+          </button>
+          <button
+            type="button"
+            disabled={submitting}
+            onClick={onConfirm}
+            style={{
+              background: "var(--amber-dim)",
+              border: "1px solid var(--amber)",
+              borderRadius: 4,
+              padding: "8px 16px",
+              fontSize: 9,
+              fontWeight: 700,
+              letterSpacing: "0.12em",
+              textTransform: "uppercase",
+              color: "var(--amber)",
+              cursor: submitting ? "not-allowed" : "pointer",
+              fontFamily: "var(--font-space-mono), Space Mono, monospace",
+            }}
+          >
+            {submitting ? "Enqueueing…" : `Run ${script}`}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function JobsTable({ jobs, nowMs }: { jobs: CompilerJob[]; nowMs: number }) {
   if (jobs.length === 0) {
     return (
@@ -429,11 +758,13 @@ export default function CompilerJobsPage() {
         <SectionLabel>Compiler · Jobs</SectionLabel>
         <h1 style={{
           fontSize: 24, fontWeight: 700, color: "var(--t0)",
-          margin: 0, marginBottom: 24,
+          margin: 0, marginBottom: 16,
           letterSpacing: "-0.01em",
         }}>
           Job Runs
         </h1>
+
+        <RunPanel />
 
         {state.kind === "loading" && (
           <div style={{
