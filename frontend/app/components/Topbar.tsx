@@ -71,7 +71,7 @@ type ThemeTarget = 'none' | 'text' | 'fill' | 'mono';
 
 interface BaseThemeDef {
   label: string;
-  swatch: string; // panel-level color for the preview swatch
+  swatch: string;
   surface: string;
   panel: string;
   card: string;
@@ -102,12 +102,12 @@ function applyBaseTheme(id: string) {
 
 // ─── Module items ────────────────────────────────────────────────────────────
 
-const MODULES: Array<{ key: ModuleKey; icon: string; href?: string }> = [
-  { key: 'compiler', icon: '</>', href: '/compiler' },
-  { key: 'indexer', icon: '⌕', href: '/indexer' },
-  { key: 'simulator', icon: '◴', href: '/simulator' },
-  { key: 'allocator', icon: '⚙', href: '/trader' },
-  { key: 'manager', icon: '▣', href: '/manager' },
+const MODULES: Array<{ key: ModuleKey; icon: string; href: string; pill: string; shortcut: string }> = [
+  { key: 'compiler',  icon: '</>', href: '/compiler',  pill: 'COMP',  shortcut: '1' },
+  { key: 'indexer',   icon: '⌕',  href: '/indexer',   pill: 'INDX',  shortcut: '2' },
+  { key: 'simulator', icon: '◴',  href: '/simulator', pill: 'SIM',   shortcut: '3' },
+  { key: 'allocator', icon: '⚙',  href: '/trader',    pill: 'ALLOC', shortcut: '4' },
+  { key: 'manager',   icon: '▣',  href: '/manager',   pill: 'MGR',   shortcut: '5' },
 ];
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -126,6 +126,16 @@ function resolveAccent(themeId: string, moduleKey: ModuleKey | null): string {
 function applyAccent(themeId: string, moduleKey: ModuleKey | null) {
   const color = resolveAccent(themeId, moduleKey);
   document.documentElement.style.setProperty('--module-accent', color || 'var(--t0)');
+}
+
+// ─── Divider component ──────────────────────────────────────────────────────
+
+function Divider() {
+  return (
+    <div style={{
+      width: 1, height: 16, background: 'var(--line)', margin: '0 6px', flexShrink: 0,
+    }} />
+  );
 }
 
 // ─── Component ───────────────────────────────────────────────────────────────
@@ -188,6 +198,21 @@ export default function Topbar() {
     };
   }, []);
 
+  // Keyboard shortcuts: ⌘1–5 navigate to modules
+  useEffect(() => {
+    function onKeyDown(e: KeyboardEvent) {
+      if (!e.metaKey && !e.ctrlKey) return;
+      const idx = parseInt(e.key, 10);
+      if (idx >= 1 && idx <= 5) {
+        e.preventDefault();
+        const mod = MODULES[idx - 1];
+        if (mod?.href) router.push(mod.href);
+      }
+    }
+    document.addEventListener('keydown', onKeyDown);
+    return () => document.removeEventListener('keydown', onKeyDown);
+  }, [router]);
+
   const selectTheme = useCallback((id: string) => {
     if (THEMES[id]?.disabled) return;
     setThemeId(id);
@@ -217,13 +242,15 @@ export default function Topbar() {
     }
   }
 
-  // Preview swatch color — use the allocator color as the representative dot for each theme
   function getThemePreviewColor(id: string): string {
     const t = THEMES[id];
     if (!t || t.disabled) return 'var(--t2)';
-    // Show a gradient of all 5 module colors — but for a single swatch, use the active module or simulator
     return activeModule ? t.colors[activeModule] : t.colors.simulator;
   }
+
+  const activeModuleName = activeModule
+    ? MODULES.find((m) => m.key === activeModule)?.key.toUpperCase() ?? ''
+    : '';
 
   const navClass = themeTarget === 'fill' ? 'navbar--fill-mode' : themeTarget === 'mono' ? 'navbar--mono-mode' : '';
 
@@ -241,21 +268,123 @@ export default function Topbar() {
         flexShrink: 0,
       }}
     >
-      {/* Logo */}
-      <span className="navbar-title" style={{ fontSize: 14, fontWeight: 700, letterSpacing: '0.05em' }}>
-        <span>3M </span>
-        <span style={{
-          color: themeTarget === 'fill' ? undefined
-            : (themeTarget === 'text' || themeTarget === 'mono') ? (accentColor || 'var(--t0)')
-            : 'var(--t0)',
-        }}>
-          {activeModule?.toUpperCase() || 'CAPITAL'}
-        </span>
-      </span>
+      {/* ─── Left side: 3M · MODULE ▾ dropdown ──────────────────────────────── */}
+      <div ref={modulesRef} style={{ position: 'relative' }}>
+        <button
+          onClick={() => { setModulesOpen((v) => !v); setThemeOpen(false); }}
+          style={{
+            background: 'transparent',
+            border: 'none',
+            cursor: 'pointer',
+            display: 'inline-flex',
+            alignItems: 'center',
+            gap: 0,
+            padding: 0,
+            fontFamily: 'var(--font-space-mono), Space Mono, monospace',
+          }}
+        >
+          <span style={{ fontSize: 11, fontWeight: 700, color: 'var(--t0)' }}>3M</span>
+          {activeModuleName && (
+            <>
+              <span style={{ fontSize: 9, color: 'var(--t3)', margin: '0 6px' }}>&middot;</span>
+              <span style={{
+                fontSize: 11,
+                fontWeight: 700,
+                color: themeTarget === 'fill' ? 'var(--t0)'
+                  : (themeTarget === 'text' || themeTarget === 'mono') ? (accentColor || 'var(--t0)')
+                  : 'var(--t0)',
+              }}>
+                {activeModuleName}
+              </span>
+            </>
+          )}
+          <span style={{ fontSize: 8, color: 'var(--t3)', marginLeft: 5 }}>
+            {modulesOpen ? '\u25B4' : '\u25BE'}
+          </span>
+        </button>
 
-      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+        {modulesOpen && (
+          <div
+            style={{
+              position: 'absolute',
+              left: 0,
+              top: 34,
+              minWidth: 220,
+              background: 'var(--bg0)',
+              border: '1px solid var(--line)',
+              borderRadius: 6,
+              padding: 6,
+              zIndex: 60,
+              boxShadow: '0 10px 24px rgba(0,0,0,0.35)',
+            }}
+          >
+            {MODULES.map((item) => {
+              const isActive = pathname.startsWith(item.href);
+              const itemAccent = resolveAccent(themeId, item.key);
+              return (
+                <button
+                  key={item.key}
+                  onClick={() => {
+                    setModulesOpen(false);
+                    router.push(item.href);
+                  }}
+                  style={{
+                    width: '100%',
+                    height: 30,
+                    border: 'none',
+                    background: isActive ? 'var(--bg2)' : 'transparent',
+                    textAlign: 'left',
+                    padding: '0 10px',
+                    borderRadius: 4,
+                    cursor: 'pointer',
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: 10,
+                    fontFamily: 'var(--font-space-mono), Space Mono, monospace',
+                  }}
+                  onMouseEnter={(e) => { if (!isActive) e.currentTarget.style.background = 'var(--bg2)'; }}
+                  onMouseLeave={(e) => { if (!isActive) e.currentTarget.style.background = 'transparent'; }}
+                >
+                  {/* Accent dot */}
+                  <span style={{
+                    width: 6, height: 6, borderRadius: '50%',
+                    background: itemAccent || 'var(--t3)',
+                    flexShrink: 0,
+                  }} />
+                  {/* Module name */}
+                  <span style={{
+                    flex: 1,
+                    fontSize: 9,
+                    fontWeight: 700,
+                    letterSpacing: '0.08em',
+                    textTransform: 'uppercase',
+                    color: isActive ? 'var(--t0)' : 'var(--t3)',
+                  }}>
+                    {item.key}
+                  </span>
+                  {/* Shortcut badge */}
+                  <span style={{
+                    fontSize: 8,
+                    fontFamily: 'var(--font-space-mono), Space Mono, monospace',
+                    color: 'var(--t3)',
+                    background: 'var(--bg2)',
+                    border: '1px solid var(--line)',
+                    borderRadius: 3,
+                    padding: '1px 5px',
+                  }}>
+                    {'\u2318'}{item.shortcut}
+                  </span>
+                </button>
+              );
+            })}
+          </div>
+        )}
+      </div>
 
-        {/* Fullscreen toggle — icon only */}
+      {/* ─── Right side ─────────────────────────────────────────────────────── */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 0 }}>
+
+        {/* Fullscreen toggle — borderless */}
         <button
           className="navbar-btn"
           type="button"
@@ -266,8 +395,8 @@ export default function Topbar() {
             width: 28, height: 28,
             border: 'none',
             borderRadius: 3,
-            background: isFullscreen ? 'var(--bg3)' : 'transparent',
-            color: isFullscreen ? 'var(--t0)' : 'var(--t2)',
+            background: 'transparent',
+            color: isFullscreen ? 'var(--t0)' : 'var(--t3)',
             fontSize: 12,
             cursor: 'pointer',
             display: 'inline-flex',
@@ -278,33 +407,32 @@ export default function Topbar() {
           {isFullscreen ? '\u2922' : '\u26F6'}
         </button>
 
-        {/* Theme selector */}
+        {/* Theme selector — borderless */}
         <div ref={themeRef} style={{ position: 'relative' }}>
           <button
             className="navbar-btn"
             onClick={() => { setThemeOpen((v) => !v); setModulesOpen(false); }}
             style={{
               height: 28,
-              padding: '0 10px',
-              border: '1px solid var(--line2)',
+              padding: '0 8px',
+              border: 'none',
               borderRadius: 3,
-              background: 'var(--bg1)',
-              color: 'var(--t1)',
+              background: 'transparent',
+              color: 'var(--t3)',
               fontSize: 9,
+              fontWeight: 700,
               letterSpacing: '0.08em',
               textTransform: 'uppercase',
               cursor: 'pointer',
               display: 'inline-flex',
               alignItems: 'center',
-              gap: 6,
+              gap: 5,
             }}
           >
-            {/* Accent dot */}
             {accentColor && (
               <span style={{
                 width: 6, height: 6, borderRadius: '50%',
-                background: accentColor,
-                flexShrink: 0,
+                background: accentColor, flexShrink: 0,
               }} />
             )}
             Theme
@@ -351,7 +479,6 @@ export default function Topbar() {
                     onMouseEnter={(e) => { if (!isActive && !isDisabled) (e.currentTarget).style.background = 'var(--bg3)'; }}
                     onMouseLeave={(e) => { if (!isActive && !isDisabled) (e.currentTarget).style.background = 'transparent'; }}
                   >
-                    {/* 5-color swatch strip */}
                     <div style={{ display: 'flex', gap: 2, flexShrink: 0 }}>
                       {(['compiler', 'indexer', 'simulator', 'allocator', 'manager'] as ModuleKey[]).map((m) => (
                         <span
@@ -394,91 +521,52 @@ export default function Topbar() {
           )}
         </div>
 
-        {/* Modules dropdown */}
-        <div ref={modulesRef} style={{ position: 'relative' }}>
-          <button
-            className="navbar-btn"
-            onClick={() => { setModulesOpen((v) => !v); setThemeOpen(false); }}
-            style={{
-              height: 28,
-              padding: '0 10px',
-              border: '1px solid var(--line2)',
-              borderRadius: 3,
-              background: 'var(--bg1)',
-              color: 'var(--t1)',
-              fontSize: 9,
-              letterSpacing: '0.08em',
-              textTransform: 'uppercase',
-              cursor: 'pointer',
-              display: 'inline-flex',
-              alignItems: 'center',
-              gap: 6,
-            }}
-          >
-            <span style={{ opacity: 0.85 }}>☰</span>
-            {activeModule ?? 'Modules'} {modulesOpen ? '▴' : '▾'}
-          </button>
-          {modulesOpen && (
-            <div
+        <Divider />
+
+        {/* ─── Module pill row ──────────────────────────────────────────────── */}
+        {MODULES.map((item) => {
+          const isActive = pathname.startsWith(item.href);
+          const pillAccent = resolveAccent(themeId, item.key);
+          return (
+            <button
+              key={item.key}
+              onClick={() => router.push(item.href)}
               style={{
-                position: 'absolute',
-                right: 0,
-                top: 34,
-                minWidth: 140,
-                background: 'var(--bg2)',
-                border: '1px solid var(--line2)',
-                borderRadius: 3,
-                padding: 4,
-                zIndex: 60,
-                boxShadow: '0 10px 24px rgba(0,0,0,0.35)',
+                fontSize: 8,
+                fontWeight: 700,
+                letterSpacing: '0.06em',
+                padding: '4px 8px',
+                borderRadius: 4,
+                border: isActive
+                  ? `0.5px solid ${pillAccent}4D`   // 30% opacity
+                  : '0.5px solid transparent',
+                background: isActive
+                  ? `${pillAccent}1A`                // 10% opacity
+                  : 'transparent',
+                color: isActive ? pillAccent : 'var(--t3)',
+                cursor: 'pointer',
+                fontFamily: 'var(--font-space-mono), Space Mono, monospace',
+                transition: 'all 0.15s ease',
+              }}
+              onMouseEnter={(e) => {
+                if (!isActive) {
+                  e.currentTarget.style.color = 'var(--t2)';
+                  e.currentTarget.style.background = 'var(--bg2)';
+                }
+              }}
+              onMouseLeave={(e) => {
+                if (!isActive) {
+                  e.currentTarget.style.color = 'var(--t3)';
+                  e.currentTarget.style.background = 'transparent';
+                }
               }}
             >
-              {MODULES.map((item) => {
-                const isActive = item.href && pathname.startsWith(item.href);
-                const itemAccent = resolveAccent(themeId, item.key);
-                return (
-                  <button
-                    key={item.key}
-                    onClick={() => {
-                      setModulesOpen(false);
-                      if (item.href) router.push(item.href);
-                    }}
-                    style={{
-                      width: '100%',
-                      height: 28,
-                      border: 'none',
-                      background: isActive ? 'var(--bg3)' : 'transparent',
-                      color: isActive ? itemAccent : 'var(--t1)',
-                      textAlign: 'left',
-                      padding: '0 8px',
-                      fontSize: 10,
-                      textTransform: 'capitalize',
-                      borderRadius: 2,
-                      cursor: 'pointer',
-                      display: 'flex',
-                      alignItems: 'center',
-                      gap: 8,
-                    }}
-                    onMouseEnter={(e) => { if (!isActive) (e.currentTarget).style.background = 'var(--bg3)'; }}
-                    onMouseLeave={(e) => { if (!isActive) (e.currentTarget).style.background = 'transparent'; }}
-                  >
-                    <span
-                      style={{
-                        width: 14,
-                        textAlign: 'center',
-                        color: isActive ? itemAccent : 'var(--t2)',
-                        fontSize: 10,
-                      }}
-                    >
-                      {item.icon}
-                    </span>
-                    <span>{item.key}</span>
-                  </button>
-                );
-              })}
-            </div>
-          )}
-        </div>
+              {item.pill}
+            </button>
+          );
+        })}
+
+        <Divider />
 
         {/* Exit to landing */}
         <button
@@ -489,6 +577,7 @@ export default function Topbar() {
             fontSize: 9, color: 'var(--t3)', cursor: 'pointer',
             transition: 'all 0.15s ease',
             display: 'inline-flex', alignItems: 'center', gap: 4,
+            fontFamily: 'var(--font-space-mono), Space Mono, monospace',
           }}
           onMouseEnter={e => { e.currentTarget.style.borderColor = 'var(--line2)'; e.currentTarget.style.color = 'var(--t2)'; }}
           onMouseLeave={e => { e.currentTarget.style.borderColor = 'var(--line)'; e.currentTarget.style.color = 'var(--t3)'; }}
