@@ -727,6 +727,26 @@ CREATE INDEX IF NOT EXISTS idx_strategy_perf_date
 CREATE INDEX IF NOT EXISTS idx_connections_user
     ON user_mgmt.exchange_connections (user_id);
 
+-- ─── Exchange snapshots (balance + position logger) ───────────────────────────
+CREATE TABLE IF NOT EXISTS user_mgmt.exchange_snapshots (
+    snapshot_id      UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+    connection_id    UUID        NOT NULL REFERENCES user_mgmt.exchange_connections(connection_id),
+    snapshot_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    total_equity_usd NUMERIC(18,4),
+    available_usd    NUMERIC(18,4),
+    used_margin_usd  NUMERIC(18,4),
+    unrealized_pnl   NUMERIC(18,4),
+    positions        JSONB,
+    fetch_ok         BOOLEAN     NOT NULL DEFAULT TRUE,
+    error_msg        TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_exchange_snapshots_connection_time
+    ON user_mgmt.exchange_snapshots (connection_id, snapshot_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_exchange_snapshots_time
+    ON user_mgmt.exchange_snapshots (snapshot_at DESC);
+
 
 -- =============================================================================
 -- MIGRATION: market_data_1m -> market.futures_1m

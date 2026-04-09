@@ -29,12 +29,15 @@ Cron (invoked by run_daily.sh at 05:58 UTC after daily_signal.py):
   58 5 * * *  /home/ubuntu/benji3m/run_daily.sh >> /home/ubuntu/benji3m/cron.log 2>&1
 """
 
-import os, sys, json, math, time, logging, datetime, argparse, csv, hmac, base64, hashlib, requests
-from uuid import uuid4
+import os, sys, json, math, time, logging, datetime, argparse, csv, requests
 from urllib.parse import urlencode
 import numpy as np
 import pandas as pd
 from pathlib import Path
+
+# Ensure project root is on sys.path so pipeline imports resolve
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from pipeline.allocator.blofin_auth import get_headers as _shared_get_headers
 
 # Self-load secrets.env so the script works regardless of how it's invoked
 # (cron without `set -a`, manual shell, systemd, etc). Plain KEY=VALUE lines
@@ -324,23 +327,9 @@ class BlofinREST:
             log.info("DEMO MODE -- using BloFin paper trading environment")
 
     def _headers(self, path: str, method: str, body: dict = None) -> dict:
-        ts    = str(int(time.time() * 1000))
-        nonce = str(uuid4())
         body_str = (json.dumps(body, separators=(",", ":"), ensure_ascii=False)
                     if body and method.upper() != "GET" else "")
-        prehash  = f"{path}{method.upper()}{ts}{nonce}{body_str}"
-        hex_sig   = hmac.new(
-            self._secret.encode(), prehash.encode(), hashlib.sha256
-        ).hexdigest().encode()
-        signature = base64.b64encode(hex_sig).decode()
-        return {
-            "ACCESS-KEY":        self._key,
-            "ACCESS-SIGN":       signature,
-            "ACCESS-TIMESTAMP":  ts,
-            "ACCESS-NONCE":      nonce,
-            "ACCESS-PASSPHRASE": self._passphrase,
-            "Content-Type":      "application/json",
-        }
+        return _shared_get_headers(method, path, body_str)
 
     def request(self, method: str, path: str,
                 params: dict = None, body: dict = None) -> dict:
