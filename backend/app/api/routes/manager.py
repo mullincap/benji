@@ -29,6 +29,7 @@ from pydantic import BaseModel
 from ...db import get_cursor
 from ...core.config import settings
 from .admin import require_admin
+from .allocator import refresh_snapshots
 
 # ── Self-load secrets.env for ANTHROPIC_API_KEY on the server ────────────────
 _SECRETS = Path("/mnt/quant-data/credentials/secrets.env")
@@ -578,6 +579,9 @@ async def send_message(
     )
     msg_count = cur.fetchone()["cnt"]
 
+    # Refresh live exchange data before building context
+    refresh_snapshots(cur)
+
     # Fetch portfolio context
     ctx = _fetch_portfolio_context(cur)
     today_str = datetime.date.today().isoformat()
@@ -659,6 +663,9 @@ async def briefing(cur=Depends(get_cursor)) -> dict[str, Any]:
         INSERT INTO user_mgmt.manager_messages (conversation_id, role, content)
         VALUES (%s, 'user', %s)
     """, (conversation_id, user_content))
+
+    # Refresh live exchange data before building context
+    refresh_snapshots(cur)
 
     # Fetch context and call Claude
     ctx = _fetch_portfolio_context(cur)
