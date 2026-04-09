@@ -97,11 +97,13 @@ def _fetch_portfolio_context(cur) -> dict[str, Any]:
 
     total_aum = Decimal(0)
     alloc_list = []
-    all_version_ids = []
+    all_version_ids = []       # native UUIDs for SQL queries
+    all_alloc_ids = []         # native UUIDs for SQL queries
 
     for a in allocations:
         total_aum += a["capital_usd"] or Decimal(0)
-        all_version_ids.append(str(a["strategy_version_id"]))
+        all_version_ids.append(a["strategy_version_id"])
+        all_alloc_ids.append(a["allocation_id"])
         alloc_list.append({
             "allocation_id": str(a["allocation_id"]),
             "strategy_version_id": str(a["strategy_version_id"]),
@@ -122,14 +124,13 @@ def _fetch_portfolio_context(cur) -> dict[str, Any]:
     today = datetime.date.today()
 
     if alloc_list:
-        alloc_ids = [a["allocation_id"] for a in alloc_list]
         cur.execute("""
             SELECT allocation_id, date, equity_usd, daily_return, drawdown
             FROM user_mgmt.performance_daily
-            WHERE allocation_id = ANY(%s)
+            WHERE allocation_id = ANY(%s::uuid[])
               AND date >= CURRENT_DATE - INTERVAL '30 days'
             ORDER BY allocation_id, date
-        """, (alloc_ids,))
+        """, (all_alloc_ids,))
         for row in cur.fetchall():
             aid = str(row["allocation_id"])
             perf_by_alloc.setdefault(aid, []).append({
@@ -152,7 +153,7 @@ def _fetch_portfolio_context(cur) -> dict[str, Any]:
                 j.strategy_version_id, r.sharpe
             FROM audit.results r
             JOIN audit.jobs j ON r.job_id = j.job_id
-            WHERE j.strategy_version_id = ANY(%s)
+            WHERE j.strategy_version_id = ANY(%s::uuid[])
               AND j.status = 'complete'
             ORDER BY j.strategy_version_id, j.completed_at DESC NULLS LAST
         """, (all_version_ids,))
@@ -218,12 +219,12 @@ def _fetch_portfolio_context(cur) -> dict[str, Any]:
             FROM user_mgmt.daily_signals ds
             JOIN audit.strategy_versions sv ON sv.strategy_version_id = ds.strategy_version_id
             JOIN audit.strategies s ON s.strategy_id = sv.strategy_id
-            WHERE ds.strategy_version_id = ANY(%s)
+            WHERE ds.strategy_version_id = ANY(%s::uuid[])
             ORDER BY ds.strategy_version_id, ds.signal_date DESC
         """, (all_version_ids,))
         signal_rows = cur.fetchall()
 
-        batch_ids = [str(r["signal_batch_id"]) for r in signal_rows]
+        batch_ids = [r["signal_batch_id"] for r in signal_rows]
         items_by_batch: dict[str, list[dict]] = {}
         if batch_ids:
             cur.execute("""
@@ -231,7 +232,7 @@ def _fetch_portfolio_context(cur) -> dict[str, Any]:
                        sym.base AS symbol
                 FROM user_mgmt.daily_signal_items dsi
                 JOIN market.symbols sym ON sym.symbol_id = dsi.symbol_id
-                WHERE dsi.signal_batch_id = ANY(%s)
+                WHERE dsi.signal_batch_id = ANY(%s::uuid[])
                 ORDER BY dsi.rank
             """, (batch_ids,))
             for row in cur.fetchall():
