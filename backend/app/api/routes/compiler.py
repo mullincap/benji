@@ -293,6 +293,121 @@ def list_runs(
     }
 
 
+# ─── /symbols (list) ──────────────────────────────────────────────────────────
+
+@router.get("/symbols")
+def list_symbols(
+    source_id: int = Query(1, ge=1),
+    cur=Depends(get_cursor),
+) -> dict[str, Any]:
+    """
+    Coverage summary for every active symbol — one row per symbol with
+    most-recent-day completeness for price (close), open_interest, and
+    volume, plus a 90-day count of distinct days with any data.
+
+    NOTE — performance: this query touches market.futures_1m which is
+    currently a ~558M-row hypertable. The query is gated by a hard
+    90-day window in the WHERE clause to prevent a full-table scan,
+    so worst case it scans ~90 × 1440 × 756 ≈ 98M rows. Real
+    runtime is much smaller because the (symbol_id, source_id,
+    timestamp_utc DESC) index is selective per symbol.
+
+    LONG-TERM FIX (deferred): a per-day per-symbol coverage materialized
+    view (or TimescaleDB continuous aggregate) would reduce this to a
+    sub-100ms point query. Mirrors the cagg fix we did for
+    market.leaderboards in commit 7589194. Out of scope for this round.
+
+    Implementation strategy: a single SQL with two CTEs to avoid the
+    naive "4 correlated subqueries per symbol" pattern:
+      latest_per_symbol — finds MAX(timestamp_utc::date) per symbol
+                          inside the 90-day window
+      latest_day_counts — joins back and counts NOT NULL per column
+                          for that latest day only
+    """
+    cur.execute(
+        """
+        WITH latest_per_symbol AS (
+            SELECT
+                f.symbol_id,
+                MAX(time_bucket('1 day', f.timestamp_utc))::date AS latest_date,
+                COUNT(DISTINCT time_bucket('1 day', f.timestamp_utc)) AS days_with_data
+            FROM market.futures_1m f
+            WHERE f.source_id = %s
+              AND f.timestamp_utc >= NOW() - INTERVAL '90 days'
+            GROUP BY f.symbol_id
+        ),
+        latest_day_counts AS (
+            SELECT
+                lps.symbol_id,
+                lps.latest_date,
+                lps.days_with_data,
+                COUNT(*) AS total_rows,
+                COUNT(f.close)         AS price_rows,
+                COUNT(f.open_interest) AS oi_rows,
+                COUNT(f.volume)        AS volume_rows
+            FROM latest_per_symbol lps
+            JOIN market.futures_1m f
+              ON f.symbol_id = lps.symbol_id
+             AND f.source_id = %s
+             AND f.timestamp_utc >= lps.latest_date::timestamptz
+             AND f.timestamp_utc <  (lps.latest_date + INTERVAL '1 day')::timestamptz
+            GROUP BY lps.symbol_id, lps.latest_date, lps.days_with_data
+        )
+        SELECT
+            s.symbol_id,
+            s.base AS symbol,
+            COALESCE(ldc.days_with_data, 0) AS days_with_data,
+            ldc.latest_date,
+            COALESCE(ldc.total_rows,  0) AS total_rows,
+            COALESCE(ldc.price_rows,  0) AS price_rows,
+            COALESCE(ldc.oi_rows,     0) AS oi_rows,
+            COALESCE(ldc.volume_rows, 0) AS volume_rows
+        FROM market.symbols s
+        LEFT JOIN latest_day_counts ldc ON ldc.symbol_id = s.symbol_id
+        WHERE s.active = TRUE
+        ORDER BY days_with_data DESC, s.base ASC
+        """,
+        (source_id, source_id),
+    )
+    rows = cur.fetchall()
+
+    def _pct(num: int, denom: int) -> float:
+        if denom <= 0:
+            return 0.0
+        return round(num / denom * 100, 1)
+
+    def _status(price_pct: float, oi_pct: float, volume_pct: float, total_rows: int) -> str:
+        if total_rows == 0:
+            return "missing"
+        if price_pct >= 95 and oi_pct >= 95 and volume_pct >= 95:
+            return "complete"
+        return "partial"
+
+    payload = []
+    for r in rows:
+        total = int(r["total_rows"])
+        price_pct  = _pct(int(r["price_rows"]),  total)
+        oi_pct     = _pct(int(r["oi_rows"]),     total)
+        volume_pct = _pct(int(r["volume_rows"]), total)
+        payload.append({
+            "symbol":        r["symbol"],
+            "symbol_id":     r["symbol_id"],
+            "days_with_data": int(r["days_with_data"]),
+            "latest_date":   r["latest_date"].isoformat() if r["latest_date"] else None,
+            "price_pct":     price_pct,
+            "oi_pct":        oi_pct,
+            "volume_pct":    volume_pct,
+            "status":        _status(price_pct, oi_pct, volume_pct, total),
+        })
+
+    return {
+        "source_id":        source_id,
+        "lookback_days":    90,
+        "symbols_returned": len(payload),
+        "symbols":          payload,
+    }
+
+
 # ─── /symbols/{symbol} ────────────────────────────────────────────────────────
 
 @router.get("/symbols/{symbol}")
