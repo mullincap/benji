@@ -108,11 +108,13 @@ function ManagerSidebar({
   allocations,
   totalAum,
   onNewConversation,
+  onDeleteConversation,
 }: {
   conversations: Conversation[];
   allocations: Allocation[];
   totalAum: number;
   onNewConversation: () => void;
+  onDeleteConversation: (id: string) => void;
 }) {
   const pathname = usePathname();
   const router = useRouter();
@@ -214,52 +216,80 @@ function ManagerSidebar({
         {conversations.map((c) => {
           const isActive = activeConvId === c.conversation_id;
           return (
-            <button
+            <div
               key={c.conversation_id}
-              onClick={() => router.push(`/manager/chat/${c.conversation_id}`)}
               style={{
-                display: "block",
-                width: "100%",
+                display: "flex",
+                alignItems: "center",
                 background: isActive ? "var(--bg2)" : "transparent",
-                border: "none",
                 borderLeft: `2px solid ${isActive ? "var(--green)" : "transparent"}`,
-                padding: "6px 14px 6px 16px",
-                cursor: "pointer",
-                textAlign: "left",
-                fontFamily: "var(--font-space-mono), Space Mono, monospace",
                 transition: "background 0.15s ease",
               }}
               onMouseEnter={(e) => {
-                if (!isActive)
-                  e.currentTarget.style.background = "var(--bg1)";
+                if (!isActive) e.currentTarget.style.background = "var(--bg1)";
+                const del = e.currentTarget.querySelector("[data-del]") as HTMLElement;
+                if (del) del.style.opacity = "1";
               }}
               onMouseLeave={(e) => {
-                if (!isActive)
-                  e.currentTarget.style.background = "transparent";
+                if (!isActive) e.currentTarget.style.background = "transparent";
+                const del = e.currentTarget.querySelector("[data-del]") as HTMLElement;
+                if (del) del.style.opacity = "0";
               }}
             >
-              <div
+              <button
+                onClick={() => router.push(`/manager/chat/${c.conversation_id}`)}
                 style={{
-                  fontSize: 10,
-                  color: isActive ? "var(--t0)" : "var(--t1)",
-                  fontWeight: isActive ? 700 : 400,
-                  whiteSpace: "nowrap",
-                  overflow: "hidden",
-                  textOverflow: "ellipsis",
+                  flex: 1,
+                  background: "transparent",
+                  border: "none",
+                  padding: "6px 0 6px 16px",
+                  cursor: "pointer",
+                  textAlign: "left",
+                  fontFamily: "var(--font-space-mono), Space Mono, monospace",
+                  minWidth: 0,
                 }}
               >
-                {c.title ? truncate(c.title, 28) : "Untitled"}
-              </div>
-              <div
+                <div
+                  style={{
+                    fontSize: 10,
+                    color: isActive ? "var(--t0)" : "var(--t1)",
+                    fontWeight: isActive ? 700 : 400,
+                    whiteSpace: "nowrap",
+                    overflow: "hidden",
+                    textOverflow: "ellipsis",
+                  }}
+                >
+                  {c.title ? truncate(c.title, 24) : "Untitled"}
+                </div>
+                <div style={{ fontSize: 9, color: "var(--t3)", marginTop: 2 }}>
+                  {relativeTime(c.updated_at)}
+                </div>
+              </button>
+              <button
+                data-del
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onDeleteConversation(c.conversation_id);
+                }}
                 style={{
-                  fontSize: 9,
+                  background: "transparent",
+                  border: "none",
                   color: "var(--t3)",
-                  marginTop: 2,
+                  fontSize: 11,
+                  cursor: "pointer",
+                  padding: "4px 10px",
+                  opacity: 0,
+                  transition: "opacity 0.15s ease, color 0.15s ease",
+                  fontFamily: "var(--font-space-mono), Space Mono, monospace",
+                  flexShrink: 0,
                 }}
+                onMouseEnter={(e) => { e.currentTarget.style.color = "var(--red)"; }}
+                onMouseLeave={(e) => { e.currentTarget.style.color = "var(--t3)"; }}
+                title="Delete conversation"
               >
-                {relativeTime(c.updated_at)}
-              </div>
-            </button>
+                x
+              </button>
+            </div>
           );
         })}
         {conversations.length === 0 && (
@@ -401,6 +431,22 @@ export default function ManagerProtectedLayout({
     return () => window.removeEventListener("manager:refresh-conversations", handler);
   }, [refreshConversations]);
 
+  const handleDeleteConversation = useCallback(async (id: string) => {
+    try {
+      await fetch(`${API_BASE}/api/manager/conversations/${id}`, {
+        method: "DELETE",
+        credentials: "include",
+      });
+      refreshConversations();
+      // If we just deleted the active conversation, go to chat empty state
+      if (window.location.pathname.includes(id)) {
+        router.push("/manager/chat");
+      }
+    } catch {
+      // ignore
+    }
+  }, [refreshConversations, router]);
+
   const handleNewConversation = useCallback(async () => {
     try {
       const resp = await fetch(`${API_BASE}/api/manager/conversations`, {
@@ -446,6 +492,7 @@ export default function ManagerProtectedLayout({
           allocations={allocations}
           totalAum={totalAum}
           onNewConversation={handleNewConversation}
+          onDeleteConversation={handleDeleteConversation}
         />
         <div style={{ flex: 1, overflow: "auto" }}>
           {typeof children === "object" && children !== null
