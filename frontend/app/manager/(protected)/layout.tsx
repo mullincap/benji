@@ -370,6 +370,7 @@ export default function ManagerProtectedLayout({
   children: React.ReactNode;
 }) {
   const router = useRouter();
+  const pathname = usePathname();
   const [authState, setAuthState] = useState<AuthState>("loading");
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [allocations, setAllocations] = useState<Allocation[]>([]);
@@ -399,7 +400,7 @@ export default function ManagerProtectedLayout({
     };
   }, [router]);
 
-  // Load sidebar data once authed
+  // Load sidebar data on auth + pathname changes
   useEffect(() => {
     if (authState !== "authed") return;
 
@@ -415,7 +416,7 @@ export default function ManagerProtectedLayout({
         setTotalAum(data.total_aum || 0);
       })
       .catch(() => {});
-  }, [authState]);
+  }, [authState, pathname]);
 
   const refreshConversations = useCallback(() => {
     fetch(`${API_BASE}/api/manager/conversations`, { credentials: "include" })

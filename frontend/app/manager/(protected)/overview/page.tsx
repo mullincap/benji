@@ -103,6 +103,7 @@ function statusBadge(status: string) {
     complete: { bg: "var(--green-dim)", color: "var(--green)", label: "COMPLETE" },
     running: { bg: "var(--amber-dim)", color: "var(--amber)", label: "RUNNING" },
     failed: { bg: "var(--red-dim)", color: "var(--red)", label: "FAILED" },
+    stale: { bg: "var(--amber-dim)", color: "var(--amber)", label: "STALE" },
     unknown: { bg: "var(--bg3)", color: "var(--t3)", label: "UNKNOWN" },
   };
   const s = map[status] || map.unknown;
@@ -136,12 +137,12 @@ function relTime(iso: string | null): string {
 }
 
 function staleCheck(job: PipelineJob): string {
-  if (job.status === "unknown") return "UNKNOWN";
-  if (!job.last_run) return "UNKNOWN";
+  if (job.status === "unknown") return "unknown";
+  if (!job.last_run) return "unknown";
   const diff = Date.now() - new Date(job.last_run).getTime();
-  if (job.status === "running") return "RUNNING";
-  if (job.status === "complete" && diff > 48 * 3600000) return "STALE";
-  return job.status.toUpperCase();
+  if (job.status === "running") return "running";
+  if (job.status === "complete" && diff > 48 * 3600000) return "stale";
+  return job.status;
 }
 
 // ─── KPI Card ───────────────────────────────────────────────────────────────
