@@ -107,7 +107,7 @@ const MODULES: Array<{ key: ModuleKey; icon: string; href?: string }> = [
   { key: 'indexer', icon: '⌕', href: '/indexer' },
   { key: 'simulator', icon: '◴', href: '/simulator' },
   { key: 'allocator', icon: '⚙', href: '/trader' },
-  { key: 'manager', icon: '▣' },
+  { key: 'manager', icon: '▣', href: '/manager' },
 ];
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
