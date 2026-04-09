@@ -747,6 +747,25 @@ CREATE INDEX IF NOT EXISTS idx_exchange_snapshots_connection_time
 CREATE INDEX IF NOT EXISTS idx_exchange_snapshots_time
     ON user_mgmt.exchange_snapshots (snapshot_at DESC);
 
+-- ─── Manager conversations + messages ─────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS user_mgmt.manager_conversations (
+    conversation_id  UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    title            TEXT,
+    created_at       TIMESTAMPTZ DEFAULT NOW(),
+    updated_at       TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS user_mgmt.manager_messages (
+    message_id       UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    conversation_id  UUID NOT NULL REFERENCES user_mgmt.manager_conversations(conversation_id) ON DELETE CASCADE,
+    role             TEXT NOT NULL CHECK (role IN ('user', 'assistant')),
+    content          TEXT NOT NULL,
+    created_at       TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_manager_messages_conversation
+    ON user_mgmt.manager_messages (conversation_id, created_at ASC);
+
 
 -- =============================================================================
 -- MIGRATION: market_data_1m -> market.futures_1m
