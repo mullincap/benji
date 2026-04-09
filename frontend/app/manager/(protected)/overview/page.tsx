@@ -200,14 +200,22 @@ export default function OverviewPage() {
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    fetch(`${API_BASE}/api/manager/overview`, { credentials: "include" })
-      .then((r) => {
-        if (r.status === 401) throw new Error("Session expired");
-        if (!r.ok) throw new Error(`HTTP ${r.status}`);
-        return r.json();
-      })
-      .then(setData)
-      .catch((e) => setError(e.message));
+    // Refresh live exchange data first, then load overview
+    fetch(`${API_BASE}/api/allocator/snapshots/refresh`, {
+      method: "POST",
+      credentials: "include",
+    })
+      .catch(() => {}) // non-critical — overview still works with stale snapshots
+      .finally(() => {
+        fetch(`${API_BASE}/api/manager/overview`, { credentials: "include" })
+          .then((r) => {
+            if (r.status === 401) throw new Error("Session expired");
+            if (!r.ok) throw new Error(`HTTP ${r.status}`);
+            return r.json();
+          })
+          .then(setData)
+          .catch((e) => setError(e.message));
+      });
   }, []);
 
   if (error) {
@@ -300,7 +308,7 @@ export default function OverviewPage() {
         />
         <KpiCard
           label="Total AUM"
-          value={`$${data.total_aum.toLocaleString()}`}
+          value={`$${(data.total_live_equity_usd ?? data.total_aum).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`}
         />
       </div>
 
