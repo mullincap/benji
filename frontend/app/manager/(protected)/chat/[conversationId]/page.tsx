@@ -1,7 +1,8 @@
 "use client";
 
 import { useEffect, useState, useRef, useCallback } from "react";
-import { useParams } from "next/navigation";
+import { useParams, useRouter } from "next/navigation";
+import ReactMarkdown from "react-markdown";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE || "";
 
@@ -20,6 +21,11 @@ export default function ConversationPage() {
   const [sending, setSending] = useState(false);
   const [title, setTitle] = useState<string | null>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
+
+  // Signal the layout to refresh its conversation list
+  const refreshSidebar = useCallback(() => {
+    window.dispatchEvent(new CustomEvent("manager:refresh-conversations"));
+  }, []);
 
   // Load conversation
   useEffect(() => {
@@ -75,6 +81,7 @@ export default function ConversationPage() {
         created_at: data.created_at,
       };
       setMessages((prev) => [...prev, asstMsg]);
+      refreshSidebar();
     } catch {
       const errMsg: Message = {
         message_id: `err-${Date.now()}`,
@@ -116,8 +123,8 @@ export default function ConversationPage() {
 
     return (
       <>
-        <div style={{ fontSize: 10, color: "var(--t0)", whiteSpace: "pre-wrap", lineHeight: 1.6 }}>
-          {displayContent}
+        <div className="manager-md" style={{ fontSize: 10, color: "var(--t0)", lineHeight: 1.6 }}>
+          <ReactMarkdown>{displayContent}</ReactMarkdown>
         </div>
         {actionBlock && (
           <div

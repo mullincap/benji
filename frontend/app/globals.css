@@ -100,3 +100,15 @@ body {
   background: color-mix(in srgb, var(--module-accent) 12%, #0d0d0d) !important;
   border-bottom-color: color-mix(in srgb, var(--module-accent) 8%, #1a1a1a) !important;
 }
+
+/* ── Manager chat markdown ────────────────────────────────────────────────── */
+.manager-md p { margin: 0 0 8px; }
+.manager-md p:last-child { margin-bottom: 0; }
+.manager-md strong { color: var(--t0); font-weight: 700; }
+.manager-md ul, .manager-md ol { margin: 4px 0 8px 16px; padding: 0; }
+.manager-md li { margin-bottom: 2px; }
+.manager-md code { background: var(--bg3); padding: 1px 4px; border-radius: 3px; font-size: 10px; }
+.manager-md pre { background: var(--bg3); padding: 10px; border-radius: 5px; overflow-x: auto; margin: 8px 0; }
+.manager-md pre code { background: none; padding: 0; }
+.manager-md h1, .manager-md h2, .manager-md h3 { font-size: 11px; font-weight: 700; color: var(--t0); margin: 12px 0 4px; }
+.manager-md hr { border: none; border-top: 1px solid var(--line); margin: 8px 0; }

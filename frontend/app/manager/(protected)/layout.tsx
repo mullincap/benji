@@ -394,6 +394,13 @@ export default function ManagerProtectedLayout({
       .catch(() => {});
   }, []);
 
+  // Listen for refresh events from chat pages
+  useEffect(() => {
+    const handler = () => refreshConversations();
+    window.addEventListener("manager:refresh-conversations", handler);
+    return () => window.removeEventListener("manager:refresh-conversations", handler);
+  }, [refreshConversations]);
+
   const handleNewConversation = useCallback(async () => {
     try {
       const resp = await fetch(`${API_BASE}/api/manager/conversations`, {
