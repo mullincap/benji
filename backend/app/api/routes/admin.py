@@ -26,6 +26,7 @@ Dependency:
 from __future__ import annotations
 
 import os
+from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
@@ -38,6 +39,17 @@ from ...services.admin_sessions import (
     delete_session,
     validate_session,
 )
+
+# ── Self-load secrets.env for INTERNAL_API_TOKEN on the server ────────────────
+_SECRETS = Path("/mnt/quant-data/credentials/secrets.env")
+if _SECRETS.exists():
+    for _line in _SECRETS.read_text().splitlines():
+        _line = _line.strip()
+        if _line and not _line.startswith("#") and "=" in _line:
+            _k, _, _v = _line.partition("=")
+            os.environ.setdefault(_k.strip(), _v.strip())
+
+INTERNAL_API_TOKEN = settings.INTERNAL_API_TOKEN or os.environ.get("INTERNAL_API_TOKEN", "")
 
 router = APIRouter(prefix="/api/admin", tags=["admin"])
 
@@ -60,12 +72,18 @@ class LoginRequest(BaseModel):
 
 def require_admin(request: Request) -> str:
     """
-    FastAPI dependency: enforces a valid admin session cookie.
-    Returns the session token on success. Raises 401 otherwise.
+    FastAPI dependency: enforces a valid admin session cookie OR a valid
+    X-Internal-Token header (for server-to-server calls like the briefing cron).
+    Returns the session token (or "internal") on success. Raises 401 otherwise.
 
     Use as: @router.get(..., dependencies=[Depends(require_admin)])
     or:     def my_route(token: str = Depends(require_admin), ...)
     """
+    # Check X-Internal-Token header first (server-to-server auth)
+    internal_token = request.headers.get("X-Internal-Token")
+    if internal_token and INTERNAL_API_TOKEN and internal_token == INTERNAL_API_TOKEN:
+        return "internal"
+
     token = request.cookies.get(COOKIE_NAME)
     if not validate_session(settings.ADMIN_SESSIONS_FILE, token):
         raise HTTPException(
