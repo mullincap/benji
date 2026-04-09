@@ -6,9 +6,9 @@
 
 ## Current State
 
-**Phase 0 complete.** Conventions read, prerequisites checked, build doc created.
-**Next action:** User confirms build doc, then proceed to Phase 1 (database migrations).
-**Resume command for next session:** "Build the Manager module. Read `docs/builds/manager-page-build.md` and continue from the first unchecked phase."
+**All 5 phases complete.** Manager module is end-to-end functional: overview page with KPI cards + charts + pipeline status, Claude-powered chat with conversation history and action card parsing, daily briefing cron at 00:30 UTC.
+**Next action:** None — build complete. Follow-up work includes wiring action execution (pause/adjust/add), read-only toggle implementation, and performance_daily population.
+**Resume command for next session:** N/A — build is complete.
 
 ---
 
@@ -143,45 +143,45 @@ LIMIT 1
 ## Phase checklist
 
 - [x] **Phase 0** — Read conventions, check prerequisites, create this build doc
-- [ ] **Phase 1** — Database migrations (`manager_conversations`, `manager_messages`)
-  - [ ] Add tables to `schema.sql`
-  - [ ] Run migration on live DB
-  - [ ] Smoke test
-- [ ] **Phase 2** — FastAPI routes
-  - [ ] Part A: `backend/app/api/routes/allocator.py` — `GET /api/allocator/snapshots`
-  - [ ] Part B: `backend/app/api/routes/manager.py` — all manager endpoints
-  - [ ] Add `X-Internal-Token` exception to `require_admin` in `admin.py`
-  - [ ] Add `INTERNAL_API_TOKEN` + `ANTHROPIC_API_KEY` to `core/config.py`
-  - [ ] Register new routers in `main.py`
-  - [ ] `GET /api/manager/overview` — full portfolio context
-  - [ ] `GET /api/manager/conversations` — list
-  - [ ] `POST /api/manager/conversations` — create
-  - [ ] `GET /api/manager/conversations/{id}` — full history
-  - [ ] `DELETE /api/manager/conversations/{id}` — cascade delete
-  - [ ] `POST /api/manager/conversations/{id}/messages` — send + Claude response
-  - [ ] `POST /api/manager/briefing` — internal token auth, auto-conversation
-  - [ ] Smoke test all endpoints
-- [ ] **Phase 3** — Frontend shell
-  - [ ] `frontend/app/manager/(protected)/layout.tsx` — auth + sidebar with conversations
-  - [ ] `frontend/app/manager/(protected)/page.tsx` — redirect to `/manager/overview`
-  - [ ] `frontend/app/manager/(protected)/overview/page.tsx` — placeholder
-  - [ ] `frontend/app/manager/(protected)/chat/page.tsx` — empty state with suggested prompts
-  - [ ] `frontend/app/manager/(public)/layout.tsx` — redirect to `/compiler/login`
-  - [ ] Add `href: '/manager'` to Topbar MODULES
-  - [ ] Verify `next build` clean
-- [ ] **Phase 4** — Overview page
-  - [ ] Row 1: 5 KPI cards (TODAY % / WTD % / MTD % / MAX DRAWDOWN / TOTAL AUM)
-  - [ ] Row 2: equity curve (30d Chart.js line) + daily return bars (30d Chart.js bar)
-  - [ ] Row 3 left: per-allocation breakdown table
-  - [ ] Row 3 right: pipeline status
-  - [ ] Handle all empty-data states
-- [ ] **Phase 5** — Chat page
-  - [ ] Conversation list with load/create/delete
-  - [ ] Message history rendering
-  - [ ] Send message → Claude response → render
-  - [ ] Action card parsing (trailing JSON block)
-  - [ ] Loading/error/empty states
-  - [ ] Briefing cron entry
+- [x] **Phase 1** — Database migrations (`manager_conversations`, `manager_messages`)
+  - [x] Add tables to `schema.sql`
+  - [x] Run migration on live DB
+  - [x] Smoke test
+- [x] **Phase 2** — FastAPI routes
+  - [x] Part A: `backend/app/api/routes/allocator.py` — `GET /api/allocator/snapshots`
+  - [x] Part B: `backend/app/api/routes/manager.py` — all manager endpoints
+  - [x] Add `X-Internal-Token` exception to `require_admin` in `admin.py`
+  - [x] Add `INTERNAL_API_TOKEN` + `ANTHROPIC_API_KEY` to `core/config.py`
+  - [x] Register new routers in `main.py`
+  - [x] `GET /api/manager/overview` — full portfolio context
+  - [x] `GET /api/manager/conversations` — list
+  - [x] `POST /api/manager/conversations` — create
+  - [x] `GET /api/manager/conversations/{id}` — full history
+  - [x] `DELETE /api/manager/conversations/{id}` — cascade delete
+  - [x] `POST /api/manager/conversations/{id}/messages` — send + Claude response
+  - [x] `POST /api/manager/briefing` — internal token auth, auto-conversation
+  - [x] Smoke test all endpoints
+- [x] **Phase 3** — Frontend shell
+  - [x] `frontend/app/manager/(protected)/layout.tsx` — auth + sidebar with conversations
+  - [x] `frontend/app/manager/(protected)/page.tsx` — redirect to `/manager/overview`
+  - [x] `frontend/app/manager/(protected)/overview/page.tsx` — placeholder
+  - [x] `frontend/app/manager/(protected)/chat/page.tsx` — empty state with suggested prompts
+  - [x] `frontend/app/manager/(public)/layout.tsx` — redirect to `/compiler/login`
+  - [x] Add `href: '/manager'` to Topbar MODULES
+  - [x] Verify `next build` clean
+- [x] **Phase 4** — Overview page
+  - [x] Row 1: 5 KPI cards (TODAY % / WTD % / MTD % / MAX DRAWDOWN / TOTAL AUM)
+  - [x] Row 2: equity curve (30d Chart.js line) + daily return bars (30d Chart.js bar)
+  - [x] Row 3 left: per-allocation breakdown table
+  - [x] Row 3 right: pipeline status
+  - [x] Handle all empty-data states
+- [x] **Phase 5** — Chat page
+  - [x] Conversation list with load/create/delete
+  - [x] Message history rendering
+  - [x] Send message → Claude response → render
+  - [x] Action card parsing (trailing JSON block)
+  - [x] Loading/error/empty states
+  - [x] Briefing cron entry
 
 ---
 
