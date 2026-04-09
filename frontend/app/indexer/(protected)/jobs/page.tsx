@@ -324,6 +324,206 @@ function JobRow({ job, nowMs }: { job: IndexerJob; nowMs: number }) {
   );
 }
 
+// ─── Backfill panel — POST /api/indexer/runs ────────────────────────────────
+
+const BACKFILL_METRICS: { metric: "price" | "open_interest" | "volume"; label: string }[] = [
+  { metric: "price",         label: "Price" },
+  { metric: "open_interest", label: "Open Interest" },
+  { metric: "volume",        label: "Volume" },
+];
+
+function BackfillPanel({ onJobCreated }: { onJobCreated: () => void }) {
+  const [pending, setPending] = useState<string | null>(null); // metric awaiting confirmation
+  const [submitting, setSubmitting] = useState(false);
+  const [feedback, setFeedback] = useState<string | null>(null);
+
+  async function trigger(metric: string) {
+    setSubmitting(true);
+    setFeedback(null);
+    try {
+      const res = await fetch(`${API_BASE}/api/indexer/runs`, {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ metric }),
+      });
+      if (res.status === 401) {
+        setFeedback("Session expired. Please log in again.");
+        return;
+      }
+      if (!res.ok) {
+        const txt = await res.text();
+        setFeedback(`POST /api/indexer/runs returned ${res.status}: ${txt.slice(0, 200)}`);
+        return;
+      }
+      const data = await res.json();
+      setFeedback(`✓ Backfill enqueued for ${metric} — task ${data.celery_task_id?.slice(0, 8) ?? "?"}…`);
+      onJobCreated();
+    } catch (err) {
+      setFeedback(`Network error: ${err instanceof Error ? err.message : String(err)}`);
+    } finally {
+      setSubmitting(false);
+      setPending(null);
+    }
+  }
+
+  return (
+    <div style={{
+      background: "var(--bg2)",
+      border: "1px solid var(--line)",
+      borderRadius: 6,
+      padding: "14px 16px",
+      marginBottom: 16,
+    }}>
+      <div style={{
+        fontSize: 9, fontWeight: 700, letterSpacing: "0.12em",
+        color: "var(--t3)", textTransform: "uppercase",
+        marginBottom: 10,
+      }}>
+        Backfill Leaderboards
+      </div>
+      <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+        {BACKFILL_METRICS.map((m) => (
+          <button
+            key={m.metric}
+            type="button"
+            disabled={submitting}
+            onClick={() => setPending(m.metric)}
+            style={{
+              background: "var(--bg3)",
+              border: "1px solid var(--line2)",
+              borderRadius: 4,
+              padding: "8px 14px",
+              fontSize: 9,
+              fontWeight: 700,
+              letterSpacing: "0.12em",
+              textTransform: "uppercase",
+              color: "var(--t1)",
+              cursor: submitting ? "not-allowed" : "pointer",
+              fontFamily: "var(--font-space-mono), Space Mono, monospace",
+              transition: "all 0.15s ease",
+            }}
+            onMouseEnter={(e) => { if (!submitting) e.currentTarget.style.color = "var(--t0)"; }}
+            onMouseLeave={(e) => { if (!submitting) e.currentTarget.style.color = "var(--t1)"; }}
+          >
+            Backfill {m.label}
+          </button>
+        ))}
+        {feedback && (
+          <span style={{
+            fontSize: 10,
+            color: feedback.startsWith("✓") ? "var(--green)" : "var(--red)",
+            marginLeft: 4,
+          }}>
+            {feedback}
+          </span>
+        )}
+      </div>
+      {pending && (
+        <ConfirmModal
+          metric={pending}
+          submitting={submitting}
+          onCancel={() => setPending(null)}
+          onConfirm={() => trigger(pending)}
+        />
+      )}
+    </div>
+  );
+}
+
+function ConfirmModal({
+  metric, submitting, onCancel, onConfirm,
+}: {
+  metric: string;
+  submitting: boolean;
+  onCancel: () => void;
+  onConfirm: () => void;
+}) {
+  return (
+    <div
+      role="dialog"
+      aria-modal="true"
+      onClick={onCancel}
+      style={{
+        position: "fixed",
+        inset: 0,
+        background: "rgba(0,0,0,0.7)",
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        zIndex: 1000,
+      }}
+    >
+      <div
+        onClick={(e) => e.stopPropagation()}
+        style={{
+          background: "var(--bg2)",
+          border: "1px solid var(--line2)",
+          borderRadius: 6,
+          padding: "20px 24px",
+          maxWidth: 440,
+          fontFamily: "var(--font-space-mono), Space Mono, monospace",
+        }}
+      >
+        <div style={{
+          fontSize: 9, fontWeight: 700, letterSpacing: "0.12em",
+          color: "var(--t3)", textTransform: "uppercase",
+          marginBottom: 10,
+        }}>
+          Confirm Backfill
+        </div>
+        <div style={{ fontSize: 11, color: "var(--t1)", lineHeight: 1.6, marginBottom: 16 }}>
+          This will run <code style={{ color: "var(--t0)" }}>backfill_leaderboards_bulk.py --metric {metric}</code> on the server.
+          The job typically takes 60–90 minutes and writes ~190M rows. The Indexer Coverage page will be slow to query during the run.
+          The script is idempotent — re-running is safe.
+        </div>
+        <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
+          <button
+            type="button"
+            disabled={submitting}
+            onClick={onCancel}
+            style={{
+              background: "transparent",
+              border: "1px solid var(--line2)",
+              borderRadius: 4,
+              padding: "8px 16px",
+              fontSize: 9,
+              fontWeight: 700,
+              letterSpacing: "0.12em",
+              textTransform: "uppercase",
+              color: "var(--t2)",
+              cursor: submitting ? "not-allowed" : "pointer",
+              fontFamily: "var(--font-space-mono), Space Mono, monospace",
+            }}
+          >
+            Cancel
+          </button>
+          <button
+            type="button"
+            disabled={submitting}
+            onClick={onConfirm}
+            style={{
+              background: "var(--amber-dim)",
+              border: "1px solid var(--amber)",
+              borderRadius: 4,
+              padding: "8px 16px",
+              fontSize: 9,
+              fontWeight: 700,
+              letterSpacing: "0.12em",
+              textTransform: "uppercase",
+              color: "var(--amber)",
+              cursor: submitting ? "not-allowed" : "pointer",
+              fontFamily: "var(--font-space-mono), Space Mono, monospace",
+            }}
+          >
+            {submitting ? "Enqueueing…" : `Run Backfill ${metric}`}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function EmptyState() {
   return (
     <div style={{
@@ -521,11 +721,14 @@ export default function IndexerJobsPage() {
         <SectionLabel>Indexer · Jobs</SectionLabel>
         <h1 style={{
           fontSize: 24, fontWeight: 700, color: "var(--t0)",
-          margin: 0, marginBottom: 24,
+          margin: 0, marginBottom: 16,
           letterSpacing: "-0.01em",
         }}>
           Indexer Jobs
         </h1>
+
+        <BackfillPanel onJobCreated={() => fetchJobs()} />
+
 
         {state.kind === "loading" && (
           <div style={{

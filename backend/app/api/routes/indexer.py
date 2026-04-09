@@ -19,6 +19,7 @@ Constraints (per build doc):
 from typing import Any, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import BaseModel
 
 from ...db import get_cursor
 from .admin import require_admin
@@ -178,6 +179,39 @@ def list_jobs(
     return {
         "jobs_returned": len(rows),
         "jobs":          [_serialize_indexer_job(r) for r in rows],
+    }
+
+
+# ─── POST /runs — UI-triggered backfill ─────────────────────────────────────
+
+class RunRequest(BaseModel):
+    metric: str  # "price" | "open_interest" | "volume"
+
+
+@router.post("/runs")
+def create_run(body: RunRequest) -> dict[str, Any]:
+    """Enqueue a celery task that runs backfill_leaderboards_bulk.py for the
+    given metric. Returns the celery task_id immediately. Progress is tracked
+    in market.indexer_jobs and visible on the Jobs page (which polls every
+    10s).
+
+    No params beyond metric — the bulk script handles its own staging
+    table, conflict logic, and clean-up. Each call is independent and safe
+    to re-run idempotently."""
+    if body.metric not in METRICS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"invalid metric {body.metric!r}, must be one of {METRICS}",
+        )
+    # Lazy import so importing this route module doesn't pull in celery+psycopg2
+    # at FastAPI startup time.
+    from app.workers.indexer_backfill_worker import backfill_metric
+    async_result = backfill_metric.delay(body.metric, "ui")
+    return {
+        "ok": True,
+        "metric": body.metric,
+        "celery_task_id": async_result.id,
+        "message": f"Backfill enqueued for {body.metric}. Watch the Jobs page for progress.",
     }
 
 

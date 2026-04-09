@@ -859,3 +859,15 @@ def run_pipeline(self, job_id: str, params: dict) -> dict:
     return results
     if _is_cancelled(job_id):
         return {}
+
+
+# ─── Side-effect import: register additional task modules ───────────────────
+# `app.workers.indexer_backfill_worker` defines @celery_app.task(...) functions
+# against the SAME celery_app instance from this file. Importing it here at
+# module load time ensures the celery worker process picks up those task
+# definitions when it starts via:
+#   celery -A app.workers.pipeline_worker.celery_app worker
+# Without this import the new tasks would only be discovered if the worker
+# command was changed to load multiple modules. Keep this at the bottom of
+# the file so it runs after `celery_app` is fully constructed.
+import app.workers.indexer_backfill_worker  # noqa: E402,F401
