@@ -74,7 +74,7 @@ const LOOKBACK_PRESETS = [
   { label: "ALL", days: 10000 },
 ] as const;
 type LookbackPreset = (typeof LOOKBACK_PRESETS)[number];
-const DEFAULT_PRESET: LookbackPreset = LOOKBACK_PRESETS[1]; // 90
+const DEFAULT_PRESET: LookbackPreset = LOOKBACK_PRESETS[3]; // ALL
 
 type LoadState =
   | { kind: "loading" }
@@ -498,14 +498,25 @@ function CoverageContent({ coverage, gaps }: { coverage: CoverageResponse; gaps:
   const daysWithGaps = gaps.gaps.filter((g) => g.status === "partial").length;
   const daysMissing = gaps.gaps.filter((g) => g.status === "missing").length;
 
+  // Average completeness across every day in the window. Single headline
+  // number — matches how a human would eyeball the heatmap.
+  const coveragePct = coverage.days.length > 0
+    ? coverage.days.reduce((sum, d) => sum + d.completeness_pct, 0) / coverage.days.length
+    : 0;
+
   return (
     <>
       <div style={{
         display: "grid",
-        gridTemplateColumns: "repeat(4, 1fr)",
+        gridTemplateColumns: "repeat(5, 1fr)",
         gap: 10,
         marginBottom: 24,
       }}>
+        <KPICard
+          label="Coverage"
+          value={`${coveragePct.toFixed(1)}%`}
+          hint={`avg across ${coverage.days_returned} days`}
+        />
         <KPICard
           label="Fetched Universe"
           value={fetchedUniverse.toLocaleString("en-US")}
