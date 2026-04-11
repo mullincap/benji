@@ -94,6 +94,18 @@ parser.add_argument(
     help="Ranking metric: price | open_interest | volume"
 )
 parser.add_argument(
+    "--source",
+    type=str,
+    choices=["parquet", "db"],
+    default="parquet",
+    dest="source",
+    help=(
+        "Data source: 'parquet' (default) reads from --parquet-path or PARQUET_DIR "
+        "partitions; 'db' reads directly from market.futures_1m. In db mode, use "
+        "--start/--end to scope the date range (default: last 14 days)."
+    )
+)
+parser.add_argument(
     "--parquet-path",
     type=str,
     default=None,
@@ -102,7 +114,8 @@ parser.add_argument(
         "Path to a single master parquet file (e.g. master_oi_training_table.parquet). "
         "When supplied, the builder reads this file grouped by date instead of "
         "scanning PARQUET_DIR for date=* partitions. "
-        "Required columns: timestamp_utc, symbol, <metric>."
+        "Required columns: timestamp_utc, symbol, <metric>. "
+        "Ignored when --source db is used."
     )
 )
 parser.add_argument(
@@ -116,11 +129,11 @@ parser.add_argument(
 parser.add_argument(
     "--index-lookback",
     type=int,
-    default=0,
+    default=6,
     dest="index_lookback",
     help=(
         "Hours before deployment_start_hour to use as the % change anchor. "
-        "Default: 0 = midnight (first bar of the day, current behaviour). "
+        "Default 6 paired with default deployment_start_hour 6 → anchor 00:00 UTC (midnight). "
         "e.g. --deployment-start-hour 6 --index-lookback 6 anchors at 00:00; "
         "     --deployment-start-hour 6 --index-lookback 4 anchors at 02:00; "
         "     --deployment-start-hour 6 --index-lookback 8 anchors at 22:00 prev day."
@@ -570,17 +583,120 @@ def _load_day_from_parquet(
     return pd.concat(frames, ignore_index=True)
 
 
+# ── Helpers: DB-source mode (reads directly from market.futures_1m) ──────
+# Mirrors the shape and return contract of `_load_day_from_parquet` so the
+# main loop dispatches on mode without caring where the data came from.
+# Uses a long-lived connection opened in the main-mode setup block below.
+
+_DB_SOURCE_ID = 1  # amberdata_binance — matches metl.py's INSERT target
+
+# Column name mapping: the indexer asks for "price" but the DB stores it as
+# "close" on market.futures_1m. All other metric columns are named the same
+# in both places.
+_DB_COLUMN_ALIASES = {
+    "price": "close",
+}
+
+
+def _db_select_expr(col: str) -> str:
+    """Return the SQL SELECT expression for a requested column name.
+    Prefixed with `f.` to match the query's alias."""
+    if col in ("timestamp_utc",):
+        return "f.timestamp_utc"
+    if col == "symbol":
+        return "s.binance_id AS symbol"
+    src = _DB_COLUMN_ALIASES.get(col, col)
+    return f"f.{src} AS {col}" if src != col else f"f.{col}"
+
+
+def _get_db_date_range(cur, start_date, end_date) -> list:
+    """Return a sorted list of python date objects for which at least one
+    row exists in market.futures_1m within [start_date, end_date]."""
+    cur.execute(
+        """
+        SELECT DISTINCT time_bucket('1 day', timestamp_utc)::date AS day
+        FROM market.futures_1m
+        WHERE source_id = %s
+          AND timestamp_utc >= %s::timestamp
+          AND timestamp_utc <  (%s::date + INTERVAL '1 day')
+        ORDER BY day
+        """,
+        (_DB_SOURCE_ID, start_date, end_date),
+    )
+    return [r[0] for r in cur.fetchall()]
+
+
+def _load_day_from_db(cur, target_date, columns: list[str]) -> pd.DataFrame:
+    """Read all rows for `target_date` from market.futures_1m and return a
+    DataFrame with the same shape as `_load_day_from_parquet`.
+
+    `columns` is the same list the parquet loader uses — one of:
+      ["timestamp_utc", "symbol", <metric>]
+    where <metric> is "price", "open_interest", or "volume".
+    """
+    select_parts = [_db_select_expr(c) for c in columns]
+    col_sql = ", ".join(select_parts)
+
+    cur.execute(
+        f"""
+        SELECT {col_sql}
+        FROM market.futures_1m f
+        JOIN market.symbols s ON s.symbol_id = f.symbol_id
+        WHERE f.source_id = %s
+          AND f.timestamp_utc >= %s::date
+          AND f.timestamp_utc <  (%s::date + INTERVAL '1 day')
+          AND s.binance_id IS NOT NULL
+        ORDER BY f.timestamp_utc
+        """,
+        (_DB_SOURCE_ID, target_date, target_date),
+    )
+    rows = cur.fetchall()
+    if not rows:
+        return pd.DataFrame(columns=columns)
+
+    df = pd.DataFrame(rows, columns=columns)
+    # psycopg2 returns timestamptz as tz-aware datetime; drop tz to match
+    # the parquet loader (which returns naive datetime).
+    df["timestamp_utc"] = pd.to_datetime(df["timestamp_utc"]).dt.tz_localize(None)
+    return df
+
+
 # ── Determine data source ─────────────────────────────────────────────────
-# Single-file mode: row-group streaming (memory-bounded, OOM-safe)
-# Partition mode:   scan PARQUET_DIR for date=* subdirectories (original)
-USE_SINGLE_FILE = args.parquet_path is not None
+# DB mode:           read directly from market.futures_1m (default for cron)
+# Single-file mode:  row-group streaming from one parquet file
+# Partition mode:    scan PARQUET_DIR for date=* subdirectories (legacy)
+USE_DB = args.source == "db"
+USE_SINGLE_FILE = (not USE_DB) and args.parquet_path is not None
 
 # Module-level handles populated only in single-file mode. Both stay None
 # in partition mode and are not referenced from that branch.
 _PF: pq.ParquetFile | None = None
 _DATE_TO_RG: dict = {}
 
-if USE_SINGLE_FILE:
+# Long-lived DB connection + cursor used by the data loader in DB mode.
+# Populated in the USE_DB branch below and reused by every _load_day_from_db
+# call during the main loop.
+_DB_CONN = None
+_DB_CUR = None
+
+if USE_DB:
+    from datetime import date, timedelta
+    from pipeline.db.connection import get_conn as _get_db_conn
+
+    # Default window if --start/--end not specified: last 14 days up to today.
+    # 14 days gives enough lead-in for same-day anchor computations; dates
+    # already in market.leaderboards get skipped by the per-day DB checkpoint.
+    _default_end   = date.today()
+    _default_start = _default_end - timedelta(days=14)
+    _db_start = datetime.strptime(args.start, "%Y-%m-%d").date() if args.start else _default_start
+    _db_end   = datetime.strptime(args.end,   "%Y-%m-%d").date() if args.end   else _default_end
+
+    print(f"🗄  DB-source mode: market.futures_1m [{_db_start} → {_db_end}]")
+    _DB_CONN = _get_db_conn()
+    _DB_CUR = _DB_CONN.cursor()
+    _date_groups = _get_db_date_range(_DB_CUR, _db_start, _db_end)
+    print(f"🗄  Dates found: {len(_date_groups)}\n")
+elif USE_SINGLE_FILE:
     print(f"📂 Single-file mode (row-group streaming): {args.parquet_path}")
     _PF = pq.ParquetFile(args.parquet_path)
     print(
@@ -598,10 +714,12 @@ else:
 # ─── Apply --start / --end filter to _date_groups ───────────────────────────
 # Both bounds are inclusive. Filtering happens before the main loop so the
 # tqdm progress bar reflects only the dates we'll actually process.
+# DB mode handles start/end inside _get_db_date_range, so this only runs for
+# file-based modes.
 def _date_of(group) -> "datetime.date":
     """Extract a python date from a _date_groups entry, regardless of mode."""
-    if USE_SINGLE_FILE:
-        return group  # already a python date from .dt.date.unique()
+    if USE_DB or USE_SINGLE_FILE:
+        return group  # already a python date from .dt.date.unique() / DB query
     # Partition mode: group is a Path like date=2025-04-05
     return datetime.strptime(group.name.split("=")[1], "%Y-%m-%d").date()
 
@@ -659,7 +777,7 @@ for _day_key in tqdm(_date_groups, desc="Processing days"):
 
     # ─── Resolve date_str up-front so the checkpoint and per-iteration
     # diagnostics have it available before any processing happens. ────
-    if USE_SINGLE_FILE:
+    if USE_DB or USE_SINGLE_FILE:
         date_str = str(_day_key)
     else:
         date_str = _day_key.name.split("=")[1]
@@ -679,7 +797,12 @@ for _day_key in tqdm(_date_groups, desc="Processing days"):
 
     try:
 
-        if USE_SINGLE_FILE:
+        if USE_DB:
+            df = _load_day_from_db(
+                _DB_CUR, _day_key,
+                columns=["timestamp_utc", "symbol", RANK_METRIC],
+            )
+        elif USE_SINGLE_FILE:
             df = _load_day_from_parquet(
                 _PF, _DATE_TO_RG, _day_key,
                 columns=["timestamp_utc", "symbol", RANK_METRIC],
@@ -734,12 +857,18 @@ for _day_key in tqdm(_date_groups, desc="Processing days"):
                 ).strftime("%Y-%m-%d")
                 _prev_date_key = pd.Timestamp(prev_date_str).date()
                 _prev_exists = (
+                    USE_DB or
                     (USE_SINGLE_FILE and _prev_date_key in _DATE_TO_RG) or
-                    (not USE_SINGLE_FILE and
+                    (not USE_SINGLE_FILE and not USE_DB and
                      (PARQUET_DIR / f"date={prev_date_str}").exists())
                 )
                 if _prev_exists:
-                    if USE_SINGLE_FILE:
+                    if USE_DB:
+                        prev_df = _load_day_from_db(
+                            _DB_CUR, _prev_date_key,
+                            columns=["timestamp_utc", "symbol", "volume"],
+                        )
+                    elif USE_SINGLE_FILE:
                         prev_df = _load_day_from_parquet(
                             _PF, _DATE_TO_RG, _prev_date_key,
                             columns=["timestamp_utc", "symbol", "volume"],
@@ -749,6 +878,10 @@ for _day_key in tqdm(_date_groups, desc="Processing days"):
                             PARQUET_DIR / f"date={prev_date_str}",
                             columns=["timestamp_utc", "symbol", "volume"]
                         )
+                    # DB mode may return empty if prev-day not in futures_1m
+                    if prev_df.empty:
+                        _prev_exists = False
+                if _prev_exists:
                     prev_df["minute"] = prev_df["timestamp_utc"].dt.floor("min")
                     prev_df = (
                         prev_df.sort_values("timestamp_utc")
@@ -855,12 +988,18 @@ for _day_key in tqdm(_date_groups, desc="Processing days"):
                 ).strftime("%Y-%m-%d")
                 _prev_date_key = pd.Timestamp(prev_date_str).date()
                 _prev_exists = (
+                    USE_DB or
                     (USE_SINGLE_FILE and _prev_date_key in _DATE_TO_RG) or
-                    (not USE_SINGLE_FILE and
+                    (not USE_SINGLE_FILE and not USE_DB and
                      (PARQUET_DIR / f"date={prev_date_str}").exists())
                 )
                 if _prev_exists:
-                    if USE_SINGLE_FILE:
+                    if USE_DB:
+                        prev_df = _load_day_from_db(
+                            _DB_CUR, _prev_date_key,
+                            columns=["timestamp_utc", "symbol", RANK_METRIC],
+                        )
+                    elif USE_SINGLE_FILE:
                         prev_df = _load_day_from_parquet(
                             _PF, _DATE_TO_RG, _prev_date_key,
                             columns=["timestamp_utc", "symbol", RANK_METRIC],
@@ -870,6 +1009,9 @@ for _day_key in tqdm(_date_groups, desc="Processing days"):
                             PARQUET_DIR / f"date={prev_date_str}",
                             columns=["timestamp_utc", "symbol", RANK_METRIC]
                         )
+                    if prev_df.empty:
+                        _prev_exists = False
+                if _prev_exists:
                     prev_df["minute"] = prev_df["timestamp_utc"].dt.floor("min")
                     prev_df = (
                         prev_df.sort_values("timestamp_utc")
@@ -1083,6 +1225,18 @@ if _failure_count > 0:
     job_fail(JOB_ID, _summary)
 else:
     job_complete(JOB_ID)
+
+# Close the long-lived DB handle used by the data loader (DB mode only).
+if _DB_CUR is not None:
+    try:
+        _DB_CUR.close()
+    except Exception:
+        pass
+if _DB_CONN is not None:
+    try:
+        _DB_CONN.close()
+    except Exception:
+        pass
 
 # ============================================================
 # DONE
