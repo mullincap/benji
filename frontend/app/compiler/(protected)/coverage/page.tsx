@@ -21,6 +21,7 @@
 
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
+import Skeleton from "../../../components/Skeleton";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE || "";
 
@@ -480,15 +481,7 @@ export default function CompilerCoveragePage() {
           />
         </div>
 
-        {state.kind === "loading" && (
-          <div style={{
-            fontSize: 9, color: "var(--t3)",
-            textTransform: "uppercase", letterSpacing: "0.12em",
-            padding: "40px 0",
-          }}>
-            Loading coverage data…
-          </div>
-        )}
+        {state.kind === "loading" && <CoverageSkeleton />}
 
         {state.kind === "error" && (
           <div style={{
@@ -566,6 +559,92 @@ function CoverageContent({ coverage, gaps, onDayClick }: { coverage: CoverageRes
       </div>
 
       <GapTable gaps={gaps.gaps} onDayClick={onDayClick} />
+    </>
+  );
+}
+
+// ─── Skeleton (loading placeholder) ─────────────────────────────────────────
+
+function CoverageSkeleton() {
+  // 5 KPI cards + heatmap card + gap table card. Same dimensions/spacing
+  // as the real components so the page doesn't reflow when data lands.
+  return (
+    <>
+      {/* KPI strip */}
+      <div style={{
+        display: "grid",
+        gridTemplateColumns: "repeat(5, 1fr)",
+        gap: 10,
+        marginBottom: 24,
+      }}>
+        {Array.from({ length: 5 }).map((_, i) => (
+          <div key={i} style={{
+            background: "var(--bg2)",
+            border: "1px solid var(--line)",
+            borderRadius: 6,
+            padding: "14px 16px",
+            display: "flex",
+            flexDirection: "column",
+            gap: 8,
+          }}>
+            <Skeleton width={70} height={9} />
+            <Skeleton width={90} height={20} />
+            <Skeleton width={120} height={9} />
+          </div>
+        ))}
+      </div>
+
+      {/* Heatmap card */}
+      <div style={{
+        background: "var(--bg2)",
+        border: "1px solid var(--line)",
+        borderRadius: 6,
+        padding: "16px 18px",
+        marginBottom: 24,
+      }}>
+        <Skeleton width={180} height={9} style={{ marginBottom: 14 }} />
+        <div style={{
+          display: "flex",
+          flexWrap: "wrap",
+          gap: 4,
+          marginBottom: 14,
+        }}>
+          {Array.from({ length: 90 }).map((_, i) => (
+            <Skeleton key={i} width={14} height={14} borderRadius={2} />
+          ))}
+        </div>
+        <div style={{ display: "flex", gap: 14 }}>
+          <Skeleton width={100} height={9} />
+          <Skeleton width={100} height={9} />
+          <Skeleton width={100} height={9} />
+        </div>
+      </div>
+
+      {/* Gap table card */}
+      <div style={{
+        background: "var(--bg2)",
+        border: "1px solid var(--line)",
+        borderRadius: 6,
+        padding: "16px 18px",
+      }}>
+        <Skeleton width={140} height={9} style={{ marginBottom: 14 }} />
+        {Array.from({ length: 6 }).map((_, i) => (
+          <div key={i} style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 16,
+            paddingTop: 10,
+            paddingBottom: 10,
+            borderTop: i === 0 ? "none" : "1px solid var(--line)",
+          }}>
+            <Skeleton width={80} height={10} />
+            <Skeleton width={60} height={14} borderRadius={3} />
+            <div style={{ flex: 1 }} />
+            <Skeleton width={70} height={10} />
+            <Skeleton width={50} height={10} />
+          </div>
+        ))}
+      </div>
     </>
   );
 }
