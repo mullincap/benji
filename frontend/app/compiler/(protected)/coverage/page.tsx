@@ -342,12 +342,10 @@ function GapTable({ gaps, onDayClick }: { gaps: GapDay[]; onDayClick: (date: str
             <Th>Status</Th>
             <Th align="right">Complete / Total</Th>
             <Th align="right">%</Th>
-            <Th align="right" title="close">Px</Th>
-            <Th align="right" title="open_interest">OI</Th>
-            <Th align="right" title="volume">Vol</Th>
-            <Th align="right" title="funding_rate">Fnd</Th>
-            <Th align="right" title="long_short_ratio">L/S</Th>
-            <Th align="right" title="market_cap_usd">MC</Th>
+            <Th align="right" title={`Price · ${endpointDayCount(gaps, "close")} / ${gaps.length} days complete`}>Px</Th>
+            <Th align="right" title={`Open Interest · ${endpointDayCount(gaps, "open_interest")} / ${gaps.length} days complete`}>OI</Th>
+            <Th align="right" title={`Volume · ${endpointDayCount(gaps, "volume")} / ${gaps.length} days complete`}>Vol</Th>
+            <Th align="right" title={`Market Cap · ${endpointDayCount(gaps, "market_cap_usd")} / ${gaps.length} days complete`}>MC</Th>
           </tr>
         </thead>
         <tbody>
@@ -370,8 +368,6 @@ function GapTable({ gaps, onDayClick }: { gaps: GapDay[]; onDayClick: (date: str
               <Td align="right"><EndpointPctBadge pct={g.endpoints?.close ?? 0} /></Td>
               <Td align="right"><EndpointPctBadge pct={g.endpoints?.open_interest ?? 0} /></Td>
               <Td align="right"><EndpointPctBadge pct={g.endpoints?.volume ?? 0} /></Td>
-              <Td align="right"><EndpointPctBadge pct={g.endpoints?.funding_rate ?? 0} /></Td>
-              <Td align="right"><EndpointPctBadge pct={g.endpoints?.long_short_ratio ?? 0} /></Td>
               <Td align="right"><EndpointPctBadge pct={g.endpoints?.market_cap_usd ?? 0} /></Td>
             </tr>
           ))}
@@ -379,6 +375,13 @@ function GapTable({ gaps, onDayClick }: { gaps: GapDay[]; onDayClick: (date: str
       </table>
     </div>
   );
+}
+
+// Count how many days in a list are "complete" (>= 95%) for a given
+// endpoint. Used by column header tooltips so you can see the rolled-up
+// "X / N days have full coverage" alongside the per-row percentages.
+function endpointDayCount(gaps: GapDay[], key: keyof EndpointCoverage): number {
+  return gaps.filter((g) => (g.endpoints?.[key] ?? 0) >= 95).length;
 }
 
 // Compact per-endpoint percentage badge — green/amber/red color-coded.
@@ -389,7 +392,6 @@ function EndpointPctBadge({ pct }: { pct: number }) {
     pct >= 95 ? "var(--green)" :
     pct >= 5  ? "var(--amber)" :
                 "var(--red)";
-  const label = pct >= 99.95 ? "100" : pct.toFixed(0);
   return (
     <span style={{
       fontSize: 9,
@@ -397,7 +399,7 @@ function EndpointPctBadge({ pct }: { pct: number }) {
       color,
       fontFamily: "var(--font-space-mono), Space Mono, monospace",
     }}>
-      {label}
+      {pct.toFixed(1)}%
     </span>
   );
 }

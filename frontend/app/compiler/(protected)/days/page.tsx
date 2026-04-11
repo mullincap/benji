@@ -247,12 +247,10 @@ function DaysList({ data, onDayClick }: { data: CoverageResponse; onDayClick: (d
             <th style={thStyle}>Day</th>
             <th style={thStyle}>Status</th>
             <th style={{ ...thStyle, textAlign: "right" }}>%</th>
-            <th style={{ ...thStyle, textAlign: "right" }} title="close">Px</th>
-            <th style={{ ...thStyle, textAlign: "right" }} title="open_interest">OI</th>
-            <th style={{ ...thStyle, textAlign: "right" }} title="volume">Vol</th>
-            <th style={{ ...thStyle, textAlign: "right" }} title="funding_rate">Fnd</th>
-            <th style={{ ...thStyle, textAlign: "right" }} title="long_short_ratio">L/S</th>
-            <th style={{ ...thStyle, textAlign: "right" }} title="market_cap_usd">MC</th>
+            <th style={{ ...thStyle, textAlign: "right" }} title={`Price · ${endpointDayCount(data.days, "close")} / ${data.days.length} days complete`}>Px</th>
+            <th style={{ ...thStyle, textAlign: "right" }} title={`Open Interest · ${endpointDayCount(data.days, "open_interest")} / ${data.days.length} days complete`}>OI</th>
+            <th style={{ ...thStyle, textAlign: "right" }} title={`Volume · ${endpointDayCount(data.days, "volume")} / ${data.days.length} days complete`}>Vol</th>
+            <th style={{ ...thStyle, textAlign: "right" }} title={`Market Cap · ${endpointDayCount(data.days, "market_cap_usd")} / ${data.days.length} days complete`}>MC</th>
             <th style={thStyle}></th>
           </tr>
         </thead>
@@ -297,12 +295,6 @@ function DaysList({ data, onDayClick }: { data: CoverageResponse; onDayClick: (d
                   <EndpointPctBadge pct={day.endpoints?.volume ?? 0} />
                 </td>
                 <td style={{ ...tdStyle, textAlign: "right" }}>
-                  <EndpointPctBadge pct={day.endpoints?.funding_rate ?? 0} />
-                </td>
-                <td style={{ ...tdStyle, textAlign: "right" }}>
-                  <EndpointPctBadge pct={day.endpoints?.long_short_ratio ?? 0} />
-                </td>
-                <td style={{ ...tdStyle, textAlign: "right" }}>
                   <EndpointPctBadge pct={day.endpoints?.market_cap_usd ?? 0} />
                 </td>
                 <td style={{ ...tdStyle, textAlign: "right", paddingRight: 14 }}>
@@ -317,13 +309,18 @@ function DaysList({ data, onDayClick }: { data: CoverageResponse; onDayClick: (d
   );
 }
 
+// Count how many days in a list are "complete" (>= 95%) for a given
+// endpoint. Used by column header tooltips.
+function endpointDayCount(days: CoverageDay[], key: keyof EndpointCoverage): number {
+  return days.filter((d) => (d.endpoints?.[key] ?? 0) >= 95).length;
+}
+
 // Compact per-endpoint percentage badge — green/amber/red color-coded.
 function EndpointPctBadge({ pct }: { pct: number }) {
   const color =
     pct >= 95 ? "var(--green)" :
     pct >= 5  ? "var(--amber)" :
                 "var(--red)";
-  const label = pct >= 99.95 ? "100" : pct.toFixed(0);
   return (
     <span style={{
       fontSize: 9,
@@ -331,7 +328,7 @@ function EndpointPctBadge({ pct }: { pct: number }) {
       color,
       fontFamily: "var(--font-space-mono), Space Mono, monospace",
     }}>
-      {label}
+      {pct.toFixed(1)}%
     </span>
   );
 }
