@@ -114,6 +114,47 @@ CREATE INDEX IF NOT EXISTS idx_futures_1m_symbol_ts
 CREATE INDEX IF NOT EXISTS idx_futures_1m_source_symbol_ts
     ON market.futures_1m (source_id, symbol_id, timestamp_utc DESC);
 
+-- ─── Continuous aggregate: per-(day, symbol) row counts ──────────────────────
+-- Pre-computed denominator for the compiler coverage page. The raw query
+-- against futures_1m would scan ~330M rows on the ALL preset (5-15s).
+-- This cagg materializes COUNT(*) per (day, source_id, symbol_id) with an
+-- hourly refresh policy and ~300K rows total, dropping coverage queries to
+-- <100ms. materialized_only = false means the planner also merges the
+-- latest unmaterialized futures_1m rows into the result, so today's data
+-- is always accurate even though the materialized portion lags by ~1 hour.
+--
+-- DO blocks because TimescaleDB caggs and policies aren't fully idempotent
+-- via plain CREATE/IF NOT EXISTS in older versions.
+CREATE MATERIALIZED VIEW IF NOT EXISTS market.futures_1m_daily_symbol_count
+WITH (timescaledb.continuous) AS
+SELECT
+    time_bucket('1 day', timestamp_utc) AS day,
+    source_id,
+    symbol_id,
+    COUNT(*) AS row_count
+FROM market.futures_1m
+GROUP BY 1, 2, 3
+WITH NO DATA;
+
+-- One-time backfill (run manually after first creation):
+--   CALL refresh_continuous_aggregate('market.futures_1m_daily_symbol_count', NULL, NULL);
+
+-- Hourly refresh policy. start_offset=7 days catches late-arriving rows
+-- from metl.py reloads; end_offset=1 hour leaves the most recent hour
+-- to the real-time aggregation path.
+DO $$
+BEGIN
+    PERFORM add_continuous_aggregate_policy('market.futures_1m_daily_symbol_count',
+        start_offset      => INTERVAL '7 days',
+        end_offset        => INTERVAL '1 hour',
+        schedule_interval => INTERVAL '1 hour'
+    );
+EXCEPTION WHEN duplicate_object THEN NULL;
+END $$;
+
+ALTER MATERIALIZED VIEW market.futures_1m_daily_symbol_count
+SET (timescaledb.materialized_only = false);
+
 -- ─── Cross-exchange derivatives analytics ─────────────────────────────────────
 CREATE TABLE IF NOT EXISTS market.derivatives_analytics (
     timestamp_utc         TIMESTAMPTZ      NOT NULL,

@@ -104,19 +104,25 @@ def coverage(
 
     cur.execute(
         """
+        -- Per-(day, symbol) row counts come from the continuous aggregate
+        -- market.futures_1m_daily_symbol_count, which materializes
+        -- COUNT(*) per time_bucket('1 day', timestamp_utc), source_id,
+        -- symbol_id and refreshes hourly. With materialized_only = false,
+        -- the cagg's planner transparently merges the latest unmaterialized
+        -- futures_1m rows into the result, so today's data is always
+        -- accurate even though the materialized portion lags by ~1 hour.
+        --
+        -- Replaced a 330M-row scan + GROUP BY (~5-15 sec on ALL preset)
+        -- with a ~300K-row cagg lookup (<100ms).
         WITH day_stats AS (
             SELECT
                 day::date AS day,
                 COUNT(DISTINCT symbol_id) AS symbols_with_data,
-                COUNT(DISTINCT symbol_id) FILTER (WHERE cnt >= 1440) AS symbols_complete,
-                COUNT(DISTINCT symbol_id) FILTER (WHERE cnt BETWEEN 1 AND 1439) AS symbols_partial
-            FROM (
-                SELECT time_bucket('1 day', timestamp_utc) AS day, symbol_id, COUNT(*) AS cnt
-                FROM market.futures_1m
-                WHERE source_id = %s
-                  AND timestamp_utc >= NOW() - %s::interval
-                GROUP BY 1, 2
-            ) sub
+                COUNT(DISTINCT symbol_id) FILTER (WHERE row_count >= 1440) AS symbols_complete,
+                COUNT(DISTINCT symbol_id) FILTER (WHERE row_count BETWEEN 1 AND 1439) AS symbols_partial
+            FROM market.futures_1m_daily_symbol_count
+            WHERE source_id = %s
+              AND day >= NOW() - %s::interval
             GROUP BY day
         ),
         -- Ground truth for how many symbols metl.py actually tried to fetch
