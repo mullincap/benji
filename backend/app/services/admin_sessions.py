@@ -66,11 +66,32 @@ def _load(path: Path) -> dict:
 
 
 def _save(path: Path, data: dict) -> None:
+    """
+    Atomic write with a per-call unique temp file. Two concurrent writers
+    would race on a shared `<name>.tmp` filename — the first one's
+    os.replace consumes the tmp, the second one's os.replace blows up
+    with FileNotFoundError. Using tempfile.mkstemp in the same directory
+    gives each writer its own source file while keeping the rename atomic.
+    """
     import os
+    import tempfile
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(path.name + ".tmp")
-    tmp.write_text(json.dumps(data, indent=2))
-    os.replace(tmp, path)
+    fd, tmp_str = tempfile.mkstemp(
+        prefix=path.name + ".",
+        suffix=".tmp",
+        dir=str(path.parent),
+    )
+    try:
+        with os.fdopen(fd, "w") as f:
+            json.dump(data, f, indent=2)
+        os.replace(tmp_str, path)
+    except Exception:
+        # Clean up our tmp file if the rename failed
+        try:
+            os.unlink(tmp_str)
+        except FileNotFoundError:
+            pass
+        raise
 
 
 def _prune_expired(data: dict) -> dict:
