@@ -72,18 +72,28 @@ def _serialize_job(r: dict) -> dict[str, Any]:
 
 @router.get("/coverage")
 def coverage(
-    days: int = Query(90, ge=1, le=365, description="Lookback window in days (1-365, default 90)"),
+    days: int = Query(90, ge=1, le=10000, description="Lookback window in days (1-10000, default 90; frontend uses a large value to represent ALL)"),
     source_id: int = Query(1, ge=1, description="market.sources.source_id (default 1 = amberdata_binance)"),
     cur=Depends(get_cursor),
 ) -> dict[str, Any]:
     """
     Per-day symbol completeness for the last N days.
 
+    Denominator note: the "expected universe" is the peak number of distinct
+    symbols that reached `complete` (>= 1440 rows) on any day in the window.
+    This measures today's delivery against "what we know the pipeline can
+    fetch" rather than the raw `market.symbols WHERE active` count, which
+    drifts stale whenever Binance lists/delists instruments.
+
     Returns one row per day with:
-      - symbols_complete: count of distinct symbols with >= 1440 rows that day
-      - symbols_partial:  count of distinct symbols with 1-1439 rows that day
-      - symbols_missing:  total_active - symbols_with_data
-      - total_active_symbols: market.symbols WHERE active = TRUE
+      - symbols_complete:     distinct symbols with >= 1440 rows that day
+      - symbols_partial:      distinct symbols with 1-1439 rows that day
+      - symbols_missing:      fetched_universe - symbols_with_data
+      - fetched_universe:     peak symbols_complete across the window
+      - total_active_symbols: market.symbols WHERE active = TRUE (kept for
+                              backward compat; stale-prone, prefer
+                              fetched_universe)
+      - completeness_pct:     symbols_complete / fetched_universe
     """
     interval_str = f"{days} days"
 
@@ -114,19 +124,27 @@ def coverage(
     cur.execute("SELECT COUNT(*) AS total FROM market.symbols WHERE active = TRUE")
     total_active = cur.fetchone()["total"]
 
+    # Fetched universe = peak symbols_complete across the window. Falls back
+    # to total_active if the window has no rows at all (empty DB / new install).
+    fetched_universe = max((r["symbols_complete"] for r in day_rows), default=0)
+    if fetched_universe == 0:
+        fetched_universe = total_active
+
     return {
         "source_id": source_id,
         "lookback_days": days,
         "total_active_symbols": total_active,
+        "fetched_universe": fetched_universe,
         "days_returned": len(day_rows),
         "days": [
             {
                 "date":                  r["day"].isoformat(),
                 "symbols_complete":      r["symbols_complete"],
                 "symbols_partial":       r["symbols_partial"],
-                "symbols_missing":       max(0, total_active - r["symbols_with_data"]),
+                "symbols_missing":       max(0, fetched_universe - r["symbols_with_data"]),
                 "total_active_symbols":  total_active,
-                "completeness_pct":      round(r["symbols_complete"] / total_active * 100, 1) if total_active > 0 else 0.0,
+                "fetched_universe":      fetched_universe,
+                "completeness_pct":      round(r["symbols_complete"] / fetched_universe * 100, 1) if fetched_universe > 0 else 0.0,
             }
             for r in day_rows
         ],
@@ -137,14 +155,14 @@ def coverage(
 
 @router.get("/gaps")
 def gaps(
-    days: int = Query(90, ge=1, le=365, description="Lookback window in days (1-365, default 90)"),
+    days: int = Query(90, ge=1, le=10000, description="Lookback window in days (1-10000, default 90)"),
     source_id: int = Query(1, ge=1),
     cur=Depends(get_cursor),
 ) -> dict[str, Any]:
     """
     Days within the lookback window where coverage is incomplete.
 
-    A day appears in this list if symbols_complete < total_active_symbols.
+    A day appears in this list if symbols_complete < fetched_universe.
     Status:
       - 'missing' = completeness_pct == 0 (no symbols hit 1440 rows)
       - 'partial' = completeness_pct > 0 but < 100
@@ -152,7 +170,7 @@ def gaps(
     """
     # Reuse the coverage logic so the math stays in one place.
     cov = coverage(days=days, source_id=source_id, cur=cur)
-    total = cov["total_active_symbols"]
+    total = cov["fetched_universe"]
 
     gap_days = []
     for d in cov["days"]:
@@ -170,7 +188,8 @@ def gaps(
     return {
         "source_id": source_id,
         "lookback_days": days,
-        "total_active_symbols": total,
+        "total_active_symbols": cov["total_active_symbols"],
+        "fetched_universe":     total,
         "gaps_returned": len(gap_days),
         "gaps": gap_days,
     }

@@ -33,6 +33,7 @@ type CoverageDay = {
   symbols_partial: number;
   symbols_missing: number;
   total_active_symbols: number;
+  fetched_universe: number;     // peak symbols_complete across the window
   completeness_pct: number;     // 0.0 - 100.0, rounded to 1 decimal
 };
 
@@ -40,6 +41,7 @@ type CoverageResponse = {
   source_id: number;
   lookback_days: number;
   total_active_symbols: number;
+  fetched_universe: number;
   days_returned: number;
   days: CoverageDay[];
 };
@@ -56,9 +58,23 @@ type GapsResponse = {
   source_id: number;
   lookback_days: number;
   total_active_symbols: number;
+  fetched_universe: number;
   gaps_returned: number;
   gaps: GapDay[];
 };
+
+// ─── Lookback presets ────────────────────────────────────────────────────────
+// Segment control shown above the KPI cards. "ALL" sends 10000 days upstream;
+// the API clamps to whatever's actually in market.futures_1m via its
+// `>= NOW() - <interval>` filter, so 10000 effectively means "everything".
+const LOOKBACK_PRESETS = [
+  { label: "30",  days: 30 },
+  { label: "90",  days: 90 },
+  { label: "365", days: 365 },
+  { label: "ALL", days: 10000 },
+] as const;
+type LookbackPreset = (typeof LOOKBACK_PRESETS)[number];
+const DEFAULT_PRESET: LookbackPreset = LOOKBACK_PRESETS[1]; // 90
 
 type LoadState =
   | { kind: "loading" }
@@ -84,6 +100,73 @@ function heatmapColor(pct: number | null): { bg: string; border: string } {
 }
 
 // ─── Subcomponents ───────────────────────────────────────────────────────────
+
+function LookbackSegmentControl({
+  value,
+  onChange,
+  disabled,
+}: {
+  value: LookbackPreset;
+  onChange: (next: LookbackPreset) => void;
+  disabled: boolean;
+}) {
+  return (
+    <div
+      role="tablist"
+      aria-label="Lookback range"
+      style={{
+        display: "inline-flex",
+        background: "var(--bg2)",
+        border: "1px solid var(--line)",
+        borderRadius: 4,
+        overflow: "hidden",
+        opacity: disabled ? 0.5 : 1,
+      }}
+    >
+      {LOOKBACK_PRESETS.map((preset) => {
+        const active = preset.label === value.label;
+        return (
+          <button
+            key={preset.label}
+            type="button"
+            role="tab"
+            aria-selected={active}
+            disabled={disabled}
+            onClick={() => onChange(preset)}
+            style={{
+              background: active ? "var(--bg4)" : "transparent",
+              color: active ? "var(--t0)" : "var(--t2)",
+              border: "none",
+              borderLeft: preset === LOOKBACK_PRESETS[0]
+                ? "none"
+                : "1px solid var(--line)",
+              padding: "6px 14px",
+              fontSize: 9,
+              fontWeight: 700,
+              letterSpacing: "0.12em",
+              textTransform: "uppercase",
+              fontFamily: "var(--font-space-mono), Space Mono, monospace",
+              cursor: disabled ? "not-allowed" : "pointer",
+              transition: "background 0.15s ease, color 0.15s ease",
+            }}
+            onMouseEnter={(e) => {
+              if (!active && !disabled) {
+                e.currentTarget.style.color = "var(--t1)";
+              }
+            }}
+            onMouseLeave={(e) => {
+              if (!active && !disabled) {
+                e.currentTarget.style.color = "var(--t2)";
+              }
+            }}
+          >
+            {preset.label}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
 
 function SectionLabel({ children }: { children: React.ReactNode }) {
   return (
@@ -307,14 +390,16 @@ function StatusBadge({ status }: { status: "missing" | "partial" }) {
 
 export default function CompilerCoveragePage() {
   const [state, setState] = useState<LoadState>({ kind: "loading" });
+  const [preset, setPreset] = useState<LookbackPreset>(DEFAULT_PRESET);
 
   useEffect(() => {
     let cancelled = false;
+    setState({ kind: "loading" });
     async function load() {
       try {
         const [covRes, gapsRes] = await Promise.all([
-          fetch(`${API_BASE}/api/compiler/coverage?days=90`, { credentials: "include" }),
-          fetch(`${API_BASE}/api/compiler/gaps?days=90`, { credentials: "include" }),
+          fetch(`${API_BASE}/api/compiler/coverage?days=${preset.days}`, { credentials: "include" }),
+          fetch(`${API_BASE}/api/compiler/gaps?days=${preset.days}`, { credentials: "include" }),
         ]);
         if (cancelled) return;
 
@@ -345,19 +430,33 @@ export default function CompilerCoveragePage() {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [preset]);
 
   return (
     <div style={{ background: "var(--bg0)", padding: 28, minHeight: "100%" }}>
       <div style={{ maxWidth: 960, margin: "0 auto" }}>
-        <SectionLabel>Compiler · Coverage</SectionLabel>
-        <h1 style={{
-          fontSize: 24, fontWeight: 700, color: "var(--t0)",
-          margin: 0, marginBottom: 24,
-          letterSpacing: "-0.01em",
+        <div style={{
+          display: "flex",
+          alignItems: "flex-start",
+          justifyContent: "space-between",
+          marginBottom: 24,
         }}>
-          Coverage Map
-        </h1>
+          <div>
+            <SectionLabel>Compiler · Coverage</SectionLabel>
+            <h1 style={{
+              fontSize: 24, fontWeight: 700, color: "var(--t0)",
+              margin: 0,
+              letterSpacing: "-0.01em",
+            }}>
+              Coverage Map
+            </h1>
+          </div>
+          <LookbackSegmentControl
+            value={preset}
+            onChange={setPreset}
+            disabled={state.kind === "loading"}
+          />
+        </div>
 
         {state.kind === "loading" && (
           <div style={{
@@ -365,7 +464,7 @@ export default function CompilerCoveragePage() {
             textTransform: "uppercase", letterSpacing: "0.12em",
             padding: "40px 0",
           }}>
-            Loading coverage data… (the 90-day query takes ~3s on first hit)
+            Loading coverage data…
           </div>
         )}
 
@@ -391,8 +490,10 @@ export default function CompilerCoveragePage() {
 }
 
 function CoverageContent({ coverage, gaps }: { coverage: CoverageResponse; gaps: GapsResponse }) {
-  // KPI math
-  const totalActive = coverage.total_active_symbols;
+  // KPI math. "Fetched universe" = peak symbols_complete across the window.
+  // It's a more honest denominator than `active`, which drifts stale when
+  // Binance lists/delists instruments.
+  const fetchedUniverse = coverage.fetched_universe;
   const daysComplete = coverage.days.filter((d) => d.completeness_pct >= 95).length;
   const daysWithGaps = gaps.gaps.filter((g) => g.status === "partial").length;
   const daysMissing = gaps.gaps.filter((g) => g.status === "missing").length;
@@ -406,9 +507,9 @@ function CoverageContent({ coverage, gaps }: { coverage: CoverageResponse; gaps:
         marginBottom: 24,
       }}>
         <KPICard
-          label="Total Symbols"
-          value={totalActive.toLocaleString("en-US")}
-          hint="active in market.symbols"
+          label="Fetched Universe"
+          value={fetchedUniverse.toLocaleString("en-US")}
+          hint="peak symbols complete in window"
         />
         <KPICard
           label="Days Complete"
