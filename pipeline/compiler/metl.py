@@ -99,7 +99,7 @@ FETCH_LIQUIDATIONS = True   # heacy - long liqs, short liqs
 
 #L3
 FETCH_TRADES       = True   # HEAVIEST - trade delta
-FETCH_ORDERBOOK    = True   # HEAVIEST - order imbalance
+FETCH_ORDERBOOK    = False  # disabled: Amberdata OB page discovery times out on ~5 symbols/day and stalls the backfill
 
 #DAILY (CoinGecko join — loaded from parquet, not fetched live)
 FETCH_MARKETCAP    = True   # market_cap_usd, market_cap_rank
@@ -1317,7 +1317,27 @@ def main(start_date, end_date, job_id=None, triggered_by='cli', run_tag=None):
             print(f"\n📅 {day.date()}")
 
             if AUTO_RESUME and csv_exists_for_day(day):
-                print(f"\n⏭ Skipping {day.date()} → CSV already exists")
+                # CSV already on disk — still run the DB load to cover the
+                # case where an earlier run was killed after writing CSV but
+                # before (or mid-way through) the DB insert. load_csv_to_futures_1m
+                # is idempotent via ON CONFLICT DO NOTHING, so re-running is
+                # a cheap correctness guarantee.
+                existing_csv = os.path.join(CSV_BACKUP_DIR, f"oi_{day.strftime('%Y%m%d')}.csv")
+                try:
+                    print(f"\n⏭ Skipping fetch for {day.date()} → CSV already exists")
+                    print(f"   💽 Syncing CSV to market.futures_1m → {existing_csv}")
+                    result = load_csv_to_futures_1m(existing_csv)
+                    print(
+                        f"   ✅ DB sync done → "
+                        f"read={result['rows_read']:,} "
+                        f"sent={result['rows_inserted']:,} "
+                        f"skipped={result['rows_skipped']:,} "
+                        f"in {result['elapsed_sec']}s"
+                    )
+                except Exception as load_err:
+                    print(f"   ⚠️ DB sync failed → {load_err}")
+                    job_fail(job_id, f"Skip-path DB sync failed: {load_err}")
+                    raise
                 continue
 
             day_utc = datetime(year=day.year,month=day.month,day=day.day,tzinfo=timezone.utc)
