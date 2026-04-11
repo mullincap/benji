@@ -34,15 +34,21 @@ router = APIRouter(
 )
 
 
-# ─── Per-symbol-day endpoint columns (used by /symbols/{symbol}) ──────────────
-# These are the 15 data columns in market.futures_1m that represent distinct
-# Amberdata endpoints. Used to compute per-endpoint completeness for the
-# Symbol Inspector page. Order chosen to roughly match data importance / cost.
+# ─── Per-symbol-day endpoint columns (used by /symbols/{symbol}, /days/{date}) ─
+# Data columns in market.futures_1m that represent distinct Amberdata + CoinGecko
+# endpoints. Used to compute per-endpoint completeness for the Symbol Inspector
+# and Day Detail pages. Order roughly matches data importance / cost (L1 first).
 ENDPOINT_COLS = [
+    # L1 — core market data (metl.py FETCH_PRICE / FETCH_OI / FETCH_FUNDING / FETCH_LS)
     "close", "volume", "open_interest", "funding_rate", "long_short_ratio",
+    # L2 — trades + liquidations (metl.py FETCH_TRADES / FETCH_LIQUIDATIONS)
     "trade_delta", "long_liqs", "short_liqs",
+    # L3 — orderbook depth + ticker (metl.py FETCH_TICKER / FETCH_ORDERBOOK)
     "last_bid_depth", "last_ask_depth", "last_depth_imbalance", "last_spread_pct",
     "spread_pct", "bid_ask_imbalance", "basis_pct",
+    # DAILY — CoinGecko market cap join (metl.py FETCH_MARKETCAP). Tracked
+    # here so the day detail page surfaces whether the daily mcap join landed.
+    "market_cap_usd", "market_cap_rank",
 ]
 
 
@@ -104,22 +110,30 @@ def coverage(
 
     cur.execute(
         """
-        -- Per-(day, symbol) row counts come from the continuous aggregate
-        -- market.futures_1m_daily_symbol_count, which materializes
-        -- COUNT(*) per time_bucket('1 day', timestamp_utc), source_id,
-        -- symbol_id and refreshes hourly. With materialized_only = false,
-        -- the cagg's planner transparently merges the latest unmaterialized
-        -- futures_1m rows into the result, so today's data is always
-        -- accurate even though the materialized portion lags by ~1 hour.
+        -- Per-(day, symbol) endpoint counts from the continuous aggregate
+        -- market.futures_1m_daily_symbol_count. The cagg materializes
+        -- COUNT(*) plus per-endpoint COUNT(col) for the 6 metrics the
+        -- simulator/audit pipeline reads downstream:
+        --   close, volume, open_interest, funding_rate, long_short_ratio,
+        --   market_cap_usd
+        -- Refreshed hourly + materialized_only=false so today's data is
+        -- always accurate.
         --
-        -- Replaced a 330M-row scan + GROUP BY (~5-15 sec on ALL preset)
-        -- with a ~300K-row cagg lookup (<100ms).
+        -- Per-endpoint complete check uses `>= 1440` (not `== 1440`) so
+        -- days with duplicate row sets (1/17, 2/16, 2/23 — see followup)
+        -- still report correctly.
         WITH day_stats AS (
             SELECT
                 day::date AS day,
                 COUNT(DISTINCT symbol_id) AS symbols_with_data,
                 COUNT(DISTINCT symbol_id) FILTER (WHERE row_count >= 1440) AS symbols_complete,
-                COUNT(DISTINCT symbol_id) FILTER (WHERE row_count BETWEEN 1 AND 1439) AS symbols_partial
+                COUNT(DISTINCT symbol_id) FILTER (WHERE row_count BETWEEN 1 AND 1439) AS symbols_partial,
+                COUNT(DISTINCT symbol_id) FILTER (WHERE close_count    >= 1440) AS symbols_complete_close,
+                COUNT(DISTINCT symbol_id) FILTER (WHERE volume_count   >= 1440) AS symbols_complete_volume,
+                COUNT(DISTINCT symbol_id) FILTER (WHERE oi_count       >= 1440) AS symbols_complete_oi,
+                COUNT(DISTINCT symbol_id) FILTER (WHERE funding_count  >= 1440) AS symbols_complete_funding,
+                COUNT(DISTINCT symbol_id) FILTER (WHERE ls_count       >= 1440) AS symbols_complete_ls,
+                COUNT(DISTINCT symbol_id) FILTER (WHERE mcap_count     >= 1440) AS symbols_complete_mcap
             FROM market.futures_1m_daily_symbol_count
             WHERE source_id = %s
               AND day >= NOW() - %s::interval
@@ -146,6 +160,12 @@ def coverage(
             d.symbols_with_data,
             d.symbols_complete,
             d.symbols_partial,
+            d.symbols_complete_close,
+            d.symbols_complete_volume,
+            d.symbols_complete_oi,
+            d.symbols_complete_funding,
+            d.symbols_complete_ls,
+            d.symbols_complete_mcap,
             COALESCE(j.symbols_total, d.symbols_with_data) AS expected_symbols,
             (j.symbols_total IS NOT NULL) AS has_job_truth
         FROM day_stats d
@@ -158,6 +178,9 @@ def coverage(
 
     cur.execute("SELECT COUNT(*) AS total FROM market.symbols WHERE active = TRUE")
     total_active = cur.fetchone()["total"]
+
+    def _pct(num: int, denom: int) -> float:
+        return round(num / denom * 100, 1) if denom > 0 else 0.0
 
     days_payload = []
     for r in day_rows:
@@ -172,7 +195,19 @@ def coverage(
             "symbols_missing":      max(0, expected - symbols_with_data),
             "expected_symbols":     expected,
             "has_job_truth":        bool(r["has_job_truth"]),
-            "completeness_pct":     round(symbols_complete / expected * 100, 1) if expected > 0 else 0.0,
+            "completeness_pct":     _pct(symbols_complete, expected),
+            # Per-endpoint coverage — symbols where the named column has
+            # >= 1440 non-null values that day, divided by expected_symbols.
+            # These are the 6 metrics audit.py / rebuild_portfolio_matrix.py
+            # consume from the master parquet.
+            "endpoints": {
+                "close":            _pct(int(r["symbols_complete_close"]),   expected),
+                "volume":           _pct(int(r["symbols_complete_volume"]),  expected),
+                "open_interest":    _pct(int(r["symbols_complete_oi"]),      expected),
+                "funding_rate":     _pct(int(r["symbols_complete_funding"]), expected),
+                "long_short_ratio": _pct(int(r["symbols_complete_ls"]),      expected),
+                "market_cap_usd":   _pct(int(r["symbols_complete_mcap"]),    expected),
+            },
         })
 
     # Most recent day's expected count — used by the frontend as the
@@ -225,6 +260,7 @@ def gaps(
             "completeness_pct": completeness_pct,
             "has_job_truth":    d["has_job_truth"],
             "status":           "missing" if completeness_pct == 0 else "partial",
+            "endpoints":        d["endpoints"],
         })
 
     return {
@@ -363,6 +399,21 @@ def day_detail(
         if total_expected > 0 else 0.0
     )
 
+    # Dupe-detection guard. A normal day has total_rows ≤ symbols × 1440.
+    # If the day's actual total exceeds 1.3× that ceiling, we likely have
+    # two row sets coexisting from different ingestion sources (e.g. the
+    # original parquet at sub-minute timestamps + a metl.py reload at
+    # minute-aligned). This silently bloats storage and confuses the
+    # row-count completeness math. Surface it as a warning so the user
+    # sees it on the day detail page.
+    total_rows_on_day = sum(s["total_rows"] for s in symbols_payload)
+    expected_max_rows = max(symbols_with_data, 1) * 1440
+    suspected_duplicates = total_rows_on_day > expected_max_rows * 1.3
+    duplicate_factor = (
+        round(total_rows_on_day / expected_max_rows, 2)
+        if expected_max_rows > 0 else 0.0
+    )
+
     return {
         "date":                  parsed_date.isoformat(),
         "source_id":             source_id,
@@ -376,6 +427,9 @@ def day_detail(
         "job":                   job_payload,
         "endpoint_cols":         ENDPOINT_COLS,
         "symbols":               symbols_payload,
+        "total_rows":            total_rows_on_day,
+        "suspected_duplicates":  suspected_duplicates,
+        "duplicate_factor":      duplicate_factor,
     }
 
 

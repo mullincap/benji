@@ -22,6 +22,15 @@ const API_BASE = process.env.NEXT_PUBLIC_API_BASE || "";
 
 // ─── Response shapes (subset — match coverage endpoint) ─────────────────────
 
+type EndpointCoverage = {
+  close: number;
+  volume: number;
+  open_interest: number;
+  funding_rate: number;
+  long_short_ratio: number;
+  market_cap_usd: number;
+};
+
 type CoverageDay = {
   date: string;
   symbols_complete: number;
@@ -31,6 +40,7 @@ type CoverageDay = {
   expected_symbols: number;
   has_job_truth: boolean;
   completeness_pct: number;
+  endpoints: EndpointCoverage;
 };
 
 type CoverageResponse = {
@@ -236,9 +246,13 @@ function DaysList({ data, onDayClick }: { data: CoverageResponse; onDayClick: (d
             <th style={thStyle}>Date</th>
             <th style={thStyle}>Day</th>
             <th style={thStyle}>Status</th>
-            <th style={thStyle}>Coverage</th>
-            <th style={{ ...thStyle, textAlign: "right" }}>Complete / Expected</th>
             <th style={{ ...thStyle, textAlign: "right" }}>%</th>
+            <th style={{ ...thStyle, textAlign: "right" }} title="close">Px</th>
+            <th style={{ ...thStyle, textAlign: "right" }} title="open_interest">OI</th>
+            <th style={{ ...thStyle, textAlign: "right" }} title="volume">Vol</th>
+            <th style={{ ...thStyle, textAlign: "right" }} title="funding_rate">Fnd</th>
+            <th style={{ ...thStyle, textAlign: "right" }} title="long_short_ratio">L/S</th>
+            <th style={{ ...thStyle, textAlign: "right" }} title="market_cap_usd">MC</th>
             <th style={thStyle}></th>
           </tr>
         </thead>
@@ -268,17 +282,28 @@ function DaysList({ data, onDayClick }: { data: CoverageResponse; onDayClick: (d
                 <td style={tdStyle}>
                   <StatusBadge status={status} />
                 </td>
-                <td style={tdStyle}>
-                  <CoverageBar pct={day.completeness_pct} />
-                </td>
-                <td style={{ ...tdStyle, textAlign: "right" }}>
-                  <span style={{ color: "var(--t1)" }}>{day.symbols_complete.toLocaleString()}</span>
-                  <span style={{ color: "var(--t3)" }}> / {day.expected_symbols.toLocaleString()}</span>
-                </td>
                 <td style={{ ...tdStyle, textAlign: "right" }}>
                   <span style={{ color: "var(--t0)", fontWeight: 700 }}>
                     {day.completeness_pct.toFixed(1)}%
                   </span>
+                </td>
+                <td style={{ ...tdStyle, textAlign: "right" }}>
+                  <EndpointPctBadge pct={day.endpoints?.close ?? 0} />
+                </td>
+                <td style={{ ...tdStyle, textAlign: "right" }}>
+                  <EndpointPctBadge pct={day.endpoints?.open_interest ?? 0} />
+                </td>
+                <td style={{ ...tdStyle, textAlign: "right" }}>
+                  <EndpointPctBadge pct={day.endpoints?.volume ?? 0} />
+                </td>
+                <td style={{ ...tdStyle, textAlign: "right" }}>
+                  <EndpointPctBadge pct={day.endpoints?.funding_rate ?? 0} />
+                </td>
+                <td style={{ ...tdStyle, textAlign: "right" }}>
+                  <EndpointPctBadge pct={day.endpoints?.long_short_ratio ?? 0} />
+                </td>
+                <td style={{ ...tdStyle, textAlign: "right" }}>
+                  <EndpointPctBadge pct={day.endpoints?.market_cap_usd ?? 0} />
                 </td>
                 <td style={{ ...tdStyle, textAlign: "right", paddingRight: 14 }}>
                   <span style={{ color: "var(--t3)", fontSize: 12 }}>›</span>
@@ -289,6 +314,25 @@ function DaysList({ data, onDayClick }: { data: CoverageResponse; onDayClick: (d
         </tbody>
       </table>
     </div>
+  );
+}
+
+// Compact per-endpoint percentage badge — green/amber/red color-coded.
+function EndpointPctBadge({ pct }: { pct: number }) {
+  const color =
+    pct >= 95 ? "var(--green)" :
+    pct >= 5  ? "var(--amber)" :
+                "var(--red)";
+  const label = pct >= 99.95 ? "100" : pct.toFixed(0);
+  return (
+    <span style={{
+      fontSize: 9,
+      fontWeight: 700,
+      color,
+      fontFamily: "var(--font-space-mono), Space Mono, monospace",
+    }}>
+      {label}
+    </span>
   );
 }
 

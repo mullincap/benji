@@ -29,6 +29,15 @@ const API_BASE = process.env.NEXT_PUBLIC_API_BASE || "";
 // Mirror the FastAPI router exactly. If the backend shape changes these
 // types must change too — they are the contract.
 
+type EndpointCoverage = {
+  close: number;
+  volume: number;
+  open_interest: number;
+  funding_rate: number;
+  long_short_ratio: number;
+  market_cap_usd: number;
+};
+
 type CoverageDay = {
   date: string;                 // 'YYYY-MM-DD'
   symbols_complete: number;
@@ -38,6 +47,7 @@ type CoverageDay = {
   expected_symbols: number;     // per-day denominator (job truth or fallback)
   has_job_truth: boolean;       // true if expected_symbols came from compiler_jobs
   completeness_pct: number;     // 0.0 - 100.0, rounded to 1 decimal
+  endpoints: EndpointCoverage;  // per-endpoint pcts (close/volume/OI/funding/LS/mcap)
 };
 
 type CoverageResponse = {
@@ -56,6 +66,7 @@ type GapDay = {
   completeness_pct: number;
   has_job_truth: boolean;
   status: "missing" | "partial";
+  endpoints: EndpointCoverage;
 };
 
 type GapsResponse = {
@@ -330,7 +341,13 @@ function GapTable({ gaps, onDayClick }: { gaps: GapDay[]; onDayClick: (date: str
             <Th>Date</Th>
             <Th>Status</Th>
             <Th align="right">Complete / Total</Th>
-            <Th align="right">Completeness</Th>
+            <Th align="right">%</Th>
+            <Th align="right" title="close">Px</Th>
+            <Th align="right" title="open_interest">OI</Th>
+            <Th align="right" title="volume">Vol</Th>
+            <Th align="right" title="funding_rate">Fnd</Th>
+            <Th align="right" title="long_short_ratio">L/S</Th>
+            <Th align="right" title="market_cap_usd">MC</Th>
           </tr>
         </thead>
         <tbody>
@@ -350,6 +367,12 @@ function GapTable({ gaps, onDayClick }: { gaps: GapDay[]; onDayClick: (date: str
               <Td><StatusBadge status={g.status} /></Td>
               <Td align="right">{g.symbols_complete} / {g.symbols_total}</Td>
               <Td align="right">{g.completeness_pct.toFixed(1)}%</Td>
+              <Td align="right"><EndpointPctBadge pct={g.endpoints?.close ?? 0} /></Td>
+              <Td align="right"><EndpointPctBadge pct={g.endpoints?.open_interest ?? 0} /></Td>
+              <Td align="right"><EndpointPctBadge pct={g.endpoints?.volume ?? 0} /></Td>
+              <Td align="right"><EndpointPctBadge pct={g.endpoints?.funding_rate ?? 0} /></Td>
+              <Td align="right"><EndpointPctBadge pct={g.endpoints?.long_short_ratio ?? 0} /></Td>
+              <Td align="right"><EndpointPctBadge pct={g.endpoints?.market_cap_usd ?? 0} /></Td>
             </tr>
           ))}
         </tbody>
@@ -358,9 +381,30 @@ function GapTable({ gaps, onDayClick }: { gaps: GapDay[]; onDayClick: (date: str
   );
 }
 
-function Th({ children, align = "left" }: { children: React.ReactNode; align?: "left" | "right" }) {
+// Compact per-endpoint percentage badge — green/amber/red color-coded.
+// Used in the Gap Days table and Days list page so a row scan immediately
+// shows which endpoint is the limiting factor on a partial day.
+function EndpointPctBadge({ pct }: { pct: number }) {
+  const color =
+    pct >= 95 ? "var(--green)" :
+    pct >= 5  ? "var(--amber)" :
+                "var(--red)";
+  const label = pct >= 99.95 ? "100" : pct.toFixed(0);
   return (
-    <th style={{
+    <span style={{
+      fontSize: 9,
+      fontWeight: 700,
+      color,
+      fontFamily: "var(--font-space-mono), Space Mono, monospace",
+    }}>
+      {label}
+    </span>
+  );
+}
+
+function Th({ children, align = "left", title }: { children: React.ReactNode; align?: "left" | "right"; title?: string }) {
+  return (
+    <th title={title} style={{
       fontSize: 9, fontWeight: 700, letterSpacing: "0.12em",
       color: "var(--t3)", textTransform: "uppercase",
       textAlign: align,

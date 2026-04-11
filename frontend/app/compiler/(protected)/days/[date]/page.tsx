@@ -66,6 +66,9 @@ type DayResponse = {
   job: JobPayload | null;
   endpoint_cols: string[];
   symbols: DaySymbol[];
+  total_rows: number;
+  suspected_duplicates: boolean;
+  duplicate_factor: number;
 };
 
 type LoadState =
@@ -398,6 +401,46 @@ function DayContent({
 
   return (
     <>
+      {/* Suspected duplicates warning. Fires when total_rows on this day
+          exceeds 1.3× the expected ceiling (symbols × 1440), which is
+          how the 1/17, 2/16, 2/23 dupe-row situation manifests: two
+          ingestion sources wrote rows with different timestamp
+          granularities and they coexist on the same primary key. */}
+      {data.suspected_duplicates && (
+        <div style={{
+          background: "var(--amber-dim)",
+          border: "1px solid var(--amber)",
+          borderRadius: 6,
+          padding: "12px 16px",
+          marginBottom: 16,
+          display: "flex",
+          alignItems: "flex-start",
+          gap: 12,
+        }}>
+          <div style={{
+            fontSize: 9,
+            fontWeight: 700,
+            letterSpacing: "0.12em",
+            color: "var(--amber)",
+            textTransform: "uppercase",
+            flexShrink: 0,
+          }}>
+            ⚠ Suspected Duplicates
+          </div>
+          <div style={{ fontSize: 10, color: "var(--t1)", lineHeight: 1.5 }}>
+            This day has <strong style={{ color: "var(--t0)" }}>
+              {data.total_rows.toLocaleString()}
+            </strong> total rows — about <strong style={{ color: "var(--t0)" }}>
+              {data.duplicate_factor}×
+            </strong> the expected ceiling of {(data.symbols_with_data * 1440).toLocaleString()}{" "}
+            (symbols × 1440). Two ingestion sources likely wrote rows with
+            different timestamp granularities and now coexist on the
+            primary key. Per-endpoint coverage math still works correctly,
+            but the row count is bloated.
+          </div>
+        </div>
+      )}
+
       {/* KPI strip */}
       <div style={{
         display: "grid",
