@@ -68,27 +68,85 @@ function NavItem({ label, href, active }: { label: string; href: string; active:
 
 function IndexerSidebar() {
   const pathname = usePathname();
+  const [collapsed, setCollapsed] = useState(false);
   return (
-    <div style={{
-      width: 200,
-      flexShrink: 0,
-      background: "var(--bg0)",
-      borderRight: "1px solid var(--line)",
-      display: "flex",
-      flexDirection: "column",
-      paddingTop: 14,
-    }}>
-      <div style={{
-        padding: "0 16px 10px",
-        fontSize: 9, fontWeight: 700, letterSpacing: "0.12em",
-        color: "var(--t3)", textTransform: "uppercase",
-      }}>
-        Indexer
+    <div
+      style={{
+        width: collapsed ? 38 : 288,
+        borderRight: "1px solid var(--line)",
+        overflow: "hidden",
+        flexShrink: 0,
+        transition: "width 0.2s ease",
+        background: "var(--bg0)",
+        display: "flex",
+        flexDirection: "column",
+      }}
+    >
+      <div
+        style={{
+          height: 40,
+          borderBottom: "1px solid var(--line)",
+          display: "flex",
+          alignItems: "center",
+          justifyContent: collapsed ? "center" : "space-between",
+          padding: collapsed ? 0 : "0 8px 0 16px",
+          flexShrink: 0,
+        }}
+      >
+        {!collapsed && (
+          <span
+            style={{
+              fontSize: 9,
+              textTransform: "uppercase",
+              letterSpacing: "0.12em",
+              color: "var(--t3)",
+              fontWeight: 700,
+            }}
+          >
+            Indexer
+          </span>
+        )}
+        <button
+          onClick={() => setCollapsed((v) => !v)}
+          title={collapsed ? "Expand sidebar" : "Collapse sidebar"}
+          style={{
+            width: 24,
+            height: 24,
+            border: "1px solid var(--line2)",
+            borderRadius: 3,
+            background: "transparent",
+            color: "var(--t1)",
+            fontSize: 11,
+            cursor: "pointer",
+          }}
+        >
+          {collapsed ? "»" : "«"}
+        </button>
       </div>
-      <NavItem label="Coverage"   href="/indexer/coverage"   active={pathname === "/indexer/coverage"} />
-      <NavItem label="Jobs"       href="/indexer/jobs"       active={pathname === "/indexer/jobs"} />
-      <NavItem label="Signals"    href="/indexer/signals"    active={pathname === "/indexer/signals"} />
-      <NavItem label="Strategies" href="/indexer/strategies" active={pathname === "/indexer/strategies"} />
+      {!collapsed && (
+        <div style={{ flex: 1, overflowY: "auto", paddingTop: 8 }}>
+          <NavItem label="Coverage"   href="/indexer/coverage"   active={pathname === "/indexer/coverage"} />
+          <NavItem label="Jobs"       href="/indexer/jobs"       active={pathname === "/indexer/jobs"} />
+          <NavItem label="Signals"    href="/indexer/signals"    active={pathname === "/indexer/signals"} />
+          <NavItem label="Strategies" href="/indexer/strategies" active={pathname === "/indexer/strategies"} />
+        </div>
+      )}
+      {collapsed && (
+        <div
+          style={{
+            flex: 1,
+            display: "flex",
+            alignItems: "flex-end",
+            justifyContent: "center",
+            paddingBottom: 8,
+            pointerEvents: "none",
+          }}
+        >
+          <div style={{ fontSize: 8, color: "var(--t3)", transform: "rotate(-90deg)", whiteSpace: "nowrap", letterSpacing: "0.08em" }}>
+            SIDEBAR
+          </div>
+        </div>
+      )}
     </div>
   );
 }
