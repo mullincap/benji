@@ -20,6 +20,7 @@ from bisect import bisect_left
 # DB connection helper for compiler_jobs tracking
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from pipeline.db.connection import get_conn
+from pipeline.db.load_csv_to_futures_1m import load_csv as load_csv_to_futures_1m
 
 SCRIPT_START_TIME = time.time()
 
@@ -1370,6 +1371,26 @@ def main(start_date, end_date, job_id=None, triggered_by='cli', run_tag=None):
                 file_path = os.path.join(CSV_BACKUP_DIR, f"oi_{day.strftime('%Y%m%d')}.csv")
                 append_day_csv(day,expected_header,all_rows_day,write_header=not os.path.exists(file_path))
                 all_rows_day.clear()
+
+            # Load the day's CSV into market.futures_1m. The compiler "Jobs"
+            # status of "complete" reflects DB state, not just CSV state.
+            # ON CONFLICT DO NOTHING makes this safe on retries.
+            day_csv_path = os.path.join(CSV_BACKUP_DIR, f"oi_{day.strftime('%Y%m%d')}.csv")
+            if os.path.exists(day_csv_path):
+                try:
+                    print(f"\n💽 Loading CSV into market.futures_1m → {day_csv_path}")
+                    result = load_csv_to_futures_1m(day_csv_path)
+                    print(
+                        f"   ✅ DB load done → "
+                        f"read={result['rows_read']:,} "
+                        f"sent={result['rows_inserted']:,} "
+                        f"skipped={result['rows_skipped']:,} "
+                        f"in {result['elapsed_sec']}s"
+                    )
+                except Exception as load_err:
+                    print(f"   ⚠️ DB load failed → {load_err}")
+                    job_fail(job_id, f"CSV written but DB load failed: {load_err}")
+                    raise
 
             if PRINT_SUMMARY_SHEETS:
                 date_str = day.strftime("%Y-%m-%d")
