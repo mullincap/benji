@@ -32,6 +32,7 @@
  */
 
 import { useEffect, useMemo, useState } from "react";
+import Skeleton, { KPIGridSkeleton } from "../../../components/Skeleton";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE || "";
 
@@ -601,13 +602,28 @@ export default function IndexerCoveragePage() {
         </div>
 
         {state.kind === "loading" && (
-          <div style={{
-            fontSize: 9, color: "var(--t3)",
-            textTransform: "uppercase", letterSpacing: "0.12em",
-            padding: "40px 0",
-          }}>
-            Loading coverage data…
-          </div>
+          <>
+            {/* 3 metric blocks (price / OI / volume), each = KPI strip + heatmap */}
+            {Array.from({ length: 3 }).map((_, m) => (
+              <div key={m} style={{ marginBottom: 28 }}>
+                <Skeleton width={120} height={9} style={{ marginBottom: 12 }} />
+                <KPIGridSkeleton count={4} />
+                <div style={{
+                  background: "var(--bg2)",
+                  border: "1px solid var(--line)",
+                  borderRadius: 6,
+                  padding: "16px 18px",
+                  display: "flex",
+                  flexWrap: "wrap",
+                  gap: 4,
+                }}>
+                  {Array.from({ length: 90 }).map((_, i) => (
+                    <Skeleton key={i} width={14} height={14} borderRadius={2} />
+                  ))}
+                </div>
+              </div>
+            ))}
+          </>
         )}
 
         {state.kind === "error" && (

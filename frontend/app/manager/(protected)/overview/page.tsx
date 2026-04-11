@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState, useRef } from "react";
+import Skeleton, { KPIGridSkeleton, TableSkeleton } from "../../../components/Skeleton";
 import {
   Chart as ChartJS,
   CategoryScale,
@@ -234,19 +235,42 @@ export default function OverviewPage() {
 
   if (!data) {
     return (
-      <div
-        style={{
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "center",
-          height: "100%",
-          fontSize: 9,
-          color: "var(--t3)",
-          textTransform: "uppercase",
-          letterSpacing: "0.12em",
-        }}
-      >
-        Loading overview...
+      <div style={{
+        padding: 20,
+        display: "flex",
+        flexDirection: "column",
+        gap: 14,
+        height: "100%",
+        overflow: "hidden",
+      }}>
+        <KPIGridSkeleton count={5} />
+        {/* Two charts side-by-side */}
+        <div style={{ display: "flex", gap: 10, flex: "0 0 200px" }}>
+          {Array.from({ length: 2 }).map((_, i) => (
+            <div key={i} style={{
+              flex: 1,
+              background: "var(--bg2)",
+              border: "1px solid var(--line)",
+              borderRadius: 5,
+              padding: "12px 16px",
+              display: "flex",
+              flexDirection: "column",
+              gap: 10,
+            }}>
+              <Skeleton width={140} height={9} />
+              <Skeleton width="100%" height={150} borderRadius={4} />
+            </div>
+          ))}
+        </div>
+        {/* Two cards side-by-side: allocation table + pipeline status */}
+        <div style={{ display: "flex", gap: 10, flex: 1, minHeight: 0 }}>
+          <div style={{ flex: 1 }}>
+            <TableSkeleton rows={5} columns={[80, 100, 70, 80, 60, 50, 60]} />
+          </div>
+          <div style={{ flex: 1 }}>
+            <TableSkeleton rows={4} columns={[100, 80, 80]} />
+          </div>
+        </div>
       </div>
     );
   }

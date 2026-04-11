@@ -20,6 +20,7 @@
  */
 
 import { useEffect, useState } from "react";
+import { CardSkeleton } from "../../../components/Skeleton";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE || "";
 
@@ -334,12 +335,10 @@ export default function IndexerStrategiesPage() {
         </div>
 
         {state.kind === "loading" && (
-          <div style={{
-            fontSize: 9, color: "var(--t3)",
-            textTransform: "uppercase", letterSpacing: "0.12em",
-            padding: "40px 0",
-          }}>
-            Loading strategies…
+          <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+            {Array.from({ length: 3 }).map((_, i) => (
+              <CardSkeleton key={i} lines={5} />
+            ))}
           </div>
         )}
 

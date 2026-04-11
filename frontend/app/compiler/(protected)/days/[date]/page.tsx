@@ -22,6 +22,7 @@
 
 import { useEffect, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
+import { KPIGridSkeleton, TableSkeleton } from "../../../../components/Skeleton";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE || "";
 
@@ -340,13 +341,10 @@ export default function DayDetailPage() {
         </h1>
 
         {state.kind === "loading" && (
-          <div style={{
-            fontSize: 9, color: "var(--t3)",
-            textTransform: "uppercase", letterSpacing: "0.12em",
-            padding: "40px 0",
-          }}>
-            Loading day detail…
-          </div>
+          <>
+            <KPIGridSkeleton count={5} />
+            <TableSkeleton rows={12} columns={[140, 100, 80, 60, 80, 70]} />
+          </>
         )}
 
         {state.kind === "error" && (

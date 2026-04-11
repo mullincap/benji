@@ -3,6 +3,7 @@
 import { useEffect, useState, useRef, useCallback } from "react";
 import { useParams, useRouter } from "next/navigation";
 import ReactMarkdown from "react-markdown";
+import Skeleton from "../../../../components/Skeleton";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE || "";
 
@@ -306,19 +307,77 @@ export default function ConversationPage() {
 
   if (loading) {
     return (
-      <div
-        style={{
+      <div style={{ display: "flex", flexDirection: "column", height: "100%" }}>
+        {/* Header skeleton */}
+        <div style={{
+          padding: "12px 20px",
+          borderBottom: "0.5px solid var(--line)",
+        }}>
+          <Skeleton width={220} height={12} />
+        </div>
+        {/* Messages skeleton — alternate user/assistant blocks */}
+        <div style={{ flex: 1, overflowY: "auto", padding: "20px 24px" }}>
+          <div style={{ display: "flex", flexDirection: "column", gap: 24 }}>
+            {/* Assistant message */}
+            <div style={{ display: "flex", flexDirection: "column" }}>
+              <Skeleton width={20} height={8} style={{ marginBottom: 6 }} />
+              <div style={{
+                borderLeft: "2px solid var(--line)",
+                paddingLeft: 14,
+                display: "flex",
+                flexDirection: "column",
+                gap: 6,
+              }}>
+                <Skeleton width="90%" height={10} />
+                <Skeleton width="80%" height={10} />
+                <Skeleton width="50%" height={10} />
+              </div>
+            </div>
+            {/* User message (right-aligned) */}
+            <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end" }}>
+              <Skeleton width={20} height={8} style={{ marginBottom: 6 }} />
+              <div style={{
+                background: "var(--bg2)",
+                border: "0.5px solid var(--line)",
+                borderRadius: 6,
+                padding: "8px 12px",
+                maxWidth: "60%",
+                display: "flex",
+                flexDirection: "column",
+                gap: 6,
+              }}>
+                <Skeleton width={180} height={10} />
+                <Skeleton width={140} height={10} />
+              </div>
+            </div>
+            {/* Another assistant message */}
+            <div style={{ display: "flex", flexDirection: "column" }}>
+              <Skeleton width={20} height={8} style={{ marginBottom: 6 }} />
+              <div style={{
+                borderLeft: "2px solid var(--line)",
+                paddingLeft: 14,
+                display: "flex",
+                flexDirection: "column",
+                gap: 6,
+              }}>
+                <Skeleton width="95%" height={10} />
+                <Skeleton width="85%" height={10} />
+                <Skeleton width="70%" height={10} />
+                <Skeleton width="40%" height={10} />
+              </div>
+            </div>
+          </div>
+        </div>
+        {/* Input bar skeleton */}
+        <div style={{
+          padding: "12px 20px",
+          borderTop: "0.5px solid var(--line)",
           display: "flex",
-          alignItems: "center",
-          justifyContent: "center",
-          height: "100%",
-          fontSize: 9,
-          color: "var(--t3)",
-          textTransform: "uppercase",
-          letterSpacing: "0.12em",
-        }}
-      >
-        Loading conversation...
+          gap: 8,
+        }}>
+          <Skeleton width="100%" height={32} borderRadius={5} />
+          <Skeleton width={70} height={32} borderRadius={5} />
+        </div>
       </div>
     );
   }

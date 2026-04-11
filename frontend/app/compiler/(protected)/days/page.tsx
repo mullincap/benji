@@ -16,6 +16,7 @@
 
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
+import { TableSkeleton } from "../../../components/Skeleton";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE || "";
 
@@ -177,13 +178,7 @@ export default function CompilerDaysListPage() {
         </h1>
 
         {state.kind === "loading" && (
-          <div style={{
-            fontSize: 9, color: "var(--t3)",
-            textTransform: "uppercase", letterSpacing: "0.12em",
-            padding: "40px 0",
-          }}>
-            Loading recent days…
-          </div>
+          <TableSkeleton rows={10} columns={[80, 100, 60, 120, 100, 50, 12]} />
         )}
 
         {state.kind === "error" && (

@@ -23,6 +23,7 @@
  */
 
 import { useCallback, useEffect, useState } from "react";
+import { TableSkeleton } from "../../../components/Skeleton";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE || "";
 const LOOKBACK_DAYS = 90;
@@ -467,13 +468,7 @@ export default function IndexerSignalsPage() {
         </div>
 
         {state.kind === "loading" && (
-          <div style={{
-            fontSize: 9, color: "var(--t3)",
-            textTransform: "uppercase", letterSpacing: "0.12em",
-            padding: "40px 0",
-          }}>
-            Loading signals…
-          </div>
+          <TableSkeleton rows={8} columns={[100, 90, 80, 120, 80, 70]} />
         )}
 
         {state.kind === "error" && (

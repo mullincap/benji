@@ -32,6 +32,7 @@
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { TableSkeleton } from "../../../components/Skeleton";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE || "";
 const POLL_INTERVAL_MS = 10_000;
@@ -731,13 +732,7 @@ export default function IndexerJobsPage() {
 
 
         {state.kind === "loading" && (
-          <div style={{
-            fontSize: 9, color: "var(--t3)",
-            textTransform: "uppercase", letterSpacing: "0.12em",
-            padding: "40px 0",
-          }}>
-            Loading jobs…
-          </div>
+          <TableSkeleton rows={10} columns={[120, 80, 100, 80, 70, 60, 80]} />
         )}
 
         {state.kind === "error" && (

@@ -37,6 +37,7 @@
  */
 
 import { useEffect, useMemo, useRef, useState } from "react";
+import Skeleton from "../../../components/Skeleton";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE || "";
 
@@ -561,11 +562,34 @@ export default function CompilerSymbolsPage() {
 
         {state.kind === "loading" && (
           <div style={{
-            fontSize: 9, color: "var(--t3)",
-            textTransform: "uppercase", letterSpacing: "0.12em",
-            padding: "20px 0",
+            background: "var(--bg2)",
+            border: "1px solid var(--line)",
+            borderRadius: 6,
+            padding: "20px 24px",
+            display: "flex",
+            flexDirection: "column",
+            gap: 14,
           }}>
-            Inspecting {state.query}…
+            <Skeleton width={140} height={9} />
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 14 }}>
+              {Array.from({ length: 4 }).map((_, i) => (
+                <div key={i} style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                  <Skeleton width={60} height={9} />
+                  <Skeleton width={90} height={16} />
+                </div>
+              ))}
+            </div>
+            <Skeleton width="100%" height={40} borderRadius={4} />
+            {Array.from({ length: 3 }).map((_, tier) => (
+              <div key={tier} style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                <Skeleton width={40} height={9} />
+                <div style={{ display: "flex", gap: 6 }}>
+                  {Array.from({ length: 5 }).map((__, j) => (
+                    <Skeleton key={j} width="100%" height={18} borderRadius={3} />
+                  ))}
+                </div>
+              </div>
+            ))}
           </div>
         )}
 
@@ -727,12 +751,18 @@ function CoverageTable({ onSelectSymbol }: { onSelectSymbol: (symbol: string) =>
           border: "1px solid var(--line)",
           borderRadius: 6,
           padding: "20px 24px",
-          fontSize: 9,
-          color: "var(--t3)",
-          textTransform: "uppercase",
-          letterSpacing: "0.12em",
+          display: "flex",
+          flexDirection: "column",
+          gap: 10,
         }}>
-          Loading symbol coverage…
+          <Skeleton width={160} height={9} style={{ marginBottom: 6 }} />
+          {Array.from({ length: 12 }).map((_, i) => (
+            <div key={i} style={{ display: "flex", alignItems: "center", gap: 12 }}>
+              <Skeleton width={70} height={10} />
+              <Skeleton width="100%" height={6} borderRadius={2} />
+              <Skeleton width={50} height={10} />
+            </div>
+          ))}
         </div>
       )}
 
