@@ -1327,12 +1327,14 @@ def main(start_date, end_date, job_id=None, triggered_by='cli', run_tag=None):
                     print(f"\n⏭ Skipping fetch for {day.date()} → CSV already exists")
                     print(f"   💽 Syncing CSV to market.futures_1m → {existing_csv}")
                     result = load_csv_to_futures_1m(existing_csv)
+                    auto_created = result.get('symbols_auto_created', 0)
+                    auto_note = f" auto_created={auto_created}" if auto_created else ""
                     print(
                         f"   ✅ DB sync done → "
                         f"read={result['rows_read']:,} "
                         f"sent={result['rows_inserted']:,} "
                         f"skipped={result['rows_skipped']:,} "
-                        f"in {result['elapsed_sec']}s"
+                        f"in {result['elapsed_sec']}s{auto_note}"
                     )
                 except Exception as load_err:
                     print(f"   ⚠️ DB sync failed → {load_err}")
@@ -1400,12 +1402,14 @@ def main(start_date, end_date, job_id=None, triggered_by='cli', run_tag=None):
                 try:
                     print(f"\n💽 Loading CSV into market.futures_1m → {day_csv_path}")
                     result = load_csv_to_futures_1m(day_csv_path)
+                    auto_created = result.get('symbols_auto_created', 0)
+                    auto_note = f" auto_created={auto_created}" if auto_created else ""
                     print(
                         f"   ✅ DB load done → "
                         f"read={result['rows_read']:,} "
                         f"sent={result['rows_inserted']:,} "
                         f"skipped={result['rows_skipped']:,} "
-                        f"in {result['elapsed_sec']}s"
+                        f"in {result['elapsed_sec']}s{auto_note}"
                     )
                 except Exception as load_err:
                     print(f"   ⚠️ DB load failed → {load_err}")

@@ -20,6 +20,7 @@
  */
 
 import { useEffect, useState } from "react";
+import { useRouter } from "next/navigation";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE || "";
 
@@ -213,29 +214,34 @@ function KPICard({ label, value, hint }: { label: string; value: string; hint?: 
   );
 }
 
-function HeatmapCell({ day }: { day: CoverageDay }) {
+function HeatmapCell({ day, onClick }: { day: CoverageDay; onClick: () => void }) {
   const colors = heatmapColor(day.completeness_pct);
   const source = day.has_job_truth ? "job truth" : "fallback: symbols_with_data";
   const tooltip =
     `${day.date}\n` +
     `${day.symbols_complete} complete · ${day.symbols_partial} partial · ${day.symbols_missing} missing\n` +
-    `${day.completeness_pct}% of ${day.expected_symbols} expected (${source})`;
+    `${day.completeness_pct}% of ${day.expected_symbols} expected (${source})\n` +
+    `Click to drill into this day`;
   return (
     <div
       title={tooltip}
+      onClick={onClick}
       style={{
         width: 14,
         height: 14,
         background: colors.bg,
         border: `1px solid ${colors.border}`,
         borderRadius: 2,
-        cursor: "default",
+        cursor: "pointer",
+        transition: "transform 0.1s ease",
       }}
+      onMouseEnter={(e) => { e.currentTarget.style.transform = "scale(1.15)"; }}
+      onMouseLeave={(e) => { e.currentTarget.style.transform = "scale(1)"; }}
     />
   );
 }
 
-function Heatmap({ days }: { days: CoverageDay[] }) {
+function Heatmap({ days, onDayClick }: { days: CoverageDay[]; onDayClick: (date: string) => void }) {
   // Display oldest-first left-to-right so the most recent day is bottom-right,
   // matching the convention of GitHub's contribution graph. The API returns
   // newest-first so we reverse here.
@@ -256,7 +262,7 @@ function Heatmap({ days }: { days: CoverageDay[] }) {
         marginBottom: 12,
       }}>
         {ordered.map((day) => (
-          <HeatmapCell key={day.date} day={day} />
+          <HeatmapCell key={day.date} day={day} onClick={() => onDayClick(day.date)} />
         ))}
       </div>
       <div style={{
@@ -288,7 +294,7 @@ function LegendSwatch({ color, border, label }: { color: string; border: string;
   );
 }
 
-function GapTable({ gaps }: { gaps: GapDay[] }) {
+function GapTable({ gaps, onDayClick }: { gaps: GapDay[]; onDayClick: (date: string) => void }) {
   if (gaps.length === 0) {
     return (
       <div style={{
@@ -328,7 +334,17 @@ function GapTable({ gaps }: { gaps: GapDay[] }) {
         </thead>
         <tbody>
           {gaps.map((g) => (
-            <tr key={g.date} style={{ borderTop: "1px solid var(--line)" }}>
+            <tr
+              key={g.date}
+              onClick={() => onDayClick(g.date)}
+              style={{
+                borderTop: "1px solid var(--line)",
+                cursor: "pointer",
+              }}
+              onMouseEnter={(e) => { e.currentTarget.style.background = "var(--bg3)"; }}
+              onMouseLeave={(e) => { e.currentTarget.style.background = "transparent"; }}
+              title="Click to drill into this day"
+            >
               <Td>{g.date}</Td>
               <Td><StatusBadge status={g.status} /></Td>
               <Td align="right">{g.symbols_complete} / {g.symbols_total}</Td>
@@ -392,8 +408,11 @@ function StatusBadge({ status }: { status: "missing" | "partial" }) {
 // ─── Page ────────────────────────────────────────────────────────────────────
 
 export default function CompilerCoveragePage() {
+  const router = useRouter();
   const [state, setState] = useState<LoadState>({ kind: "loading" });
   const [preset, setPreset] = useState<LookbackPreset>(DEFAULT_PRESET);
+
+  const goToDay = (date: string) => router.push(`/compiler/days/${date}`);
 
   useEffect(() => {
     let cancelled = false;
@@ -485,14 +504,14 @@ export default function CompilerCoveragePage() {
         )}
 
         {state.kind === "ready" && (
-          <CoverageContent coverage={state.coverage} gaps={state.gaps} />
+          <CoverageContent coverage={state.coverage} gaps={state.gaps} onDayClick={goToDay} />
         )}
       </div>
     </div>
   );
 }
 
-function CoverageContent({ coverage, gaps }: { coverage: CoverageResponse; gaps: GapsResponse }) {
+function CoverageContent({ coverage, gaps, onDayClick }: { coverage: CoverageResponse; gaps: GapsResponse; onDayClick: (date: string) => void }) {
   // KPI math. Each day has its own expected_symbols (joined from
   // compiler_jobs.symbols_total when available, else symbols_with_data).
   // Coverage % is a weighted average: total complete / total expected
@@ -543,10 +562,10 @@ function CoverageContent({ coverage, gaps }: { coverage: CoverageResponse; gaps:
       </div>
 
       <div style={{ marginBottom: 24 }}>
-        <Heatmap days={coverage.days} />
+        <Heatmap days={coverage.days} onDayClick={onDayClick} />
       </div>
 
-      <GapTable gaps={gaps.gaps} />
+      <GapTable gaps={gaps.gaps} onDayClick={onDayClick} />
     </>
   );
 }

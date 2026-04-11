@@ -68,6 +68,52 @@ def _build_symbol_map(cur) -> dict:
     return {row[0]: row[1] for row in cur.fetchall()}
 
 
+def _derive_base(binance_id: str) -> str:
+    """Derive the `base` primary key for market.symbols from a Binance id.
+
+    `*USDT` symbols use the stripped base (BTCUSDT -> BTC) to match the
+    existing convention in seed_symbols.py. Other suffixes (USDC,
+    USD_PERP, dated futures, etc.) keep the full binance_id as base to
+    avoid collisions with the USDT variant (e.g., BTCUSDT and BTCUSDC
+    both have the same stripped base "BTC", which would break the
+    UNIQUE constraint).
+    """
+    if binance_id.endswith("USDT"):
+        return binance_id[:-4]
+    return binance_id
+
+
+def _auto_upsert_symbol(cur, binance_id: str) -> int | None:
+    """Insert a new market.symbols row for an unknown Binance id and
+    return its symbol_id. Uses ON CONFLICT DO NOTHING on the UNIQUE base
+    column so two concurrent loader runs won't race. If the row already
+    exists (from a race or a prior base collision), do a follow-up
+    SELECT to recover the existing symbol_id. Returns None only if the
+    INSERT was skipped AND no existing row could be matched — which
+    shouldn't happen in practice.
+    """
+    base = _derive_base(binance_id)
+    cur.execute(
+        """
+        INSERT INTO market.symbols (base, binance_id, active)
+        VALUES (%s, %s, TRUE)
+        ON CONFLICT (base) DO NOTHING
+        RETURNING symbol_id
+        """,
+        (base, binance_id),
+    )
+    row = cur.fetchone()
+    if row is not None:
+        return row[0]
+    # ON CONFLICT skipped — fetch the existing row.
+    cur.execute(
+        "SELECT symbol_id FROM market.symbols WHERE binance_id = %s LIMIT 1",
+        (binance_id,),
+    )
+    existing = cur.fetchone()
+    return existing[0] if existing else None
+
+
 def _parse_float(val: str) -> float | None:
     if val == "" or val is None:
         return None
@@ -111,6 +157,7 @@ def load_csv(csv_path: Path | str, conn=None) -> dict:
     rows_read = 0
     rows_skipped = 0
     rows_inserted = 0
+    symbols_auto_created = 0
     batch: list[tuple] = []
     start = time.time()
 
@@ -118,7 +165,18 @@ def load_csv(csv_path: Path | str, conn=None) -> dict:
         reader = csv.DictReader(f)
         for row in reader:
             rows_read += 1
-            symbol_id = symbol_map.get(row.get("symbol", ""))
+            sym = row.get("symbol", "") or ""
+            symbol_id = symbol_map.get(sym)
+
+            # Self-heal: if metl.py fetched a symbol we've never seen
+            # before (Binance listed a new instrument), auto-upsert it
+            # into market.symbols instead of silently dropping its rows.
+            if symbol_id is None and sym:
+                symbol_id = _auto_upsert_symbol(cur, sym)
+                if symbol_id is not None:
+                    symbol_map[sym] = symbol_id
+                    symbols_auto_created += 1
+
             if symbol_id is None:
                 rows_skipped += 1
                 continue
@@ -160,6 +218,7 @@ def load_csv(csv_path: Path | str, conn=None) -> dict:
         "rows_read": rows_read,
         "rows_inserted": rows_inserted,
         "rows_skipped": rows_skipped,
+        "symbols_auto_created": symbols_auto_created,
         "elapsed_sec": round(elapsed, 2),
     }
 
@@ -172,12 +231,17 @@ def main():
     for arg in sys.argv[1:]:
         try:
             result = load_csv(arg)
+            auto_note = (
+                f"  auto_created={result['symbols_auto_created']}"
+                if result.get("symbols_auto_created") else ""
+            )
             print(
                 f"OK  {result['file']}  "
                 f"read={result['rows_read']:,}  "
                 f"inserted={result['rows_inserted']:,}  "
                 f"skipped={result['rows_skipped']:,}  "
                 f"elapsed={result['elapsed_sec']}s"
+                f"{auto_note}"
             )
         except Exception as e:
             print(f"ERR {arg}  {type(e).__name__}: {e}")

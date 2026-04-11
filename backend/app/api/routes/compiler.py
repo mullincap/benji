@@ -14,6 +14,7 @@ Constraints (per build doc):
   - Default lookback windows are bounded to keep queries fast
 """
 
+from datetime import datetime
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -227,6 +228,148 @@ def gaps(
         "expected_today":       cov["expected_today"],
         "gaps_returned": len(gap_days),
         "gaps": gap_days,
+    }
+
+
+# ─── /days/{date} ─────────────────────────────────────────────────────────────
+
+@router.get("/days/{target_date}")
+def day_detail(
+    target_date: str,
+    source_id: int = Query(1, ge=1),
+    cur=Depends(get_cursor),
+) -> dict[str, Any]:
+    """
+    Drill-down view of a single day. Returns:
+
+    - date, expected_symbols (from compiler_jobs when available, else
+      symbols_with_data), symbols_complete/partial/missing counts
+    - Optional compiler_jobs metadata (job_id, status, triggered_by,
+      run_tag, started_at, completed_at, symbols_total, etc.)
+    - symbols[] — one row per symbol with per-endpoint row counts so the
+      frontend can visually render "this symbol got close + volume but
+      no orderbook" style hints
+
+    Layout of symbols[] mirrors the symbol inspector's per-endpoint
+    shape so the two pages share rendering logic.
+    """
+    # Validate date format
+    try:
+        parsed_date = datetime.strptime(target_date, "%Y-%m-%d").date()
+    except ValueError:
+        raise HTTPException(status_code=400, detail=f"Invalid date format: {target_date}. Use YYYY-MM-DD.")
+
+    # Per-symbol per-endpoint counts for the target day. ENDPOINT_COLS is
+    # hardcoded above so direct interpolation is safe.
+    col_selects = ",\n            ".join([f"COUNT(f.{c}) AS {c}_cnt" for c in ENDPOINT_COLS])
+    cur.execute(
+        f"""
+        SELECT
+            s.symbol_id,
+            s.base,
+            s.binance_id,
+            COUNT(*) AS total_rows,
+            {col_selects}
+        FROM market.futures_1m f
+        JOIN market.symbols s ON s.symbol_id = f.symbol_id
+        WHERE f.source_id = %s
+          AND f.timestamp_utc >= %s::date
+          AND f.timestamp_utc <  (%s::date + INTERVAL '1 day')
+        GROUP BY s.symbol_id, s.base, s.binance_id
+        ORDER BY total_rows DESC, s.base
+        """,
+        (source_id, parsed_date, parsed_date),
+    )
+    symbol_rows = cur.fetchall()
+
+    # Per-symbol payload
+    symbols_payload = []
+    complete_count = 0
+    partial_count = 0
+    for r in symbol_rows:
+        total = int(r["total_rows"])
+        if total >= 1440:
+            status = "complete"
+            complete_count += 1
+        elif total > 0:
+            status = "partial"
+            partial_count += 1
+        else:
+            status = "missing"
+        symbols_payload.append({
+            "symbol_id":         r["symbol_id"],
+            "base":              r["base"],
+            "binance_id":        r["binance_id"],
+            "total_rows":        total,
+            "completeness_pct":  round(min(total / 1440 * 100, 100), 1),
+            "status":            status,
+            "rows_per_endpoint": {c: int(r[f"{c}_cnt"]) for c in ENDPOINT_COLS},
+        })
+
+    # Compiler job metadata for this date (most recent successful run).
+    cur.execute(
+        """
+        SELECT job_id, status, symbols_total, symbols_done, rows_written,
+               started_at, completed_at, triggered_by, run_tag, error_msg
+        FROM market.compiler_jobs
+        WHERE source_id = %s
+          AND date_from = %s::date
+          AND date_to   = %s::date
+        ORDER BY
+          CASE status WHEN 'complete' THEN 0 ELSE 1 END,
+          completed_at DESC NULLS LAST
+        LIMIT 1
+        """,
+        (source_id, parsed_date, parsed_date),
+    )
+    job_row = cur.fetchone()
+
+    job_payload = None
+    expected_symbols = None
+    if job_row:
+        job_payload = {
+            "job_id":         str(job_row["job_id"]),
+            "status":         job_row["status"],
+            "symbols_total":  job_row["symbols_total"],
+            "symbols_done":   job_row["symbols_done"],
+            "rows_written":   int(job_row["rows_written"]) if job_row["rows_written"] is not None else 0,
+            "started_at":     job_row["started_at"].isoformat() if job_row["started_at"] else None,
+            "completed_at":   job_row["completed_at"].isoformat() if job_row["completed_at"] else None,
+            "triggered_by":   job_row["triggered_by"],
+            "run_tag":        job_row["run_tag"],
+            "error_msg":      job_row["error_msg"],
+        }
+        if job_row["symbols_total"] and job_row["symbols_total"] > 0:
+            expected_symbols = int(job_row["symbols_total"])
+
+    # Fall back to symbols_with_data when no job record exists (historical
+    # master-parquet era).
+    symbols_with_data = len(symbols_payload)
+    if expected_symbols is None:
+        expected_symbols = symbols_with_data
+
+    missing_count = max(0, expected_symbols - symbols_with_data)
+
+    total_complete = complete_count
+    total_expected = expected_symbols
+    day_completeness_pct = (
+        round(total_complete / total_expected * 100, 1)
+        if total_expected > 0 else 0.0
+    )
+
+    return {
+        "date":                  parsed_date.isoformat(),
+        "source_id":             source_id,
+        "expected_symbols":      expected_symbols,
+        "symbols_with_data":     symbols_with_data,
+        "symbols_complete":      complete_count,
+        "symbols_partial":       partial_count,
+        "symbols_missing":       missing_count,
+        "has_job_truth":         job_payload is not None,
+        "day_completeness_pct":  day_completeness_pct,
+        "job":                   job_payload,
+        "endpoint_cols":         ENDPOINT_COLS,
+        "symbols":               symbols_payload,
     }
 
 
