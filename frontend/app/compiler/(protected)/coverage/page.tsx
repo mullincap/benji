@@ -31,9 +31,10 @@ type CoverageDay = {
   date: string;                 // 'YYYY-MM-DD'
   symbols_complete: number;
   symbols_partial: number;
+  symbols_with_data: number;
   symbols_missing: number;
-  total_active_symbols: number;
-  fetched_universe: number;     // peak symbols_complete across the window
+  expected_symbols: number;     // per-day denominator (job truth or fallback)
+  has_job_truth: boolean;       // true if expected_symbols came from compiler_jobs
   completeness_pct: number;     // 0.0 - 100.0, rounded to 1 decimal
 };
 
@@ -41,7 +42,7 @@ type CoverageResponse = {
   source_id: number;
   lookback_days: number;
   total_active_symbols: number;
-  fetched_universe: number;
+  expected_today: number;       // latest day's expected_symbols (KPI headline)
   days_returned: number;
   days: CoverageDay[];
 };
@@ -51,6 +52,7 @@ type GapDay = {
   symbols_complete: number;
   symbols_total: number;
   completeness_pct: number;
+  has_job_truth: boolean;
   status: "missing" | "partial";
 };
 
@@ -58,7 +60,7 @@ type GapsResponse = {
   source_id: number;
   lookback_days: number;
   total_active_symbols: number;
-  fetched_universe: number;
+  expected_today: number;
   gaps_returned: number;
   gaps: GapDay[];
 };
@@ -213,10 +215,11 @@ function KPICard({ label, value, hint }: { label: string; value: string; hint?: 
 
 function HeatmapCell({ day }: { day: CoverageDay }) {
   const colors = heatmapColor(day.completeness_pct);
+  const source = day.has_job_truth ? "job truth" : "fallback: symbols_with_data";
   const tooltip =
     `${day.date}\n` +
     `${day.symbols_complete} complete · ${day.symbols_partial} partial · ${day.symbols_missing} missing\n` +
-    `${day.completeness_pct}% of ${day.total_active_symbols} active symbols`;
+    `${day.completeness_pct}% of ${day.expected_symbols} expected (${source})`;
   return (
     <div
       title={tooltip}
@@ -490,19 +493,19 @@ export default function CompilerCoveragePage() {
 }
 
 function CoverageContent({ coverage, gaps }: { coverage: CoverageResponse; gaps: GapsResponse }) {
-  // KPI math. "Fetched universe" = peak symbols_complete across the window.
-  // It's a more honest denominator than `active`, which drifts stale when
-  // Binance lists/delists instruments.
-  const fetchedUniverse = coverage.fetched_universe;
+  // KPI math. Each day has its own expected_symbols (joined from
+  // compiler_jobs.symbols_total when available, else symbols_with_data).
+  // Coverage % is a weighted average: total complete / total expected
+  // across the whole window. This correctly handles historical days
+  // that had a smaller symbol universe.
+  const expectedToday = coverage.expected_today;
   const daysComplete = coverage.days.filter((d) => d.completeness_pct >= 95).length;
   const daysWithGaps = gaps.gaps.filter((g) => g.status === "partial").length;
   const daysMissing = gaps.gaps.filter((g) => g.status === "missing").length;
 
-  // Average completeness across every day in the window. Single headline
-  // number — matches how a human would eyeball the heatmap.
-  const coveragePct = coverage.days.length > 0
-    ? coverage.days.reduce((sum, d) => sum + d.completeness_pct, 0) / coverage.days.length
-    : 0;
+  const totalComplete = coverage.days.reduce((sum, d) => sum + d.symbols_complete, 0);
+  const totalExpected = coverage.days.reduce((sum, d) => sum + d.expected_symbols, 0);
+  const coveragePct = totalExpected > 0 ? (totalComplete / totalExpected) * 100 : 0;
 
   return (
     <>
@@ -515,12 +518,12 @@ function CoverageContent({ coverage, gaps }: { coverage: CoverageResponse; gaps:
         <KPICard
           label="Coverage"
           value={`${coveragePct.toFixed(1)}%`}
-          hint={`avg across ${coverage.days_returned} days`}
+          hint={`weighted across ${coverage.days_returned} days`}
         />
         <KPICard
-          label="Fetched Universe"
-          value={fetchedUniverse.toLocaleString("en-US")}
-          hint="peak symbols complete in window"
+          label="Expected Today"
+          value={expectedToday.toLocaleString("en-US")}
+          hint="symbols Binance listed on latest day"
         />
         <KPICard
           label="Days Complete"

@@ -79,30 +79,33 @@ def coverage(
     """
     Per-day symbol completeness for the last N days.
 
-    Denominator note: the "expected universe" is the peak number of distinct
-    symbols that reached `complete` (>= 1440 rows) on any day in the window.
-    This measures today's delivery against "what we know the pipeline can
-    fetch" rather than the raw `market.symbols WHERE active` count, which
-    drifts stale whenever Binance lists/delists instruments.
+    Denominator semantics: each day uses its OWN expected symbol count,
+    joined from market.compiler_jobs (symbols_total = what metl.py's
+    get_symbols_for_date(day) returned at run time). This is the honest
+    ground truth for "how many symbols did the pipeline try to fetch."
+
+    For pre-job-tracking days (historical master-parquet backfill), no
+    compiler_jobs row exists, so we fall back to symbols_with_data — the
+    count of symbols that produced at least one row. Reads as 100% of
+    whatever actually arrived, which is the best we can do without the
+    original run's expected count.
 
     Returns one row per day with:
-      - symbols_complete:     distinct symbols with >= 1440 rows that day
-      - symbols_partial:      distinct symbols with 1-1439 rows that day
-      - symbols_missing:      fetched_universe - symbols_with_data
-      - fetched_universe:     peak symbols_complete across the window
-      - total_active_symbols: market.symbols WHERE active = TRUE (kept for
-                              backward compat; stale-prone, prefer
-                              fetched_universe)
-      - completeness_pct:     symbols_complete / fetched_universe
+      - symbols_complete:    distinct symbols with >= 1440 rows that day
+      - symbols_partial:     distinct symbols with 1-1439 rows that day
+      - symbols_missing:     expected_symbols - symbols_with_data
+      - expected_symbols:    per-day denominator (job ground truth or fallback)
+      - has_job_truth:       bool — True if expected_symbols came from
+                             compiler_jobs, False if fallback
+      - completeness_pct:    symbols_complete / expected_symbols
     """
     interval_str = f"{days} days"
 
     cur.execute(
         """
-        SELECT day::date AS day, symbols_with_data, symbols_complete, symbols_partial
-        FROM (
+        WITH day_stats AS (
             SELECT
-                day,
+                day::date AS day,
                 COUNT(DISTINCT symbol_id) AS symbols_with_data,
                 COUNT(DISTINCT symbol_id) FILTER (WHERE cnt >= 1440) AS symbols_complete,
                 COUNT(DISTINCT symbol_id) FILTER (WHERE cnt BETWEEN 1 AND 1439) AS symbols_partial
@@ -114,40 +117,68 @@ def coverage(
                 GROUP BY 1, 2
             ) sub
             GROUP BY day
-            ORDER BY day DESC
-        ) coverage
+        ),
+        -- Ground truth for how many symbols metl.py actually tried to fetch
+        -- on each day. DISTINCT ON picks the most recent successful run per
+        -- date_from (cron + backfill scripts always invoke metl.py with a
+        -- single-day range, so date_from uniquely identifies the day).
+        job_totals AS (
+            SELECT DISTINCT ON (date_from::date)
+                date_from::date AS day,
+                symbols_total
+            FROM market.compiler_jobs
+            WHERE status = 'complete'
+              AND source_id = %s
+              AND symbols_total IS NOT NULL
+              AND symbols_total > 0
+              AND date_from = date_to
+            ORDER BY date_from::date, completed_at DESC NULLS LAST
+        )
+        SELECT
+            d.day,
+            d.symbols_with_data,
+            d.symbols_complete,
+            d.symbols_partial,
+            COALESCE(j.symbols_total, d.symbols_with_data) AS expected_symbols,
+            (j.symbols_total IS NOT NULL) AS has_job_truth
+        FROM day_stats d
+        LEFT JOIN job_totals j ON j.day = d.day
+        ORDER BY d.day DESC
         """,
-        (source_id, interval_str),
+        (source_id, interval_str, source_id),
     )
     day_rows = cur.fetchall()
 
     cur.execute("SELECT COUNT(*) AS total FROM market.symbols WHERE active = TRUE")
     total_active = cur.fetchone()["total"]
 
-    # Fetched universe = peak symbols_complete across the window. Falls back
-    # to total_active if the window has no rows at all (empty DB / new install).
-    fetched_universe = max((r["symbols_complete"] for r in day_rows), default=0)
-    if fetched_universe == 0:
-        fetched_universe = total_active
+    days_payload = []
+    for r in day_rows:
+        expected = int(r["expected_symbols"]) if r["expected_symbols"] is not None else 0
+        symbols_complete = int(r["symbols_complete"])
+        symbols_with_data = int(r["symbols_with_data"])
+        days_payload.append({
+            "date":                 r["day"].isoformat(),
+            "symbols_complete":     symbols_complete,
+            "symbols_partial":      int(r["symbols_partial"]),
+            "symbols_with_data":    symbols_with_data,
+            "symbols_missing":      max(0, expected - symbols_with_data),
+            "expected_symbols":     expected,
+            "has_job_truth":        bool(r["has_job_truth"]),
+            "completeness_pct":     round(symbols_complete / expected * 100, 1) if expected > 0 else 0.0,
+        })
+
+    # Most recent day's expected count — used by the frontend as the
+    # "Expected Today" KPI (replacing the old stale fetched_universe).
+    expected_today = days_payload[0]["expected_symbols"] if days_payload else total_active
 
     return {
         "source_id": source_id,
         "lookback_days": days,
         "total_active_symbols": total_active,
-        "fetched_universe": fetched_universe,
-        "days_returned": len(day_rows),
-        "days": [
-            {
-                "date":                  r["day"].isoformat(),
-                "symbols_complete":      r["symbols_complete"],
-                "symbols_partial":       r["symbols_partial"],
-                "symbols_missing":       max(0, fetched_universe - r["symbols_with_data"]),
-                "total_active_symbols":  total_active,
-                "fetched_universe":      fetched_universe,
-                "completeness_pct":      round(r["symbols_complete"] / fetched_universe * 100, 1) if fetched_universe > 0 else 0.0,
-            }
-            for r in day_rows
-        ],
+        "expected_today": expected_today,
+        "days_returned": len(days_payload),
+        "days": days_payload,
     }
 
 
@@ -162,7 +193,9 @@ def gaps(
     """
     Days within the lookback window where coverage is incomplete.
 
-    A day appears in this list if symbols_complete < fetched_universe.
+    A day appears in this list if symbols_complete < expected_symbols
+    (per-day denominator from compiler_jobs.symbols_total, or fallback
+    to symbols_with_data for pre-job-tracking historical days).
     Status:
       - 'missing' = completeness_pct == 0 (no symbols hit 1440 rows)
       - 'partial' = completeness_pct > 0 but < 100
@@ -170,18 +203,20 @@ def gaps(
     """
     # Reuse the coverage logic so the math stays in one place.
     cov = coverage(days=days, source_id=source_id, cur=cur)
-    total = cov["fetched_universe"]
 
     gap_days = []
     for d in cov["days"]:
-        if total > 0 and d["symbols_complete"] >= total:
+        expected = d["expected_symbols"]
+        symbols_complete = d["symbols_complete"]
+        if expected > 0 and symbols_complete >= expected:
             continue
-        completeness_pct = round((d["symbols_complete"] / total * 100), 2) if total > 0 else 0.0
+        completeness_pct = round((symbols_complete / expected * 100), 2) if expected > 0 else 0.0
         gap_days.append({
             "date":             d["date"],
-            "symbols_complete": d["symbols_complete"],
-            "symbols_total":    total,
+            "symbols_complete": symbols_complete,
+            "symbols_total":    expected,
             "completeness_pct": completeness_pct,
+            "has_job_truth":    d["has_job_truth"],
             "status":           "missing" if completeness_pct == 0 else "partial",
         })
 
@@ -189,7 +224,7 @@ def gaps(
         "source_id": source_id,
         "lookback_days": days,
         "total_active_symbols": cov["total_active_symbols"],
-        "fetched_universe":     total,
+        "expected_today":       cov["expected_today"],
         "gaps_returned": len(gap_days),
         "gaps": gap_days,
     }
