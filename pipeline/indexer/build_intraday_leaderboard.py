@@ -1147,12 +1147,20 @@ for _day_key in tqdm(_date_groups, desc="Processing days"):
             # Lazy-open the writer on the first day so the path is known
             # and the schema is fixed once. After that, every day writes
             # one row group (1440 rows) directly to disk.
+            # Write to a TEMP file first — merged with the existing ALL
+            # parquet in the CLOSE section so nightly appends don't
+            # overwrite history.
             if _master_writer is None:
                 _master_path = OUTPUT_DIR / (
                     f"intraday_pct_leaderboard_{RANK_METRIC}_top{TOP_N}_anchor{ANCHOR_HHMM}_ALL.parquet"
                 )
+                import tempfile as _tempfile
+                _master_tmp_fd, _master_tmp_str = _tempfile.mkstemp(
+                    suffix=".parquet", dir=str(OUTPUT_DIR))
+                os.close(_master_tmp_fd)
+                _master_tmp_path = Path(_master_tmp_str)
                 _master_writer = pq.ParquetWriter(
-                    _master_path,
+                    str(_master_tmp_path),
                     _master_schema(TOP_N),
                     compression="snappy",
                 )
@@ -1199,14 +1207,57 @@ for _day_key in tqdm(_date_groups, desc="Processing days"):
 if BUILD_MASTER_FILE:
     if _master_writer is not None:
         _master_writer.close()
-        print(
-            f"\n✅ Master file built → {_master_path.name}\n"
-            f"Rows: {_master_rows_written:,}"
-        )
+
+        # Merge new data with existing ALL parquet. New data wins for
+        # overlapping dates (dedup by timestamp_utc, keep new).
+        if _master_path.exists():
+            existing_pf = pq.ParquetFile(str(_master_path))
+            new_pf = pq.ParquetFile(str(_master_tmp_path))
+
+            # Collect new-data dates so we can skip them from the old file
+            new_dates = set()
+            for rg_idx in range(new_pf.num_row_groups):
+                ts = new_pf.read_row_group(rg_idx, columns=["timestamp_utc"]).to_pandas()
+                new_dates.update(pd.to_datetime(ts["timestamp_utc"]).dt.date.unique())
+
+            # Write merged file: old row groups (excluding new dates) + new row groups
+            merged_path = _master_path.with_suffix(".merged.parquet")
+            merged_writer = pq.ParquetWriter(
+                str(merged_path), _master_schema(TOP_N), compression="snappy")
+
+            # Copy old row groups that don't overlap with new data
+            old_kept = 0
+            for rg_idx in range(existing_pf.num_row_groups):
+                tbl = existing_pf.read_row_group(rg_idx)
+                ts = pd.to_datetime(tbl.column("timestamp_utc").to_pandas())
+                rg_dates = set(ts.dt.date.unique())
+                if not rg_dates.intersection(new_dates):
+                    merged_writer.write_table(tbl)
+                    old_kept += tbl.num_rows
+
+            # Copy all new row groups
+            for rg_idx in range(new_pf.num_row_groups):
+                tbl = new_pf.read_row_group(rg_idx)
+                merged_writer.write_table(tbl)
+
+            merged_writer.close()
+
+            # Atomic swap
+            os.replace(str(merged_path), str(_master_path))
+            os.remove(str(_master_tmp_path))
+            total_rows = old_kept + _master_rows_written
+            print(
+                f"\n✅ Master file merged → {_master_path.name}\n"
+                f"   kept {old_kept:,} existing + {_master_rows_written:,} new = {total_rows:,} total"
+            )
+        else:
+            # No existing file — just move the temp into place
+            os.replace(str(_master_tmp_path), str(_master_path))
+            print(
+                f"\n✅ Master file built → {_master_path.name}\n"
+                f"Rows: {_master_rows_written:,}"
+            )
     else:
-        # No frame ever produced — every day either failed or was skipped
-        # by the checkpoint. The file does NOT exist on disk; downstream
-        # consumers (overlap_analysis.py) must check for its presence.
         print("⚠️  No dataframes produced — master parquet was not written.")
 
 # ============================================================
