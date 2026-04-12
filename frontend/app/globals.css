@@ -133,3 +133,33 @@ body {
 .manager-md pre code { background: none; padding: 0; }
 .manager-md h1, .manager-md h2, .manager-md h3 { font-size: 11px; font-weight: 700; color: var(--t0); margin: 12px 0 4px; }
 .manager-md hr { border: none; border-top: 1px solid var(--line); margin: 8px 0; }
+
+/* ── Navbar fill mode: all text turns black against the accent background ── */
+.navbar--fill-mode,
+.navbar--fill-mode span,
+.navbar--fill-mode button,
+.navbar--fill-mode svg { color: #000 !important; }
+.navbar--fill-mode svg path { stroke: #000 !important; }
+.navbar--fill-mode button:hover,
+.navbar--fill-mode button:hover span,
+.navbar--fill-mode button:hover svg { color: var(--t0) !important; }
+.navbar--fill-mode button:hover svg path { stroke: var(--t0) !important; }
+/* Active module pill needs contrast against the accent background */
+.navbar--fill-mode .navbar-pill-active {
+  background: rgba(0,0,0,0.15) !important;
+  border-color: rgba(0,0,0,0.3) !important;
+}
+/* Fullscreen + theme buttons: no background in fill mode */
+.navbar--fill-mode .navbar-btn {
+  background: transparent !important;
+}
+/* Theme dropdown panel keeps its original dark-mode colors */
+.navbar-theme-panel,
+.navbar-theme-panel span,
+.navbar-theme-panel button,
+.navbar-theme-panel div { color: revert !important; }
+.navbar-theme-panel button { color: var(--t1) !important; }
+.navbar-theme-panel button:hover { color: var(--t0) !important; }
+.navbar-theme-panel .theme-label { color: var(--t2) !important; }
+.navbar-theme-panel .theme-target-btn { color: var(--t3) !important; }
+.navbar-theme-panel .theme-target-btn-active { color: var(--t0) !important; }

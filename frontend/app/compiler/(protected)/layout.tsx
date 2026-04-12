@@ -126,12 +126,16 @@ function CompilerSidebar() {
         </button>
       </div>
       {!collapsed && (
-        <div style={{ flex: 1, overflowY: "auto", paddingTop: 8 }}>
-          <NavItem label="Coverage"  href="/compiler/coverage"  active={pathname === "/compiler/coverage"} />
-          <NavItem label="Days"      href="/compiler/days"      active={pathname === "/compiler/days" || pathname.startsWith("/compiler/days/")} />
-          <NavItem label="Marketcap" href="/compiler/marketcap" active={pathname === "/compiler/marketcap" || pathname.startsWith("/compiler/marketcap/")} />
-          <NavItem label="Symbols"   href="/compiler/symbols"   active={pathname === "/compiler/symbols"} />
-          <NavItem label="Jobs"      href="/compiler/jobs"      active={pathname === "/compiler/jobs"} />
+        <div style={{ flex: 1, overflowY: "auto", paddingTop: 8, display: "flex", flexDirection: "column" }}>
+          <div>
+            <NavItem label="Coverage"  href="/compiler/coverage"  active={pathname === "/compiler/coverage"} />
+            <NavItem label="Days"      href="/compiler/days"      active={pathname === "/compiler/days" || pathname.startsWith("/compiler/days/")} />
+            <NavItem label="Marketcap" href="/compiler/marketcap" active={pathname === "/compiler/marketcap" || pathname.startsWith("/compiler/marketcap/")} />
+            <NavItem label="Symbols"   href="/compiler/symbols"   active={pathname === "/compiler/symbols"} />
+          </div>
+          <div style={{ marginTop: "auto", borderTop: "1px solid var(--line)", paddingTop: 4 }}>
+            <NavItem label="Jobs"      href="/compiler/jobs"      active={pathname === "/compiler/jobs"} />
+          </div>
         </div>
       )}
       {collapsed && (

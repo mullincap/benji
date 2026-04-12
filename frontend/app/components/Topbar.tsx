@@ -305,6 +305,7 @@ export default function Topbar() {
 
         {modulesOpen && (
           <div
+            className="navbar-theme-panel"
             style={{
               position: 'absolute',
               left: 0,
@@ -402,6 +403,7 @@ export default function Topbar() {
             display: 'inline-flex',
             alignItems: 'center',
             justifyContent: 'center',
+            marginRight: 4,
           }}
         >
           {isFullscreen ? '\u2922' : '\u26F6'}
@@ -439,6 +441,7 @@ export default function Topbar() {
           </button>
           {themeOpen && (
             <div
+              className="navbar-theme-panel"
               style={{
                 position: 'absolute',
                 right: 0,
@@ -499,11 +502,12 @@ export default function Topbar() {
 
               {/* Color target toggle */}
               <div style={{ borderTop: '1px solid var(--line)', marginTop: 6, paddingTop: 8, padding: '8px 8px 4px' }}>
-                <div style={{ fontSize: 8, color: 'var(--t2)', letterSpacing: '0.1em', textTransform: 'uppercase', marginBottom: 6 }}>COLOR TARGET</div>
+                <div className="theme-label" style={{ fontSize: 8, color: 'var(--t2)', letterSpacing: '0.1em', textTransform: 'uppercase', marginBottom: 6 }}>COLOR TARGET</div>
                 <div style={{ display: 'flex', border: '1px solid var(--line)', borderRadius: 4, overflow: 'hidden' }}>
                   {(['none', 'text', 'fill', 'mono'] as ThemeTarget[]).map((t) => (
                     <button
                       key={t}
+                      className={themeTarget === t ? 'theme-target-btn-active' : 'theme-target-btn'}
                       onClick={() => selectTarget(t)}
                       style={{
                         flex: 1, padding: '4px 0',
@@ -530,6 +534,7 @@ export default function Topbar() {
           return (
             <button
               key={item.key}
+              className={isActive ? 'navbar-pill-active' : ''}
               onClick={() => router.push(item.href)}
               style={{
                 fontSize: 8,

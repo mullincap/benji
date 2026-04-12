@@ -8,7 +8,10 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
 from app.core.config import settings
-from app.services.job_store import create_job, delete_job, get_job, list_jobs, update_job
+from app.services.job_store import (
+    create_job, delete_job, get_job, list_jobs, update_job,
+    list_folders, create_folder, rename_folder, delete_folder,
+)
 from app.workers.pipeline_worker import _parse_metrics, run_pipeline
 
 router = APIRouter(prefix="/api/jobs", tags=["jobs"])
@@ -252,6 +255,7 @@ class JobResponse(BaseModel):
 
 class JobPatchRequest(BaseModel):
     display_name: str | None = None
+    folder_id: str | None = None
 
 
 class JobRenameRequest(BaseModel):
@@ -298,6 +302,8 @@ def patch_job_endpoint(job_id: str, req: JobPatchRequest) -> JobResponse:
             fields["display_name"] = name or None
         else:
             fields["display_name"] = None
+    if "folder_id" in req.model_fields_set:
+        fields["folder_id"] = req.folder_id
 
     if not fields:
         return job
@@ -411,3 +417,40 @@ def download_report(job_id: str) -> FileResponse:
         media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
         filename=f"audit_report_{job_id[:8]}.docx",
     )
+
+
+# ---------------------------------------------------------------------------
+# Folder endpoints
+# ---------------------------------------------------------------------------
+
+class FolderCreateRequest(BaseModel):
+    name: str
+
+
+class FolderRenameRequest(BaseModel):
+    name: str
+
+
+@router.get("/folders/list")
+def list_folders_endpoint() -> list[dict[str, Any]]:
+    return list_folders()
+
+
+@router.post("/folders")
+def create_folder_endpoint(req: FolderCreateRequest) -> dict[str, Any]:
+    return create_folder(req.name)
+
+
+@router.patch("/folders/{folder_id}")
+def rename_folder_endpoint(folder_id: str, req: FolderRenameRequest) -> dict[str, Any]:
+    result = rename_folder(folder_id, req.name)
+    if result is None:
+        raise HTTPException(status_code=404, detail="Folder not found")
+    return result
+
+
+@router.delete("/folders/{folder_id}")
+def delete_folder_endpoint(folder_id: str) -> dict[str, str]:
+    if not delete_folder(folder_id):
+        raise HTTPException(status_code=404, detail="Folder not found")
+    return {"status": "deleted", "folder_id": folder_id}

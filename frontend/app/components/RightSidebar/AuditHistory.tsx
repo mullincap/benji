@@ -1,16 +1,26 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
+
+const API_BASE = process.env.NEXT_PUBLIC_API_BASE || '';
 
 interface AuditHistoryItem {
   id: string;
   display_name?: string | null;
+  folder_id?: string | null;
   status: string;
   stage?: string | null;
   created_at?: number;
   updated_at?: number;
   params?: Record<string, unknown>;
   results?: Record<string, unknown> | null;
+}
+
+interface Folder {
+  id: string;
+  name: string;
+  created_at: number;
+  position: number;
 }
 
 type FilterMetricRow = {
@@ -33,6 +43,7 @@ interface AuditHistoryProps {
   onSelect: (job: AuditHistoryItem) => void;
   onDelete: (job: AuditHistoryItem) => void;
   onRename: (job: AuditHistoryItem, displayName: string) => void | Promise<void>;
+  onJobsChanged?: () => void;
 }
 
 function fmtWhen(ts?: number): string {
@@ -111,6 +122,19 @@ function pickBestSharpe(results: Record<string, unknown> | null | undefined): nu
   return legacy;
 }
 
+const btnStyle: React.CSSProperties = {
+  height: 18,
+  padding: '0 6px',
+  borderRadius: 2,
+  border: '1px solid var(--line2)',
+  background: 'var(--bg1)',
+  fontSize: 9,
+  fontFamily: 'Space Mono, monospace',
+  cursor: 'pointer',
+  display: 'inline-flex',
+  alignItems: 'center',
+};
+
 export default function AuditHistory({
   collapsed,
   jobs,
@@ -123,10 +147,97 @@ export default function AuditHistory({
   onSelect,
   onDelete,
   onRename,
+  onJobsChanged,
 }: AuditHistoryProps) {
   const [pendingDeleteId, setPendingDeleteId] = useState<string | null>(null);
   const [editingRenameId, setEditingRenameId] = useState<string | null>(null);
   const [renameDraft, setRenameDraft] = useState('');
+
+  // Folder state
+  const [folders, setFolders] = useState<Folder[]>([]);
+  const [activeFolderId, setActiveFolderId] = useState<string | null>(null); // null = "All"
+  const [creatingFolder, setCreatingFolder] = useState(false);
+  const [newFolderName, setNewFolderName] = useState('');
+  const [editingFolderId, setEditingFolderId] = useState<string | null>(null);
+  const [editFolderName, setEditFolderName] = useState('');
+  const [movingJobId, setMovingJobId] = useState<string | null>(null);
+
+  useEffect(() => {
+    fetchFolders();
+  }, []);
+
+  async function fetchFolders() {
+    try {
+      const res = await fetch(`${API_BASE}/api/jobs/folders/list`);
+      if (res.ok) {
+        const data = await res.json();
+        setFolders(data);
+      }
+    } catch { /* ignore */ }
+  }
+
+  async function handleCreateFolder() {
+    const name = newFolderName.trim();
+    if (!name) return;
+    try {
+      const res = await fetch(`${API_BASE}/api/jobs/folders`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name }),
+      });
+      if (res.ok) {
+        const folder = await res.json();
+        setFolders((prev) => [...prev, folder]);
+        setActiveFolderId(folder.id);
+      }
+    } catch { /* ignore */ }
+    setCreatingFolder(false);
+    setNewFolderName('');
+  }
+
+  async function handleRenameFolder(folderId: string) {
+    const name = editFolderName.trim();
+    if (!name) return;
+    try {
+      const res = await fetch(`${API_BASE}/api/jobs/folders/${folderId}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name }),
+      });
+      if (res.ok) {
+        const updated = await res.json();
+        setFolders((prev) => prev.map((f) => f.id === folderId ? updated : f));
+      }
+    } catch { /* ignore */ }
+    setEditingFolderId(null);
+    setEditFolderName('');
+  }
+
+  async function handleDeleteFolder(folderId: string) {
+    try {
+      await fetch(`${API_BASE}/api/jobs/folders/${folderId}`, { method: 'DELETE' });
+      setFolders((prev) => prev.filter((f) => f.id !== folderId));
+      if (activeFolderId === folderId) setActiveFolderId(null);
+      onJobsChanged?.();
+    } catch { /* ignore */ }
+  }
+
+  async function handleMoveJob(jobId: string, folderId: string | null) {
+    try {
+      await fetch(`${API_BASE}/api/jobs/${jobId}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ folder_id: folderId }),
+      });
+      onJobsChanged?.();
+    } catch { /* ignore */ }
+    setMovingJobId(null);
+  }
+
+  // Filter jobs by active folder
+  const filteredJobs = activeFolderId === null
+    ? jobs
+    : jobs.filter((j) => j.folder_id === activeFolderId);
 
   return (
     <div
@@ -141,6 +252,7 @@ export default function AuditHistory({
         overflow: 'hidden',
       }}
     >
+      {/* Header */}
       <div
         style={{
           height: 40,
@@ -152,15 +264,10 @@ export default function AuditHistory({
         }}
       >
         {!collapsed && (
-          <span
-            style={{
-              fontSize: 9,
-              textTransform: 'uppercase',
-              letterSpacing: '0.12em',
-              color: 'var(--t3)',
-              fontWeight: 700,
-            }}
-          >
+          <span style={{
+            fontSize: 9, textTransform: 'uppercase', letterSpacing: '0.12em',
+            color: 'var(--t3)', fontWeight: 700,
+          }}>
             Audit History
           </span>
         )}
@@ -168,14 +275,10 @@ export default function AuditHistory({
           onClick={onToggle}
           title={collapsed ? 'Expand history' : 'Collapse history'}
           style={{
-            width: 24,
-            height: 24,
-            border: '1px solid var(--line2)',
-            borderRadius: 3,
-            background: 'transparent',
-            color: 'var(--t1)',
-            fontSize: 11,
-            cursor: 'pointer',
+            width: 24, height: 24,
+            border: '1px solid var(--line2)', borderRadius: 3,
+            background: 'transparent', color: 'var(--t1)',
+            fontSize: 11, cursor: 'pointer',
           }}
         >
           {collapsed ? '«' : '»'}
@@ -183,308 +286,292 @@ export default function AuditHistory({
       </div>
 
       {!collapsed && (
-        <div style={{ flex: 1, overflowY: 'auto', padding: 8 }}>
-          {loading && <div style={{ fontSize: 10, color: 'var(--t2)', padding: 6 }}>Refreshing audits...</div>}
-          {error && (
-            <div style={{ fontSize: 10, color: 'var(--red)', padding: 6, border: '1px solid var(--red)', borderRadius: 3 }}>
-              {error}
-            </div>
-          )}
-          {!error && jobs.length === 0 && (
-            <div style={{ fontSize: 10, color: 'var(--t2)', padding: 6 }}>No audits found.</div>
-          )}
-          {!error &&
-            jobs.map((job, jobIdx) => {
-              const selected = selectedJobId === job.id;
-              const nextIsSelected = jobIdx + 1 < jobs.length && selectedJobId === jobs[jobIdx + 1].id;
-              const bestSharpe = pickBestSharpe(job.results as Record<string, unknown> | null | undefined);
-              const sharpeVal = bestSharpe !== null ? bestSharpe.toFixed(3) : '—';
-              const deleting = deletingJobId === job.id;
-              const renaming = renamingJobId === job.id;
-              const isEditingName = editingRenameId === job.id;
-              const displayName = (typeof job.display_name === 'string' && job.display_name.trim().length > 0)
-                ? job.display_name.trim()
-                : '';
-              return (
-                <div
-                  key={job.id}
-                  onClick={() => onSelect(job)}
-                  onKeyDown={(e) => {
-                    if (e.key === 'Enter' || e.key === ' ') {
-                      e.preventDefault();
-                      onSelect(job);
-                    }
+        <>
+          {/* Folder tabs */}
+          <div style={{
+            borderBottom: '1px solid var(--line)',
+            padding: '6px 8px',
+            display: 'flex',
+            flexDirection: 'column',
+            gap: 4,
+          }}>
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
+              <button
+                onClick={() => setActiveFolderId(null)}
+                style={{
+                  ...btnStyle,
+                  background: activeFolderId === null ? 'var(--bg4)' : 'var(--bg1)',
+                  color: activeFolderId === null ? 'var(--t0)' : 'var(--t3)',
+                  fontWeight: 700,
+                  letterSpacing: '0.06em',
+                }}
+              >
+                ALL
+              </button>
+              {folders.map((f) => (
+                <button
+                  key={f.id}
+                  onClick={() => setActiveFolderId(f.id)}
+                  onContextMenu={(e) => {
+                    e.preventDefault();
+                    setEditingFolderId(f.id);
+                    setEditFolderName(f.name);
                   }}
-                  role="button"
-                  tabIndex={0}
+                  title="Click to filter · Right-click to edit"
                   style={{
-                    width: '100%',
-                    textAlign: 'left',
-                    marginBottom: 0,
-                    padding: '8px 8px',
-                    borderRadius: selected ? 3 : 0,
-                    border: selected ? '1px solid var(--line)' : 'none',
-                    borderBottom: selected ? '1px solid var(--line)' : nextIsSelected ? '1px solid transparent' : '1px solid var(--line2)',
-                    background: selected ? 'var(--bg2)' : 'transparent',
-                    cursor: 'pointer',
+                    ...btnStyle,
+                    background: activeFolderId === f.id ? 'var(--bg4)' : 'var(--bg1)',
+                    color: activeFolderId === f.id ? 'var(--t0)' : 'var(--t3)',
+                    fontWeight: 700,
+                    letterSpacing: '0.06em',
+                    maxWidth: 120,
+                    overflow: 'hidden',
+                    textOverflow: 'ellipsis',
+                    whiteSpace: 'nowrap',
                   }}
                 >
-                  <div style={{ display: 'flex', alignItems: 'center', marginBottom: 6, gap: 6 }}>
-                    <span style={{ fontSize: 10, color: statusColor(job.status), textTransform: 'uppercase', letterSpacing: '0.08em' }}>
-                      {normalizeStatus(job.status)}
-                    </span>
-                    <span style={{ fontSize: 9, color: 'var(--t2)', marginLeft: 'auto', fontFamily: 'Space Mono, monospace' }}>
-                      {job.id.slice(0, 8)}
-                    </span>
-                    {pendingDeleteId === job.id ? (
-                      <>
-                        <span
-                          role="button"
-                          tabIndex={0}
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            setPendingDeleteId(null);
-                          }}
-                          onKeyDown={(e) => {
-                            if (e.key === 'Enter' || e.key === ' ') {
-                              e.preventDefault();
-                              e.stopPropagation();
-                              setPendingDeleteId(null);
-                            }
-                          }}
-                          title="Cancel delete"
-                          style={{
-                            height: 18,
-                            padding: '0 6px',
-                            borderRadius: 2,
-                            border: '1px solid var(--line2)',
-                            background: 'var(--bg1)',
-                            color: 'var(--t1)',
-                            fontSize: 9,
-                            cursor: 'pointer',
-                            display: 'inline-flex',
-                            alignItems: 'center',
-                          }}
-                        >
-                          CANCEL
-                        </span>
-                        <span
-                          role="button"
-                          tabIndex={deleting ? -1 : 0}
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            if (deleting) return;
-                            onDelete(job);
-                            setPendingDeleteId(null);
-                          }}
-                          onKeyDown={(e) => {
-                            if (e.key === 'Enter' || e.key === ' ') {
-                              e.preventDefault();
-                              e.stopPropagation();
-                              if (deleting) return;
-                              onDelete(job);
-                              setPendingDeleteId(null);
-                            }
-                          }}
-                          title="Confirm delete"
-                          aria-disabled={deleting}
-                          style={{
-                            height: 18,
-                            padding: '0 6px',
-                            borderRadius: 2,
-                            border: '1px solid var(--line2)',
-                            background: 'var(--bg1)',
-                            color: deleting ? 'var(--t2)' : 'var(--t1)',
-                            fontSize: 9,
-                            cursor: deleting ? 'not-allowed' : 'pointer',
-                            transition: 'color 0.15s ease',
-                            display: 'inline-flex',
-                            alignItems: 'center',
-                          }}
-                          onMouseEnter={(e) => {
-                            if (!deleting) (e.currentTarget.style.color = 'var(--red)');
-                          }}
-                          onMouseLeave={(e) => {
-                            if (!deleting) (e.currentTarget.style.color = 'var(--t1)');
-                          }}
-                        >
-                          {deleting ? '…' : 'DELETE'}
-                        </span>
-                      </>
-                    ) : (
-                      <span
-                        role="button"
-                        tabIndex={deleting ? -1 : 0}
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          if (deleting) return;
-                          setPendingDeleteId(job.id);
-                        }}
-                        onKeyDown={(e) => {
-                          if (e.key === 'Enter' || e.key === ' ') {
-                            e.preventDefault();
-                            e.stopPropagation();
-                            if (deleting) return;
-                            setPendingDeleteId(job.id);
-                          }
-                        }}
-                        title="Delete audit"
-                        aria-disabled={deleting}
-                        style={{
-                          height: 18,
-                          padding: '0 6px',
-                          borderRadius: 2,
-                          border: '1px solid var(--line2)',
-                          background: 'var(--bg1)',
-                          color: deleting ? 'var(--t2)' : 'var(--t1)',
-                          fontSize: 9,
-                          cursor: deleting ? 'not-allowed' : 'pointer',
-                          transition: 'color 0.15s ease',
-                          display: 'inline-flex',
-                          alignItems: 'center',
-                        }}
-                        onMouseEnter={(e) => {
-                          if (!deleting) (e.currentTarget.style.color = 'var(--red)');
-                        }}
-                        onMouseLeave={(e) => {
-                          if (!deleting) (e.currentTarget.style.color = 'var(--t1)');
-                        }}
-                      >
-                        {deleting ? '…' : 'DEL'}
+                  {f.name}
+                </button>
+              ))}
+              <button
+                onClick={() => setCreatingFolder(true)}
+                style={{
+                  ...btnStyle,
+                  color: 'var(--t3)',
+                  fontSize: 11,
+                }}
+                title="New folder"
+              >
+                +
+              </button>
+            </div>
+
+            {/* New folder input */}
+            {creatingFolder && (
+              <div style={{ display: 'flex', gap: 4, alignItems: 'center' }}>
+                <input
+                  autoFocus
+                  value={newFolderName}
+                  onChange={(e) => setNewFolderName(e.target.value)}
+                  placeholder="Folder name"
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') handleCreateFolder();
+                    if (e.key === 'Escape') { setCreatingFolder(false); setNewFolderName(''); }
+                  }}
+                  style={{
+                    flex: 1, height: 22,
+                    border: '1px solid var(--line2)', borderRadius: 2,
+                    background: 'var(--bg1)', color: 'var(--t1)',
+                    fontSize: 9, fontFamily: 'Space Mono, monospace',
+                    padding: '0 6px', outline: 'none',
+                  }}
+                />
+                <button onClick={handleCreateFolder} style={{ ...btnStyle, color: 'var(--t1)' }}>OK</button>
+                <button onClick={() => { setCreatingFolder(false); setNewFolderName(''); }} style={{ ...btnStyle, color: 'var(--t2)' }}>X</button>
+              </div>
+            )}
+
+            {/* Edit folder inline */}
+            {editingFolderId && (
+              <div style={{ display: 'flex', gap: 4, alignItems: 'center' }}>
+                <input
+                  autoFocus
+                  value={editFolderName}
+                  onChange={(e) => setEditFolderName(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') handleRenameFolder(editingFolderId);
+                    if (e.key === 'Escape') { setEditingFolderId(null); setEditFolderName(''); }
+                  }}
+                  style={{
+                    flex: 1, height: 22,
+                    border: '1px solid var(--line2)', borderRadius: 2,
+                    background: 'var(--bg1)', color: 'var(--t1)',
+                    fontSize: 9, fontFamily: 'Space Mono, monospace',
+                    padding: '0 6px', outline: 'none',
+                  }}
+                />
+                <button onClick={() => handleRenameFolder(editingFolderId)} style={{ ...btnStyle, color: 'var(--t1)' }}>SAVE</button>
+                <button onClick={() => handleDeleteFolder(editingFolderId)} style={{ ...btnStyle, color: 'var(--red)' }}>DEL</button>
+                <button onClick={() => { setEditingFolderId(null); setEditFolderName(''); }} style={{ ...btnStyle, color: 'var(--t2)' }}>X</button>
+              </div>
+            )}
+          </div>
+
+          {/* Job list */}
+          <div style={{ flex: 1, overflowY: 'auto', padding: 8 }}>
+            {loading && <div style={{ fontSize: 10, color: 'var(--t2)', padding: 6 }}>Refreshing audits...</div>}
+            {error && (
+              <div style={{ fontSize: 10, color: 'var(--red)', padding: 6, border: '1px solid var(--red)', borderRadius: 3 }}>
+                {error}
+              </div>
+            )}
+            {!error && filteredJobs.length === 0 && (
+              <div style={{ fontSize: 10, color: 'var(--t2)', padding: 6 }}>
+                {activeFolderId ? 'No audits in this folder.' : 'No audits found.'}
+              </div>
+            )}
+            {!error &&
+              filteredJobs.map((job, jobIdx) => {
+                const selected = selectedJobId === job.id;
+                const nextIsSelected = jobIdx + 1 < filteredJobs.length && selectedJobId === filteredJobs[jobIdx + 1].id;
+                const bestSharpe = pickBestSharpe(job.results as Record<string, unknown> | null | undefined);
+                const sharpeVal = bestSharpe !== null ? bestSharpe.toFixed(3) : '—';
+                const deleting = deletingJobId === job.id;
+                const renaming = renamingJobId === job.id;
+                const isEditingName = editingRenameId === job.id;
+                const isMoving = movingJobId === job.id;
+                const displayName = (typeof job.display_name === 'string' && job.display_name.trim().length > 0)
+                  ? job.display_name.trim()
+                  : '';
+                return (
+                  <div
+                    key={job.id}
+                    onClick={() => onSelect(job)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter' || e.key === ' ') {
+                        e.preventDefault();
+                        onSelect(job);
+                      }
+                    }}
+                    role="button"
+                    tabIndex={0}
+                    style={{
+                      width: '100%',
+                      textAlign: 'left',
+                      marginBottom: 0,
+                      padding: '8px 8px',
+                      borderRadius: selected ? 3 : 0,
+                      border: selected ? '1px solid var(--line)' : 'none',
+                      borderBottom: selected ? '1px solid var(--line)' : nextIsSelected ? '1px solid transparent' : '1px solid var(--line2)',
+                      background: selected ? 'var(--bg2)' : 'transparent',
+                      cursor: 'pointer',
+                    }}
+                  >
+                    {/* Row 1: status + id + actions */}
+                    <div style={{ display: 'flex', alignItems: 'center', marginBottom: 6, gap: 6 }}>
+                      <span style={{ fontSize: 10, color: statusColor(job.status), textTransform: 'uppercase', letterSpacing: '0.08em' }}>
+                        {normalizeStatus(job.status)}
                       </span>
-                    )}
-                  </div>
-                  {isEditingName ? (
-                    <div style={{ display: 'flex', gap: 6, alignItems: 'center', marginBottom: 6 }}>
-                      <input
-                        value={renameDraft}
-                        onChange={(e) => setRenameDraft(e.target.value)}
-                        placeholder="Audit name"
-                        onClick={(e) => e.stopPropagation()}
-                        onKeyDown={async (e) => {
-                          e.stopPropagation();
-                          if (e.key === 'Escape') {
-                            setEditingRenameId(null);
-                            setRenameDraft('');
-                            return;
-                          }
-                          if (e.key === 'Enter') {
-                            if (renaming) return;
-                            await onRename(job, renameDraft.trim());
-                            setEditingRenameId(null);
-                            setRenameDraft('');
-                          }
-                        }}
-                        style={{
-                          flex: 1,
-                          height: 22,
-                          border: '1px solid var(--line2)',
-                          borderRadius: 2,
-                          background: 'var(--bg1)',
-                          color: 'var(--t1)',
-                          fontSize: 9,
-                          fontFamily: 'Space Mono, monospace',
-                          padding: '0 6px',
-                          outline: 'none',
-                        }}
-                      />
-                      <button
-                        type="button"
-                        onClick={async (e) => {
-                          e.stopPropagation();
-                          if (renaming) return;
-                          await onRename(job, renameDraft.trim());
-                          setEditingRenameId(null);
-                          setRenameDraft('');
-                        }}
-                        disabled={renaming}
-                        style={{
-                          height: 22,
-                          border: '1px solid var(--line2)',
-                          borderRadius: 2,
-                          background: 'var(--bg1)',
-                          color: renaming ? 'var(--t2)' : 'var(--t1)',
-                          fontSize: 9,
-                          fontFamily: 'Space Mono, monospace',
-                          padding: '0 6px',
-                          cursor: renaming ? 'not-allowed' : 'pointer',
-                        }}
-                      >
-                        {renaming ? '…' : 'SAVE'}
-                      </button>
-                      <button
-                        type="button"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          if (renaming) return;
-                          setEditingRenameId(null);
-                          setRenameDraft('');
-                        }}
-                        disabled={renaming}
-                        style={{
-                          height: 22,
-                          border: '1px solid var(--line2)',
-                          borderRadius: 2,
-                          background: 'var(--bg1)',
-                          color: 'var(--t2)',
-                          fontSize: 9,
-                          fontFamily: 'Space Mono, monospace',
-                          padding: '0 6px',
-                          cursor: renaming ? 'not-allowed' : 'pointer',
-                        }}
-                      >
-                        CANCEL
-                      </button>
+                      <span style={{ fontSize: 9, color: 'var(--t2)', marginLeft: 'auto', fontFamily: 'Space Mono, monospace' }}>
+                        {job.id.slice(0, 8)}
+                      </span>
+                      {pendingDeleteId === job.id ? (
+                        <>
+                          <span role="button" tabIndex={0}
+                            onClick={(e) => { e.stopPropagation(); setPendingDeleteId(null); }}
+                            onKeyDown={(e) => { if (e.key === 'Enter') { e.stopPropagation(); setPendingDeleteId(null); } }}
+                            style={{ ...btnStyle, color: 'var(--t1)' }}>CANCEL</span>
+                          <span role="button" tabIndex={deleting ? -1 : 0}
+                            onClick={(e) => { e.stopPropagation(); if (!deleting) { onDelete(job); setPendingDeleteId(null); } }}
+                            onKeyDown={(e) => { if (e.key === 'Enter') { e.stopPropagation(); if (!deleting) { onDelete(job); setPendingDeleteId(null); } } }}
+                            style={{ ...btnStyle, color: deleting ? 'var(--t2)' : 'var(--t1)' }}
+                            onMouseEnter={(e) => { if (!deleting) e.currentTarget.style.color = 'var(--red)'; }}
+                            onMouseLeave={(e) => { if (!deleting) e.currentTarget.style.color = 'var(--t1)'; }}
+                          >{deleting ? '...' : 'DELETE'}</span>
+                        </>
+                      ) : (
+                        <span role="button" tabIndex={deleting ? -1 : 0}
+                          onClick={(e) => { e.stopPropagation(); if (!deleting) setPendingDeleteId(job.id); }}
+                          onKeyDown={(e) => { if (e.key === 'Enter') { e.stopPropagation(); if (!deleting) setPendingDeleteId(job.id); } }}
+                          style={{ ...btnStyle, color: deleting ? 'var(--t2)' : 'var(--t1)' }}
+                          onMouseEnter={(e) => { if (!deleting) e.currentTarget.style.color = 'var(--red)'; }}
+                          onMouseLeave={(e) => { if (!deleting) e.currentTarget.style.color = 'var(--t1)'; }}
+                        >{deleting ? '...' : 'DEL'}</span>
+                      )}
                     </div>
-                  ) : (
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 6 }}>
-                      <div
-                        style={{
-                          fontSize: 9,
-                          color: displayName ? 'var(--t1)' : 'var(--t2)',
-                          fontFamily: 'Space Mono, monospace',
-                          whiteSpace: 'nowrap',
-                          overflow: 'hidden',
-                          textOverflow: 'ellipsis',
-                          flex: 1,
-                        }}
-                        title={displayName || 'Unnamed audit'}
-                      >
-                        {displayName || 'Unnamed audit'}
+
+                    {/* Row 2: name / rename */}
+                    {isEditingName ? (
+                      <div style={{ display: 'flex', gap: 6, alignItems: 'center', marginBottom: 6 }}>
+                        <input
+                          value={renameDraft}
+                          onChange={(e) => setRenameDraft(e.target.value)}
+                          placeholder="Audit name"
+                          onClick={(e) => e.stopPropagation()}
+                          onKeyDown={async (e) => {
+                            e.stopPropagation();
+                            if (e.key === 'Escape') { setEditingRenameId(null); setRenameDraft(''); return; }
+                            if (e.key === 'Enter') { if (!renaming) { await onRename(job, renameDraft.trim()); setEditingRenameId(null); setRenameDraft(''); } }
+                          }}
+                          style={{
+                            flex: 1, height: 22,
+                            border: '1px solid var(--line2)', borderRadius: 2,
+                            background: 'var(--bg1)', color: 'var(--t1)',
+                            fontSize: 9, fontFamily: 'Space Mono, monospace',
+                            padding: '0 6px', outline: 'none',
+                          }}
+                        />
+                        <button type="button"
+                          onClick={async (e) => { e.stopPropagation(); if (!renaming) { await onRename(job, renameDraft.trim()); setEditingRenameId(null); setRenameDraft(''); } }}
+                          disabled={renaming}
+                          style={{ ...btnStyle, color: renaming ? 'var(--t2)' : 'var(--t1)' }}
+                        >{renaming ? '...' : 'SAVE'}</button>
+                        <button type="button"
+                          onClick={(e) => { e.stopPropagation(); setEditingRenameId(null); setRenameDraft(''); }}
+                          style={{ ...btnStyle, color: 'var(--t2)' }}
+                        >X</button>
                       </div>
-                      <button
-                        type="button"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          if (renaming) return;
-                          setEditingRenameId(job.id);
-                          setRenameDraft(displayName);
-                        }}
-                        disabled={renaming}
-                        style={{
-                          height: 18,
-                          border: '1px solid var(--line2)',
-                          borderRadius: 2,
-                          background: 'var(--bg1)',
-                          color: 'var(--t2)',
-                          fontSize: 9,
-                          fontFamily: 'Space Mono, monospace',
-                          padding: '0 6px',
-                          cursor: renaming ? 'not-allowed' : 'pointer',
-                        }}
-                      >
-                        RENAME
-                      </button>
+                    ) : (
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 6 }}>
+                        <div
+                          style={{
+                            fontSize: 9, color: displayName ? 'var(--t1)' : 'var(--t2)',
+                            fontFamily: 'Space Mono, monospace',
+                            whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', flex: 1,
+                          }}
+                          title={displayName || 'Unnamed audit'}
+                        >
+                          {displayName || 'Unnamed audit'}
+                        </div>
+                        <button type="button"
+                          onClick={(e) => { e.stopPropagation(); if (!renaming) { setEditingRenameId(job.id); setRenameDraft(displayName); } }}
+                          disabled={renaming}
+                          style={{ ...btnStyle, color: 'var(--t2)' }}
+                        >RENAME</button>
+                        <button type="button"
+                          onClick={(e) => { e.stopPropagation(); setMovingJobId(isMoving ? null : job.id); }}
+                          style={{ ...btnStyle, color: 'var(--t2)' }}
+                          title="Move to folder"
+                        >MOVE</button>
+                      </div>
+                    )}
+
+                    {/* Move-to-folder picker */}
+                    {isMoving && (
+                      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4, marginBottom: 6 }}
+                           onClick={(e) => e.stopPropagation()}>
+                        <button
+                          onClick={() => handleMoveJob(job.id, null)}
+                          style={{
+                            ...btnStyle,
+                            color: !job.folder_id ? 'var(--t0)' : 'var(--t3)',
+                            background: !job.folder_id ? 'var(--bg4)' : 'var(--bg1)',
+                          }}
+                        >None</button>
+                        {folders.map((f) => (
+                          <button
+                            key={f.id}
+                            onClick={() => handleMoveJob(job.id, f.id)}
+                            style={{
+                              ...btnStyle,
+                              color: job.folder_id === f.id ? 'var(--t0)' : 'var(--t3)',
+                              background: job.folder_id === f.id ? 'var(--bg4)' : 'var(--bg1)',
+                            }}
+                          >{f.name}</button>
+                        ))}
+                      </div>
+                    )}
+
+                    {/* Row 3: sharpe + timestamp */}
+                    <div style={{ fontSize: 9, color: 'var(--t1)', marginBottom: 4 }}>
+                      sharpe: {sharpeVal}
                     </div>
-                  )}
-                  <div style={{ fontSize: 9, color: 'var(--t1)', marginBottom: 4 }}>
-                    sharpe: {sharpeVal}
+                    <div style={{ fontSize: 9, color: 'var(--t2)' }}>updated: {fmtWhen(job.updated_at)}</div>
                   </div>
-                  <div style={{ fontSize: 9, color: 'var(--t2)' }}>updated: {fmtWhen(job.updated_at)}</div>
-                </div>
-              );
-            })}
-        </div>
+                );
+              })}
+          </div>
+        </>
       )}
     </div>
   );

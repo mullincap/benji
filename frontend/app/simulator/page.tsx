@@ -191,6 +191,7 @@ const STAGE_LABELS: Record<string, string> = {
 interface AuditHistoryItem {
   id: string;
   display_name?: string | null;
+  folder_id?: string | null;
   status: string;
   stage?: string | null;
   progress?: number;
@@ -247,13 +248,30 @@ export default function Home() {
     }
   }
 
+  const initialLoadDone = useRef(false);
   useEffect(() => {
-    loadAuditHistory(false);
+    async function initialLoad() {
+      await loadAuditHistory(false);
+    }
+    initialLoad();
     const interval = setInterval(() => {
       loadAuditHistory(true);
     }, 10000);
     return () => clearInterval(interval);
   }, []);
+
+  // Auto-select the most recent completed audit on first load
+  useEffect(() => {
+    if (initialLoadDone.current) return;
+    if (auditHistory.length === 0) return;
+    const latest = auditHistory.find(
+      (j) => ['complete', 'completed', 'done'].includes(String(j.status || '').toLowerCase())
+    );
+    if (latest && appState === 'idle') {
+      initialLoadDone.current = true;
+      handleSelectAudit(latest);
+    }
+  }, [auditHistory]);
 
   async function handleDeleteAudit(job: AuditHistoryItem) {
     const ok = window.confirm(`Delete audit ${job.id.slice(0, 8)}? This cannot be undone.`);
@@ -690,6 +708,7 @@ export default function Home() {
             onSelect={handleSelectAudit}
             onDelete={handleDeleteAudit}
             onRename={handleRenameAudit}
+            onJobsChanged={() => loadAuditHistory(true)}
           />
         </div>
       </div>
