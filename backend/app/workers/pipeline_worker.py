@@ -788,16 +788,20 @@ def run_pipeline(self, job_id: str, params: dict) -> dict:
     if params.get("price_source") == "db":
         import glob as _glob
         import pyarrow.parquet as _pq
+        import sys as _sys
+        _sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
         from pipeline.db.connection import get_conn as _get_conn
 
         base_dir = pipeline_env.get("BASE_DATA_DIR", "/mnt/quant-data")
         indexer_script = pipeline_dir / "indexer" / "build_intraday_leaderboard.py"
 
-        # Check if parquets are already up to date with the DB
+        # Check if parquets are already up to date with the DB.
+        # Compare both start AND end dates — a parquet that only covers
+        # the last 14 days is stale even if its end date matches.
         _conn = _get_conn()
         _cur = _conn.cursor()
-        _cur.execute("SELECT MAX(timestamp_utc)::date FROM market.leaderboards")
-        db_last = _cur.fetchone()[0]
+        _cur.execute("SELECT MIN(timestamp_utc)::date, MAX(timestamp_utc)::date FROM market.leaderboards")
+        db_first, db_last = _cur.fetchone()
         _cur.close()
         _conn.close()
 
@@ -809,9 +813,11 @@ def run_pipeline(self, job_id: str, params: dict) -> dict:
                 break
             try:
                 pf = _pq.ParquetFile(str(pq_path))
+                first_rg = pf.read_row_group(0, columns=["timestamp_utc"])
                 last_rg = pf.read_row_group(pf.metadata.num_row_groups - 1, columns=["timestamp_utc"])
+                pq_first = first_rg.to_pandas()["timestamp_utc"].min().date()
                 pq_last = last_rg.to_pandas()["timestamp_utc"].max().date()
-                if pq_last < db_last:
+                if pq_last < db_last or pq_first > db_first:
                     parquet_stale = True
                     break
             except Exception:
@@ -820,15 +826,23 @@ def run_pipeline(self, job_id: str, params: dict) -> dict:
 
         if parquet_stale:
             update_job(job_id, status="running", stage="leaderboard_refresh", progress=2)
+            # Delete ALL parquets + filtered caches so the rebuild starts
+            # from scratch across the full DB date range, not just the
+            # delta since the last parquet end date.
             for stale in _glob.glob(f"{base_dir}/leaderboard_*_filtered_*"):
                 os.remove(stale)
+            db_first_str = db_first.strftime("%Y-%m-%d")
             for metric in ("price", "open_interest", "volume"):
+                lb_dir = Path(base_dir) / "leaderboards" / metric
+                for old_pq in _glob.glob(str(lb_dir / "intraday_pct_leaderboard_*_ALL.parquet")):
+                    os.remove(old_pq)
                 lb_cmd = [
                     _PIPELINE_PYTHON, str(indexer_script),
                     "--source", "db", "--metric", metric, "--force",
+                    "--start", db_first_str,
                 ]
                 subprocess.run(lb_cmd, cwd=str(pipeline_dir), env=pipeline_env,
-                               capture_output=True, timeout=600)
+                               capture_output=True, timeout=3600)
         else:
             # Parquets are current — still need to clear filtered caches
             # in case the filter params changed since last run.

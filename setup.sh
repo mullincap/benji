@@ -623,10 +623,13 @@ PATH=/usr/local/sbin:/usr/local/bin:/sbin:/bin:/usr/sbin:/usr/bin
 # ── CoinGecko daily snapshot — 00:30 UTC ──────────────────────────────────────
 30 0 * * * . $SECRETS && $PYTHON $PIPELINE_DIR/compiler/coingecko_marketcap.py --api-key \$COINGECKO_API_KEY --mode daily >> $LOG/coingecko/cron.log 2>&1
 
-# ── Indexer — 01:00 UTC ───────────────────────────────────────────────────────
-0  1 * * * . $SECRETS && $PYTHON $PIPELINE_DIR/indexer/build_intraday_leaderboard.py --metric price >> $LOG/indexer/cron.log 2>&1
-5  1 * * * . $SECRETS && $PYTHON $PIPELINE_DIR/indexer/build_intraday_leaderboard.py --metric open_interest >> $LOG/indexer/cron.log 2>&1
-10 1 * * * . $SECRETS && $PYTHON $PIPELINE_DIR/indexer/build_intraday_leaderboard.py --metric volume >> $LOG/indexer/cron.log 2>&1
+# ── Indexer — 01:00 UTC (rebuild leaderboard parquets from DB for yesterday) ──
+0  1 * * * . $SECRETS && $PYTHON $PIPELINE_DIR/indexer/build_intraday_leaderboard.py --source db --metric price --start \$(date -d "yesterday" +\%Y-\%m-\%d) --end \$(date -d "yesterday" +\%Y-\%m-\%d) >> $LOG/indexer/cron.log 2>&1
+5  1 * * * . $SECRETS && $PYTHON $PIPELINE_DIR/indexer/build_intraday_leaderboard.py --source db --metric open_interest --start \$(date -d "yesterday" +\%Y-\%m-\%d) --end \$(date -d "yesterday" +\%Y-\%m-\%d) >> $LOG/indexer/cron.log 2>&1
+10 1 * * * . $SECRETS && $PYTHON $PIPELINE_DIR/indexer/build_intraday_leaderboard.py --source db --metric volume --start \$(date -d "yesterday" +\%Y-\%m-\%d) --end \$(date -d "yesterday" +\%Y-\%m-\%d) >> $LOG/indexer/cron.log 2>&1
+
+# ── Overlap / deploys regeneration — 01:20 UTC (after indexer finishes) ───────
+20 1 * * * . $SECRETS && $PYTHON $PIPELINE_DIR/overlap_analysis.py --leaderboard-index 100 --freq-width 20 --freq-cutoff 20 --mode snapshot --deployment-start-hour 6 --sort-lookback 6 --min-mcap 0 >> $LOG/overlap/cron.log 2>&1
 
 ${CERTBOT_CRON}
 
