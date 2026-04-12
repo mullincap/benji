@@ -842,7 +842,7 @@ def run_pipeline(self, job_id: str, params: dict) -> dict:
                     "--start", db_first_str,
                 ]
                 subprocess.run(lb_cmd, cwd=str(pipeline_dir), env=pipeline_env,
-                               capture_output=True, timeout=3600)
+                               capture_output=True, timeout=14400)  # 4h — full rebuild is ~3h
         else:
             # Parquets are current — still need to clear filtered caches
             # in case the filter params changed since last run.
