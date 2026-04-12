@@ -44,17 +44,19 @@ from pipeline.db.connection import get_conn
 SOURCE_ID = 1  # amberdata_binance
 PAGE_SIZE = 5_000
 
-# CSV columns that map directly to futures_1m columns of the same name
+# CSV columns that map directly to futures_1m columns of the same name.
+# market_cap_usd / market_cap_rank are intentionally NOT here — daily mcap
+# now lives in market.market_cap_daily as the single source of truth.
+# Pumping a daily value into 1440 1m rows was wasteful and the cagg-aware
+# coverage path joins the dedicated table instead.
 DIRECT_COLS = [
     "volume", "open_interest", "funding_rate", "long_short_ratio",
     "trade_delta", "long_liqs", "short_liqs",
     "last_bid_depth", "last_ask_depth", "last_depth_imbalance",
     "last_spread_pct", "spread_pct", "bid_ask_imbalance", "basis_pct",
-    "market_cap_usd",
 ]
 
-# market_cap_rank is INTEGER in the schema but FLOAT in the CSV — handled separately
-INSERT_COLS = ["timestamp_utc", "symbol_id", "source_id", "close"] + DIRECT_COLS + ["market_cap_rank"]
+INSERT_COLS = ["timestamp_utc", "symbol_id", "source_id", "close"] + DIRECT_COLS
 
 INSERT_SQL = f"""
     INSERT INTO market.futures_1m ({', '.join(INSERT_COLS)})
@@ -193,7 +195,6 @@ def load_csv(csv_path: Path | str, conn=None) -> dict:
                 SOURCE_ID,
                 close_val,
                 *[_parse_float(row.get(c, "")) for c in DIRECT_COLS],
-                _parse_int(row.get("market_cap_rank", "")),
             )
             batch.append(record)
 

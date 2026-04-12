@@ -38,6 +38,8 @@ type EndpointCoverage = {
   market_cap_usd: number;
 };
 
+type DayStatus = "complete" | "partial" | "missing";
+
 type CoverageDay = {
   date: string;                 // 'YYYY-MM-DD'
   symbols_complete: number;
@@ -46,7 +48,9 @@ type CoverageDay = {
   symbols_missing: number;
   expected_symbols: number;     // per-day denominator (job truth or fallback)
   has_job_truth: boolean;       // true if expected_symbols came from compiler_jobs
-  completeness_pct: number;     // 0.0 - 100.0, rounded to 1 decimal
+  completeness_pct: number;     // legacy: symbols_complete / expected (close-only)
+  min_critical_pct: number;     // min over critical endpoints (close/vol/OI/mcap)
+  status: DayStatus;            // unified day health bucket
   endpoints: EndpointCoverage;  // per-endpoint pcts (close/volume/OI/funding/LS/mcap)
 };
 
@@ -97,15 +101,16 @@ type LoadState =
   | { kind: "ready"; coverage: CoverageResponse; gaps: GapsResponse };
 
 // ─── Heatmap thresholds ──────────────────────────────────────────────────────
-// Locked decision (per spec): a day is "green" if >= 95% of active symbols
-// reach 1440 rows. Below that we use --amber for partial and --red for empty,
-// with a darker no-data variant for days where the API returned no row at all.
+// Mirror the backend day-status rule: a day is green if min(close, OI) > 90 pct
+// across the day's expected symbols. amber for any non-zero data below that
+// bar, red for zero. Keep this in sync with COMPLETE_THRESHOLD_PCT in
+// backend/app/api/routes/compiler.py.
 
 function heatmapColor(pct: number | null): { bg: string; border: string } {
   if (pct === null) {
     return { bg: "var(--bg2)", border: "var(--line)" };
   }
-  if (pct >= 95) {
+  if (pct > 90) {
     return { bg: "var(--green-mid)", border: "var(--green)" };
   }
   if (pct >= 5) {
@@ -227,12 +232,13 @@ function KPICard({ label, value, hint }: { label: string; value: string; hint?: 
 }
 
 function HeatmapCell({ day, onClick }: { day: CoverageDay; onClick: () => void }) {
-  const colors = heatmapColor(day.completeness_pct);
+  const colors = heatmapColor(day.min_critical_pct);
   const source = day.has_job_truth ? "job truth" : "fallback: symbols_with_data";
   const tooltip =
     `${day.date}\n` +
-    `${day.symbols_complete} complete · ${day.symbols_partial} partial · ${day.symbols_missing} missing\n` +
-    `${day.completeness_pct}% of ${day.expected_symbols} expected (${source})\n` +
+    `${day.status.toUpperCase()} · min critical ${day.min_critical_pct}%\n` +
+    `close ${day.endpoints.close}% · vol ${day.endpoints.volume}% · OI ${day.endpoints.open_interest}% · mcap ${day.endpoints.market_cap_usd}%\n` +
+    `expected ${day.expected_symbols} (${source})\n` +
     `Click to drill into this day`;
   return (
     <div
@@ -284,8 +290,8 @@ function Heatmap({ days, onDayClick }: { days: CoverageDay[]; onDayClick: (date:
         fontSize: 9,
         color: "var(--t2)",
       }}>
-        <LegendSwatch color="var(--green-mid)" border="var(--green)" label="≥ 95% complete" />
-        <LegendSwatch color="var(--amber-dim)" border="var(--amber)" label="5–94% complete" />
+        <LegendSwatch color="var(--green-mid)" border="var(--green)" label="> 90% complete" />
+        <LegendSwatch color="var(--amber-dim)" border="var(--amber)" label="5–90% complete" />
         <LegendSwatch color="var(--red-dim)" border="var(--red)" label="< 5% complete" />
       </div>
     </div>
@@ -345,7 +351,7 @@ function GapTable({ gaps, onDayClick }: { gaps: GapDay[]; onDayClick: (date: str
             <Th align="right" title={`Price · ${endpointDayCount(gaps, "close")} / ${gaps.length} days complete`}>Px</Th>
             <Th align="right" title={`Open Interest · ${endpointDayCount(gaps, "open_interest")} / ${gaps.length} days complete`}>OI</Th>
             <Th align="right" title={`Volume · ${endpointDayCount(gaps, "volume")} / ${gaps.length} days complete`}>Vol</Th>
-            <Th align="right" title={`Market Cap · ${endpointDayCount(gaps, "market_cap_usd")} / ${gaps.length} days complete`}>MC</Th>
+            <Th align="right" title={`Daily Market Cap (CoinGecko → market.market_cap_daily) · ${endpointDayCount(gaps, "market_cap_usd")} / ${gaps.length} days complete`}>MC</Th>
           </tr>
         </thead>
         <tbody>
@@ -551,19 +557,22 @@ export default function CompilerCoveragePage() {
 }
 
 function CoverageContent({ coverage, gaps, onDayClick }: { coverage: CoverageResponse; gaps: GapsResponse; onDayClick: (date: string) => void }) {
-  // KPI math. Each day has its own expected_symbols (joined from
-  // compiler_jobs.symbols_total when available, else symbols_with_data).
-  // Coverage % is a weighted average: total complete / total expected
-  // across the whole window. This correctly handles historical days
-  // that had a smaller symbol universe.
+  // KPI math sources from the unified per-day status the backend computes
+  // (status is the bucket where min over critical endpoints — close, vol,
+  // OI, mcap — clears the 95% threshold). complete + partial + missing
+  // adds up to days_returned exactly.
   const expectedToday = coverage.expected_today;
-  const daysComplete = coverage.days.filter((d) => d.completeness_pct >= 95).length;
-  const daysWithGaps = gaps.gaps.filter((g) => g.status === "partial").length;
-  const daysMissing = gaps.gaps.filter((g) => g.status === "missing").length;
+  const daysComplete = coverage.days.filter((d) => d.status === "complete").length;
+  const daysWithGaps = coverage.days.filter((d) => d.status === "partial").length;
+  const daysMissing = coverage.days.filter((d) => d.status === "missing").length;
 
-  const totalComplete = coverage.days.reduce((sum, d) => sum + d.symbols_complete, 0);
-  const totalExpected = coverage.days.reduce((sum, d) => sum + d.expected_symbols, 0);
-  const coveragePct = totalExpected > 0 ? (totalComplete / totalExpected) * 100 : 0;
+  // Headline coverage % is the average of min_critical_pct across the
+  // window — answers "on the average day, what fraction of the universe
+  // is fully usable by the simulator." Honest because it factors in
+  // mcap; the old close-only weighted average overstated health.
+  const coveragePct = coverage.days.length > 0
+    ? coverage.days.reduce((sum, d) => sum + d.min_critical_pct, 0) / coverage.days.length
+    : 0;
 
   return (
     <>
@@ -576,7 +585,7 @@ function CoverageContent({ coverage, gaps, onDayClick }: { coverage: CoverageRes
         <KPICard
           label="Coverage"
           value={`${coveragePct.toFixed(1)}%`}
-          hint={`weighted across ${coverage.days_returned} days`}
+          hint={`avg min(close/OI) across ${coverage.days_returned} days`}
         />
         <KPICard
           label="Expected Today"
@@ -586,7 +595,7 @@ function CoverageContent({ coverage, gaps, onDayClick }: { coverage: CoverageRes
         <KPICard
           label="Days Complete"
           value={daysComplete.toLocaleString("en-US")}
-          hint={`of ${coverage.days_returned} days · ≥ 95% coverage`}
+          hint={`of ${coverage.days_returned} days · min(close, OI) > 90%`}
         />
         <KPICard
           label="Days With Gaps"

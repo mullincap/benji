@@ -202,11 +202,18 @@ def fetch_daily_snapshot(coin_ids: list, api_key: str) -> pd.DataFrame:
             continue
         for coin in data:
             rows.append({
-                "coin_id":       coin["id"],
-                "date":          today,
-                "price_usd":     coin.get("current_price"),
+                "coin_id":        coin["id"],
+                "date":           today,
+                # symbol/name were missing from this dict for months, which
+                # made every daily-mode parquet row land with NaN symbol/name
+                # downstream. Both fields ARE in the /coins/markets payload,
+                # we just weren't copying them.
+                "symbol":         coin.get("symbol"),
+                "name":           coin.get("name"),
+                "price_usd":      coin.get("current_price"),
                 "market_cap_usd": coin.get("market_cap"),
-                "volume_usd":    coin.get("total_volume"),
+                "volume_usd":     coin.get("total_volume"),
+                "rank_num":       coin.get("market_cap_rank"),
             })
     return pd.DataFrame(rows)
 
@@ -341,6 +348,25 @@ def run_daily(api_key: str, output_dir: Path):
     log.info(f"Daily update done — {len(snapshot_df)} rows added, {len(final)} total")
     log.info(f"Output: {marketcap_path.resolve()}")
     log.info("=" * 60)
+
+    # Push the freshly written parquet into market.market_cap_daily so the
+    # DB stays the single source of truth for daily mcap (replaces the old
+    # path of jamming mcap into futures_1m at 1m grain).
+    try:
+        import sys as _sys
+        _sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+        from db.load_marketcap_to_db import load_parquet_to_db
+        result = load_parquet_to_db(marketcap_path, coins_universe_path=universe_path)
+        log.info(
+            f"DB load — rows_loaded={result['rows_loaded']:,} "
+            f"dropped_dupes={result['dropped_dupes']:,} "
+            f"fallback_filled={result['fallback_filled']:,} "
+            f"unique_dates={result['unique_dates']:,} "
+            f"unique_bases={result['unique_bases']:,} "
+            f"elapsed={result['elapsed_sec']}s"
+        )
+    except Exception as e:
+        log.error(f"DB load failed: {type(e).__name__}: {e}")
 
 
 # ─────────────────────────────────────────────

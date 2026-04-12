@@ -35,10 +35,10 @@ router = APIRouter(
 
 
 # ─── Per-symbol-day endpoint columns (used by /symbols/{symbol}, /days/{date}) ─
-# Data columns in market.futures_1m that represent distinct Amberdata + CoinGecko
+# Data columns in market.futures_1m that represent distinct Amberdata
 # endpoints. Used to compute per-endpoint completeness for the Symbol Inspector
 # and Day Detail pages. Order roughly matches data importance / cost (L1 first).
-ENDPOINT_COLS = [
+FUTURES_ENDPOINT_COLS = [
     # L1 — core market data (metl.py FETCH_PRICE / FETCH_OI / FETCH_FUNDING / FETCH_LS)
     "close", "volume", "open_interest", "funding_rate", "long_short_ratio",
     # L2 — trades + liquidations (metl.py FETCH_TRADES / FETCH_LIQUIDATIONS)
@@ -46,10 +46,26 @@ ENDPOINT_COLS = [
     # L3 — orderbook depth + ticker (metl.py FETCH_TICKER / FETCH_ORDERBOOK)
     "last_bid_depth", "last_ask_depth", "last_depth_imbalance", "last_spread_pct",
     "spread_pct", "bid_ask_imbalance", "basis_pct",
-    # DAILY — CoinGecko market cap join (metl.py FETCH_MARKETCAP). Tracked
-    # here so the day detail page surfaces whether the daily mcap join landed.
-    "market_cap_usd", "market_cap_rank",
 ]
+
+# market_cap_usd is no longer in futures_1m. It lives in
+# market.market_cap_daily as the single source of truth (one row per
+# (date, base)). The per-symbol-day endpoint shape still surfaces it so
+# the frontend keeps a single uniform completeness column — we synthesize
+# 1440 ("complete") if a row exists in the daily table, else 0.
+DAILY_ENDPOINT_COLS = ["market_cap_usd"]
+
+ENDPOINT_COLS = FUTURES_ENDPOINT_COLS + DAILY_ENDPOINT_COLS
+
+# Endpoints the day-health KPI is gated on. min over these per-endpoint
+# pcts decides complete vs partial. The simulator/audit pipeline only
+# strictly requires price (close) and open interest, so volume is no
+# longer in the gate. mcap is excluded for the same reason as before:
+# the CoinGecko-side mapping caps below 95 pct so gating on it produces
+# zero complete days. Both volume and mcap remain visible in the
+# per-endpoint breakdown.
+CRITICAL_ENDPOINTS = ["close", "open_interest"]
+COMPLETE_THRESHOLD_PCT = 90.0
 
 
 def _serialize_job(r: dict) -> dict[str, Any]:
@@ -111,33 +127,58 @@ def coverage(
     cur.execute(
         """
         -- Per-(day, symbol) endpoint counts from the continuous aggregate
-        -- market.futures_1m_daily_symbol_count. The cagg materializes
-        -- COUNT(*) plus per-endpoint COUNT(col) for the 6 metrics the
-        -- simulator/audit pipeline reads downstream:
-        --   close, volume, open_interest, funding_rate, long_short_ratio,
-        --   market_cap_usd
-        -- Refreshed hourly + materialized_only=false so today's data is
-        -- always accurate.
+        -- market.futures_1m_daily_symbol_count, joined to per-day mcap
+        -- coverage from market.market_cap_daily (the dedicated daily-grained
+        -- table that replaced jamming mcap into futures_1m at 1m grain).
         --
-        -- Per-endpoint complete check uses `>= 1440` (not `== 1440`) so
-        -- days with duplicate row sets (1/17, 2/16, 2/23 — see followup)
-        -- still report correctly.
+        -- Per-endpoint complete check uses `>= 1440` so days with duplicate
+        -- row sets still report correctly. Mcap "complete" means a row
+        -- exists in market_cap_daily for (date, base) joined to a known
+        -- symbol — there's no per-minute count for daily data.
+        -- Per-symbol "complete" = both close and open_interest have at
+        -- least 1296 non-null rows (1296 = 0.9 x 1440). The simulator
+        -- only strictly requires price + OI, so volume/funding/LS are
+        -- shown but not gated.
         WITH day_stats AS (
             SELECT
                 day::date AS day,
                 COUNT(DISTINCT symbol_id) AS symbols_with_data,
-                COUNT(DISTINCT symbol_id) FILTER (WHERE row_count >= 1440) AS symbols_complete,
-                COUNT(DISTINCT symbol_id) FILTER (WHERE row_count BETWEEN 1 AND 1439) AS symbols_partial,
-                COUNT(DISTINCT symbol_id) FILTER (WHERE close_count    >= 1440) AS symbols_complete_close,
-                COUNT(DISTINCT symbol_id) FILTER (WHERE volume_count   >= 1440) AS symbols_complete_volume,
-                COUNT(DISTINCT symbol_id) FILTER (WHERE oi_count       >= 1440) AS symbols_complete_oi,
-                COUNT(DISTINCT symbol_id) FILTER (WHERE funding_count  >= 1440) AS symbols_complete_funding,
-                COUNT(DISTINCT symbol_id) FILTER (WHERE ls_count       >= 1440) AS symbols_complete_ls,
-                COUNT(DISTINCT symbol_id) FILTER (WHERE mcap_count     >= 1440) AS symbols_complete_mcap
+                COUNT(DISTINCT symbol_id) FILTER (
+                    WHERE close_count >= 1296
+                      AND oi_count    >= 1296
+                ) AS symbols_complete,
+                COUNT(DISTINCT symbol_id) FILTER (
+                    WHERE row_count >= 1
+                      AND NOT (close_count >= 1296 AND oi_count >= 1296)
+                ) AS symbols_partial,
+                COUNT(DISTINCT symbol_id) FILTER (WHERE close_count    >= 1296) AS symbols_complete_close,
+                COUNT(DISTINCT symbol_id) FILTER (WHERE volume_count   >= 1296) AS symbols_complete_volume,
+                COUNT(DISTINCT symbol_id) FILTER (WHERE oi_count       >= 1296) AS symbols_complete_oi,
+                COUNT(DISTINCT symbol_id) FILTER (WHERE funding_count  >= 1296) AS symbols_complete_funding,
+                COUNT(DISTINCT symbol_id) FILTER (WHERE ls_count       >= 1296) AS symbols_complete_ls
             FROM market.futures_1m_daily_symbol_count
             WHERE source_id = %s
               AND day >= NOW() - %s::interval
             GROUP BY day
+        ),
+        mcap_stats AS (
+            -- Bound the mcap join to symbols that ALSO had futures_1m data
+            -- on the same date. Without this, market.symbols can grow over
+            -- time (new listings, retired bases that stayed in the table)
+            -- and the join finds more matches than the day's expected
+            -- symbols, producing nonsense like 127.3 pct. The cagg join makes
+            -- mcap_done a strict subset of sym_with_data.
+            SELECT
+                fdc.day::date AS day,
+                COUNT(DISTINCT s.symbol_id) AS symbols_complete_mcap
+            FROM market.market_cap_daily mcd
+            JOIN market.symbols s ON s.base = mcd.base
+            JOIN market.futures_1m_daily_symbol_count fdc
+              ON fdc.symbol_id = s.symbol_id
+             AND fdc.day::date = mcd.date
+             AND fdc.source_id = %s
+            WHERE mcd.date >= (NOW() - %s::interval)::date
+            GROUP BY fdc.day::date
         ),
         -- Ground truth for how many symbols metl.py actually tried to fetch
         -- on each day. DISTINCT ON picks the most recent successful run per
@@ -165,14 +206,15 @@ def coverage(
             d.symbols_complete_oi,
             d.symbols_complete_funding,
             d.symbols_complete_ls,
-            d.symbols_complete_mcap,
+            COALESCE(m.symbols_complete_mcap, 0) AS symbols_complete_mcap,
             COALESCE(j.symbols_total, d.symbols_with_data) AS expected_symbols,
             (j.symbols_total IS NOT NULL) AS has_job_truth
         FROM day_stats d
+        LEFT JOIN mcap_stats m ON m.day = d.day
         LEFT JOIN job_totals j ON j.day = d.day
         ORDER BY d.day DESC
         """,
-        (source_id, interval_str, source_id),
+        (source_id, interval_str, source_id, interval_str, source_id),
     )
     day_rows = cur.fetchall()
 
@@ -187,6 +229,26 @@ def coverage(
         expected = int(r["expected_symbols"]) if r["expected_symbols"] is not None else 0
         symbols_complete = int(r["symbols_complete"])
         symbols_with_data = int(r["symbols_with_data"])
+        endpoints = {
+            "close":            _pct(int(r["symbols_complete_close"]),   expected),
+            "volume":           _pct(int(r["symbols_complete_volume"]),  expected),
+            "open_interest":    _pct(int(r["symbols_complete_oi"]),      expected),
+            "funding_rate":     _pct(int(r["symbols_complete_funding"]), expected),
+            "long_short_ratio": _pct(int(r["symbols_complete_ls"]),      expected),
+            "market_cap_usd":   _pct(int(r["symbols_complete_mcap"]),    expected),
+        }
+        # Unified day health: min over the critical endpoints. A day is
+        # only "complete" when every critical endpoint clears the
+        # threshold; "missing" when zero data; "partial" otherwise. This
+        # makes the KPI counts add up to days_returned and propagates
+        # mcap gaps into the heatmap + gap table.
+        min_critical_pct = min(endpoints[c] for c in CRITICAL_ENDPOINTS)
+        if symbols_with_data == 0:
+            status = "missing"
+        elif min_critical_pct > COMPLETE_THRESHOLD_PCT:
+            status = "complete"
+        else:
+            status = "partial"
         days_payload.append({
             "date":                 r["day"].isoformat(),
             "symbols_complete":     symbols_complete,
@@ -195,19 +257,17 @@ def coverage(
             "symbols_missing":      max(0, expected - symbols_with_data),
             "expected_symbols":     expected,
             "has_job_truth":        bool(r["has_job_truth"]),
+            # Legacy field — symbols_complete / expected_symbols. Kept for
+            # backwards compatibility but the frontend should prefer
+            # min_critical_pct + status, which factor in mcap.
             "completeness_pct":     _pct(symbols_complete, expected),
+            "min_critical_pct":     round(min_critical_pct, 1),
+            "status":               status,
             # Per-endpoint coverage — symbols where the named column has
             # >= 1440 non-null values that day, divided by expected_symbols.
-            # These are the 6 metrics audit.py / rebuild_portfolio_matrix.py
-            # consume from the master parquet.
-            "endpoints": {
-                "close":            _pct(int(r["symbols_complete_close"]),   expected),
-                "volume":           _pct(int(r["symbols_complete_volume"]),  expected),
-                "open_interest":    _pct(int(r["symbols_complete_oi"]),      expected),
-                "funding_rate":     _pct(int(r["symbols_complete_funding"]), expected),
-                "long_short_ratio": _pct(int(r["symbols_complete_ls"]),      expected),
-                "market_cap_usd":   _pct(int(r["symbols_complete_mcap"]),    expected),
-            },
+            # mcap is sourced from market.market_cap_daily; the rest from
+            # the futures_1m daily-symbol-count cagg.
+            "endpoints":            endpoints,
         })
 
     # Most recent day's expected count — used by the frontend as the
@@ -233,33 +293,29 @@ def gaps(
     cur=Depends(get_cursor),
 ) -> dict[str, Any]:
     """
-    Days within the lookback window where coverage is incomplete.
+    Days within the lookback window where ANY critical endpoint
+    (close / volume / open_interest / market_cap_usd) is below the
+    completeness threshold (95%). Reuses /coverage so the definition
+    stays in one place.
 
-    A day appears in this list if symbols_complete < expected_symbols
-    (per-day denominator from compiler_jobs.symbols_total, or fallback
-    to symbols_with_data for pre-job-tracking historical days).
-    Status:
-      - 'missing' = completeness_pct == 0 (no symbols hit 1440 rows)
-      - 'partial' = completeness_pct > 0 but < 100
-    Ordered by date DESC.
+    Status mirrors the per-day status from /coverage:
+      - 'missing' — symbols_with_data == 0
+      - 'partial' — has data but min_critical_pct < 95%
+    Days at "complete" status are excluded. Ordered by date DESC.
     """
-    # Reuse the coverage logic so the math stays in one place.
     cov = coverage(days=days, source_id=source_id, cur=cur)
 
     gap_days = []
     for d in cov["days"]:
-        expected = d["expected_symbols"]
-        symbols_complete = d["symbols_complete"]
-        if expected > 0 and symbols_complete >= expected:
+        if d["status"] == "complete":
             continue
-        completeness_pct = round((symbols_complete / expected * 100), 2) if expected > 0 else 0.0
         gap_days.append({
             "date":             d["date"],
-            "symbols_complete": symbols_complete,
-            "symbols_total":    expected,
-            "completeness_pct": completeness_pct,
+            "symbols_complete": d["symbols_complete"],
+            "symbols_total":    d["expected_symbols"],
+            "completeness_pct": d["min_critical_pct"],
             "has_job_truth":    d["has_job_truth"],
-            "status":           "missing" if completeness_pct == 0 else "partial",
+            "status":           d["status"],
             "endpoints":        d["endpoints"],
         })
 
@@ -301,9 +357,11 @@ def day_detail(
     except ValueError:
         raise HTTPException(status_code=400, detail=f"Invalid date format: {target_date}. Use YYYY-MM-DD.")
 
-    # Per-symbol per-endpoint counts for the target day. ENDPOINT_COLS is
-    # hardcoded above so direct interpolation is safe.
-    col_selects = ",\n            ".join([f"COUNT(f.{c}) AS {c}_cnt" for c in ENDPOINT_COLS])
+    # Per-symbol per-endpoint counts for the target day. FUTURES_ENDPOINT_COLS
+    # is hardcoded above so direct interpolation is safe. Daily mcap is
+    # joined separately from market.market_cap_daily — futures_1m no longer
+    # carries it.
+    col_selects = ",\n            ".join([f"COUNT(f.{c}) AS {c}_cnt" for c in FUTURES_ENDPOINT_COLS])
     cur.execute(
         f"""
         SELECT
@@ -324,13 +382,30 @@ def day_detail(
     )
     symbol_rows = cur.fetchall()
 
-    # Per-symbol payload
+    # Bases that have a daily mcap row for the target date — used to
+    # synthesize a "1440" count for the market_cap_usd endpoint column so
+    # the per-symbol shape stays uniform with the futures_1m endpoints.
+    cur.execute(
+        "SELECT base FROM market.market_cap_daily WHERE date = %s",
+        (parsed_date,),
+    )
+    mcap_bases_for_day = {r["base"] for r in cur.fetchall()}
+
+    # Per-symbol payload. A symbol is "complete" iff close AND open
+    # interest both have at least 1296 rows (1296 = 0.9 x 1440). Same
+    # definition as the /coverage handler. Volume / funding / LS are
+    # shown in the per-row breakdown but not part of the gate.
+    L1_KEYS = ("close", "open_interest")
+    L1_THRESHOLD = 1296
     symbols_payload = []
     complete_count = 0
     partial_count = 0
     for r in symbol_rows:
         total = int(r["total_rows"])
-        if total >= 1440:
+        rows_per_endpoint = {c: int(r[f"{c}_cnt"]) for c in FUTURES_ENDPOINT_COLS}
+        rows_per_endpoint["market_cap_usd"] = 1440 if r["base"] in mcap_bases_for_day else 0
+        l1_complete = all(rows_per_endpoint[k] >= L1_THRESHOLD for k in L1_KEYS)
+        if l1_complete:
             status = "complete"
             complete_count += 1
         elif total > 0:
@@ -345,7 +420,7 @@ def day_detail(
             "total_rows":        total,
             "completeness_pct":  round(min(total / 1440 * 100, 100), 1),
             "status":            status,
-            "rows_per_endpoint": {c: int(r[f"{c}_cnt"]) for c in ENDPOINT_COLS},
+            "rows_per_endpoint": rows_per_endpoint,
         })
 
     # Compiler job metadata for this date (most recent successful run).
@@ -430,6 +505,119 @@ def day_detail(
         "total_rows":            total_rows_on_day,
         "suspected_duplicates":  suspected_duplicates,
         "duplicate_factor":      duplicate_factor,
+    }
+
+
+# ─── /marketcap/coverage ──────────────────────────────────────────────────────
+
+@router.get("/marketcap/coverage")
+def marketcap_coverage(
+    days: int = Query(90, ge=1, le=10000, description="Lookback window (1-10000)"),
+    cur=Depends(get_cursor),
+) -> dict[str, Any]:
+    """
+    Per-day market.market_cap_daily coverage stats. Mirrors the futures
+    /coverage shape so the frontend can reuse the same heatmap layout.
+
+    A day is "complete" if it has any mcap rows; "missing" if zero. There's
+    no per-symbol rollup here because mcap is daily-grained — either the
+    CoinGecko snapshot landed for that day or it didn't.
+    """
+    interval_str = f"{days} days"
+    cur.execute(
+        """
+        SELECT
+            date,
+            COUNT(*)                AS mcap_rows,
+            COUNT(rank_num)         AS ranked_rows,
+            SUM(market_cap_usd)     AS total_mcap_usd
+        FROM market.market_cap_daily
+        WHERE date >= (NOW() - %s::interval)::date
+        GROUP BY date
+        ORDER BY date DESC
+        """,
+        (interval_str,),
+    )
+    rows = cur.fetchall()
+
+    days_payload = []
+    for r in rows:
+        mcap_rows = int(r["mcap_rows"])
+        days_payload.append({
+            "date":           r["date"].isoformat(),
+            "mcap_rows":      mcap_rows,
+            "ranked_rows":    int(r["ranked_rows"]),
+            "total_mcap_usd": float(r["total_mcap_usd"]) if r["total_mcap_usd"] is not None else None,
+            "status":         "missing" if mcap_rows == 0 else "complete",
+        })
+
+    return {
+        "lookback_days":     days,
+        "days_returned":     len(days_payload),
+        "days_with_data":    sum(1 for d in days_payload if d["status"] == "complete"),
+        "days_missing":      sum(1 for d in days_payload if d["status"] == "missing"),
+        "days":              days_payload,
+    }
+
+
+# ─── /marketcap/days/{date} ───────────────────────────────────────────────────
+
+@router.get("/marketcap/days/{target_date}")
+def marketcap_day_detail(
+    target_date: str,
+    cur=Depends(get_cursor),
+) -> dict[str, Any]:
+    """
+    All market_cap_daily rows for one day, sorted by rank_num. Each row is
+    flagged with `has_futures` = whether its base also exists in
+    market.symbols (i.e. whether the simulator can use this mcap).
+    """
+    try:
+        parsed_date = datetime.strptime(target_date, "%Y-%m-%d").date()
+    except ValueError:
+        raise HTTPException(status_code=400, detail=f"Invalid date format: {target_date}. Use YYYY-MM-DD.")
+
+    cur.execute(
+        """
+        SELECT
+            mcd.base,
+            mcd.coin_id,
+            mcd.name,
+            mcd.market_cap_usd,
+            mcd.price_usd,
+            mcd.volume_usd,
+            mcd.rank_num,
+            (s.symbol_id IS NOT NULL) AS has_futures
+        FROM market.market_cap_daily mcd
+        LEFT JOIN market.symbols s ON s.base = mcd.base
+        WHERE mcd.date = %s
+        ORDER BY COALESCE(mcd.rank_num, 999999), mcd.market_cap_usd DESC NULLS LAST
+        """,
+        (parsed_date,),
+    )
+    rows = cur.fetchall()
+
+    payload = []
+    matched = 0
+    for r in rows:
+        if r["has_futures"]:
+            matched += 1
+        payload.append({
+            "base":            r["base"],
+            "coin_id":         r["coin_id"],
+            "name":            r["name"],
+            "market_cap_usd":  float(r["market_cap_usd"]) if r["market_cap_usd"] is not None else None,
+            "price_usd":       float(r["price_usd"])      if r["price_usd"]      is not None else None,
+            "volume_usd":      float(r["volume_usd"])     if r["volume_usd"]     is not None else None,
+            "rank_num":        int(r["rank_num"])         if r["rank_num"]       is not None else None,
+            "has_futures":     bool(r["has_futures"]),
+        })
+
+    return {
+        "date":               parsed_date.isoformat(),
+        "total_rows":         len(payload),
+        "matched_to_futures": matched,
+        "rows":               payload,
     }
 
 
@@ -687,9 +875,9 @@ def symbol_inspector(
             "sparkline":         [],
         }
 
-    # Per-column non-null counts for the latest day. ENDPOINT_COLS is hardcoded
-    # so direct interpolation here is safe (no SQL injection surface).
-    col_selects = ",\n            ".join([f"COUNT({c}) AS {c}_cnt" for c in ENDPOINT_COLS])
+    # Per-column non-null counts for the latest day. FUTURES_ENDPOINT_COLS
+    # is hardcoded so direct interpolation here is safe.
+    col_selects = ",\n            ".join([f"COUNT({c}) AS {c}_cnt" for c in FUTURES_ENDPOINT_COLS])
     cur.execute(
         f"""
         SELECT
@@ -705,7 +893,15 @@ def symbol_inspector(
     )
     endpoint_row = cur.fetchone()
 
-    rows_per_endpoint = {c: int(endpoint_row[f"{c}_cnt"]) for c in ENDPOINT_COLS}
+    rows_per_endpoint = {c: int(endpoint_row[f"{c}_cnt"]) for c in FUTURES_ENDPOINT_COLS}
+
+    # Daily mcap is in market.market_cap_daily, not futures_1m. Synthesize
+    # 1440 ("complete") if a row exists for this base on the latest day.
+    cur.execute(
+        "SELECT 1 FROM market.market_cap_daily WHERE base = %s AND date = %s LIMIT 1",
+        (base, latest_date),
+    )
+    rows_per_endpoint["market_cap_usd"] = 1440 if cur.fetchone() else 0
 
     # 30-day sparkline of total row counts
     cur.execute(

@@ -67,7 +67,7 @@ CSV_BACKUP_ENABLED = True
 # MODE
 # ============================================================
 MODE = "FULL"  # FULL |  FAST
-CSV_BACKUP_DIR = "/Users/johnmullin/Desktop/desk/import/oi_logger/ob-backfills/"
+CSV_BACKUP_DIR = os.environ.get("CSV_BACKUP_DIR", "/Users/johnmullin/Desktop/desk/import/oi_logger/ob-backfills/")
 if MODE == "FULL": heavy_bool = True
 else: heavy_bool = False
 
@@ -102,7 +102,11 @@ FETCH_TRADES       = True   # HEAVIEST - trade delta
 FETCH_ORDERBOOK    = False  # disabled: Amberdata OB page discovery times out on ~5 symbols/day and stalls the backfill
 
 #DAILY (CoinGecko join — loaded from parquet, not fetched live)
-FETCH_MARKETCAP    = True   # market_cap_usd, market_cap_rank
+# Disabled: market cap now lives in market.market_cap_daily as the single
+# source of truth, populated directly from the CoinGecko parquet via
+# pipeline/db/load_marketcap_to_db.py. The futures_1m loader no longer
+# accepts market_cap columns either.
+FETCH_MARKETCAP    = False
 
 
 full_header_options = [

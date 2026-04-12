@@ -31,6 +31,8 @@ type EndpointCoverage = {
   market_cap_usd: number;
 };
 
+type DayStatus = "complete" | "partial" | "missing";
+
 type CoverageDay = {
   date: string;
   symbols_complete: number;
@@ -40,6 +42,8 @@ type CoverageDay = {
   expected_symbols: number;
   has_job_truth: boolean;
   completeness_pct: number;
+  min_critical_pct: number;
+  status: DayStatus;
   endpoints: EndpointCoverage;
 };
 
@@ -59,10 +63,8 @@ type LoadState =
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
-function statusFor(day: CoverageDay): "complete" | "partial" | "missing" {
-  if (day.completeness_pct >= 95) return "complete";
-  if (day.completeness_pct >= 5) return "partial";
-  return "missing";
+function statusFor(day: CoverageDay): DayStatus {
+  return day.status;
 }
 
 function relativeDay(dateStr: string): string {
@@ -250,7 +252,7 @@ function DaysList({ data, onDayClick }: { data: CoverageResponse; onDayClick: (d
             <th style={{ ...thStyle, textAlign: "right" }} title={`Price · ${endpointDayCount(data.days, "close")} / ${data.days.length} days complete`}>Px</th>
             <th style={{ ...thStyle, textAlign: "right" }} title={`Open Interest · ${endpointDayCount(data.days, "open_interest")} / ${data.days.length} days complete`}>OI</th>
             <th style={{ ...thStyle, textAlign: "right" }} title={`Volume · ${endpointDayCount(data.days, "volume")} / ${data.days.length} days complete`}>Vol</th>
-            <th style={{ ...thStyle, textAlign: "right" }} title={`Market Cap · ${endpointDayCount(data.days, "market_cap_usd")} / ${data.days.length} days complete`}>MC</th>
+            <th style={{ ...thStyle, textAlign: "right" }} title={`Daily Market Cap (CoinGecko → market.market_cap_daily) · ${endpointDayCount(data.days, "market_cap_usd")} / ${data.days.length} days complete`}>MC</th>
             <th style={thStyle}></th>
           </tr>
         </thead>
@@ -280,9 +282,9 @@ function DaysList({ data, onDayClick }: { data: CoverageResponse; onDayClick: (d
                 <td style={tdStyle}>
                   <StatusBadge status={status} />
                 </td>
-                <td style={{ ...tdStyle, textAlign: "right" }}>
+                <td style={{ ...tdStyle, textAlign: "right" }} title="min(close, OI)">
                   <span style={{ color: "var(--t0)", fontWeight: 700 }}>
-                    {day.completeness_pct.toFixed(1)}%
+                    {day.min_critical_pct.toFixed(1)}%
                   </span>
                 </td>
                 <td style={{ ...tdStyle, textAlign: "right" }}>

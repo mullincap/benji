@@ -84,6 +84,10 @@ const TIER_L3 = [
   "last_bid_depth", "last_ask_depth", "last_depth_imbalance", "last_spread_pct",
   "spread_pct", "bid_ask_imbalance", "basis_pct",
 ];
+// Daily-grained CoinGecko data lives in market.market_cap_daily, not
+// futures_1m. The API synthesizes a count of 1440 per symbol when a row
+// exists for (date, base), so the usual "X / 1440" math still works.
+const TIER_DAILY = ["market_cap_usd"];
 
 function tierStatus(cols: string[], rows_per_endpoint: Record<string, number>): number {
   // Average completeness across the tier's columns, expressed as 0–100.
@@ -189,10 +193,12 @@ function TierDots({ sym, endpointCols }: { sym: DaySymbol; endpointCols: string[
   const l1 = TIER_L1.filter((c) => endpointCols.includes(c));
   const l2 = TIER_L2.filter((c) => endpointCols.includes(c));
   const l3 = TIER_L3.filter((c) => endpointCols.includes(c));
+  const daily = TIER_DAILY.filter((c) => endpointCols.includes(c));
   const tiers = [
     { name: "L1", pct: tierStatus(l1, sym.rows_per_endpoint) },
     { name: "L2", pct: tierStatus(l2, sym.rows_per_endpoint) },
     { name: "L3", pct: tierStatus(l3, sym.rows_per_endpoint) },
+    { name: "D",  pct: tierStatus(daily, sym.rows_per_endpoint) },
   ];
   return (
     <div style={{ display: "flex", gap: 4, alignItems: "center" }}>

@@ -127,10 +127,11 @@ function CompilerSidebar() {
       </div>
       {!collapsed && (
         <div style={{ flex: 1, overflowY: "auto", paddingTop: 8 }}>
-          <NavItem label="Coverage" href="/compiler/coverage" active={pathname === "/compiler/coverage"} />
-          <NavItem label="Days"     href="/compiler/days"     active={pathname === "/compiler/days" || pathname.startsWith("/compiler/days/")} />
-          <NavItem label="Symbols"  href="/compiler/symbols"  active={pathname === "/compiler/symbols"} />
-          <NavItem label="Jobs"     href="/compiler/jobs"     active={pathname === "/compiler/jobs"} />
+          <NavItem label="Coverage"  href="/compiler/coverage"  active={pathname === "/compiler/coverage"} />
+          <NavItem label="Days"      href="/compiler/days"      active={pathname === "/compiler/days" || pathname.startsWith("/compiler/days/")} />
+          <NavItem label="Marketcap" href="/compiler/marketcap" active={pathname === "/compiler/marketcap" || pathname.startsWith("/compiler/marketcap/")} />
+          <NavItem label="Symbols"   href="/compiler/symbols"   active={pathname === "/compiler/symbols"} />
+          <NavItem label="Jobs"      href="/compiler/jobs"      active={pathname === "/compiler/jobs"} />
         </div>
       )}
       {collapsed && (
