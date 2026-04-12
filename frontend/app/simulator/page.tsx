@@ -43,6 +43,7 @@ const DEFAULT_PARAMS: Record<string, unknown> = {
   leverage: 4.0,
   stop_raw_pct: -6.0,
   price_source: 'parquet',
+  mcap_source: 'parquet',
   save_charts: true,
   trial_purchases: false,
   quick: false,

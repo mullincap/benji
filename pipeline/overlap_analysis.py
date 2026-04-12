@@ -1237,7 +1237,7 @@ if __name__ == "__main__":
     parser.add_argument("--quick",          action="store_true",
                         help="Pass --quick flag to audit.py (faster run)")
     parser.add_argument("--audit-source",   type=str, default=None,
-                        choices=["binance", "parquet"],
+                        choices=["binance", "parquet", "db"],
                         help="Price source for audit rebuild (passed to audit.py)")
     parser.add_argument("--max-mcap",        type=float, default=float(_os.environ.get("MAX_MCAP", "0.0")),
                         help="Maximum market cap in USD (e.g. 500000000 for $500M). Symbols above this are excluded. Default: no ceiling.")

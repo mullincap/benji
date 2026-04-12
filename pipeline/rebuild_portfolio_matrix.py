@@ -36,6 +36,7 @@ Outputs:
 import os
 import re
 import argparse
+from pathlib import Path
 import pandas as pd
 import numpy as np
 import warnings
@@ -353,6 +354,42 @@ def get_session_prices_parquet(symbols_parquet, t_start, t_end):
                           values="price", aggfunc="last")
 
 
+def get_session_prices_db(symbols_parquet, t_start, t_end):
+    """Load prices from market.futures_1m, return same pivot shape as parquet version."""
+    import sys as _sys
+    _sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    from pipeline.db.connection import get_conn
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT f.timestamp_utc, s.binance_id AS symbol, f.close AS price
+        FROM market.futures_1m f
+        JOIN market.symbols s ON s.symbol_id = f.symbol_id
+        WHERE f.source_id = 1
+          AND f.timestamp_utc >= %s
+          AND f.timestamp_utc <= %s
+          AND s.binance_id = ANY(%s)
+          AND f.close IS NOT NULL
+        ORDER BY f.timestamp_utc
+        """,
+        (pd.Timestamp(t_start).to_pydatetime(),
+         pd.Timestamp(t_end).to_pydatetime(),
+         list(symbols_parquet)),
+    )
+    rows = cur.fetchall()
+    cur.close()
+    conn.close()
+    if not rows:
+        return pd.DataFrame()
+    df = pd.DataFrame(rows, columns=["timestamp_utc", "symbol", "price"])
+    df["timestamp_utc"] = pd.to_datetime(df["timestamp_utc"])
+    if df["timestamp_utc"].dt.tz is not None:
+        df["timestamp_utc"] = df["timestamp_utc"].dt.tz_localize(None)
+    return df.pivot_table(index="timestamp_utc", columns="symbol",
+                          values="price", aggfunc="last")
+
+
 
 def apply_raw_stop(prices_series):
     """
@@ -389,7 +426,10 @@ def build_portfolio_path(symbols_parquet, session_start, debug=False):
     else:
         t_start  = bar_grid[0]
         t_end    = bar_grid[-1] + pd.Timedelta(minutes=BAR_MINUTES)
-        price_raw = get_session_prices_parquet(symbols_parquet, t_start, t_end)
+        if PRICE_SOURCE == "db":
+            price_raw = get_session_prices_db(symbols_parquet, t_start, t_end)
+        else:
+            price_raw = get_session_prices_parquet(symbols_parquet, t_start, t_end)
         if price_raw.empty:
             print(f"    ! Parquet fetch returned empty for {symbols_parquet}")
             return None, symbols_parquet
@@ -683,9 +723,10 @@ if __name__ == "__main__":
     parser.add_argument("--output",  type=str, default=None,
                         help="Output path for the matrix CSV (overrides OUTPUT_MATRIX constant).")
     parser.add_argument("--source", type=str, default=None,
-                        choices=["binance", "parquet"],
-                        help="Price source: binance (candle closes, matches Sheets) "
-                             "or parquet (fast, local ticks). Default: binance.")
+                        choices=["binance", "parquet", "db"],
+                        help="Price source: binance (candle closes, matches Sheets), "
+                             "parquet (fast, local ticks), or db (market.futures_1m). "
+                             "Default: parquet.")
     parser.add_argument("--min-listing-age", type=int, default=None,
                         dest="min_listing_age",
                         help="Override MIN_LISTING_AGE_DAYS (e.g. 0 to disable gate). "

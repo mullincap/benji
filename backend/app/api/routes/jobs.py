@@ -80,6 +80,7 @@ class JobRequest(BaseModel):
     leverage:                   float = 4.0
     stop_raw_pct:               float = -6.0
     price_source:               str   = "parquet"
+    mcap_source:                str   = "parquet"
     save_charts:                bool  = True
     trial_purchases:            bool  = False
     quick:                      bool  = False

@@ -465,6 +465,9 @@ DISPERSION_DYNAMIC_RETURNS_CACHE_FILE = "dispersion_dynamic_returns_cache.csv"
 # Default path matches coingecko_marketcap.py --output-dir data/marketcap
 _default_mcap_dir = os.environ.get("MARKETCAP_DIR", "/Users/johnmullin/Desktop/desk/benji3m/binetl/data/marketcap")
 DISPERSION_MCAP_PARQUET = os.environ.get("MARKETCAP_PARQUET", os.path.join(_default_mcap_dir, "marketcap_daily.parquet"))
+# When set to "db", market cap is read from market.market_cap_daily instead
+# of the parquet file. Set via env var or the frontend data-source toggle.
+MCAP_SOURCE = os.environ.get("MCAP_SOURCE", "parquet")
 
 # ── CoinGecko API key ─────────────────────────────────────────────────
 # CoinGecko now requires an API key even on the free Demo tier (changed
@@ -2396,6 +2399,57 @@ def _load_mcap_from_parquet(
     return wide
 
 
+def _load_mcap_from_db(start: str, end: str) -> pd.DataFrame:
+    """
+    Load market cap from market.market_cap_daily and return the same
+    wide-format DataFrame as _load_mcap_from_parquet().
+
+    The DB table uses `base` (e.g. "BTC") whereas the audit expects
+    Binance USDT-M perp tickers (e.g. "BTCUSDT"). We append "USDT"
+    to each base to match the COINGECKO_TO_BINANCE convention.
+    """
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    from pipeline.db.connection import get_conn
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT date, base, market_cap_usd
+        FROM market.market_cap_daily
+        WHERE date >= %s::date AND date <= %s::date
+          AND market_cap_usd IS NOT NULL
+        ORDER BY date
+        """,
+        (start, end),
+    )
+    rows = cur.fetchall()
+    cur.close()
+    conn.close()
+    if not rows:
+        raise ValueError(f"No mcap data in DB for {start} → {end}")
+    df = pd.DataFrame(rows, columns=["date", "base", "market_cap_usd"])
+    df["date"] = pd.to_datetime(df["date"])
+    df["binance_ticker"] = df["base"] + "USDT"
+    # Only keep tickers that appear in the COINGECKO_TO_BINANCE mapping
+    valid_tickers = set(COINGECKO_TO_BINANCE.values())
+    df = df[df["binance_ticker"].isin(valid_tickers)]
+    if df.empty:
+        raise ValueError("No DB mcap rows match COINGECKO_TO_BINANCE mapping")
+    df = (df.sort_values("market_cap_usd", ascending=False)
+            .drop_duplicates(subset=["binance_ticker", "date"])
+            .sort_values("date"))
+    wide = df.pivot(index="date", columns="binance_ticker", values="market_cap_usd")
+    wide.index = pd.to_datetime(wide.index).tz_localize(None)
+    wide.columns.name = None
+    n_coins  = len(wide.columns)
+    n_days   = len(wide)
+    coverage = wide.notna().mean().mean() * 100
+    print(f"    DB loaded: {n_days} days × {n_coins} Binance tickers  "
+          f"(avg coverage {coverage:.0f}%)")
+    print(f"    Date range: {wide.index[0].date()} → {wide.index[-1].date()}")
+    return wide
+
+
 def fetch_mcap_history(
     coingecko_ids: List[str] = None,
     start:         str = "2024-11-01",
@@ -2423,6 +2477,17 @@ def fetch_mcap_history(
 
     Only CoinGecko IDs present in COINGECKO_TO_BINANCE are included.
     """
+    # ── Source 0: live database (market.market_cap_daily) ─────────────
+    if MCAP_SOURCE == "db":
+        try:
+            wide = _load_mcap_from_db(start, end)
+            if not wide.empty:
+                print(f"    Mcap source: database (market.market_cap_daily)  "
+                      f"[{len(wide.columns)} tickers]")
+                return wide
+        except Exception as e:
+            print(f"    DB mcap load failed ({e}), falling back to parquet ...")
+
     # ── Source 1: parquet from coingecko_marketcap.py ─────────────────
     if DISPERSION_MCAP_PARQUET:
         pq_path = Path(DISPERSION_MCAP_PARQUET)
@@ -19085,8 +19150,8 @@ if __name__ == "__main__":
         "--source",
         type=str,
         default=None,
-        choices=["binance", "parquet"],
-        help="Price source for rebuild: binance (matches Sheets) or parquet (fast). Default: binance."
+        choices=["binance", "parquet", "db"],
+        help="Price source for rebuild: binance (matches Sheets), parquet (fast), or db (market.futures_1m). Default: parquet."
     )
     parser.add_argument(
         "--max-port",

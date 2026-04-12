@@ -418,7 +418,18 @@ export default function ParamForm({ params, onChange, onSubmit }: ParamFormProps
             onChange={(v) => set('price_source', v)}
             options={[
               { value: 'parquet', label: 'parquet' },
+              { value: 'db', label: 'database' },
               { value: 'binance', label: 'binance' },
+            ]}
+          />
+        </Row>
+        <Row label="mcap_source">
+          <SelInput
+            value={p.mcap_source}
+            onChange={(v) => set('mcap_source', v)}
+            options={[
+              { value: 'parquet', label: 'parquet' },
+              { value: 'db', label: 'database' },
             ]}
           />
         </Row>

@@ -563,8 +563,9 @@ def _build_cli_args(params: dict) -> list[str]:
     }
 
     # --audit chains into rebuild_portfolio_matrix.py and audit.py automatically.
-    # --audit-source parquet skips Google Sheets (correct flag name).
-    args: list[str] = ["--audit", "--audit-source", "parquet"]
+    # --audit-source controls the price data source for rebuild_portfolio_matrix.
+    audit_source = params.get("price_source", "parquet")
+    args: list[str] = ["--audit", "--audit-source", audit_source]
 
     for param, flag in flag_map.items():
         value = params.get(param)
@@ -647,6 +648,7 @@ def run_pipeline(self, job_id: str, params: dict) -> dict:
         "LEVERAGE":                   str(params.get("leverage", 4.0)),
         "STOP_RAW_PCT":               str(params.get("stop_raw_pct", -6.0)),
         "PRICE_SOURCE":               str(params.get("price_source", "parquet")),
+        "MCAP_SOURCE":                str(params.get("mcap_source", "parquet")),
         "SAVE_CHARTS":                _boolenv(params.get("save_charts", True)),
         "TRIAL_PURCHASES":            _boolenv(params.get("trial_purchases", False)),
         "QUICK":                      _boolenv(params.get("quick", False)),
@@ -779,6 +781,59 @@ def run_pipeline(self, job_id: str, params: dict) -> dict:
         "SAVE_DAILY_FILES":      _boolenv(params.get("save_daily_files", False)),
         "BUILD_MASTER_FILE":     _boolenv(params.get("build_master_file", True)),
     }
+
+    # ------------------------------------------------------------------
+    # Stage 0 (DB mode only): refresh leaderboard parquets from DB
+    # ------------------------------------------------------------------
+    if params.get("price_source") == "db":
+        import glob as _glob
+        import pyarrow.parquet as _pq
+        from pipeline.db.connection import get_conn as _get_conn
+
+        base_dir = pipeline_env.get("BASE_DATA_DIR", "/mnt/quant-data")
+        indexer_script = pipeline_dir / "indexer" / "build_intraday_leaderboard.py"
+
+        # Check if parquets are already up to date with the DB
+        _conn = _get_conn()
+        _cur = _conn.cursor()
+        _cur.execute("SELECT MAX(timestamp_utc)::date FROM market.leaderboards")
+        db_last = _cur.fetchone()[0]
+        _cur.close()
+        _conn.close()
+
+        parquet_stale = False
+        for metric in ("price", "open_interest", "volume"):
+            pq_path = Path(base_dir) / "leaderboards" / metric / f"intraday_pct_leaderboard_{metric}_top333_anchor0000_ALL.parquet"
+            if not pq_path.exists():
+                parquet_stale = True
+                break
+            try:
+                pf = _pq.ParquetFile(str(pq_path))
+                last_rg = pf.read_row_group(pf.metadata.num_row_groups - 1, columns=["timestamp_utc"])
+                pq_last = last_rg.to_pandas()["timestamp_utc"].max().date()
+                if pq_last < db_last:
+                    parquet_stale = True
+                    break
+            except Exception:
+                parquet_stale = True
+                break
+
+        if parquet_stale:
+            update_job(job_id, status="running", stage="leaderboard_refresh", progress=2)
+            for stale in _glob.glob(f"{base_dir}/leaderboard_*_filtered_*"):
+                os.remove(stale)
+            for metric in ("price", "open_interest", "volume"):
+                lb_cmd = [
+                    _PIPELINE_PYTHON, str(indexer_script),
+                    "--source", "db", "--metric", metric, "--force",
+                ]
+                subprocess.run(lb_cmd, cwd=str(pipeline_dir), env=pipeline_env,
+                               capture_output=True, timeout=600)
+        else:
+            # Parquets are current — still need to clear filtered caches
+            # in case the filter params changed since last run.
+            for stale in _glob.glob(f"{base_dir}/leaderboard_*_filtered_*"):
+                os.remove(stale)
 
     # ------------------------------------------------------------------
     # Stage 1: overlap_analysis.py --audit
