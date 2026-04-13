@@ -48,6 +48,8 @@ type DailySignal = {
   filter_reason: string | null;
   computed_at: string | null;
   symbol_count: number;
+  conviction_roi_x: number | null;
+  session_return_pct: number | null;
   symbols: SignalSymbol[];
 };
 
@@ -55,13 +57,14 @@ type SignalsResponse = {
   lookback_days: number;
   source_filter: SignalSource | null;
   signals_returned: number;
+  conviction_kill_y: number;
   signals: DailySignal[];
 };
 
 type LoadState =
   | { kind: "loading" }
   | { kind: "error"; message: string }
-  | { kind: "ready"; signals: DailySignal[] };
+  | { kind: "ready"; signals: DailySignal[]; killY: number };
 
 type FilterKey = "all" | SignalSource;
 
@@ -260,14 +263,61 @@ function SymbolList({ symbols }: { symbols: SignalSymbol[] }) {
   );
 }
 
+function ConvictionBadge({ roiX, killY, sitFlat }: { roiX: number | null; killY: number; sitFlat: boolean }) {
+  if (sitFlat) {
+    return <span style={{ fontSize: 9, color: "var(--t3)" }}>—</span>;
+  }
+  if (roiX === null) {
+    return <span style={{ fontSize: 9, color: "var(--t3)" }}>no data</span>;
+  }
+  const passed = roiX >= killY;
+  return (
+    <span style={{
+      fontSize: 9,
+      fontWeight: 700,
+      fontFamily: "var(--font-space-mono), Space Mono, monospace",
+      color: passed ? "var(--green)" : "var(--red)",
+    }}>
+      {roiX.toFixed(2)}%
+      <span style={{
+        fontSize: 8,
+        fontWeight: 400,
+        color: "var(--t3)",
+        marginLeft: 4,
+      }}>
+        / {killY.toFixed(1)}%
+      </span>
+      {" "}
+      <span style={{
+        fontSize: 8,
+        fontWeight: 700,
+        letterSpacing: "0.06em",
+        padding: "1px 4px",
+        borderRadius: 2,
+        background: passed ? "var(--green-dim)" : "var(--red-dim)",
+        color: passed ? "var(--green)" : "var(--red)",
+        border: `1px solid ${passed ? "var(--green)" : "var(--red)"}`,
+      }}>
+        {passed ? "PASS" : "FAIL"}
+      </span>
+    </span>
+  );
+}
+
 function SignalRow({
   signal,
   expanded,
   onToggle,
+  killY,
+  stratRoi,
+  stratRoiLoading,
 }: {
   signal: DailySignal;
   expanded: boolean;
   onToggle: () => void;
+  killY: number;
+  stratRoi: StratRoi | null;
+  stratRoiLoading: boolean;
 }) {
   const date = signal.signal_date ?? "—";
   const versionLabel = signal.strategy_version_id
@@ -301,6 +351,58 @@ function SignalRow({
         <Td><SourceBadge source={signal.signal_source} /></Td>
         <Td><SitFlatBadge sitFlat={signal.sit_flat} /></Td>
         <Td>{filterName}</Td>
+        <Td><ConvictionBadge roiX={signal.conviction_roi_x} killY={killY} sitFlat={signal.sit_flat} /></Td>
+        <Td align="right">
+          {signal.sit_flat ? (
+            <span style={{ fontSize: 9, color: "var(--t3)" }}>—</span>
+          ) : signal.session_return_pct === null ? (
+            <span style={{ fontSize: 9, color: "var(--t3)" }}>—</span>
+          ) : (
+            <span style={{
+              fontSize: 10,
+              fontWeight: 700,
+              fontFamily: "var(--font-space-mono), Space Mono, monospace",
+              color: signal.session_return_pct >= 0 ? "var(--green)" : "var(--red)",
+            }}>
+              {signal.session_return_pct >= 0 ? "+" : ""}{signal.session_return_pct.toFixed(2)}%
+            </span>
+          )}
+        </Td>
+        <Td align="right">
+          {signal.sit_flat ? (
+            <span style={{ fontSize: 9, color: "var(--t3)" }}>—</span>
+          ) : stratRoiLoading ? (
+            <span style={{ fontSize: 9, color: "var(--t3)", fontStyle: "italic" }}>computing</span>
+          ) : !stratRoi ? (
+            <span style={{ fontSize: 9, color: "var(--t3)" }}>—</span>
+          ) : (
+            <span style={{
+              fontSize: 10,
+              fontWeight: 700,
+              fontFamily: "var(--font-space-mono), Space Mono, monospace",
+              color: stratRoi.return_pct >= 0 ? "var(--green)" : "var(--red)",
+            }}>
+              {stratRoi.return_pct >= 0 ? "+" : ""}{stratRoi.return_pct.toFixed(2)}%
+              <span style={{
+                fontSize: 8,
+                fontWeight: 400,
+                color: "var(--t3)",
+                marginLeft: 4,
+                textTransform: "uppercase",
+                letterSpacing: "0.04em",
+              }}>
+                {stratRoi.exit_reason === "held" ? "" :
+                 stratRoi.exit_reason === "no_entry" ? "no entry" :
+                 stratRoi.exit_reason === "sit_flat" ? "" :
+                 stratRoi.exit_reason === "stop_loss" ? "SL" :
+                 stratRoi.exit_reason === "trailing_stop" ? "TSL" :
+                 stratRoi.exit_reason === "early_kill" ? "KILL" :
+                 stratRoi.exit_reason === "profit_take" ? "TP" :
+                 stratRoi.exit_reason}
+              </span>
+            </span>
+          )}
+        </Td>
         <Td>
           <code
             title={signal.strategy_version_id ?? undefined}
@@ -313,7 +415,7 @@ function SignalRow({
       </tr>
       {expanded && (
         <tr style={{ background: "var(--bg3)" }}>
-          <td colSpan={6} style={{ padding: "12px 16px 16px 32px" }}>
+          <td colSpan={9} style={{ padding: "12px 16px 16px 32px" }}>
             {signal.filter_reason && (
               <div style={{
                 fontSize: 10,
@@ -336,10 +438,16 @@ function SignalsTable({
   signals,
   expandedId,
   onToggle,
+  killY,
+  stratRoi,
+  stratRoiLoading,
 }: {
   signals: DailySignal[];
   expandedId: string | null;
   onToggle: (id: string) => void;
+  killY: number;
+  stratRoi: Record<string, StratRoi>;
+  stratRoiLoading: boolean;
 }) {
   if (signals.length === 0) {
     return (
@@ -374,6 +482,13 @@ function SignalsTable({
             <Th>Source</Th>
             <Th>Status</Th>
             <Th>Filter</Th>
+            <Th>Conviction</Th>
+            <Th align="right">Raw ROI</Th>
+            <Th align="right">
+              <span title="Hardcoded strategy configs (L=1.33x, SL=-6%, TSL=-7.5%, Kill=0.3%@bar35, TP=9%). Will be dynamic per strategy version in a future update.">
+                Strat ROI *
+              </span>
+            </Th>
             <Th>Version</Th>
             <Th align="right">Symbols</Th>
           </tr>
@@ -385,6 +500,9 @@ function SignalsTable({
               signal={s}
               expanded={expandedId === s.signal_batch_id}
               onToggle={() => onToggle(s.signal_batch_id)}
+              killY={killY}
+              stratRoi={s.signal_date ? stratRoi[s.signal_date] ?? null : null}
+              stratRoiLoading={stratRoiLoading}
             />
           ))}
         </tbody>
@@ -395,13 +513,18 @@ function SignalsTable({
 
 // ─── Page ────────────────────────────────────────────────────────────────────
 
+type StratRoi = { return_pct: number; exit_reason: string };
+
 export default function IndexerSignalsPage() {
   const [state, setState] = useState<LoadState>({ kind: "loading" });
   const [filter, setFilter] = useState<FilterKey>("all");
   const [expandedId, setExpandedId] = useState<string | null>(null);
+  const [stratRoi, setStratRoi] = useState<Record<string, StratRoi>>({});
+  const [stratRoiLoading, setStratRoiLoading] = useState(false);
 
   const fetchSignals = useCallback(async (sourceFilter: FilterKey) => {
     setState({ kind: "loading" });
+    setStratRoi({});
     try {
       const params = new URLSearchParams({ days: String(LOOKBACK_DAYS) });
       if (sourceFilter !== "all") params.set("source", sourceFilter);
@@ -418,7 +541,19 @@ export default function IndexerSignalsPage() {
         return;
       }
       const data = (await res.json()) as SignalsResponse;
-      setState({ kind: "ready", signals: data.signals });
+      setState({ kind: "ready", signals: data.signals, killY: data.conviction_kill_y });
+
+      // Fetch strat ROI in background
+      setStratRoiLoading(true);
+      fetch(`${API_BASE}/api/indexer/signals/strat-roi?days=${LOOKBACK_DAYS}`, { credentials: "include" })
+        .then(async (r) => {
+          if (r.ok) {
+            const d = await r.json();
+            setStratRoi(d.strat_roi || {});
+          }
+        })
+        .catch(() => {})
+        .finally(() => setStratRoiLoading(false));
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       setState({ kind: "error", message: `Network error: ${message}` });
@@ -489,6 +624,9 @@ export default function IndexerSignalsPage() {
             signals={state.signals}
             expandedId={expandedId}
             onToggle={handleToggle}
+            killY={state.killY}
+            stratRoi={stratRoi}
+            stratRoiLoading={stratRoiLoading}
           />
         )}
       </div>

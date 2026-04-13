@@ -146,6 +146,49 @@ def _fetch_portfolio_context(cur) -> dict[str, Any]:
             if dd < drawdown_by_alloc.get(aid, 0):
                 drawdown_by_alloc[aid] = dd
 
+    # ── Fallback: compute daily performance from exchange_snapshots ──────
+    # When performance_daily is empty (no pipeline populates it yet),
+    # build per-day equity + returns from the last exchange snapshot per day.
+    if not perf_by_alloc and all_alloc_ids:
+        cur.execute("""
+            SELECT DISTINCT ON (a.allocation_id, date_trunc('day', es.snapshot_at))
+                a.allocation_id,
+                date_trunc('day', es.snapshot_at)::date AS day,
+                es.total_equity_usd
+            FROM user_mgmt.exchange_snapshots es
+            JOIN user_mgmt.allocations a ON a.connection_id = es.connection_id
+            WHERE a.allocation_id = ANY(%s::uuid[])
+              AND es.fetch_ok = TRUE
+              AND es.snapshot_at >= NOW() - INTERVAL '30 days'
+            ORDER BY a.allocation_id, date_trunc('day', es.snapshot_at), es.snapshot_at DESC
+        """, (all_alloc_ids,))
+        # Group by allocation
+        snap_by_alloc: dict[str, list[tuple]] = {}
+        for row in cur.fetchall():
+            aid = str(row["allocation_id"])
+            snap_by_alloc.setdefault(aid, []).append(
+                (row["day"].isoformat(), float(row["total_equity_usd"] or 0))
+            )
+        for aid, snaps in snap_by_alloc.items():
+            snaps.sort()
+            peak = 0.0
+            prev_eq = None
+            for d, eq in snaps:
+                daily_ret = ((eq / prev_eq - 1) * 100) if prev_eq and prev_eq > 0 else 0.0
+                peak = max(peak, eq)
+                dd = ((eq / peak - 1) * 100) if peak > 0 else 0.0
+                prev_eq = eq
+                perf_by_alloc.setdefault(aid, []).append({
+                    "date": d,
+                    "equity_usd": eq,
+                    "daily_return": round(daily_ret, 4),
+                    "drawdown": round(dd, 4),
+                })
+                if d == today.isoformat():
+                    today_return_by_alloc[aid] = daily_ret
+                if dd < drawdown_by_alloc.get(aid, 0):
+                    drawdown_by_alloc[aid] = dd
+
     # ── Sharpe per strategy version (most recent audit result) ───────────
     sharpe_by_version: dict[str, float | None] = {}
     if all_version_ids:
@@ -203,6 +246,7 @@ def _fetch_portfolio_context(cur) -> dict[str, Any]:
     for a in alloc_list:
         for p in perf_by_alloc.get(a["allocation_id"], []):
             equity_by_date[p["date"]] = equity_by_date.get(p["date"], 0) + (p["equity_usd"] or 0)
+
     portfolio_equity = [
         {"date": d, "equity_usd": v}
         for d, v in sorted(equity_by_date.items())
@@ -284,10 +328,26 @@ def _fetch_portfolio_context(cur) -> dict[str, Any]:
         if times:
             signals_time = max(times)
 
+    # Trader: check most recent deployment for last execution
+    cur.execute("""
+        SELECT status, created_at, entry_at, exit_at
+        FROM user_mgmt.deployments
+        ORDER BY created_at DESC LIMIT 1
+    """)
+    trader_row = cur.fetchone()
+    if trader_row:
+        trader_status = {
+            "status": trader_row["status"],
+            "last_run": _iso(trader_row["entry_at"] or trader_row["created_at"]),
+        }
+    else:
+        trader_status = {"status": "no_deployments", "last_run": None}
+
     pipeline = {
         "compiler": _job_status(compiler_job),
         "indexer": _job_status(indexer_job),
         "signals_last_generated": signals_time,
+        "trader": trader_status,
     }
 
     # ── Exchange snapshots ───────────────────────────────────────────────

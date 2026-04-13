@@ -79,6 +79,7 @@ interface OverviewData {
   pipeline: {
     compiler: PipelineJob;
     indexer: PipelineJob;
+    trader: PipelineJob;
     signals_last_generated: string | null;
   };
   exchange_snapshots: Snapshot[];
@@ -695,9 +696,11 @@ export default function OverviewPage() {
               <tr>
                 <td style={tdStyle}>Trader</td>
                 <td style={tdStyle}>
-                  {statusBadge("unknown")}
+                  {statusBadge(staleCheck(data.pipeline.trader))}
                 </td>
-                <td style={tdStyle}>--</td>
+                <td style={tdStyle}>
+                  {relTime(data.pipeline.trader.last_run)}
+                </td>
               </tr>
             </tbody>
           </table>

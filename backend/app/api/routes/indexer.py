@@ -291,10 +291,76 @@ def list_signals(
     )
     rows = cur.fetchall()
 
+    # ── Conviction gate: compute roi_x for each signal date ────────────
+    # roi_x = equal-weight avg return from 06:00 to 06:35 UTC across
+    # the signal's selected symbols. Computed from market.futures_1m.
+    KILL_Y = 0.3  # conviction threshold (%)
+
+    signal_dates = list({r["signal_date"] for r in rows if r["signal_date"] and int(r["symbol_count"] or 0) > 0})
+    conviction_by_date: dict[str, float | None] = {}
+    session_return_by_date: dict[str, float | None] = {}
+
+    if signal_dates:
+        # Batch query: for each signal date, get the open (06:00),
+        # bar-6 (06:35), and session close (23:55) prices for ALL
+        # symbols that had signals that day.
+        cur.execute("""
+            WITH signal_syms AS (
+                SELECT ds.signal_date, dsi.symbol_id
+                FROM user_mgmt.daily_signals ds
+                JOIN user_mgmt.daily_signal_items dsi
+                  ON dsi.signal_batch_id = ds.signal_batch_id
+                WHERE ds.signal_date = ANY(%s::date[])
+                  AND dsi.is_selected = TRUE
+            ),
+            open_px AS (
+                SELECT ss.signal_date, ss.symbol_id, f.close AS px
+                FROM signal_syms ss
+                JOIN market.futures_1m f ON f.symbol_id = ss.symbol_id
+                WHERE f.source_id = 1
+                  AND f.timestamp_utc >= (ss.signal_date + TIME '06:00')
+                  AND f.timestamp_utc <  (ss.signal_date + TIME '06:01')
+            ),
+            bar6_px AS (
+                SELECT ss.signal_date, ss.symbol_id, f.close AS px
+                FROM signal_syms ss
+                JOIN market.futures_1m f ON f.symbol_id = ss.symbol_id
+                WHERE f.source_id = 1
+                  AND f.timestamp_utc >= (ss.signal_date + TIME '06:35')
+                  AND f.timestamp_utc <  (ss.signal_date + TIME '06:36')
+            ),
+            close_px AS (
+                SELECT ss.signal_date, ss.symbol_id, f.close AS px
+                FROM signal_syms ss
+                JOIN market.futures_1m f ON f.symbol_id = ss.symbol_id
+                WHERE f.source_id = 1
+                  AND f.timestamp_utc >= (ss.signal_date + TIME '23:55')
+                  AND f.timestamp_utc <  (ss.signal_date + TIME '23:56')
+            )
+            SELECT o.signal_date,
+                   AVG((b.px / NULLIF(o.px, 0) - 1) * 100) AS roi_x,
+                   AVG((c.px / NULLIF(o.px, 0) - 1) * 100) AS session_return
+            FROM open_px o
+            JOIN bar6_px b ON b.signal_date = o.signal_date
+                          AND b.symbol_id = o.symbol_id
+            LEFT JOIN close_px c ON c.signal_date = o.signal_date
+                                AND c.symbol_id = o.symbol_id
+            GROUP BY o.signal_date
+        """, (signal_dates,))
+        for row in cur.fetchall():
+            d = row["signal_date"].isoformat()
+            conviction_by_date[d] = (
+                round(float(row["roi_x"]), 4) if row["roi_x"] is not None else None
+            )
+            session_return_by_date[d] = (
+                round(float(row["session_return"]), 4) if row["session_return"] is not None else None
+            )
+
     return {
         "lookback_days":     days,
         "source_filter":     source,
         "signals_returned":  len(rows),
+        "conviction_kill_y": KILL_Y,
         "signals": [
             {
                 "signal_batch_id":     str(r["signal_batch_id"]),
@@ -307,10 +373,188 @@ def list_signals(
                 "computed_at":         r["computed_at"].isoformat() if r["computed_at"] else None,
                 "symbol_count":        int(r["symbol_count"] or 0),
                 "symbols":             r["symbols"] or [],
+                "conviction_roi_x":    conviction_by_date.get(
+                    r["signal_date"].isoformat() if r["signal_date"] else "", None
+                ),
+                "session_return_pct":   session_return_by_date.get(
+                    r["signal_date"].isoformat() if r["signal_date"] else "", None
+                ),
             }
             for r in rows
         ],
     }
+
+
+@router.get("/signals/strat-roi")
+def signals_strat_roi(
+    days: int = Query(90, ge=1, le=365),
+    cur=Depends(get_cursor),
+) -> dict[str, Any]:
+    """
+    Compute strategy-simulated return for each signal date. Separate
+    endpoint because the bar-by-bar query is heavy (~5-10s). The
+    frontend calls this after the main /signals response loads.
+    """
+    from collections import defaultdict
+
+    KILL_Y = 0.3
+    STRAT_LEVERAGE       = 1.33
+    STRAT_SL             = -6.0
+    STRAT_TSL            = -7.5
+    STRAT_EARLY_KILL_BAR = 35
+    STRAT_EARLY_KILL_Y   = 0.3
+    STRAT_EARLY_FILL_Y   = 9.0
+
+    interval_str = f"{days} days"
+
+    # Get signal dates with selected symbols
+    cur.execute("""
+        SELECT ds.signal_date, ds.sit_flat
+        FROM user_mgmt.daily_signals ds
+        WHERE ds.signal_date >= (NOW() - %s::interval)::date
+    """, (interval_str,))
+    sig_rows = cur.fetchall()
+    active_dates = [r["signal_date"] for r in sig_rows if not r["sit_flat"]]
+
+    if not active_dates:
+        return {"strat_roi": {}}
+
+    # Conviction values (needed for no-entry check)
+    cur.execute("""
+        WITH signal_syms AS (
+            SELECT ds.signal_date, dsi.symbol_id
+            FROM user_mgmt.daily_signals ds
+            JOIN user_mgmt.daily_signal_items dsi
+              ON dsi.signal_batch_id = ds.signal_batch_id
+            WHERE ds.signal_date = ANY(%s::date[])
+              AND dsi.is_selected = TRUE
+        ),
+        open_px AS (
+            SELECT ss.signal_date, ss.symbol_id, f.close AS px
+            FROM signal_syms ss
+            JOIN market.futures_1m f ON f.symbol_id = ss.symbol_id
+            WHERE f.source_id = 1
+              AND f.timestamp_utc >= (ss.signal_date + TIME '06:00')
+              AND f.timestamp_utc <  (ss.signal_date + TIME '06:01')
+        ),
+        bar6_px AS (
+            SELECT ss.signal_date, ss.symbol_id, f.close AS px
+            FROM signal_syms ss
+            JOIN market.futures_1m f ON f.symbol_id = ss.symbol_id
+            WHERE f.source_id = 1
+              AND f.timestamp_utc >= (ss.signal_date + TIME '06:35')
+              AND f.timestamp_utc <  (ss.signal_date + TIME '06:36')
+        )
+        SELECT o.signal_date,
+               AVG((b.px / NULLIF(o.px, 0) - 1) * 100) AS roi_x
+        FROM open_px o
+        JOIN bar6_px b ON b.signal_date = o.signal_date AND b.symbol_id = o.symbol_id
+        GROUP BY o.signal_date
+    """, (active_dates,))
+    conviction_by_date = {}
+    for row in cur.fetchall():
+        conviction_by_date[row["signal_date"].isoformat()] = (
+            round(float(row["roi_x"]), 4) if row["roi_x"] is not None else None
+        )
+
+    # Fetch all bars 06:00→23:55 for active signal dates
+    cur.execute("""
+        WITH signal_syms AS (
+            SELECT ds.signal_date, dsi.symbol_id
+            FROM user_mgmt.daily_signals ds
+            JOIN user_mgmt.daily_signal_items dsi
+              ON dsi.signal_batch_id = ds.signal_batch_id
+            WHERE ds.signal_date = ANY(%s::date[])
+              AND dsi.is_selected = TRUE
+        )
+        SELECT ss.signal_date, f.timestamp_utc, ss.symbol_id, f.close
+        FROM signal_syms ss
+        JOIN market.futures_1m f ON f.symbol_id = ss.symbol_id
+        WHERE f.source_id = 1
+          AND f.timestamp_utc >= (ss.signal_date + TIME '06:00')
+          AND f.timestamp_utc <= (ss.signal_date + TIME '23:55')
+        ORDER BY ss.signal_date, f.timestamp_utc
+    """, (active_dates,))
+    bar_rows = cur.fetchall()
+
+    bars_by_date: dict = defaultdict(lambda: defaultdict(list))
+    for br in bar_rows:
+        d = br["signal_date"].isoformat()
+        bars_by_date[d][br["symbol_id"]].append(
+            (br["timestamp_utc"], float(br["close"]))
+        )
+
+    result: dict[str, dict] = {}
+    for d, syms in bars_by_date.items():
+        open_prices = {}
+        for sid, bars in syms.items():
+            if bars:
+                open_prices[sid] = bars[0][1]
+        if not open_prices:
+            continue
+
+        all_ts = sorted({ts for bars in syms.values() for ts, _ in bars})
+        bar_returns = []
+        for ts in all_ts:
+            rets = []
+            for sid, bars in syms.items():
+                op = open_prices.get(sid)
+                if op is None or op == 0:
+                    continue
+                px = None
+                for bts, bpx in bars:
+                    if bts <= ts:
+                        px = bpx
+                    else:
+                        break
+                if px is not None:
+                    rets.append((px / op - 1) * 100)
+            if rets:
+                bar_returns.append((ts, sum(rets) / len(rets)))
+
+        if not bar_returns:
+            continue
+
+        conviction_roi = conviction_by_date.get(d)
+        if conviction_roi is not None and conviction_roi < KILL_Y:
+            result[d] = {"return_pct": 0.0, "exit_reason": "no_entry"}
+            continue
+
+        peak_ret = 0.0
+        exit_ret = None
+        exit_reason = "held"
+
+        for bar_idx, (ts, ret) in enumerate(bar_returns):
+            if bar_idx == STRAT_EARLY_KILL_BAR and ret < STRAT_EARLY_KILL_Y:
+                exit_ret = ret
+                exit_reason = "early_kill"
+                break
+            if ret <= STRAT_SL:
+                exit_ret = STRAT_SL
+                exit_reason = "stop_loss"
+                break
+            peak_ret = max(peak_ret, ret)
+            if peak_ret > 0 and (ret - peak_ret) <= STRAT_TSL:
+                exit_ret = ret
+                exit_reason = "trailing_stop"
+                break
+            if ret >= STRAT_EARLY_FILL_Y:
+                exit_ret = ret
+                exit_reason = "profit_take"
+                break
+
+        if exit_ret is None:
+            exit_ret = bar_returns[-1][1] if bar_returns else 0.0
+
+        leveraged_ret = exit_ret * STRAT_LEVERAGE
+        result[d] = {"return_pct": round(leveraged_ret, 4), "exit_reason": exit_reason}
+
+    # Also mark sit-flat dates
+    for r in sig_rows:
+        if r["sit_flat"]:
+            result[r["signal_date"].isoformat()] = {"return_pct": 0.0, "exit_reason": "sit_flat"}
+
+    return {"strat_roi": result}
 
 
 @router.get("/signals/{signal_batch_id}")

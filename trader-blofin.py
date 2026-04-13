@@ -61,7 +61,7 @@ API_KEY    = os.environ.get("BLOFIN_API_KEY",    "YOUR_API_KEY")
 API_SECRET = os.environ.get("BLOFIN_API_SECRET", "YOUR_API_SECRET")
 PASSPHRASE = os.environ.get("BLOFIN_PASSPHRASE", "YOUR_PASSPHRASE")
 
-if "YOUR_" in API_KEY or "YOUR_" in API_SECRET or not PASSPHRASE or PASSPHRASE == "pass":
+if "YOUR_" in API_KEY or "YOUR_" in API_SECRET or not PASSPHRASE:
     raise RuntimeError("BloFin API credentials not set — check secrets.env")
 
 DEMO_MODE  = False   # True -> BloFin paper trading environment
@@ -1211,6 +1211,29 @@ def run_session(dry_run: bool = False, resume: bool = False):
 
     roi_x = equal_weight_return(bar6_prices, open_prices)
     log.info(f"  roi_x={roi_x*100:.4f}%  KILL_Y={KILL_Y*100:.1f}%")
+
+    # Store conviction result on the daily_signals row for the indexer UI
+    try:
+        import psycopg2 as _pg2
+        _cconn = _pg2.connect(
+            host=os.environ.get("DB_HOST", "127.0.0.1"),
+            user=os.environ.get("DB_USER", "quant"),
+            password=os.environ.get("DB_PASSWORD", ""),
+            dbname=os.environ.get("DB_NAME", "marketdata"),
+        )
+        _ccur = _cconn.cursor()
+        _ccur.execute("""
+            UPDATE user_mgmt.daily_signals
+            SET conviction_roi_x = %s,
+                conviction_kill_y = %s,
+                conviction_passed = %s
+            WHERE signal_date = %s
+        """, (round(roi_x * 100, 4), round(KILL_Y * 100, 4), roi_x >= KILL_Y, today))
+        _cconn.commit()
+        _ccur.close()
+        _cconn.close()
+    except Exception as _ce:
+        log.warning(f"  Failed to store conviction: {_ce}")
 
     if past_cutoff:
         log.info(
