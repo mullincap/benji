@@ -2,6 +2,7 @@
 
 import React, { useState, useEffect, useRef } from "react";
 import { useTrader, Exchange, fmt, mask } from "../context";
+import { allocatorApi } from "../api";
 import AllocationPicker from "./AllocationPicker";
 
 // ─── Exchange catalog ───────────────────────────────────────────────────────
@@ -126,30 +127,59 @@ export default function SetupWizard({ strategyName, onActivate, onCancel }: Setu
     }
   }
 
-  function runVerify() {
+  const [verifyError, setVerifyError] = useState<string | null>(null);
+
+  async function runVerify() {
     if (!selectedExchangeName) return;
-    setVerifyStatus("checking"); setVerifyLog([]);
-    const lines = [
-      `> Connecting to ${selectedExchangeName} API...`,
-      "> Sending signed test request...", "> Response: 200 OK", "> Account type: SPOT",
-      "> Verifying key ownership...", "> Signature check: PASSED", "> Connection verified \u2713",
-    ];
-    lines.forEach((l, i) => {
-      setTimeout(() => {
-        setVerifyLog(prev => [...prev, l]);
-        if (i === lines.length - 1) {
-          setVerifyStatus("ok");
-          const newEx: Exchange = {
-            id: selectedExchangeName.toLowerCase().replace(/\s+/g, "-") + "-" + Date.now(),
-            name: selectedExchangeName, maskedKey: mask(inlineApiKey), lastSynced: "just now",
-            balance: selectedExchangeName === "Binance" ? 127369 : 92210,
-          };
-          addExchange(newEx);
-          setSelectedExchangeId(newEx.id);
-          setTimeout(() => setStep(3), 800);
-        }
-      }, 400 + i * 350);
-    });
+    setVerifyStatus("checking");
+    setVerifyLog([]);
+    setVerifyError(null);
+
+    const addLog = (line: string) => setVerifyLog(prev => [...prev, line]);
+
+    addLog(`> Connecting to ${selectedExchangeName} API...`);
+
+    try {
+      addLog("> Storing encrypted credentials...");
+      const result = await allocatorApi.storeExchangeKeys({
+        exchange: selectedExchangeName.toLowerCase(),
+        label: selectedExchangeName,
+        api_key: inlineApiKey,
+        api_secret: inlineSecretKey,
+      });
+
+      addLog("> Credentials stored securely");
+      addLog("> Triggering balance snapshot...");
+
+      // Trigger a snapshot refresh to validate the keys work
+      const snapResult = await allocatorApi.refreshSnapshots().catch(() => null);
+      if (snapResult) {
+        addLog("> Balance fetched successfully");
+      }
+
+      addLog("> Connection verified \u2713");
+      setVerifyStatus("ok");
+
+      // Find the balance from snapshot data
+      const snap = snapResult?.snapshots?.find(s => s.connection_id === result.connection_id);
+      const balance = snap?.total_equity_usd ?? 0;
+
+      const newEx: Exchange = {
+        id: result.connection_id,
+        name: selectedExchangeName,
+        maskedKey: result.masked_key,
+        lastSynced: "just now",
+        balance,
+      };
+      addExchange(newEx);
+      setSelectedExchangeId(newEx.id);
+      setTimeout(() => setStep(3), 800);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "Verification failed";
+      addLog(`> Error: ${msg}`);
+      setVerifyError(msg);
+      setVerifyStatus("idle");
+    }
   }
 
   function fireCelebration(stratName: string, exchName: string) {
@@ -500,9 +530,14 @@ export default function SetupWizard({ strategyName, onActivate, onCancel }: Setu
                 padding: 12, height: 120, overflowY: "auto", marginBottom: 12, fontSize: 10, lineHeight: 1.9,
               }}>
                 {verifyLog.map((l, i) => (
-                  <div key={i} style={{ color: l.includes("\u2713") || l.includes("PASSED") ? "var(--green)" : "var(--t2)" }}>{l}</div>
+                  <div key={i} style={{ color: l.includes("\u2713") || l.includes("PASSED") ? "var(--green)" : l.includes("Error") ? "var(--red)" : "var(--t2)" }}>{l}</div>
                 ))}
                 {verifyStatus === "checking" && <span style={{ color: "var(--t2)", animation: "blink-cursor 1s step-end infinite" }}>{"\u258C"}</span>}
+              </div>
+            )}
+            {verifyError && (
+              <div style={{ fontSize: 9, color: "var(--red)", marginBottom: 12 }}>
+                Failed to verify connection. Check your API keys and try again.
               </div>
             )}
 

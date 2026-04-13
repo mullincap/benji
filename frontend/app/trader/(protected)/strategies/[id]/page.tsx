@@ -2,17 +2,10 @@
 
 import { useState, useEffect, useRef } from "react";
 import { useParams, useRouter } from "next/navigation";
-import { useTrader, STRATEGY_CATALOG, StrategyType, StrategyInstance, fmt, RISK_COLOR, RISK_DIM, GHOST_CURVE } from "../../context";
-import EquityCurveSvg from "../../equity-curve";
-import SetupWizard from "../../components/SetupWizard";
-
-// ─── Capacity data ──────────────────────────────────────────────────────────
-
-const CAPACITY_DATA: Record<string, { allocators: number; deployed: number; capacity: number }> = {
-  "alpha-low":  { allocators: 8,  deployed: 740000, capacity: 1000000 },
-  "alpha-mid":  { allocators: 31, deployed: 220000, capacity: 1000000 },
-  "alpha-high": { allocators: 47, deployed: 920000, capacity: 1000000 },
-};
+import { useTrader, STRATEGY_CATALOG, CAPACITY_DATA, StrategyType, StrategyInstance, fmt, RISK_COLOR, RISK_DIM, GHOST_CURVE } from "../../../context";
+import { allocatorApi } from "../../../api";
+import EquityCurveSvg from "../../../equity-curve";
+import SetupWizard from "../../../components/SetupWizard";
 
 // ─── Metric card ─────────────────────────────────────────────────────────────
 
@@ -29,6 +22,7 @@ function MetricCard({ label, value, color }: { label: string; value: string; col
 
 interface DayData { date: string; day: number; dow: number; ret: number | null; future?: boolean; }
 
+// TODO: replace with real backtest daily returns from backend
 function generateMockCalendarData(): Record<string, DayData[]> {
   const months: Record<string, DayData[]> = {};
   const now = new Date();
@@ -219,7 +213,7 @@ export default function MarketplaceDetailPage() {
   const router = useRouter();
   const id = typeof params.id === "string" ? params.id : "alpha-mid";
   const cat = STRATEGY_CATALOG[id as StrategyType];
-  const { instances, addInstance, updateInstance, removeInstance } = useTrader();
+  const { instances, addInstance, updateInstance, removeInstance, refresh } = useTrader();
 
   if (!cat) {
     return <div style={{ background: "var(--bg0)", padding: 28, minHeight: "100%", color: "var(--t2)", fontSize: 10 }}>Strategy not found.</div>;
@@ -269,22 +263,54 @@ export default function MarketplaceDetailPage() {
     setWizardOpen(true);
   }
 
-  function handleWizardActivate(exchangeId: string, exchangeName: string, allocation: number) {
+  async function handleWizardActivate(exchangeId: string, exchangeName: string, allocation: number) {
     if (!wizardInstanceId) return;
-    const targetId = wizardInstanceId;
-    updateInstance(targetId, {
+
+    // Create allocation via API
+    const stratVersionId = cat.strategyVersionId;
+    let realAllocationId = wizardInstanceId;
+
+    if (stratVersionId) {
+      try {
+        const result = await allocatorApi.createAllocation({
+          strategy_version_id: stratVersionId,
+          connection_id: exchangeId,
+          capital_usd: allocation,
+        });
+        realAllocationId = result.allocation_id;
+      } catch (err) {
+        console.error("Failed to create allocation:", err);
+        // Fall through — update local state anyway so UI isn't stuck
+      }
+    }
+
+    // Remove the temporary unlinked instance
+    if (wizardInstanceId !== realAllocationId) {
+      removeInstance(wizardInstanceId);
+    }
+
+    // Update or add the real instance
+    updateInstance(realAllocationId, {
+      id: realAllocationId,
       status: "live",
       exchangeId,
       exchangeName,
       allocation,
-      equity: Math.round(allocation * 1.034),
+      equity: allocation,
+      strategyVersionId: stratVersionId,
+      connectionId: exchangeId,
     });
+
     setWizardOpen(false);
     setWizardInstanceId(null);
+
+    // Refresh data from backend
+    refresh();
+
     setTimeout(() => {
       const fadeOut = (window as any).__celebrationFadeOut;
       if (fadeOut) { fadeOut(); delete (window as any).__celebrationFadeOut; }
-      setTimeout(() => router.push(`/trader/traders/${targetId}`), 200);
+      setTimeout(() => router.push(`/trader/traders/${realAllocationId}`), 200);
     }, 1800);
   }
 

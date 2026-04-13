@@ -1,12 +1,12 @@
 "use client";
 
 import { useRouter } from "next/navigation";
-import { useTrader } from "../context";
-import TraderCard from "../components/TraderCard";
+import { useTrader } from "../../context";
+import TraderCard from "../../components/TraderCard";
 
 export default function TradersPage() {
   const router = useRouter();
-  const { instances } = useTrader();
+  const { instances, loading } = useTrader();
 
   return (
     <div style={{ background: "var(--bg0)", padding: "28px", minHeight: "100%" }}>
@@ -16,7 +16,9 @@ export default function TradersPage() {
           TRADERS
         </div>
 
-        {instances.length === 0 ? (
+        {loading ? (
+          <div style={{ textAlign: "center", padding: "40px 0", color: "var(--t2)", fontSize: 10 }}>Loading traders...</div>
+        ) : instances.length === 0 ? (
           <div style={{
             background: "var(--bg2)", border: "1px solid var(--line)", borderRadius: 5,
             padding: "40px 24px", textAlign: "center",

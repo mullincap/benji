@@ -2,10 +2,10 @@
 
 import { useState } from "react";
 import { useRouter } from "next/navigation";
-import { useTrader, Position, Exchange, StrategyInstance, StrategyType, STRATEGY_CATALOG, fmt, GHOST_CURVE, RISK_COLOR, RISK_DIM } from "../context";
-import EquityCurveSvg from "../equity-curve";
-import PerformanceChart from "../performance-chart";
-import TraderCard from "../components/TraderCard";
+import { useTrader, Position, Exchange, StrategyInstance, StrategyType, STRATEGY_CATALOG, fmt, GHOST_CURVE, RISK_COLOR, RISK_DIM, StrategyCatalogEntry } from "../../context";
+import EquityCurveSvg from "../../equity-curve";
+import PerformanceChart from "../../performance-chart";
+import TraderCard from "../../components/TraderCard";
 import {
   Chart as ChartJS,
   RadialLinearScale, PointElement, LineElement, Filler, Tooltip,
@@ -119,7 +119,7 @@ function DashboardContent({ equity, dailyPnl, allTimePnl, sharpe, allocated, act
 
 export default function OverviewPage() {
   const router = useRouter();
-  const { instances, exchanges } = useTrader();
+  const { instances, exchanges, loading, error } = useTrader();
   const empty = instances.length === 0;
   const exchangeBalance = exchanges.reduce((s, e) => s + e.balance, 0);
   const totalAllocatedRaw = instances.reduce((s, i) => s + (i.allocation ?? 0), 0);
@@ -135,7 +135,7 @@ export default function OverviewPage() {
 
   // Portfolio Sharpe: equity-weighted average of per-strategy Sharpe from STRATEGY_CATALOG
   const sharpe = totalEquity > 0
-    ? instances.reduce((s, i) => s + (STRATEGY_CATALOG[i.strategyType].sharpe * i.equity), 0) / totalEquity
+    ? instances.reduce((s, i) => s + ((STRATEGY_CATALOG[i.strategyType]?.sharpe ?? 0) * i.equity), 0) / totalEquity
     : 0;
 
   const allPositions: (Position & { strategy: string; exchange: string })[] = [];
@@ -153,6 +153,16 @@ export default function OverviewPage() {
         <div style={{ fontSize: 9, fontWeight: 700, letterSpacing: "0.12em", color: "var(--t3)", textTransform: "uppercase", marginBottom: 16 }}>
           OVERVIEW
         </div>
+
+        {loading && (
+          <div style={{ textAlign: "center", padding: "40px 0", color: "var(--t2)", fontSize: 10 }}>Loading...</div>
+        )}
+
+        {error && (
+          <div style={{ background: "var(--bg2)", border: "1px solid var(--red-dim)", borderRadius: 5, padding: "12px 16px", marginBottom: 16, fontSize: 10, color: "var(--red)" }}>
+            {error}
+          </div>
+        )}
 
         <div style={{ position: "relative" }}>
 

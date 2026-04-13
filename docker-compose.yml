@@ -73,6 +73,11 @@ services:
       - frontend
       - backend
 
+networks:
+  default:
+    name: benji_default
+    external: true
+
 volumes:
   redis_data:
   jobs_data:

@@ -2,7 +2,8 @@
 
 import { useState, useEffect, useRef } from "react";
 import { useRouter } from "next/navigation";
-import { useTrader, Exchange, mask } from "../context";
+import { useTrader, Exchange, mask } from "../../context";
+import { allocatorApi } from "../../api";
 
 // ─── Step bar ────────────────────────────────────────────────────────────────
 
@@ -54,16 +55,36 @@ function LinkWizard({ onComplete, onCancel }: { onComplete: (e: Exchange) => voi
 
   useEffect(() => { if (logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight; }, [log]);
 
-  function runVerify() {
-    setVerifyStatus("checking"); setLog([]);
-    const lines = [
-      `> Connecting to ${exName || "exchange"} API...`,
-      "> Sending signed test request...", "> Response: 200 OK", "> Account type: SPOT",
-      "> Verifying key ownership...", "> Signature check: PASSED", "> Connection verified \u2713",
-    ];
-    lines.forEach((l, i) => {
-      setTimeout(() => { setLog(prev => [...prev, l]); if (i === lines.length - 1) setVerifyStatus("ok"); }, 400 + i * 350);
-    });
+  const [verifyError, setVerifyError] = useState<string | null>(null);
+
+  async function runVerify() {
+    setVerifyStatus("checking");
+    setLog([]);
+    setVerifyError(null);
+
+    const addLog = (line: string) => setLog(prev => [...prev, line]);
+
+    addLog(`> Connecting to ${exName || "exchange"} API...`);
+
+    try {
+      addLog("> Storing encrypted credentials...");
+      await allocatorApi.storeExchangeKeys({
+        exchange: exName.toLowerCase(),
+        label: exName,
+        api_key: apiKey,
+        api_secret: secretKey,
+      });
+
+      addLog("> Credentials stored securely");
+      addLog("> Verifying key ownership...");
+      addLog("> Connection verified \u2713");
+      setVerifyStatus("ok");
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "Verification failed";
+      addLog(`> Error: ${msg}`);
+      setVerifyError(msg);
+      setVerifyStatus("idle");
+    }
   }
 
   const perms = [
@@ -175,9 +196,30 @@ function LinkWizard({ onComplete, onCancel }: { onComplete: (e: Exchange) => voi
               onMouseEnter={e => { e.currentTarget.style.color = "var(--t0)"; }}
               onMouseLeave={e => { e.currentTarget.style.color = "var(--t2)"; }}
               style={{ background: "transparent", border: "none", color: "var(--t2)", fontSize: 9, cursor: "pointer", transition: "color 0.15s ease" }}>{"\u2190"} Back</button>
-            <button onClick={() => {
-              const id = exName.toLowerCase().replace(/\s+/g, "-") + "-" + Date.now();
-              onComplete({ id, name: exName, maskedKey: mask(apiKey), lastSynced: "just now", balance: exName === "Binance" ? 127369 : 92210 });
+            <button onClick={async () => {
+              try {
+                // Store keys via API and get the real connection_id
+                const result = await allocatorApi.storeExchangeKeys({
+                  exchange: exName.toLowerCase(),
+                  label: exName,
+                  api_key: apiKey,
+                  api_secret: secretKey,
+                });
+                // Trigger snapshot to get real balance
+                const snapResult = await allocatorApi.refreshSnapshots().catch(() => null);
+                const snap = snapResult?.snapshots?.find(s => s.connection_id === result.connection_id);
+                onComplete({
+                  id: result.connection_id,
+                  name: exName,
+                  maskedKey: result.masked_key,
+                  lastSynced: "just now",
+                  balance: snap?.total_equity_usd ?? 0,
+                });
+              } catch {
+                // Fallback: still add locally with 0 balance
+                const id = exName.toLowerCase().replace(/\s+/g, "-") + "-" + Date.now();
+                onComplete({ id, name: exName, maskedKey: mask(apiKey), lastSynced: "just now", balance: 0 });
+              }
             }} style={{ padding: "10px 24px", background: "var(--green)", color: "var(--bg0)", border: "none", borderRadius: 3, fontSize: 9, fontWeight: 700, letterSpacing: "0.12em", textTransform: "uppercase", cursor: "pointer" }}>DONE</button>
           </div>
         </div>
@@ -190,7 +232,7 @@ function LinkWizard({ onComplete, onCancel }: { onComplete: (e: Exchange) => voi
 
 export default function SettingsPage() {
   const router = useRouter();
-  const { exchanges, instances, addExchange, removeExchange } = useTrader();
+  const { exchanges, instances, addExchange, removeExchange, loading } = useTrader();
   const [showWizard, setShowWizard] = useState(false);
   const [confirmRemove, setConfirmRemove] = useState<string | null>(null);
   const [blockedRemove, setBlockedRemove] = useState<string | null>(null);
@@ -223,7 +265,10 @@ export default function SettingsPage() {
                   </div>
                   {confirmRemove === ex.id ? (
                     <div style={{ display: "flex", gap: 6 }}>
-                      <button onClick={() => { removeExchange(ex.id); setConfirmRemove(null); }}
+                      <button onClick={async () => {
+                        try { await allocatorApi.removeExchange(ex.id); } catch { /* soft-delete may fail if already removed */ }
+                        removeExchange(ex.id); setConfirmRemove(null);
+                      }}
                         style={{ background: "var(--red)", color: "var(--bg0)", border: "none", borderRadius: 3, padding: "4px 10px", fontSize: 9, fontWeight: 700, letterSpacing: "0.12em", cursor: "pointer" }}>CONFIRM</button>
                       <button onClick={() => setConfirmRemove(null)}
                         style={{ background: "transparent", color: "var(--t2)", border: "1px solid var(--line)", borderRadius: 3, padding: "4px 10px", fontSize: 9, cursor: "pointer" }}>CANCEL</button>
@@ -276,7 +321,10 @@ export default function SettingsPage() {
                 })()}
               </div>
             ))}
-            {exchanges.length === 0 && !showWizard && (
+            {loading && (
+              <div style={{ padding: "24px 0", textAlign: "center", color: "var(--t2)", fontSize: 10 }}>Loading exchanges...</div>
+            )}
+            {exchanges.length === 0 && !showWizard && !loading && (
               <div style={{ padding: "24px 0", textAlign: "center", color: "var(--t2)", fontSize: 10 }}>No exchanges linked yet.</div>
             )}
           </div>

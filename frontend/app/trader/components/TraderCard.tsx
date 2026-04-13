@@ -2,6 +2,7 @@
 
 import { useRouter } from "next/navigation";
 import { useTrader, StrategyInstance, fmt, RISK_COLOR, RISK_DIM } from "../context";
+import { allocatorApi } from "../api";
 
 // ─── Toggle ──────────────────────────────────────────────────────────────────
 
@@ -107,7 +108,11 @@ function LiveCard({ inst }: { inst: StrategyInstance }) {
           on={isLive}
           onColor="var(--green)"
           offColor="var(--t2)"
-          onToggle={() => updateInstance(inst.id, { status: isLive ? "paused" : "live" })}
+          onToggle={() => {
+            const newStatus = isLive ? "paused" : "live";
+            allocatorApi.updateAllocation(inst.id, { status: newStatus === "live" ? "active" : "paused" }).catch(() => {});
+            updateInstance(inst.id, { status: newStatus });
+          }}
           label={isLive ? "Live" : "Paused"}
         />
       </div>

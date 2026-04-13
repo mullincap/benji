@@ -1,15 +1,16 @@
 "use client";
 
-import { createContext, useContext, useState, useCallback, ReactNode } from "react";
+import { createContext, useContext, useState, useCallback, useEffect, ReactNode } from "react";
+import { allocatorApi, ApiStrategy, ApiExchange, ApiAllocation, ApiSnapshot } from "./api";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
 export interface Exchange {
-  id: string;
-  name: string;
+  id: string;           // connection_id from backend
+  name: string;         // exchange label (e.g. "BloFin")
   maskedKey: string;
   lastSynced: string;
-  balance: number;
+  balance: number;      // total_equity_usd from latest snapshot
 }
 
 export interface Position {
@@ -22,13 +23,13 @@ export interface Position {
   pnlPct: number;
 }
 
-export type StrategyType = "alpha-low" | "alpha-mid" | "alpha-high";
+export type StrategyType = string;
 export type RiskLevel = "low" | "medium" | "high";
 
 export type InstanceStatus = "unlinked" | "live" | "paused";
 
 export interface StrategyInstance {
-  id: string;
+  id: string;                // allocation_id from backend (or temp id for unlinked)
   strategyType: StrategyType;
   strategyName: string;
   exchangeId: string | null;
@@ -40,38 +41,110 @@ export interface StrategyInstance {
   equity: number;
   dailyPnl: number;
   positions: Position[];
+  // Backend references
+  strategyVersionId?: string;
+  connectionId?: string;
 }
 
-export const STRATEGY_CATALOG: Record<StrategyType, {
-  name: string; risk: RiskLevel; description: string;
-  sharpe: number; maxDd: number; winRate: number; ytd: number; cagr: number;
-  profitFactor: number; avg1m: number; activeDays: number; vol: number;
-  simpleReturn: number; compoundedReturn: number; avgWinLoss: number;
-}> = {
+// ─── Strategy catalog (fetched from backend) ────────────────────────────────
+
+export interface StrategyCatalogEntry {
+  name: string;
+  risk: RiskLevel;
+  description: string;
+  sharpe: number;
+  maxDd: number;
+  winRate: number;
+  ytd: number;
+  cagr: number;
+  profitFactor: number;
+  avg1m: number;
+  activeDays: number;
+  vol: number;
+  simpleReturn: number;
+  compoundedReturn: number;
+  avgWinLoss: number;
+  // Backend references
+  strategyVersionId: string;
+  capitalCapUsd: number | null;
+}
+
+export interface CapacityData {
+  allocators: number;
+  deployed: number;
+  capacity: number;
+}
+
+// Mutable catalog populated from the API
+export let STRATEGY_CATALOG: Record<string, StrategyCatalogEntry> = {};
+export let CAPACITY_DATA: Record<string, CapacityData> = {};
+
+function riskFromFilterMode(filterMode: string): RiskLevel {
+  const lower = (filterMode || "").toLowerCase();
+  if (lower.includes("low") || lower.includes("conservative")) return "low";
+  if (lower.includes("high") || lower.includes("aggressive")) return "high";
+  return "medium";
+}
+
+function mapApiStrategyToCatalog(s: ApiStrategy): StrategyCatalogEntry {
+  const m = s.metrics;
+  return {
+    name: s.display_name,
+    risk: riskFromFilterMode(s.filter_mode),
+    description: s.description || "",
+    sharpe: m.sharpe ?? 0,
+    maxDd: Math.abs(m.max_dd_pct ?? 0),
+    winRate: (m.win_rate_daily ?? 0) * 100,
+    ytd: m.total_return_pct ?? 0,
+    cagr: m.cagr_pct ?? 0,
+    profitFactor: m.profit_factor ?? 0,
+    avg1m: (m.avg_daily_ret_pct ?? 0) * 21, // approximate monthly
+    activeDays: m.active_days ?? 0,
+    vol: 0, // not directly available from this query
+    simpleReturn: m.total_return_pct ?? 0,
+    compoundedReturn: m.cagr_pct ?? 0,
+    avgWinLoss: m.profit_factor ?? 0,
+    strategyVersionId: s.strategy_version_id,
+    capitalCapUsd: s.capital_cap_usd,
+  };
+}
+
+// ─── Fallback catalog (used while loading or if API fails) ──────────────────
+
+const FALLBACK_CATALOG: Record<string, StrategyCatalogEntry> = {
   "alpha-low": {
     name: "Alpha Low", risk: "low",
-    description: "Conservative capital preservation strategy with tight drawdown controls and reduced position sizing. Designed for accounts prioritising stability over growth. Targets consistent small gains with minimal exposure to tail risk events.",
+    description: "Conservative capital preservation strategy with tight drawdown controls and reduced position sizing.",
     sharpe: 1.84, maxDd: 8.2, winRate: 61, ytd: 14.2, cagr: 18.7,
     profitFactor: 1.88, avg1m: 1.2, activeDays: 312, vol: 6.4,
     simpleReturn: 14.2, compoundedReturn: 18.7, avgWinLoss: 1.42,
+    strategyVersionId: "", capitalCapUsd: null,
   },
   "alpha-mid": {
     name: "Alpha Mid", risk: "medium",
-    description: "Balanced trend-following approach with dynamic position sizing that scales with conviction. Captures medium-term momentum across top-50 pairs while maintaining disciplined risk limits. The default choice for most accounts.",
+    description: "Balanced trend-following approach with dynamic position sizing that scales with conviction.",
     sharpe: 2.63, maxDd: 14.6, winRate: 63, ytd: 38.2, cagr: 42.1,
     profitFactor: 2.25, avg1m: 2.4, activeDays: 342, vol: 11.8,
     simpleReturn: 38.2, compoundedReturn: 42.1, avgWinLoss: 1.71,
+    strategyVersionId: "", capitalCapUsd: null,
   },
   "alpha-high": {
     name: "Alpha High", risk: "high",
-    description: "Aggressive momentum capture across top-20 pairs with concentrated position sizing. Accepts higher drawdowns in exchange for outsized returns during trending regimes. Requires tolerance for short-term volatility.",
+    description: "Aggressive momentum capture across top-20 pairs with concentrated position sizing.",
     sharpe: 3.90, maxDd: 19.9, winRate: 67, ytd: 91.4, cagr: 187.3,
     profitFactor: 3.09, avg1m: 3.2, activeDays: 358, vol: 18.2,
     simpleReturn: 91.4, compoundedReturn: 187.3, avgWinLoss: 2.34,
+    strategyVersionId: "", capitalCapUsd: null,
   },
 };
 
-// ─── Mock positions ──────────────────────────────────────────────────────────
+const FALLBACK_CAPACITY: Record<string, CapacityData> = {
+  "alpha-low":  { allocators: 0, deployed: 0, capacity: 1000000 },
+  "alpha-mid":  { allocators: 0, deployed: 0, capacity: 1000000 },
+  "alpha-high": { allocators: 0, deployed: 0, capacity: 1000000 },
+};
+
+// ─── Mock positions (fallback for ghost/demo states) ────────────────────────
 
 export const MOCK_POSITIONS_A: Position[] = [
   { symbol: "BTCUSDT", side: "LONG",  size: 0.25, entry: 61840, mark: 63420, pnl: 395.0,  pnlPct: 2.55 },
@@ -84,31 +157,185 @@ export const MOCK_POSITIONS_B: Position[] = [
   { symbol: "BNBUSDT", side: "LONG",  size: 3.5,  entry: 572.0, mark: 589.5, pnl: 61.25,  pnlPct: 3.06 },
 ];
 
-// ─── Initial state ───────────────────────────────────────────────────────────
-
-const INITIAL_EXCHANGES: Exchange[] = [
-  { id: "binance-1", name: "Binance", maskedKey: "aK3x9f\u2022\u2022\u2022\u2022\u2022\u2022mP7qL2", lastSynced: "2m ago", balance: 127369 },
-];
-
-const INITIAL_INSTANCES: StrategyInstance[] = [];
-
 // ─── Context ─────────────────────────────────────────────────────────────────
 
 interface TraderState {
+  // Data
   exchanges: Exchange[];
   instances: StrategyInstance[];
+
+  // Loading / error
+  loading: boolean;
+  error: string | null;
+
+  // Mutations (keep same interface for components)
   addExchange: (e: Exchange) => void;
   removeExchange: (id: string) => void;
   addInstance: (i: StrategyInstance) => void;
   updateInstance: (id: string, patch: Partial<StrategyInstance>) => void;
   removeInstance: (id: string) => void;
+
+  // Refresh from backend
+  refresh: () => Promise<void>;
 }
 
 const TraderContext = createContext<TraderState | null>(null);
 
+function mapSnapshotToExchange(snap: ApiSnapshot): Exchange {
+  const timeDiff = snap.snapshot_at
+    ? formatTimeDiff(new Date(snap.snapshot_at))
+    : "never";
+  return {
+    id: snap.connection_id,
+    name: snap.label || snap.exchange,
+    maskedKey: "••••••",  // will be enriched from exchanges endpoint
+    lastSynced: timeDiff,
+    balance: snap.total_equity_usd ?? 0,
+  };
+}
+
+function formatTimeDiff(date: Date): string {
+  const diff = Date.now() - date.getTime();
+  const mins = Math.floor(diff / 60000);
+  if (mins < 1) return "just now";
+  if (mins < 60) return `${mins}m ago`;
+  const hours = Math.floor(mins / 60);
+  if (hours < 24) return `${hours}h ago`;
+  return `${Math.floor(hours / 24)}d ago`;
+}
+
+function mapApiPosition(p: { symbol: string; side: string; size: number; entry_price: number; mark_price: number; unrealized_pnl: number }): Position {
+  const entry = p.entry_price;
+  const mark = p.mark_price;
+  const pnlPct = entry > 0 ? ((mark - entry) / entry) * 100 : 0;
+  return {
+    symbol: p.symbol,
+    side: (p.side || "long").toUpperCase() as "LONG" | "SHORT",
+    size: p.size,
+    entry,
+    mark,
+    pnl: p.unrealized_pnl,
+    pnlPct: Math.round(pnlPct * 100) / 100,
+  };
+}
+
 export function TraderProvider({ children }: { children: ReactNode }) {
-  const [exchanges, setExchanges] = useState<Exchange[]>(INITIAL_EXCHANGES);
-  const [instances, setInstances] = useState<StrategyInstance[]>(INITIAL_INSTANCES);
+  const [exchanges, setExchanges] = useState<Exchange[]>([]);
+  const [instances, setInstances] = useState<StrategyInstance[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  const refresh = useCallback(async () => {
+    try {
+      setLoading(true);
+      setError(null);
+
+      // Fetch all data in parallel
+      const [strategiesRes, exchangesRes, snapshotsRes, allocationsRes] = await Promise.all([
+        allocatorApi.getStrategies().catch(() => ({ strategies: [] as ApiStrategy[] })),
+        allocatorApi.getExchanges().catch(() => ({ exchanges: [] as ApiExchange[] })),
+        allocatorApi.getSnapshots().catch(() => ({ snapshots: [] as ApiSnapshot[], total_live_equity_usd: null, total_unrealized_pnl: null })),
+        allocatorApi.getAllocations().catch(() => ({ allocations: [] as ApiAllocation[] })),
+      ]);
+
+      // Build strategy catalog from API data
+      const newCatalog: Record<string, StrategyCatalogEntry> = {};
+      const newCapacity: Record<string, CapacityData> = {};
+      for (const s of strategiesRes.strategies) {
+        newCatalog[s.name] = mapApiStrategyToCatalog(s);
+        newCapacity[s.name] = {
+          allocators: s.capacity.allocators,
+          deployed: s.capacity.deployed_usd,
+          capacity: s.capacity.capacity_usd,
+        };
+      }
+      // Use API data if available, fallback otherwise
+      STRATEGY_CATALOG = Object.keys(newCatalog).length > 0 ? newCatalog : FALLBACK_CATALOG;
+      CAPACITY_DATA = Object.keys(newCapacity).length > 0 ? newCapacity : FALLBACK_CAPACITY;
+
+      // Build snapshot lookup by connection_id
+      const snapByConn: Record<string, ApiSnapshot> = {};
+      for (const snap of snapshotsRes.snapshots) {
+        snapByConn[snap.connection_id] = snap;
+      }
+
+      // Build exchanges from exchange connections + snapshots
+      const exchangeKeyMap: Record<string, string> = {};
+      for (const ex of exchangesRes.exchanges) {
+        exchangeKeyMap[ex.connection_id] = ex.masked_key;
+      }
+
+      const newExchanges: Exchange[] = [];
+      // Use snapshots as primary (has balance), enrich with exchange metadata
+      for (const snap of snapshotsRes.snapshots) {
+        const ex = mapSnapshotToExchange(snap);
+        ex.maskedKey = exchangeKeyMap[snap.connection_id] || "••••••";
+        newExchanges.push(ex);
+      }
+      // Add exchanges that have no snapshot yet
+      for (const apiEx of exchangesRes.exchanges) {
+        if (!snapByConn[apiEx.connection_id]) {
+          newExchanges.push({
+            id: apiEx.connection_id,
+            name: apiEx.label || apiEx.exchange,
+            maskedKey: apiEx.masked_key,
+            lastSynced: "never",
+            balance: 0,
+          });
+        }
+      }
+
+      // Build instances from allocations
+      const newInstances: StrategyInstance[] = allocationsRes.allocations.map((a: ApiAllocation) => {
+        const snap = snapByConn[a.connection_id];
+        const positions = snap?.positions?.map(mapApiPosition) ?? [];
+
+        // Determine risk from strategy catalog
+        const catEntry = Object.values(STRATEGY_CATALOG).find(
+          c => c.strategyVersionId === a.strategy_version_id
+        );
+        const strategyType = Object.entries(STRATEGY_CATALOG).find(
+          ([, c]) => c.strategyVersionId === a.strategy_version_id
+        )?.[0] ?? a.strategy_slug;
+
+        const statusMap: Record<string, InstanceStatus> = { active: "live", paused: "paused" };
+
+        return {
+          id: a.allocation_id,
+          strategyType,
+          strategyName: a.strategy_name,
+          exchangeId: a.connection_id,
+          exchangeName: a.connection_label || a.exchange,
+          risk: catEntry?.risk ?? "medium",
+          status: statusMap[a.status] ?? "live",
+          alerts: false,
+          allocation: a.capital_usd,
+          equity: a.equity_usd,
+          dailyPnl: a.daily_pnl_usd,
+          positions,
+          strategyVersionId: a.strategy_version_id,
+          connectionId: a.connection_id,
+        };
+      });
+
+      setExchanges(newExchanges);
+      setInstances(prev => {
+        // Preserve any unlinked (local-only) instances that haven't been persisted yet
+        const unlinked = prev.filter(i => i.status === "unlinked");
+        return [...newInstances, ...unlinked];
+      });
+    } catch (err) {
+      console.error("Failed to load allocator data:", err);
+      setError(err instanceof Error ? err.message : "Failed to load data");
+      // Use fallbacks so the UI still renders
+      STRATEGY_CATALOG = FALLBACK_CATALOG;
+      CAPACITY_DATA = FALLBACK_CAPACITY;
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => { refresh(); }, [refresh]);
 
   const addExchange = useCallback((e: Exchange) => setExchanges(prev => [...prev, e]), []);
   const removeExchange = useCallback((id: string) => setExchanges(prev => prev.filter(e => e.id !== id)), []);
@@ -119,7 +346,11 @@ export function TraderProvider({ children }: { children: ReactNode }) {
   const removeInstance = useCallback((id: string) => setInstances(prev => prev.filter(i => i.id !== id)), []);
 
   return (
-    <TraderContext.Provider value={{ exchanges, instances, addExchange, removeExchange, addInstance, updateInstance, removeInstance }}>
+    <TraderContext.Provider value={{
+      exchanges, instances, loading, error,
+      addExchange, removeExchange, addInstance, updateInstance, removeInstance,
+      refresh,
+    }}>
       {children}
     </TraderContext.Provider>
   );
@@ -146,7 +377,7 @@ export const RISK_COLOR: Record<RiskLevel, string> = { low: "var(--green)", medi
 export const RISK_DIM: Record<RiskLevel, string> = { low: "var(--green-dim)", medium: "var(--green-dim)", high: "var(--red-dim)" };
 export const RISK_MID: Record<RiskLevel, string> = { low: "var(--green-mid)", medium: "var(--green-dim)", high: "var(--red-dim)" };
 
-// ─── Equity curve mock data ──────────────────────────────────────────────────
+// ─── Equity curve mock data (used as ghost/fallback) ────────────────────────
 
 export const GHOST_CURVE = [
   100, 101.2, 100.8, 102.5, 103.1, 104.8, 103.9, 105.6, 107.2, 106.4,

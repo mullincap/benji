@@ -586,12 +586,30 @@ CREATE TABLE IF NOT EXISTS audit.strategy_performance (
 
 -- ─── Users ────────────────────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS user_mgmt.users (
-    user_id    UUID    PRIMARY KEY DEFAULT gen_random_uuid(),
-    email      TEXT    NOT NULL UNIQUE,
-    created_at TIMESTAMPTZ DEFAULT NOW(),
-    updated_at TIMESTAMPTZ DEFAULT NOW(),
-    last_login TIMESTAMPTZ
+    user_id       UUID    PRIMARY KEY DEFAULT gen_random_uuid(),
+    email         TEXT    NOT NULL UNIQUE,
+    password_hash TEXT,
+    is_active     BOOLEAN DEFAULT TRUE,
+    created_at    TIMESTAMPTZ DEFAULT NOW(),
+    updated_at    TIMESTAMPTZ DEFAULT NOW(),
+    last_login    TIMESTAMPTZ
 );
+
+-- Migration for existing deployments:
+ALTER TABLE user_mgmt.users ADD COLUMN IF NOT EXISTS password_hash TEXT;
+ALTER TABLE user_mgmt.users ADD COLUMN IF NOT EXISTS is_active BOOLEAN DEFAULT TRUE;
+
+-- ─── User sessions (DB-backed, replaces flat-file JSON) ──────────────────────
+CREATE TABLE IF NOT EXISTS user_mgmt.user_sessions (
+    token      TEXT        PRIMARY KEY,
+    user_id    UUID        NOT NULL REFERENCES user_mgmt.users(user_id) ON DELETE CASCADE,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    expires_at TIMESTAMPTZ NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_user_sessions_user
+    ON user_mgmt.user_sessions (user_id);
+CREATE INDEX IF NOT EXISTS idx_user_sessions_expires
+    ON user_mgmt.user_sessions (expires_at);
 
 -- ─── Exchange connections ──────────────────────────────────────────────────────
 -- API keys stored AES-256-GCM encrypted at the application layer.

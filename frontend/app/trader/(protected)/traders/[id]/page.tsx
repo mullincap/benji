@@ -1,10 +1,11 @@
 "use client";
 
-import { useState, useRef } from "react";
+import { useState, useEffect, useRef } from "react";
 import { useParams, useRouter } from "next/navigation";
-import { useTrader, STRATEGY_CATALOG, StrategyType, fmt, RISK_COLOR, RISK_DIM } from "../../context";
-import PerformanceChart from "../../performance-chart";
-import SetupWizard from "../../components/SetupWizard";
+import { useTrader, STRATEGY_CATALOG, StrategyType, Position, fmt, RISK_COLOR, RISK_DIM } from "../../../context";
+import { allocatorApi, ApiPosition } from "../../../api";
+import PerformanceChart from "../../../performance-chart";
+import SetupWizard from "../../../components/SetupWizard";
 
 // ─── Toggle ──────────────────────────────────────────────────────────────────
 
@@ -50,18 +51,41 @@ function MetricCard({ label, value, color }: { label: string; value: string; col
 
 function UnlinkedMode({ instanceId }: { instanceId: string }) {
   const router = useRouter();
-  const { instances, updateInstance } = useTrader();
+  const { instances, updateInstance, removeInstance, refresh } = useTrader();
   const inst = instances.find(i => i.id === instanceId)!;
   const cat = STRATEGY_CATALOG[inst.strategyType];
 
-  function handleActivate(exchangeId: string, exchangeName: string, allocation: number) {
-    updateInstance(inst.id, {
+  async function handleActivate(exchangeId: string, exchangeName: string, allocation: number) {
+    const stratVersionId = cat?.strategyVersionId;
+    let realId = inst.id;
+
+    if (stratVersionId) {
+      try {
+        const result = await allocatorApi.createAllocation({
+          strategy_version_id: stratVersionId,
+          connection_id: exchangeId,
+          capital_usd: allocation,
+        });
+        realId = result.allocation_id;
+      } catch (err) {
+        console.error("Failed to create allocation:", err);
+      }
+    }
+
+    if (realId !== inst.id) removeInstance(inst.id);
+    updateInstance(realId, {
+      id: realId,
       status: "live",
       exchangeId,
       exchangeName,
       allocation,
-      equity: Math.round(allocation * 1.034),
+      equity: allocation,
+      strategyVersionId: stratVersionId,
+      connectionId: exchangeId,
     });
+
+    refresh();
+
     setTimeout(() => {
       const fadeOut = (window as any).__celebrationFadeOut;
       if (fadeOut) { fadeOut(); delete (window as any).__celebrationFadeOut; }
@@ -98,10 +122,10 @@ function UnlinkedMode({ instanceId }: { instanceId: string }) {
           STRATEGY REFERENCE STATS
         </div>
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr", gap: 10, marginBottom: 24 }}>
-          <MetricCard label="YTD RETURN" value={`+${fmt(cat.ytd, 1)}%`} color="var(--green)" />
-          <MetricCard label="SHARPE" value={fmt(cat.sharpe, 2)} />
-          <MetricCard label="MAX DD" value={`-${fmt(cat.maxDd, 1)}%`} color="var(--red)" />
-          <MetricCard label="WIN RATE" value={`${fmt(cat.winRate, 0)}%`} />
+          <MetricCard label="YTD RETURN" value={cat ? `+${fmt(cat.ytd, 1)}%` : "\u2014"} color="var(--green)" />
+          <MetricCard label="SHARPE" value={cat ? fmt(cat.sharpe, 2) : "\u2014"} />
+          <MetricCard label="MAX DD" value={cat ? `-${fmt(cat.maxDd, 1)}%` : "\u2014"} color="var(--red)" />
+          <MetricCard label="WIN RATE" value={cat ? `${fmt(cat.winRate, 0)}%` : "\u2014"} />
         </div>
 
         {/* Setup panel */}
@@ -119,9 +143,24 @@ function UnlinkedMode({ instanceId }: { instanceId: string }) {
 
 // ─── Mode B: Live/Paused dashboard ───────────────────────────────────────────
 
+function mapApiPosition(p: ApiPosition): Position {
+  const entry = p.entry_price;
+  const mark = p.mark_price;
+  const pnlPct = entry > 0 ? ((mark - entry) / entry) * 100 : 0;
+  return {
+    symbol: p.symbol,
+    side: (p.side || "long").toUpperCase() as "LONG" | "SHORT",
+    size: p.size,
+    entry,
+    mark,
+    pnl: p.unrealized_pnl,
+    pnlPct: Math.round(pnlPct * 100) / 100,
+  };
+}
+
 function LiveMode({ instanceId }: { instanceId: string }) {
   const router = useRouter();
-  const { exchanges, instances, updateInstance, removeInstance } = useTrader();
+  const { exchanges, instances, updateInstance, removeInstance, refresh } = useTrader();
   const inst = instances.find(i => i.id === instanceId)!;
   const totalBalance = exchanges.reduce((s, e) => s + e.balance, 0);
   const editMaxAllocation = totalBalance - instances.filter(i => i.id !== instanceId).reduce((s, i) => s + (i.allocation ?? 0), 0);
@@ -130,7 +169,9 @@ function LiveMode({ instanceId }: { instanceId: string }) {
   const [exchangeLost, setExchangeLost] = useState(false);
   const [confirmClose, setConfirmClose] = useState(false);
   const [confirmRemoveTrader, setConfirmRemoveTrader] = useState(false);
-  const [positionsOpen, setPositionsOpen] = useState(inst.positions.length > 0);
+  const [livePositions, setLivePositions] = useState<Position[]>(inst.positions);
+  const [positionsLoading, setPositionsLoading] = useState(false);
+  const [positionsOpen, setPositionsOpen] = useState(true);
   const [settingsOpen, setSettingsOpen] = useState(true);
   const [editing, setEditing] = useState(false);
   const [editAllocation, setEditAllocation] = useState("");
@@ -139,6 +180,27 @@ function LiveMode({ instanceId }: { instanceId: string }) {
   const settingsContentRef = useRef<HTMLDivElement>(null);
 
   const isLive = inst.status === "live";
+
+  // Fetch live positions from backend
+  useEffect(() => {
+    let cancelled = false;
+    async function fetchPositions() {
+      setPositionsLoading(true);
+      try {
+        const result = await allocatorApi.getPositions(instanceId);
+        if (!cancelled) {
+          setLivePositions(result.positions.map(mapApiPosition));
+        }
+      } catch {
+        // Fall back to context positions
+        if (!cancelled) setLivePositions(inst.positions);
+      } finally {
+        if (!cancelled) setPositionsLoading(false);
+      }
+    }
+    fetchPositions();
+    return () => { cancelled = true; };
+  }, [instanceId, inst.positions]);
 
   return (
     <div style={{ background: "var(--bg0)", padding: "28px", minHeight: "100%" }}>
@@ -171,7 +233,10 @@ function LiveMode({ instanceId }: { instanceId: string }) {
             <Toggle on={isLive} onColor="var(--green)" offColor="var(--t2)" onToggle={() => {
               if (isLive) { setConfirmPause(true); } else {
                 const exExists = exchanges.some(e => e.name === inst.exchangeName);
-                if (exExists) { updateInstance(inst.id, { status: "live" }); setExchangeLost(false); }
+                if (exExists) {
+                  allocatorApi.updateAllocation(inst.id, { status: "active" }).catch(() => {});
+                  updateInstance(inst.id, { status: "live" }); setExchangeLost(false);
+                }
                 else { setExchangeLost(true); }
               }
             }} label={isLive ? "Live" : "Paused"} />
@@ -187,7 +252,7 @@ function LiveMode({ instanceId }: { instanceId: string }) {
             <div style={{ fontSize: 10, color: "var(--t1)", marginBottom: 2 }}>Pause this trader?</div>
             <div style={{ fontSize: 9, color: "var(--t3)", lineHeight: 1.6, marginBottom: 8 }}>Existing positions will be held. No new signals will be processed.</div>
             <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 9 }}>
-              <button onClick={() => { updateInstance(inst.id, { status: "paused" }); setConfirmPause(false); }} style={{ background: "transparent", border: "none", color: "var(--t1)", fontSize: 9, cursor: "pointer", padding: 0 }}>Yes, pause</button>
+              <button onClick={async () => { await allocatorApi.updateAllocation(inst.id, { status: "paused" }).catch(() => {}); updateInstance(inst.id, { status: "paused" }); setConfirmPause(false); }} style={{ background: "transparent", border: "none", color: "var(--t1)", fontSize: 9, cursor: "pointer", padding: 0 }}>Yes, pause</button>
               <span style={{ color: "var(--t3)" }}>&middot;</span>
               <button onClick={() => setConfirmPause(false)} style={{ background: "transparent", border: "none", color: "var(--t3)", fontSize: 9, cursor: "pointer", padding: 0 }}>Cancel</button>
             </div>
@@ -214,7 +279,7 @@ function LiveMode({ instanceId }: { instanceId: string }) {
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr", gap: 10, marginBottom: 20 }}>
           <MetricCard label="TOTAL ACCOUNT EQUITY" value={`$${fmt(exchanges.find(e => e.name === inst.exchangeName)?.balance ?? 0, 0)}`} />
           <MetricCard label="ALLOCATION" value={`$${fmt(inst.allocation ?? 0, 0)}`} />
-          <MetricCard label="OPEN POSITIONS" value={String(inst.positions.length)} />
+          <MetricCard label="OPEN POSITIONS" value={positionsLoading ? "..." : String(livePositions.length)} />
           <MetricCard label="DAILY P&L" value={!inst.dailyPnl ? "\u2014" : `${inst.dailyPnl >= 0 ? "+" : ""}$${fmt(inst.dailyPnl)}`} color={!inst.dailyPnl ? "var(--t2)" : inst.dailyPnl > 0 ? "var(--green)" : "var(--red)"} />
         </div>
 
@@ -250,8 +315,8 @@ function LiveMode({ instanceId }: { instanceId: string }) {
                 </tr>
               </thead>
               <tbody>
-                {inst.positions.map((p, i) => (
-                  <tr key={`${p.symbol}-${i}`} style={{ borderBottom: i < inst.positions.length - 1 ? "1px solid var(--bg3)" : "none" }}>
+                {livePositions.map((p, i) => (
+                  <tr key={`${p.symbol}-${i}`} style={{ borderBottom: i < livePositions.length - 1 ? "1px solid var(--bg3)" : "none" }}>
                     <td style={{ padding: "9px 16px", color: "var(--t1)" }}>{p.symbol}</td>
                     <td style={{ padding: "9px 16px" }}>
                       <span style={{ fontSize: 9, padding: "2px 6px", borderRadius: 2, background: p.side === "LONG" ? "var(--green-dim)" : "var(--red-dim)", color: p.side === "LONG" ? "var(--green)" : "var(--red)" }}>{p.side}</span>
@@ -265,7 +330,7 @@ function LiveMode({ instanceId }: { instanceId: string }) {
                     </td>
                   </tr>
                 ))}
-                {inst.positions.length === 0 && (
+                {livePositions.length === 0 && !positionsLoading && (
                   <tr><td colSpan={6} style={{ padding: "20px 16px", textAlign: "center", color: "var(--t2)", fontSize: 10 }}>No open positions</td></tr>
                 )}
               </tbody>
@@ -286,8 +351,8 @@ function LiveMode({ instanceId }: { instanceId: string }) {
                 >CLOSE ALL POSITIONS</button>
               ) : (
                 <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                  <span style={{ fontSize: 9, color: "var(--red)" }}>Close all {inst.positions.length} positions?</span>
-                  <button onClick={() => { updateInstance(inst.id, { positions: [], status: "paused" }); setConfirmClose(false); }}
+                  <span style={{ fontSize: 9, color: "var(--red)" }}>Close all {livePositions.length} positions?</span>
+                  <button onClick={async () => { await allocatorApi.updateAllocation(inst.id, { status: "paused" }).catch(() => {}); updateInstance(inst.id, { positions: [], status: "paused" }); setLivePositions([]); setConfirmClose(false); }}
                     style={{ background: "var(--red)", color: "var(--bg0)", border: "none", borderRadius: 3, padding: "5px 10px", fontSize: 9, fontWeight: 700, letterSpacing: "0.12em", textTransform: "uppercase", cursor: "pointer" }}>CONFIRM</button>
                   <button onClick={() => setConfirmClose(false)}
                     style={{ background: "transparent", color: "var(--t2)", border: "1px solid var(--line)", borderRadius: 3, padding: "5px 10px", fontSize: 9, fontWeight: 700, letterSpacing: "0.12em", textTransform: "uppercase", cursor: "pointer" }}>CANCEL</button>
@@ -319,7 +384,7 @@ function LiveMode({ instanceId }: { instanceId: string }) {
                   {(() => {
                     const val = parseInt(editAllocation) || 0;
                     const valid = val > 0 && val <= editMaxAllocation;
-                    return <button onClick={e => { e.stopPropagation(); if (valid) { updateInstance(inst.id, { allocation: val, alerts: editAlerts }); setEditing(false); } else { updateInstance(inst.id, { alerts: editAlerts }); setEditing(false); } }}
+                    return <button onClick={async e => { e.stopPropagation(); if (valid) { await allocatorApi.updateAllocation(inst.id, { capital_usd: val }).catch(() => {}); updateInstance(inst.id, { allocation: val, alerts: editAlerts }); setEditing(false); } else { updateInstance(inst.id, { alerts: editAlerts }); setEditing(false); } }}
                       style={{ background: "transparent", border: "none", color: valid ? "var(--green)" : "var(--t2)", fontSize: 9, cursor: valid ? "pointer" : "not-allowed", padding: 0, opacity: valid ? 1 : 0.4 }}>Save</button>;
                   })()}
                   <button onClick={e => { e.stopPropagation(); setEditing(false); }}
@@ -399,7 +464,7 @@ function LiveMode({ instanceId }: { instanceId: string }) {
                 ) : (
                   <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
                     <span style={{ fontSize: 9, color: "var(--red)" }}>Remove this trader?</span>
-                    <button onClick={() => { removeInstance(inst.id); router.push("/trader/traders"); }}
+                    <button onClick={async () => { await allocatorApi.deleteAllocation(inst.id).catch(() => {}); removeInstance(inst.id); router.push("/trader/traders"); }}
                       style={{ background: "var(--red)", color: "var(--bg0)", border: "none", borderRadius: 3, padding: "5px 10px", fontSize: 9, fontWeight: 700, letterSpacing: "0.12em", textTransform: "uppercase", cursor: "pointer" }}>CONFIRM</button>
                     <button onClick={() => setConfirmRemoveTrader(false)}
                       style={{ background: "transparent", color: "var(--t2)", border: "1px solid var(--line)", borderRadius: 3, padding: "5px 10px", fontSize: 9, fontWeight: 700, letterSpacing: "0.12em", textTransform: "uppercase", cursor: "pointer" }}>CANCEL</button>

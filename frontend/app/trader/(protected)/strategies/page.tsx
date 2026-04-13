@@ -2,15 +2,7 @@
 
 import { useState } from "react";
 import { useRouter } from "next/navigation";
-import { useTrader, STRATEGY_CATALOG, StrategyType, StrategyInstance, fmt, RISK_COLOR, RISK_DIM } from "../context";
-
-const CATALOG_ENTRIES = Object.entries(STRATEGY_CATALOG) as [StrategyType, typeof STRATEGY_CATALOG[StrategyType]][];
-
-const CAPACITY_DATA: Record<StrategyType, { allocators: number; deployed: number; capacity: number }> = {
-  "alpha-low":  { allocators: 8,  deployed: 740000, capacity: 1000000 },
-  "alpha-mid":  { allocators: 31, deployed: 220000, capacity: 1000000 },
-  "alpha-high": { allocators: 47, deployed: 920000, capacity: 1000000 },
-};
+import { useTrader, STRATEGY_CATALOG, CAPACITY_DATA, StrategyType, StrategyCatalogEntry, fmt, RISK_COLOR, RISK_DIM } from "../../context";
 
 function fmtAbbrev(n: number): string {
   if (n >= 1000000) return `$${(n / 1000000).toFixed(1)}m`;
@@ -25,8 +17,8 @@ function capacityColor(remaining: number, capacity: number): string {
   return "var(--red)";
 }
 
-function CapacityRow({ type, dominant }: { type: StrategyType; dominant: boolean }) {
-  const cap = CAPACITY_DATA[type];
+function CapacityRow({ type, dominant }: { type: string; dominant: boolean }) {
+  const cap = CAPACITY_DATA[type] ?? { allocators: 0, deployed: 0, capacity: 1000000 };
   const remaining = cap.capacity - cap.deployed;
   const remainingPct = remaining / cap.capacity;
   const color = capacityColor(remaining, cap.capacity);
@@ -75,9 +67,11 @@ function GridIcon({ color }: { color: string }) {
 
 export default function StrategiesPage() {
   const router = useRouter();
-  const { instances } = useTrader();
+  const { instances, loading } = useTrader();
   const [hoveredIndex, setHoveredIndex] = useState<number | null>(null);
   const [view, setView] = useState<"list" | "grid">("list");
+
+  const CATALOG_ENTRIES = Object.entries(STRATEGY_CATALOG) as [string, StrategyCatalogEntry][];
 
   function isDominant(index: number) {
     return hoveredIndex === null ? index === 0 : hoveredIndex === index;
@@ -117,6 +111,10 @@ export default function StrategiesPage() {
             ><GridIcon color={view === "grid" ? "var(--t1)" : "var(--t2)"} /></button>
           </div>
         </div>
+
+        {loading && (
+          <div style={{ textAlign: "center", padding: "40px 0", color: "var(--t2)", fontSize: 10 }}>Loading strategies...</div>
+        )}
 
         {/* Cards container */}
         <div

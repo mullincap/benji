@@ -43,6 +43,18 @@ class Settings(BaseSettings):
     ADMIN_PASSPHRASE: str = ""  # empty = login disabled (returns 503)
     ADMIN_SESSIONS_FILE: Path = Path(__file__).resolve().parents[2] / "data" / "admin_sessions.json"
 
+    # ─── User auth (allocator per-user sessions) ─────────────────────────────
+    # Sessions are now DB-backed (user_mgmt.user_sessions table).
+    # USER_SESSIONS_FILE is kept as a no-op placeholder — auth.py still passes
+    # it to the session functions for signature compatibility, but the value is
+    # never read by user_sessions.py.
+    USER_SESSIONS_FILE: Path = Path("/dev/null")
+
+    # ─── Fernet encryption key for exchange API keys at rest ────────────────
+    # Generate with: python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+    # REQUIRED — losing this key makes all stored exchange keys unrecoverable.
+    FERNET_KEY: str = ""
+
     # ─── Internal API token (server-to-server, e.g. briefing cron) ──────────
     INTERNAL_API_TOKEN: str = ""
 
