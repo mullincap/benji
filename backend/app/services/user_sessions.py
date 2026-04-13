@@ -34,6 +34,8 @@ from psycopg2.extras import RealDictCursor
 from ..core.config import settings
 
 SESSION_TTL_DAYS = 30
+# Kept for backward-compat with auth.py which imports this name
+SESSION_TTL_HOURS = SESSION_TTL_DAYS * 24
 
 
 def _now() -> datetime:
