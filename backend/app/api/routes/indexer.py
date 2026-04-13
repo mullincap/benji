@@ -263,6 +263,7 @@ def list_signals(
             ds.filter_name,
             ds.filter_reason,
             ds.computed_at,
+            ds.conviction_roi_x AS stored_conviction,
             COALESCE(items.symbol_count, 0) AS symbol_count,
             COALESCE(items.symbols, '[]'::jsonb) AS symbols
         FROM user_mgmt.daily_signals ds
@@ -296,8 +297,19 @@ def list_signals(
     # the signal's selected symbols. Computed from market.futures_1m.
     KILL_Y = 0.3  # conviction threshold (%)
 
-    signal_dates = list({r["signal_date"] for r in rows if r["signal_date"] and int(r["symbol_count"] or 0) > 0})
+    # Use stored conviction from trader when available; compute from
+    # futures_1m only for dates where the trader hasn't stored it yet.
     conviction_by_date: dict[str, float | None] = {}
+    for r in rows:
+        if r["signal_date"] and r["stored_conviction"] is not None:
+            conviction_by_date[r["signal_date"].isoformat()] = round(float(r["stored_conviction"]), 4)
+
+    signal_dates = list({
+        r["signal_date"] for r in rows
+        if r["signal_date"]
+        and int(r["symbol_count"] or 0) > 0
+        and r["signal_date"].isoformat() not in conviction_by_date
+    })
     session_return_by_date: dict[str, float | None] = {}
 
     if signal_dates:

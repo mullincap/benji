@@ -43,9 +43,12 @@ services:
       - PIPELINE_DIR=/app/pipeline
       - PIPELINE_PYTHON=python
       - NODE_BIN=node
+      - BASE_DATA_DIR=/mnt/quant-data
+      - DATA_ROOT=/mnt/quant-data
     volumes:
       - jobs_data:/app/backend/jobs
       - /data:/data
+      - /mnt/quant-data:/mnt/quant-data
     depends_on:
       redis:
         condition: service_healthy

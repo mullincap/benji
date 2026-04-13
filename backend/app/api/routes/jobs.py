@@ -243,6 +243,7 @@ class JobCreateResponse(BaseModel):
 class JobResponse(BaseModel):
     id:         str
     display_name: str | None = None
+    folder_id:  str | None = None
     status:     str
     stage:      str | None
     progress:   int
