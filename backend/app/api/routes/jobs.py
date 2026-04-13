@@ -82,8 +82,8 @@ class JobRequest(BaseModel):
     drop_unverified:            bool  = False
     leverage:                   float = 4.0
     stop_raw_pct:               float = -6.0
-    price_source:               str   = "parquet"
-    mcap_source:                str   = "parquet"
+    price_source:               str   = "db"
+    mcap_source:                str   = "db"
     save_charts:                bool  = True
     trial_purchases:            bool  = False
     quick:                      bool  = False
