@@ -662,6 +662,96 @@ def get_or_create_sampled(base_path: Path, sample_interval: int) -> pd.DataFrame
     return df_sampled
 
 
+def _load_frequency_from_db(
+    metric: str,
+    freq_width: int,
+    sample_interval: int,
+    mode: str,
+    min_mcap: float = 0.0,
+    max_mcap: float = 0.0,
+    drop_unverified: bool = False,
+) -> dict:
+    """
+    Query market.leaderboards directly and return the same
+    dict[date, Counter] that compute_daily_frequency / compute_daily_snapshot
+    produce from the parquet path. ~300x less memory than loading the
+    wide-format ALL parquet.
+
+    Returns dict[datetime.date, Counter[str, int]] where keys are base
+    symbols (e.g. "BTC") and values are frequency counts (or 1 for
+    snapshot mode).
+    """
+    import sys as _sys
+    from collections import Counter
+    _sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    from pipeline.db.connection import get_conn
+
+    conn = get_conn()
+    cur = conn.cursor()
+
+    eff_lookback = _resolve_sort_lookback()
+    window_start_hour = DEPLOYMENT_START_HOUR - eff_lookback
+
+    # Build excluded bases set (stablecoins + non-crypto)
+    excluded = NON_CRYPTO | STABLECOINS
+
+    if mode == "snapshot":
+        # Snapshot: one bar at deployment start hour, presence = 1
+        cur.execute("""
+            SELECT
+                l.timestamp_utc::date AS day,
+                s.base
+            FROM market.leaderboards l
+            JOIN market.symbols s ON s.symbol_id = l.symbol_id
+            WHERE l.metric = %s
+              AND l.rank <= %s
+              AND EXTRACT(HOUR FROM l.timestamp_utc)::int = %s
+              AND EXTRACT(MINUTE FROM l.timestamp_utc)::int = 0
+            GROUP BY l.timestamp_utc::date, s.base
+            ORDER BY l.timestamp_utc::date
+        """, (metric, freq_width, DEPLOYMENT_START_HOUR))
+    else:
+        # Frequency: count distinct bars per symbol in the electoral window
+        cur.execute("""
+            SELECT
+                l.timestamp_utc::date AS day,
+                s.base,
+                COUNT(DISTINCT l.timestamp_utc) AS freq
+            FROM market.leaderboards l
+            JOIN market.symbols s ON s.symbol_id = l.symbol_id
+            WHERE l.metric = %s
+              AND l.rank <= %s
+              AND EXTRACT(HOUR FROM l.timestamp_utc)::int >= %s
+              AND EXTRACT(HOUR FROM l.timestamp_utc)::int < %s
+              AND NOT (EXTRACT(HOUR FROM l.timestamp_utc)::int = %s
+                       AND EXTRACT(MINUTE FROM l.timestamp_utc)::int = 0)
+              AND (EXTRACT(HOUR FROM l.timestamp_utc)::int * 60
+                   + EXTRACT(MINUTE FROM l.timestamp_utc)::int) %% %s = 0
+            GROUP BY l.timestamp_utc::date, s.base
+            ORDER BY l.timestamp_utc::date
+        """, (metric, freq_width, window_start_hour, DEPLOYMENT_START_HOUR,
+              window_start_hour, sample_interval))
+
+    rows = cur.fetchall()
+    cur.close()
+    conn.close()
+
+    # Build dict[date, Counter]
+    result: dict = {}
+    for row in rows:
+        day = row[0]  # date
+        base = row[1]  # symbol base
+        if base in excluded:
+            continue
+        freq = row[2] if len(row) > 2 else 1  # snapshot mode has no freq column
+        if day not in result:
+            result[day] = Counter()
+        result[day][base] += freq
+
+    log.info(f"  DB query returned {len(rows):,} rows → {len(result)} dates")
+    return result
+
+
 def auth_gspread():
     """
     Authenticate with Google Sheets using OAuth token.
@@ -855,7 +945,7 @@ def run(min_mcap: float, freq_width: int, marketcap_dir: Path,
         sample_interval: int = SAMPLE_INTERVAL_MINUTES, leaderboard_index: int = LEADERBOARD_INDEX,
         audit: bool = False, audit_script: Path = None, audit_args: list = None,
         confluence_path: Path = None, drop_unverified: bool = False, max_mcap: float = 0.0,
-        force: bool = False,
+        force: bool = False, source: str = "parquet",
 ):
     mcap_label      = f"{int(min_mcap / 1_000_000)}M"
     marketcap_path  = marketcap_dir / "marketcap_daily.parquet"
@@ -933,92 +1023,132 @@ def run(min_mcap: float, freq_width: int, marketcap_dir: Path,
     overlap_path        = BASE_DIR / f"overlap_{idx_label}_w{freq_width}c{freq_cutoff}_{mode_label}_{mcap_label}{_run_suffix}.csv"
     output_files        = []   # collect all generated output paths for final summary
 
-    # ── Step 1: Filter (auto-skip if filtered files already exist) ──
-    if price_filtered_path.exists() and oi_filtered_path.exists():
-        log.info(f"Filtered files found for {mcap_label} — skipping filter step...")
-        log.info(f"  Price : {price_filtered_path.name}")
-        log.info(f"  OI    : {oi_filtered_path.name}")
-        price_df = pd.read_parquet(price_filtered_path)
-        oi_df    = pd.read_parquet(oi_filtered_path)
-        price_df["timestamp_utc"] = pd.to_datetime(price_df["timestamp_utc"], utc=True)
-        oi_df["timestamp_utc"]    = pd.to_datetime(oi_df["timestamp_utc"], utc=True)
+    # ── Step 1+2: DB mode — bypass parquet load/filter/downsample entirely ──
+    if source == "db":
+        from collections import Counter as _Counter
+        log.info("[DB MODE] Computing frequency tables from market.leaderboards...")
+        _raw_lookback = DEPLOYMENT_START_HOUR if SORT_LOOKBACK == "daily" else int(SORT_LOOKBACK)
+        _cap_note     = f", internal from {_raw_lookback}h" if _eff_lookback_run < _raw_lookback else ""
+        _window_label = f"{_lookback_hhmm[:2]}:00-{DEPLOYMENT_START_HOUR:02d}:00 ({_eff_lookback_run}h{_cap_note})"
+
+        if mode == "snapshot":
+            log.info(f"Computing price snapshot from DB at {DEPLOYMENT_START_HOUR:02d}:00 (freq_width={freq_width})...")
+        else:
+            log.info(f"Computing price frequency from DB (freq_width={freq_width}, {_window_label})...")
+        price_freq = _load_frequency_from_db(
+            metric="price", freq_width=freq_width,
+            sample_interval=sample_interval, mode=mode,
+            min_mcap=min_mcap, max_mcap=max_mcap,
+            drop_unverified=drop_unverified,
+        )
+        log.info(f"  → {len(price_freq)} dates with price data")
+
+        if mode == "snapshot":
+            log.info(f"Computing OI snapshot from DB at {DEPLOYMENT_START_HOUR:02d}:00 (freq_width={freq_width})...")
+        else:
+            log.info(f"Computing OI frequency from DB (freq_width={freq_width}, {_window_label})...")
+        oi_freq = _load_frequency_from_db(
+            metric="open_interest", freq_width=freq_width,
+            sample_interval=sample_interval, mode=mode,
+            min_mcap=min_mcap, max_mcap=max_mcap,
+            drop_unverified=drop_unverified,
+        )
+        log.info(f"  → {len(oi_freq)} dates with OI data")
+
+        # Export freq tables (same as parquet path)
+        freq_label = f"{idx_label}_w{freq_width}_{mode_label}_{mcap_label}{_run_suffix}"
+        price_freq_path = BASE_DIR / f"freq_price_{freq_label}.csv"
+        oi_freq_path    = BASE_DIR / f"freq_oi_{freq_label}.csv"
+        if PRINT_FREQ_TABLE:
+            print_freq_table(price_freq, f"PRICE  {freq_label}")
+            print_freq_table(oi_freq,    f"OI     {freq_label}")
+        export_freq_table(price_freq, price_freq_path)
+        export_freq_table(oi_freq,    oi_freq_path)
+        output_files += [price_freq_path, oi_freq_path]
+
     else:
-        if min_mcap == 0 and not drop_unverified:
-            # No market cap filter and not dropping unverified — copy base files directly
-            log.warning("=" * 60)
-            log.warning("NO MARKET CAP FILTER APPLIED (--min-mcap 0)")
-            log.warning("ALL symbols are being passed forward including")
-            log.warning("low-cap, illiquid, and unverified assets.")
-            log.warning("=" * 60)
-            import shutil
-            shutil.copy2(price_input, price_filtered_path)
-            shutil.copy2(oi_input,    oi_filtered_path)
+        # ── Step 1: Filter (auto-skip if filtered files already exist) ──
+        if price_filtered_path.exists() and oi_filtered_path.exists():
+            log.info(f"Filtered files found for {mcap_label} — skipping filter step...")
+            log.info(f"  Price : {price_filtered_path.name}")
+            log.info(f"  OI    : {oi_filtered_path.name}")
             price_df = pd.read_parquet(price_filtered_path)
             oi_df    = pd.read_parquet(oi_filtered_path)
             price_df["timestamp_utc"] = pd.to_datetime(price_df["timestamp_utc"], utc=True)
             oi_df["timestamp_utc"]    = pd.to_datetime(oi_df["timestamp_utc"], utc=True)
         else:
-            log.info(f"No filtered files found for {mcap_label} — running filter...")
-            mcap_lookup, mcap_coverage = build_mcap_lookup(marketcap_path, min_mcap, max_mcap=max_mcap)
-            # Build above-cap lookup for max_mcap ceiling filter
-            _above_cap_lookup = None
-            if max_mcap > 0:
-                import pandas as _pd
-                # Build per-date set of symbols ABOVE the max_mcap ceiling
-                # (these will be dropped from the leaderboard)
-                _mc_raw = _pd.read_parquet(marketcap_path)
-                _mc_raw["date"] = _pd.to_datetime(_mc_raw["date"], utc=True).dt.date
-                _uni_path = marketcap_path.parent / "coins_universe.parquet"
-                if _uni_path.exists():
-                    _uni = _pd.read_parquet(_uni_path)
-                    _id2sym = dict(zip(_uni["id"], _uni["symbol"].str.upper()))
-                else:
-                    _has = _mc_raw[_mc_raw["symbol"].notna()][["coin_id","symbol"]].drop_duplicates()
-                    _id2sym = dict(zip(_has["coin_id"], _has["symbol"].str.upper()))
-                _mc_raw["base"] = _mc_raw["coin_id"].map(_id2sym)
-                _above = _mc_raw[(_mc_raw["market_cap_usd"] > max_mcap) & _mc_raw["base"].notna()]
-                _above_cap_lookup = {}
-                for _date, _grp in _above.groupby("date"):
-                    _above_cap_lookup[_date] = set(_grp["base"])
-                log.info(f"  Above-cap lookup built: {len(_above_cap_lookup)} dates with symbols > ${max_mcap/1e6:.0f}M")
-            price_df = filter_leaderboard(price_input, price_filtered_path, mcap_lookup, mcap_coverage, min_mcap, drop_unverified=drop_unverified, max_mcap_lookup=_above_cap_lookup)
-            oi_df    = filter_leaderboard(oi_input,    oi_filtered_path,    mcap_lookup, mcap_coverage, min_mcap, drop_unverified=drop_unverified, max_mcap_lookup=_above_cap_lookup)
+            if min_mcap == 0 and not drop_unverified:
+                # No market cap filter and not dropping unverified — copy base files directly
+                log.warning("=" * 60)
+                log.warning("NO MARKET CAP FILTER APPLIED (--min-mcap 0)")
+                log.warning("ALL symbols are being passed forward including")
+                log.warning("low-cap, illiquid, and unverified assets.")
+                log.warning("=" * 60)
+                import shutil
+                shutil.copy2(price_input, price_filtered_path)
+                shutil.copy2(oi_input,    oi_filtered_path)
+                price_df = pd.read_parquet(price_filtered_path)
+                oi_df    = pd.read_parquet(oi_filtered_path)
+                price_df["timestamp_utc"] = pd.to_datetime(price_df["timestamp_utc"], utc=True)
+                oi_df["timestamp_utc"]    = pd.to_datetime(oi_df["timestamp_utc"], utc=True)
+            else:
+                log.info(f"No filtered files found for {mcap_label} — running filter...")
+                mcap_lookup, mcap_coverage = build_mcap_lookup(marketcap_path, min_mcap, max_mcap=max_mcap)
+                _above_cap_lookup = None
+                if max_mcap > 0:
+                    import pandas as _pd
+                    _mc_raw = _pd.read_parquet(marketcap_path)
+                    _mc_raw["date"] = _pd.to_datetime(_mc_raw["date"], utc=True).dt.date
+                    _uni_path = marketcap_path.parent / "coins_universe.parquet"
+                    if _uni_path.exists():
+                        _uni = _pd.read_parquet(_uni_path)
+                        _id2sym = dict(zip(_uni["id"], _uni["symbol"].str.upper()))
+                    else:
+                        _has = _mc_raw[_mc_raw["symbol"].notna()][["coin_id","symbol"]].drop_duplicates()
+                        _id2sym = dict(zip(_has["coin_id"], _has["symbol"].str.upper()))
+                    _mc_raw["base"] = _mc_raw["coin_id"].map(_id2sym)
+                    _above = _mc_raw[(_mc_raw["market_cap_usd"] > max_mcap) & _mc_raw["base"].notna()]
+                    _above_cap_lookup = {}
+                    for _date, _grp in _above.groupby("date"):
+                        _above_cap_lookup[_date] = set(_grp["base"])
+                    log.info(f"  Above-cap lookup built: {len(_above_cap_lookup)} dates with symbols > ${max_mcap/1e6:.0f}M")
+                price_df = filter_leaderboard(price_input, price_filtered_path, mcap_lookup, mcap_coverage, min_mcap, drop_unverified=drop_unverified, max_mcap_lookup=_above_cap_lookup)
+                oi_df    = filter_leaderboard(oi_input,    oi_filtered_path,    mcap_lookup, mcap_coverage, min_mcap, drop_unverified=drop_unverified, max_mcap_lookup=_above_cap_lookup)
 
-    # ── Step 1b: Apply sample interval downsampling (cached per interval) ──
-    log.info(f"Applying {sample_interval}m downsampling to frequency window...")
-    price_df = get_or_create_sampled(price_filtered_path, sample_interval)
-    oi_df    = get_or_create_sampled(oi_filtered_path,    sample_interval)
+        # ── Step 1b: Apply sample interval downsampling (cached per interval) ──
+        log.info(f"Applying {sample_interval}m downsampling to frequency window...")
+        price_df = get_or_create_sampled(price_filtered_path, sample_interval)
+        oi_df    = get_or_create_sampled(oi_filtered_path,    sample_interval)
 
-    # ── Step 2: Frequency counts or snapshot ──
-    freq_label = f"{idx_label}_w{freq_width}_{mode_label}_{mcap_label}{_run_suffix}"
-    # Pre-compute window label for log lines (used in both frequency and summary paths)
-    _raw_lookback = DEPLOYMENT_START_HOUR if SORT_LOOKBACK == "daily" else int(SORT_LOOKBACK)
-    _cap_note     = f", internal from {_raw_lookback}h" if _eff_lookback_run < _raw_lookback else ""
-    _window_label = f"{_lookback_hhmm[:2]}:00-{DEPLOYMENT_START_HOUR:02d}:00 ({_eff_lookback_run}h{_cap_note})"
-    if mode == "snapshot":
-        log.info(f"Computing price snapshot at {DEPLOYMENT_START_HOUR:02d}:00 (freq_width={freq_width} cols)...")
-        price_freq = compute_daily_snapshot(price_df, freq_width)
-        log.info(f"  → {len(price_freq)} dates with price snapshot data")
-        log.info(f"Computing OI snapshot at {DEPLOYMENT_START_HOUR:02d}:00 (freq_width={freq_width} cols)...")
-        oi_freq    = compute_daily_snapshot(oi_df,    freq_width)
-        log.info(f"  → {len(oi_freq)} dates with OI snapshot data")
-    else:
-        log.info(f"Computing price frequency counts (freq_width={freq_width} cols, {_window_label})...")
-        price_freq = compute_daily_frequency(price_df, freq_width)
-        log.info(f"  → {len(price_freq)} dates with price frequency data")
-        log.info(f"Computing OI frequency counts (freq_width={freq_width} cols, {_window_label})...")
-        oi_freq    = compute_daily_frequency(oi_df,    freq_width)
-        log.info(f"  → {len(oi_freq)} dates with OI frequency data")
+        # ── Step 2: Frequency counts or snapshot ──
+        freq_label = f"{idx_label}_w{freq_width}_{mode_label}_{mcap_label}{_run_suffix}"
+        _raw_lookback = DEPLOYMENT_START_HOUR if SORT_LOOKBACK == "daily" else int(SORT_LOOKBACK)
+        _cap_note     = f", internal from {_raw_lookback}h" if _eff_lookback_run < _raw_lookback else ""
+        _window_label = f"{_lookback_hhmm[:2]}:00-{DEPLOYMENT_START_HOUR:02d}:00 ({_eff_lookback_run}h{_cap_note})"
+        if mode == "snapshot":
+            log.info(f"Computing price snapshot at {DEPLOYMENT_START_HOUR:02d}:00 (freq_width={freq_width} cols)...")
+            price_freq = compute_daily_snapshot(price_df, freq_width)
+            log.info(f"  → {len(price_freq)} dates with price snapshot data")
+            log.info(f"Computing OI snapshot at {DEPLOYMENT_START_HOUR:02d}:00 (freq_width={freq_width} cols)...")
+            oi_freq    = compute_daily_snapshot(oi_df,    freq_width)
+            log.info(f"  → {len(oi_freq)} dates with OI snapshot data")
+        else:
+            log.info(f"Computing price frequency counts (freq_width={freq_width} cols, {_window_label})...")
+            price_freq = compute_daily_frequency(price_df, freq_width)
+            log.info(f"  → {len(price_freq)} dates with price frequency data")
+            log.info(f"Computing OI frequency counts (freq_width={freq_width} cols, {_window_label})...")
+            oi_freq    = compute_daily_frequency(oi_df,    freq_width)
+            log.info(f"  → {len(oi_freq)} dates with OI frequency data")
 
-    # ── Print + export full frequency tables ──
-    price_freq_path = BASE_DIR / f"freq_price_{freq_label}.csv"
-    oi_freq_path    = BASE_DIR / f"freq_oi_{freq_label}.csv"
-    if PRINT_FREQ_TABLE:
-        print_freq_table(price_freq, f"PRICE  {freq_label}")
-        print_freq_table(oi_freq,    f"OI     {freq_label}")
-    export_freq_table(price_freq, price_freq_path)
-    export_freq_table(oi_freq,    oi_freq_path)
-    output_files += [price_freq_path, oi_freq_path]
+        # ── Print + export full frequency tables ──
+        price_freq_path = BASE_DIR / f"freq_price_{freq_label}.csv"
+        oi_freq_path    = BASE_DIR / f"freq_oi_{freq_label}.csv"
+        if PRINT_FREQ_TABLE:
+            print_freq_table(price_freq, f"PRICE  {freq_label}")
+            print_freq_table(oi_freq,    f"OI     {freq_label}")
+        export_freq_table(price_freq, price_freq_path)
+        export_freq_table(oi_freq,    oi_freq_path)
+        output_files += [price_freq_path, oi_freq_path]
 
     # ── Step 3: Overlap ──
     log.info(f"Computing overlap (freq_cutoff={freq_cutoff})...")
@@ -1239,6 +1369,12 @@ if __name__ == "__main__":
     parser.add_argument("--audit-source",   type=str, default=None,
                         choices=["binance", "parquet", "db"],
                         help="Price source for audit rebuild (passed to audit.py)")
+    parser.add_argument("--source",         type=str,
+                        default=_os.environ.get("OVERLAP_SOURCE", "parquet"),
+                        choices=["parquet", "db"],
+                        help="Data source for leaderboard frequency computation. "
+                             "'parquet' loads wide-format ALL parquets (default). "
+                             "'db' queries market.leaderboards directly (low memory).")
     parser.add_argument("--max-mcap",        type=float, default=float(_os.environ.get("MAX_MCAP", "0.0")),
                         help="Maximum market cap in USD (e.g. 500000000 for $500M). Symbols above this are excluded. Default: no ceiling.")
     parser.add_argument("--drop-unverified", action="store_true", default=_os.environ.get("DROP_UNVERIFIED", "0") == "1",
@@ -1345,6 +1481,7 @@ if __name__ == "__main__":
         drop_unverified = args.drop_unverified,
         max_mcap        = args.max_mcap,
         force           = args.force,
+        source          = args.source,
     )
 
     elapsed = _time.time() - _start

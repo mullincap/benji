@@ -555,6 +555,7 @@ def _build_cli_args(params: dict) -> list[str]:
         "deployment_runtime_hours": "--deployment-runtime-hours",
         "capital_mode":             "--capital-mode",
         "fixed_notional_cap":       "--fixed-notional-cap",
+        "overlap_source":           "--source",
     }
     bool_flags = {
         "end_cross_midnight": "--end-cross-midnight",
