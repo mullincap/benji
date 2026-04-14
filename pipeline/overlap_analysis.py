@@ -692,9 +692,6 @@ def _load_frequency_from_db(
     eff_lookback = _resolve_sort_lookback()
     window_start_hour = DEPLOYMENT_START_HOUR - eff_lookback
 
-    # Build excluded bases set (stablecoins + non-crypto)
-    excluded = NON_CRYPTO | STABLECOINS
-
     # Build mcap WHERE clauses dynamically
     mcap_join = ""
     mcap_where = ""
@@ -724,7 +721,7 @@ def _load_frequency_from_db(
         cur.execute(f"""
             SELECT
                 l.timestamp_utc::date AS day,
-                s.base
+                s.binance_id
             FROM market.leaderboards l
             JOIN market.symbols s ON s.symbol_id = l.symbol_id
             {mcap_join}
@@ -733,14 +730,14 @@ def _load_frequency_from_db(
               AND EXTRACT(HOUR FROM l.timestamp_utc)::int = %s
               AND EXTRACT(MINUTE FROM l.timestamp_utc)::int = 0
               {mcap_where}
-            GROUP BY l.timestamp_utc::date, s.base
+            GROUP BY l.timestamp_utc::date, s.binance_id
             ORDER BY l.timestamp_utc::date
         """, (metric, freq_width, DEPLOYMENT_START_HOUR, *mcap_params))
     else:
         cur.execute(f"""
             SELECT
                 l.timestamp_utc::date AS day,
-                s.base,
+                s.binance_id,
                 COUNT(DISTINCT l.timestamp_utc) AS freq
             FROM market.leaderboards l
             JOIN market.symbols s ON s.symbol_id = l.symbol_id
@@ -754,7 +751,7 @@ def _load_frequency_from_db(
               AND (EXTRACT(HOUR FROM l.timestamp_utc)::int * 60
                    + EXTRACT(MINUTE FROM l.timestamp_utc)::int) %% %s = 0
               {mcap_where}
-            GROUP BY l.timestamp_utc::date, s.base
+            GROUP BY l.timestamp_utc::date, s.binance_id
             ORDER BY l.timestamp_utc::date
         """, (metric, freq_width, window_start_hour, DEPLOYMENT_START_HOUR,
               window_start_hour, sample_interval, *mcap_params))
@@ -763,12 +760,14 @@ def _load_frequency_from_db(
     cur.close()
     conn.close()
 
-    # Build dict[date, Counter]
+    # Build dict[date, Counter] — normalize symbols the same way the
+    # parquet path does so that 1000PEPEUSDT → PEPE, ADAUSD_PERP → ADA, etc.
     result: dict = {}
     for row in rows:
         day = row[0]  # date
-        base = row[1]  # symbol base
-        if base in excluded:
+        raw_sym = row[1]  # binance_id (e.g. "BTCUSDT", "1000PEPEUSDT")
+        base = normalize_symbol(raw_sym) if raw_sym else None
+        if base is None:
             continue
         freq = row[2] if len(row) > 2 else 1  # snapshot mode has no freq column
         if day not in result:
