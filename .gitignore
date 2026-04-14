@@ -21,6 +21,7 @@ secrets.env
 quant-data/
 *.parquet
 *.csv
+pipeline/gate_summary.txt
 pipeline/.venv/
 pipeline/**/__pycache__/
 pipeline/**/*.pyc

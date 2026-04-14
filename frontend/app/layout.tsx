@@ -4,7 +4,7 @@ import "@fontsource/space-mono/700.css";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "Benji — Institutional-Grade Crypto Risk Audits",
+  title: "3M - Institutional Returns",
   description: "Quantitative risk audit engine for crypto fund managers and allocators",
 };
 

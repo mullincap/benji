@@ -310,12 +310,9 @@ def list_signals(
         and int(r["symbol_count"] or 0) > 0
         and r["signal_date"].isoformat() not in conviction_by_date
     })
-    session_return_by_date: dict[str, float | None] = {}
 
     if signal_dates:
-        # Batch query: for each signal date, get the open (06:00),
-        # bar-6 (06:35), and session close (23:55) prices for ALL
-        # symbols that had signals that day.
+        # Lightweight query: only conviction (open + bar6), no session close
         cur.execute("""
             WITH signal_syms AS (
                 SELECT ds.signal_date, dsi.symbol_id
@@ -340,32 +337,18 @@ def list_signals(
                 WHERE f.source_id = 1
                   AND f.timestamp_utc >= (ss.signal_date + TIME '06:35')
                   AND f.timestamp_utc <  (ss.signal_date + TIME '06:36')
-            ),
-            close_px AS (
-                SELECT ss.signal_date, ss.symbol_id, f.close AS px
-                FROM signal_syms ss
-                JOIN market.futures_1m f ON f.symbol_id = ss.symbol_id
-                WHERE f.source_id = 1
-                  AND f.timestamp_utc >= (ss.signal_date + TIME '23:55')
-                  AND f.timestamp_utc <  (ss.signal_date + TIME '23:56')
             )
             SELECT o.signal_date,
-                   AVG((b.px / NULLIF(o.px, 0) - 1) * 100) AS roi_x,
-                   AVG((c.px / NULLIF(o.px, 0) - 1) * 100) AS session_return
+                   AVG((b.px / NULLIF(o.px, 0) - 1) * 100) AS roi_x
             FROM open_px o
             JOIN bar6_px b ON b.signal_date = o.signal_date
                           AND b.symbol_id = o.symbol_id
-            LEFT JOIN close_px c ON c.signal_date = o.signal_date
-                                AND c.symbol_id = o.symbol_id
             GROUP BY o.signal_date
         """, (signal_dates,))
         for row in cur.fetchall():
             d = row["signal_date"].isoformat()
             conviction_by_date[d] = (
                 round(float(row["roi_x"]), 4) if row["roi_x"] is not None else None
-            )
-            session_return_by_date[d] = (
-                round(float(row["session_return"]), 4) if row["session_return"] is not None else None
             )
 
     return {
@@ -388,13 +371,61 @@ def list_signals(
                 "conviction_roi_x":    conviction_by_date.get(
                     r["signal_date"].isoformat() if r["signal_date"] else "", None
                 ),
-                "session_return_pct":   session_return_by_date.get(
-                    r["signal_date"].isoformat() if r["signal_date"] else "", None
-                ),
             }
             for r in rows
         ],
     }
+
+
+@router.get("/signals/raw-roi")
+def signals_raw_roi(
+    days: int = Query(90, ge=1, le=365),
+    cur=Depends(get_cursor),
+) -> dict[str, Any]:
+    """
+    Compute raw (unleveraged) session return for each signal date.
+    Separate endpoint because the 3-price-point query is slow.
+    """
+    interval_str = f"{days} days"
+    cur.execute("""
+        WITH signal_syms AS (
+            SELECT ds.signal_date, dsi.symbol_id
+            FROM user_mgmt.daily_signals ds
+            JOIN user_mgmt.daily_signal_items dsi
+              ON dsi.signal_batch_id = ds.signal_batch_id
+            WHERE ds.signal_date >= (NOW() - %s::interval)::date
+              AND dsi.is_selected = TRUE
+              AND ds.sit_flat = FALSE
+        ),
+        open_px AS (
+            SELECT ss.signal_date, ss.symbol_id, f.close AS px
+            FROM signal_syms ss
+            JOIN market.futures_1m f ON f.symbol_id = ss.symbol_id
+            WHERE f.source_id = 1
+              AND f.timestamp_utc >= (ss.signal_date + TIME '06:00')
+              AND f.timestamp_utc <  (ss.signal_date + TIME '06:01')
+        ),
+        close_px AS (
+            SELECT ss.signal_date, ss.symbol_id, f.close AS px
+            FROM signal_syms ss
+            JOIN market.futures_1m f ON f.symbol_id = ss.symbol_id
+            WHERE f.source_id = 1
+              AND f.timestamp_utc >= (ss.signal_date + TIME '23:55')
+              AND f.timestamp_utc <  (ss.signal_date + TIME '23:56')
+        )
+        SELECT o.signal_date,
+               AVG((c.px / NULLIF(o.px, 0) - 1) * 100) AS session_return
+        FROM open_px o
+        JOIN close_px c ON c.signal_date = o.signal_date AND c.symbol_id = o.symbol_id
+        GROUP BY o.signal_date
+    """, (interval_str,))
+
+    result: dict[str, float] = {}
+    for row in cur.fetchall():
+        result[row["signal_date"].isoformat()] = (
+            round(float(row["session_return"]), 4) if row["session_return"] is not None else 0.0
+        )
+    return {"raw_roi": result}
 
 
 @router.get("/signals/strat-roi")

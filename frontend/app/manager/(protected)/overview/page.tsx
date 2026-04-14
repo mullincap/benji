@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, useRef } from "react";
+import { useCallback, useEffect, useState, useRef } from "react";
 import Skeleton, { KPIGridSkeleton, TableSkeleton } from "../../../components/Skeleton";
 import {
   Chart as ChartJS,
@@ -76,6 +76,7 @@ interface OverviewData {
   mtd_pct: number;
   max_drawdown: number;
   portfolio_equity_30d: { date: string; equity_usd: number }[];
+  intraday_equity: { time: string; equity_usd: number }[];
   pipeline: {
     compiler: PipelineJob;
     indexer: PipelineJob;
@@ -201,13 +202,12 @@ export default function OverviewPage() {
   const [data, setData] = useState<OverviewData | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  useEffect(() => {
-    // Refresh live exchange data first, then load overview
+  const loadOverview = useCallback(() => {
     fetch(`${API_BASE}/api/allocator/snapshots/refresh`, {
       method: "POST",
       credentials: "include",
     })
-      .catch(() => {}) // non-critical — overview still works with stale snapshots
+      .catch(() => {})
       .finally(() => {
         fetch(`${API_BASE}/api/manager/overview`, { credentials: "include" })
           .then((r) => {
@@ -219,6 +219,13 @@ export default function OverviewPage() {
           .catch((e) => setError(e.message));
       });
   }, []);
+
+  useEffect(() => {
+    loadOverview();
+    // Auto-refresh every 5 minutes for live intraday data
+    const interval = setInterval(loadOverview, 5 * 60 * 1000);
+    return () => clearInterval(interval);
+  }, [loadOverview]);
 
   if (error) {
     return (
@@ -312,6 +319,10 @@ export default function OverviewPage() {
       {/* Row 1: KPI Cards */}
       <div style={{ display: "flex", gap: 10 }}>
         <KpiCard
+          label="Total AUM"
+          value={`$${(data.total_live_equity_usd ?? data.total_aum).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`}
+        />
+        <KpiCard
           label="Today"
           value={fmtPct(data.today_pct)}
           color={pctColor(data.today_pct)}
@@ -331,14 +342,10 @@ export default function OverviewPage() {
           value={data.max_drawdown === 0 ? "0.0%" : `${data.max_drawdown.toFixed(1)}%`}
           color={data.max_drawdown < 0 ? "var(--red)" : "var(--t1)"}
         />
-        <KpiCard
-          label="Total AUM"
-          value={`$${(data.total_live_equity_usd ?? data.total_aum).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`}
-        />
       </div>
 
       {/* Row 2: Charts */}
-      <div style={{ display: "flex", gap: 10, flex: "0 0 200px" }}>
+      <div style={{ display: "flex", gap: 10, flex: "0 0 300px" }}>
         {/* Equity Curve */}
         <div
           style={{
@@ -371,7 +378,7 @@ export default function OverviewPage() {
                   datasets: [
                     {
                       data: eqValues,
-                      borderColor: "var(--green)",
+                      borderColor: "#00c896",
                       backgroundColor: "rgba(0, 200, 150, 0.08)",
                       fill: true,
                       tension: 0.3,
@@ -383,6 +390,7 @@ export default function OverviewPage() {
                 options={{
                   responsive: true,
                   maintainAspectRatio: false,
+                  interaction: { mode: "index" as const, intersect: false },
                   scales: {
                     x: {
                       display: true,
@@ -391,11 +399,26 @@ export default function OverviewPage() {
                     },
                     y: {
                       display: true,
-                      ticks: { color: "#5a5754", font: { size: 8 }, maxTicksLimit: 4 },
+                      ticks: { color: "#5a5754", font: { size: 8, family: "Space Mono" }, maxTicksLimit: 4,
+                        callback: (v: unknown) => `$${Number(v).toLocaleString("en-US")}`,
+                      },
                       grid: { color: "rgba(50,50,59,0.3)" },
                     },
                   },
-                  plugins: { tooltip: { enabled: true }, legend: { display: false } },
+                  plugins: {
+                    legend: { display: false },
+                    tooltip: {
+                      enabled: true,
+                      backgroundColor: "rgba(20,20,22,0.95)",
+                      titleFont: { family: "Space Mono", size: 10 },
+                      bodyFont: { family: "Space Mono", size: 11 },
+                      padding: 10,
+                      cornerRadius: 4,
+                      callbacks: {
+                        label: (ctx: { raw: unknown }) => `$${Number(ctx.raw).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`,
+                      },
+                    },
+                  },
                 }}
               />
             </div>
@@ -489,6 +512,138 @@ export default function OverviewPage() {
           )}
         </div>
       </div>
+
+      {/* Intraday Equity (today) */}
+      {(() => {
+        // Build full deployment window grid: 06:00 → 00:00 UTC at 15-min intervals
+        const grid: string[] = [];
+        for (let h = 6; h < 24; h++) {
+          for (let m = 0; m < 60; m += 15) {
+            grid.push(`${h.toString().padStart(2, "0")}:${m.toString().padStart(2, "0")}`);
+          }
+        }
+
+        // Map actual data onto the grid
+        const dataMap: Record<string, number> = {};
+        for (const p of data.intraday_equity ?? []) {
+          const d = new Date(p.time);
+          const label = `${d.getUTCHours().toString().padStart(2, "0")}:${d.getUTCMinutes().toString().padStart(2, "0")}`;
+          dataMap[label] = p.equity_usd;
+        }
+        const values = grid.map((label) => dataMap[label] ?? null);
+        const hasAny = values.some((v) => v !== null);
+
+        // Linear regression projection for future empty points
+        const realPoints: { x: number; y: number }[] = [];
+        values.forEach((v, i) => { if (v !== null) realPoints.push({ x: i, y: v }); });
+        let projected: (number | null)[] = values.map(() => null);
+        if (realPoints.length >= 2) {
+          const lastReal = realPoints[realPoints.length - 1];
+          // 3 hours = 12 fifteen-minute buckets
+          const hasEnoughHistory = realPoints.length >= 12;
+
+          let slope = 0;
+          if (hasEnoughHistory) {
+            const n = realPoints.length;
+            const sumX = realPoints.reduce((s, p) => s + p.x, 0);
+            const sumY = realPoints.reduce((s, p) => s + p.y, 0);
+            const sumXY = realPoints.reduce((s, p) => s + p.x * p.y, 0);
+            const sumX2 = realPoints.reduce((s, p) => s + p.x * p.x, 0);
+            slope = (n * sumXY - sumX * sumY) / (n * sumX2 - sumX * sumX);
+          }
+          // slope = 0 → flat line; slope > 0 → linear projection
+          projected = grid.map((_, i) => {
+            if (i === lastReal.x) return lastReal.y;
+            if (i > lastReal.x) return lastReal.y + slope * (i - lastReal.x);
+            return null;
+          });
+        }
+
+        return (
+          <div style={{
+            background: "var(--bg2)",
+            border: "1px solid var(--line)",
+            borderRadius: 5,
+            padding: "12px 16px",
+            marginBottom: 10,
+            height: 330,
+          }}>
+            <div style={{ fontSize: 9, fontWeight: 700, letterSpacing: "0.12em", color: "var(--t3)", textTransform: "uppercase", marginBottom: 8 }}>
+              Intraday Equity (today) · 06:00–00:00 UTC
+            </div>
+            <div style={{ height: "calc(100% - 24px)" }}>
+              {hasAny ? (
+                <Line
+                  data={{
+                    labels: grid,
+                    datasets: [
+                      {
+                        label: "Equity",
+                        data: values,
+                        borderColor: "#00c896",
+                        backgroundColor: "rgba(0, 200, 150, 0.15)",
+                        fill: true,
+                        tension: 0.3,
+                        pointRadius: values.map((v) => v !== null ? 2 : 0),
+                        pointBackgroundColor: "#00c896",
+                        borderWidth: 2,
+                        spanGaps: false,
+                      },
+                      {
+                        label: "Projected",
+                        data: projected,
+                        borderColor: "rgba(160, 157, 150, 0.4)",
+                        backgroundColor: "rgba(160, 157, 150, 0.06)",
+                        fill: true,
+                        tension: 0.3,
+                        pointRadius: 0,
+                        borderWidth: 1.5,
+                        borderDash: [6, 4],
+                        spanGaps: true,
+                      },
+                    ],
+                  }}
+                  options={{
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    interaction: { mode: "index" as const, intersect: false },
+                    plugins: {
+                      legend: { display: false },
+                      tooltip: {
+                        enabled: true,
+                        backgroundColor: "rgba(20,20,22,0.95)",
+                        titleFont: { family: "Space Mono", size: 10 },
+                        bodyFont: { family: "Space Mono", size: 11 },
+                        padding: 10,
+                        cornerRadius: 4,
+                        filter: (item: { raw: unknown; datasetIndex: number }) => item.raw !== null && item.datasetIndex === 0,
+                        callbacks: {
+                          label: (ctx: { raw: unknown; datasetIndex: number }) => {
+                            if (ctx.datasetIndex === 1) return "";
+                            return ctx.raw !== null
+                              ? `$${Number(ctx.raw).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+                              : "";
+                          },
+                        },
+                      },
+                    },
+                    scales: {
+                      x: { grid: { display: false }, ticks: { color: "#5a5754", font: { size: 8, family: "Space Mono" }, maxTicksLimit: 12 } },
+                      y: { grid: { color: "rgba(50,50,59,0.3)" }, ticks: { color: "#5a5754", font: { size: 8, family: "Space Mono" }, maxTicksLimit: 4,
+                        callback: (v: unknown) => `$${Number(v).toLocaleString("en-US")}`,
+                      }},
+                    },
+                  }}
+                />
+              ) : (
+                <div style={{ display: "flex", alignItems: "center", justifyContent: "center", height: "100%", fontSize: 10, color: "var(--t2)" }}>
+                  No intraday data yet
+                </div>
+              )}
+            </div>
+          </div>
+        );
+      })()}
 
       {/* Row 3: Allocation table + Pipeline status */}
       <div style={{ display: "flex", gap: 10, flex: 1, minHeight: 0 }}>

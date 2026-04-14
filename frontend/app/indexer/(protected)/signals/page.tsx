@@ -49,7 +49,6 @@ type DailySignal = {
   computed_at: string | null;
   symbol_count: number;
   conviction_roi_x: number | null;
-  session_return_pct: number | null;
   symbols: SignalSymbol[];
 };
 
@@ -309,6 +308,8 @@ function SignalRow({
   expanded,
   onToggle,
   killY,
+  rawRoiVal,
+  rawRoiLoading,
   stratRoi,
   stratRoiLoading,
 }: {
@@ -316,6 +317,8 @@ function SignalRow({
   expanded: boolean;
   onToggle: () => void;
   killY: number;
+  rawRoiVal: number | null;
+  rawRoiLoading: boolean;
   stratRoi: StratRoi | null;
   stratRoiLoading: boolean;
 }) {
@@ -355,16 +358,18 @@ function SignalRow({
         <Td align="right">
           {signal.sit_flat ? (
             <span style={{ fontSize: 9, color: "var(--t3)" }}>—</span>
-          ) : signal.session_return_pct === null ? (
+          ) : rawRoiLoading ? (
+            <span style={{ fontSize: 9, color: "var(--t3)", fontStyle: "italic" }}>computing</span>
+          ) : rawRoiVal === null ? (
             <span style={{ fontSize: 9, color: "var(--t3)" }}>—</span>
           ) : (
             <span style={{
               fontSize: 10,
               fontWeight: 700,
               fontFamily: "var(--font-space-mono), Space Mono, monospace",
-              color: signal.session_return_pct >= 0 ? "var(--green)" : "var(--red)",
+              color: rawRoiVal >= 0 ? "var(--green)" : "var(--red)",
             }}>
-              {signal.session_return_pct >= 0 ? "+" : ""}{signal.session_return_pct.toFixed(2)}%
+              {rawRoiVal >= 0 ? "+" : ""}{rawRoiVal.toFixed(2)}%
             </span>
           )}
         </Td>
@@ -439,6 +444,8 @@ function SignalsTable({
   expandedId,
   onToggle,
   killY,
+  rawRoi,
+  rawRoiLoading,
   stratRoi,
   stratRoiLoading,
 }: {
@@ -446,6 +453,8 @@ function SignalsTable({
   expandedId: string | null;
   onToggle: (id: string) => void;
   killY: number;
+  rawRoi: Record<string, number>;
+  rawRoiLoading: boolean;
   stratRoi: Record<string, StratRoi>;
   stratRoiLoading: boolean;
 }) {
@@ -501,6 +510,8 @@ function SignalsTable({
               expanded={expandedId === s.signal_batch_id}
               onToggle={() => onToggle(s.signal_batch_id)}
               killY={killY}
+              rawRoiVal={s.signal_date ? rawRoi[s.signal_date] ?? null : null}
+              rawRoiLoading={rawRoiLoading}
               stratRoi={s.signal_date ? stratRoi[s.signal_date] ?? null : null}
               stratRoiLoading={stratRoiLoading}
             />
@@ -519,11 +530,14 @@ export default function IndexerSignalsPage() {
   const [state, setState] = useState<LoadState>({ kind: "loading" });
   const [filter, setFilter] = useState<FilterKey>("all");
   const [expandedId, setExpandedId] = useState<string | null>(null);
+  const [rawRoi, setRawRoi] = useState<Record<string, number>>({});
+  const [rawRoiLoading, setRawRoiLoading] = useState(false);
   const [stratRoi, setStratRoi] = useState<Record<string, StratRoi>>({});
   const [stratRoiLoading, setStratRoiLoading] = useState(false);
 
   const fetchSignals = useCallback(async (sourceFilter: FilterKey) => {
     setState({ kind: "loading" });
+    setRawRoi({});
     setStratRoi({});
     try {
       const params = new URLSearchParams({ days: String(LOOKBACK_DAYS) });
@@ -543,7 +557,18 @@ export default function IndexerSignalsPage() {
       const data = (await res.json()) as SignalsResponse;
       setState({ kind: "ready", signals: data.signals, killY: data.conviction_kill_y });
 
-      // Fetch strat ROI in background
+      // Fetch raw ROI + strat ROI in background
+      setRawRoiLoading(true);
+      fetch(`${API_BASE}/api/indexer/signals/raw-roi?days=${LOOKBACK_DAYS}`, { credentials: "include" })
+        .then(async (r) => {
+          if (r.ok) {
+            const d = await r.json();
+            setRawRoi(d.raw_roi || {});
+          }
+        })
+        .catch(() => {})
+        .finally(() => setRawRoiLoading(false));
+
       setStratRoiLoading(true);
       fetch(`${API_BASE}/api/indexer/signals/strat-roi?days=${LOOKBACK_DAYS}`, { credentials: "include" })
         .then(async (r) => {
@@ -625,6 +650,8 @@ export default function IndexerSignalsPage() {
             expandedId={expandedId}
             onToggle={handleToggle}
             killY={state.killY}
+            rawRoi={rawRoi}
+            rawRoiLoading={rawRoiLoading}
             stratRoi={stratRoi}
             stratRoiLoading={stratRoiLoading}
           />
