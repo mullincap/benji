@@ -16,6 +16,7 @@ import {
 
 import MetricCard from '../ui/MetricCard';
 import FilterTable from '../ui/FilterTable';
+import { asNum, fmtPercent2, metricColor, normalizeFilterLabel, normalizeFilterLabelCore } from '@/app/lib/format';
 
 interface ResultsViewProps {
   results: Record<string, unknown> | null;
@@ -47,13 +48,6 @@ function fmtUsdCompact(v: number): string {
   return `$${Math.round(n)}`;
 }
 
-function fmtPercent2(v: unknown): string {
-  if (v === null || v === undefined) return 'N/A';
-  if (typeof v === 'number') return `${v.toFixed(2)}%`;
-  const n = Number(v);
-  if (Number.isFinite(n)) return `${n.toFixed(2)}%`;
-  return String(v);
-}
 
 function fmtCagr(v: unknown): string {
   if (v === null || v === undefined) return 'N/A';
@@ -93,32 +87,6 @@ function asPct(v: unknown): number | null {
   return n === null ? null : n;
 }
 
-function metricColor(key: string, value: unknown): string {
-  if (typeof value !== 'number') return 'var(--t2)';
-  const heuristics: Record<string, (v: number) => string> = {
-    sharpe: (v) => (v > 1 ? 'var(--green)' : v > 0.5 ? 'var(--amber)' : 'var(--red)'),
-    cagr: (v) => (v > 0 ? 'var(--green)' : v > -5 ? 'var(--amber)' : 'var(--red)'),
-    max_dd: (v) => (v > -20 ? 'var(--green)' : v > -30 ? 'var(--amber)' : 'var(--red)'),
-    active: (v) => (v > 90 ? 'var(--green)' : v > 30 ? 'var(--amber)' : 'var(--red)'),
-    tot_ret: (v) => (v > 0 ? 'var(--green)' : v > -10 ? 'var(--amber)' : 'var(--red)'),
-    compounded_ret: (v) => (v > 0 ? 'var(--green)' : v > -10 ? 'var(--amber)' : 'var(--red)'),
-    grade: (v) => (v >= 80 ? 'var(--green)' : v >= 65 ? 'var(--amber)' : 'var(--red)'),
-    sortino: (v) => (v > 1 ? 'var(--green)' : v > 0.5 ? 'var(--amber)' : 'var(--red)'),
-    calmar: (v) => (v > 1 ? 'var(--green)' : v > 0.5 ? 'var(--amber)' : 'var(--red)'),
-    calmar_ratio: (v) => (v > 1 ? 'var(--green)' : v > 0.5 ? 'var(--amber)' : 'var(--red)'),
-    omega: (v) => (v > 1.5 ? 'var(--green)' : v > 1 ? 'var(--amber)' : 'var(--red)'),
-    ulcer_index: (v) => (v < 5 ? 'var(--green)' : v < 15 ? 'var(--amber)' : 'var(--red)'),
-    fa_oos_sharpe: (v) => (v > 1 ? 'var(--green)' : v > 0.5 ? 'var(--amber)' : 'var(--red)'),
-    dsr_pct: (v) => (v > 95 ? 'var(--green)' : v > 80 ? 'var(--amber)' : 'var(--red)'),
-    cv: (v) => (v < 0.25 ? 'var(--green)' : v < 0.5 ? 'var(--amber)' : 'var(--red)'),
-    flat_days: (v) => (v < 30 ? 'var(--green)' : v < 60 ? 'var(--amber)' : 'var(--red)'),
-    avg_win_loss: (v) => (v >= 1.5 ? 'var(--green)' : v >= 1 ? 'var(--amber)' : 'var(--red)'),
-    profit_factor: (v) => (v >= 1.5 ? 'var(--green)' : v >= 1 ? 'var(--amber)' : 'var(--red)'),
-    uw_streak: (v) => (v <= 20 ? 'var(--green)' : v <= 60 ? 'var(--amber)' : 'var(--red)'),
-    avg_1m: (v) => (v > 0 ? 'var(--green)' : v > -5 ? 'var(--amber)' : 'var(--red)'),
-  };
-  return heuristics[key]?.(value) ?? 'var(--t0)';
-}
 
 type XValue = number | string | Date;
 type Point = { x: XValue; y: number } | number;
@@ -1381,19 +1349,6 @@ function ReturnBoxPlotCard({
   );
 }
 
-function normalizeFilterLabel(s: string): string {
-  return s
-    .toLowerCase()
-    .replace(/\+/g, 'p')
-    .replace(/[^a-z0-9]+/g, ' ')
-    .trim();
-}
-
-function normalizeFilterLabelCore(s: string): string {
-  const base = normalizeFilterLabel(s);
-  // Strip leading scorecard prefix patterns like "A -", "B+", etc.
-  return base.replace(/^[a-f](?:\s*[\+\-])?\s+/, '').trim();
-}
 
 function extractAlerts(text: string): string[] {
   return text
@@ -3213,14 +3168,6 @@ function DailyReturnOverlapChart({
 
 type ReportTab = 'summary' | 'breakdown' | 'stress_tests' | 'raw_output' | 'tear_sheet' | 'full_report';
 
-function asNum(v: unknown): number | null {
-  if (typeof v === 'number' && Number.isFinite(v)) return v;
-  if (typeof v === 'string') {
-    const n = Number(v);
-    if (Number.isFinite(n)) return n;
-  }
-  return null;
-}
 
 // ── Full Report Section Visualizations ───────────────────────────────────────
 

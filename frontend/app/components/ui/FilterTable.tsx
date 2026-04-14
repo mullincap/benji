@@ -1,5 +1,7 @@
 'use client';
 
+import { asNum, fmt, fmtPercent2, fmtInt, metricColor, normalizeFilterLabel } from '@/app/lib/format';
+
 interface FilterRow {
   filter?: string;
   sharpe?: number | null;
@@ -19,56 +21,6 @@ interface FilterTableProps {
   rows: FilterRow[] | null | undefined;
   selectedFilter?: string | null;
   onSelectFilter?: (filter: string) => void;
-}
-
-function fmt(v: number | null | undefined, decimals = 3): string {
-  if (v === null || v === undefined) return 'N/A';
-  return v.toFixed(decimals);
-}
-
-function fmtPercent2(v: number | null | undefined): string {
-  if (v === null || v === undefined) return 'N/A';
-  return `${new Intl.NumberFormat(undefined, {
-    minimumFractionDigits: 2,
-    maximumFractionDigits: 2,
-  }).format(v)}%`;
-}
-
-function fmtInt(v: unknown): string {
-  const n = asNum(v);
-  if (n === null) return 'N/A';
-  return new Intl.NumberFormat(undefined, {
-    maximumFractionDigits: 0,
-  }).format(Math.round(n));
-}
-
-function asNum(v: unknown): number | null {
-  if (typeof v === 'number' && Number.isFinite(v)) return v;
-  if (typeof v === 'string') {
-    const n = Number(v);
-    if (Number.isFinite(n)) return n;
-  }
-  return null;
-}
-
-function metricColor(key: 'sharpe' | 'max_dd' | 'cagr' | 'cv' | 'dsr_pct' | 'grade', value: unknown): string {
-  const v = asNum(value);
-  if (v === null) return 'var(--t2)';
-  if (key === 'sharpe') return v > 1 ? 'var(--green)' : v > 0.5 ? 'var(--amber)' : 'var(--red)';
-  if (key === 'max_dd') return v > -20 ? 'var(--green)' : v > -30 ? 'var(--amber)' : 'var(--red)';
-  if (key === 'cagr') return v > 0 ? 'var(--green)' : v > -5 ? 'var(--amber)' : 'var(--red)';
-  if (key === 'cv') return v < 0.25 ? 'var(--green)' : v < 0.5 ? 'var(--amber)' : 'var(--red)';
-  if (key === 'dsr_pct') return v >= 95 ? 'var(--green)' : v >= 80 ? 'var(--amber)' : 'var(--red)';
-  if (key === 'grade') return v >= 80 ? 'var(--green)' : v >= 65 ? 'var(--amber)' : 'var(--red)';
-  return 'var(--t0)';
-}
-
-function normalizeFilterLabel(s: string): string {
-  return s
-    .toLowerCase()
-    .replace(/\+/g, 'p')
-    .replace(/[^a-z0-9]+/g, ' ')
-    .trim();
 }
 
 export default function FilterTable({ rows, selectedFilter, onSelectFilter }: FilterTableProps) {

@@ -178,8 +178,8 @@ def alert(msg: str, subject: str = "trader-blofin ALERT"):
     try:
         with open(ALERTS_LOG, "a") as f:
             f.write(line + "\n")
-    except Exception:
-        pass
+    except OSError as e:
+        log.debug("Could not write alert log: %s", e)
     if ALERT_EMAIL:
         try:
             import subprocess
@@ -219,8 +219,8 @@ def acquire_lock():
 def release_lock():
     try:
         LOCK_FILE.unlink(missing_ok=True)
-    except Exception:
-        pass
+    except OSError as e:
+        log.debug("Could not release lock file: %s", e)
 
 
 # ==========================================================================

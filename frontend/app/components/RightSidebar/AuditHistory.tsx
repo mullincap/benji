@@ -1,6 +1,7 @@
 'use client';
 
 import { useState, useEffect } from 'react';
+import { asNum, normalizeFilterLabel } from '@/app/lib/format';
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE || '';
 
@@ -70,23 +71,6 @@ function statusColor(status: string): string {
   if (s === 'failed') return 'var(--red)';
   if (s === 'running') return 'var(--amber)';
   return 'var(--t2)';
-}
-
-function normalizeFilterLabel(s: string): string {
-  return s
-    .toLowerCase()
-    .replace(/\+/g, 'p')
-    .replace(/[^a-z0-9]+/g, ' ')
-    .trim();
-}
-
-function asNum(v: unknown): number | null {
-  if (typeof v === 'number' && Number.isFinite(v)) return v;
-  if (typeof v === 'string') {
-    const n = Number(v);
-    if (Number.isFinite(n)) return n;
-  }
-  return null;
 }
 
 function pickBestSharpe(results: Record<string, unknown> | null | undefined): number | null {

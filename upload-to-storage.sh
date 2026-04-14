@@ -19,18 +19,23 @@ set -euo pipefail
 
 BUCKET="benji3m-data"
 ENDPOINT="https://hel1.your-objectstorage.com"
-ACCESS_KEY="REDACTED_S3_ACCESS_KEY"
-SECRET_KEY="REDACTED_S3_SECRET_KEY"
+
+# Load credentials from .env if present, otherwise expect env vars
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [ -f "$SCRIPT_DIR/.env" ]; then
+    set +u
+    source <(grep -E "^S3_(ACCESS_KEY|SECRET_KEY)" "$SCRIPT_DIR/.env")
+    set -u
+fi
+
+export AWS_ACCESS_KEY_ID="${S3_ACCESS_KEY:?S3_ACCESS_KEY not set — add to .env or export it}"
+export AWS_SECRET_ACCESS_KEY="${S3_SECRET_KEY:?S3_SECRET_KEY not set — add to .env or export it}"
+export AWS_DEFAULT_REGION="eu-central-1"
 
 # Local source paths
 BASE="$HOME/Desktop/desk/benji3m"
 OI_RAW="$HOME/Desktop/desk/import/oi_logger/backfills/1raws/oi_raw"
 MARKETCAP_SRC="$BASE/binetl/data/marketcap"
-
-# AWS CLI env
-export AWS_ACCESS_KEY_ID="$ACCESS_KEY"
-export AWS_SECRET_ACCESS_KEY="$SECRET_KEY"
-export AWS_DEFAULT_REGION="eu-central-1"
 
 S3="aws s3 --endpoint-url $ENDPOINT"
 

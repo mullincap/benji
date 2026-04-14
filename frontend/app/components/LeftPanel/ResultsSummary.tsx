@@ -1,6 +1,7 @@
 'use client';
 
 import { useState } from 'react';
+import { asNum, normalizeFilterLabel, fmtPercent1 } from '@/app/lib/format';
 
 interface ResultsSummaryProps {
   results: Record<string, unknown> | null;
@@ -24,14 +25,6 @@ type FilterMetricRow = {
 function fmtVal(v: unknown, decimals = 2): string {
   if (v === null || v === undefined) return 'N/A';
   if (typeof v === 'number') return v.toFixed(decimals);
-  return String(v);
-}
-
-function fmtPercent1(v: unknown): string {
-  if (v === null || v === undefined) return 'N/A';
-  if (typeof v === 'number') return `${v.toFixed(1)}%`;
-  const n = Number(v);
-  if (Number.isFinite(n)) return `${n.toFixed(1)}%`;
   return String(v);
 }
 
@@ -184,23 +177,6 @@ function getInactiveChildKeys(params: Record<string, unknown>): Set<string> {
   }
 
   return hidden;
-}
-
-function normalizeFilterLabel(s: string): string {
-  return s
-    .toLowerCase()
-    .replace(/\+/g, 'p')
-    .replace(/[^a-z0-9]+/g, ' ')
-    .trim();
-}
-
-function asNum(v: unknown): number | null {
-  if (typeof v === 'number' && Number.isFinite(v)) return v;
-  if (typeof v === 'string') {
-    const n = Number(v);
-    if (Number.isFinite(n)) return n;
-  }
-  return null;
 }
 
 function prettySectionTitle(title: string): string {

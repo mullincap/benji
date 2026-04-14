@@ -2,6 +2,7 @@
 __pycache__/
 *.pyc
 .env
+.env.production
 *.db
 .DS_Store
 node_modules/
@@ -9,10 +10,10 @@ node_modules/
 dist/
 *.log
 celerybeat-schedule
-pipeline/audit_outputs_BEFORE/
+backend/jobs/
 
 # Pipeline
-.env
+pipeline/audit_outputs_BEFORE/
 credentials/
 token.json
 credentials.json
@@ -24,5 +25,4 @@ pipeline/.venv/
 pipeline/**/__pycache__/
 pipeline/**/*.pyc
 checkpoint_*.txt
-*.log
 .claude/

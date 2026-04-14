@@ -18,6 +18,7 @@ do that — backend connection settings come from the FastAPI Settings object
 configuration source.
 """
 
+import os
 from typing import Generator
 
 import psycopg2
@@ -27,22 +28,32 @@ from fastapi import HTTPException
 from .core.config import settings
 
 
+def _connect(**overrides):
+    """Low-level psycopg2 connect using settings + any overrides."""
+    return psycopg2.connect(
+        host=overrides.get("host", os.environ.get("DB_HOST", settings.DB_HOST)),
+        port=int(overrides.get("port", os.environ.get("DB_PORT", settings.DB_PORT))),
+        dbname=overrides.get("dbname", os.environ.get("DB_NAME", settings.DB_NAME)),
+        user=overrides.get("user", os.environ.get("DB_USER", settings.DB_USER)),
+        password=overrides.get("password", os.environ.get("DB_PASSWORD", settings.DB_PASSWORD)),
+        connect_timeout=overrides.get("connect_timeout", 5),
+    )
+
+
 def get_conn():
-    """Open a new psycopg2 connection. Caller is responsible for closing."""
-    if not settings.DB_PASSWORD:
+    """Open a new psycopg2 connection (FastAPI context). Caller is responsible for closing."""
+    if not settings.DB_PASSWORD and not os.environ.get("DB_PASSWORD"):
         raise HTTPException(
             status_code=503,
             detail="DB_PASSWORD not set. Configure in backend .env (local dev requires "
                    "SSH tunnel: ssh -L 5432:127.0.0.1:5432 mcap -N)",
         )
-    return psycopg2.connect(
-        host=settings.DB_HOST,
-        port=settings.DB_PORT,
-        dbname=settings.DB_NAME,
-        user=settings.DB_USER,
-        password=settings.DB_PASSWORD,
-        connect_timeout=5,
-    )
+    return _connect()
+
+
+def get_worker_conn():
+    """Open a psycopg2 connection for Celery workers (no HTTPException)."""
+    return _connect()
 
 
 def get_cursor() -> Generator:

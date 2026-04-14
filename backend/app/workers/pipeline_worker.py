@@ -616,8 +616,8 @@ def run_pipeline(self, job_id: str, params: dict) -> dict:
 
     pipeline_env = {
         **os.environ,
-        # Ensure miniforge python is found first when pipeline scripts call "python3"
-        "PATH": "/opt/homebrew/Caskroom/miniforge/base/bin:" + os.environ.get("PATH", ""),
+        # Ensure pipeline python's directory is on PATH so subprocess "python3" resolves correctly
+        "PATH": str(Path(_PIPELINE_PYTHON).parent) + ":" + os.environ.get("PATH", ""),
         # Infrastructure paths
         "BASE_DATA_DIR":       str(settings.BASE_DATA_DIR),
         "PARQUET_PATH":        settings.PARQUET_PATH,
@@ -927,8 +927,6 @@ def run_pipeline(self, job_id: str, params: dict) -> dict:
 
     update_job(job_id, status="complete", stage="done", progress=100, results=results)
     return results
-    if _is_cancelled(job_id):
-        return {}
 
 
 # ─── Side-effect import: register additional task modules ───────────────────

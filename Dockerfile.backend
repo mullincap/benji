@@ -22,7 +22,7 @@ RUN pip install --no-cache-dir -r /app/pipeline/requirements.txt
 
 # Pipeline Node deps
 COPY pipeline/package.json pipeline/package-lock.json* /app/pipeline/
-RUN cd /app/pipeline && npm install --production 2>/dev/null || true
+RUN cd /app/pipeline && npm install --production
 
 # Copy application code
 COPY backend/ /app/backend/

@@ -20,31 +20,23 @@ import json
 import datetime
 from decimal import Decimal
 from typing import Any
-from pathlib import Path
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel
 
 from ...db import get_cursor
-from ...core.config import settings
+from ...core.config import settings, load_secrets
 from .admin import require_admin
 from .allocator import refresh_snapshots
 
-# ── Self-load secrets.env for ANTHROPIC_API_KEY on the server ────────────────
-_SECRETS = Path("/mnt/quant-data/credentials/secrets.env")
-if _SECRETS.exists():
-    for _line in _SECRETS.read_text().splitlines():
-        _line = _line.strip()
-        if _line and not _line.startswith("#") and "=" in _line:
-            _k, _, _v = _line.partition("=")
-            os.environ.setdefault(_k.strip(), _v.strip())
+load_secrets()
 
 ANTHROPIC_API_KEY = settings.ANTHROPIC_API_KEY or os.environ.get("ANTHROPIC_API_KEY", "")
 INTERNAL_API_TOKEN = settings.INTERNAL_API_TOKEN or os.environ.get("INTERNAL_API_TOKEN", "")
 
-CLAUDE_MODEL = "claude-sonnet-4-20250514"
-CLAUDE_MAX_TOKENS = 1000
+CLAUDE_MODEL = settings.CLAUDE_MODEL
+CLAUDE_MAX_TOKENS = settings.CLAUDE_MAX_TOKENS
 
 router = APIRouter(
     prefix="/api/manager",
@@ -386,6 +378,27 @@ def _fetch_portfolio_context(cur) -> dict[str, Any]:
             "positions": r["positions"] if r["positions"] is not None else [],
         })
 
+    # ── Intraday equity curve (today, 15-min intervals) ────────────────
+    cur.execute("""
+        SELECT
+            date_trunc('hour', es.snapshot_at) +
+              INTERVAL '15 min' * FLOOR(EXTRACT(MINUTE FROM es.snapshot_at) / 15)
+              AS bucket,
+            AVG(es.total_equity_usd) AS equity_usd
+        FROM user_mgmt.exchange_snapshots es
+        JOIN user_mgmt.allocations a ON a.connection_id = es.connection_id
+        WHERE a.allocation_id = ANY(%s::uuid[])
+          AND es.fetch_ok = TRUE
+          AND es.snapshot_at >= CURRENT_DATE
+        GROUP BY bucket
+        ORDER BY bucket
+    """, (all_alloc_ids,))
+    intraday_rows = cur.fetchall()
+    intraday_equity = [
+        {"time": r["bucket"].isoformat(), "equity_usd": float(r["equity_usd"])}
+        for r in intraday_rows if r["equity_usd"] is not None
+    ]
+
     return {
         "allocations": alloc_list,
         "total_aum": total_aum_f,
@@ -394,6 +407,7 @@ def _fetch_portfolio_context(cur) -> dict[str, Any]:
         "mtd_pct": round(mtd_pct, 2),
         "max_drawdown": round(max_dd, 1),
         "portfolio_equity_30d": portfolio_equity,
+        "intraday_equity": intraday_equity,
         "signals": signals,
         "pipeline": pipeline,
         "exchange_snapshots": exchange_snapshots,

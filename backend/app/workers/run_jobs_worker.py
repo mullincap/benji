@@ -27,22 +27,13 @@ from typing import Callable
 import psycopg2
 
 from app.core.config import settings
+from app.db import get_worker_conn
 from app.workers.pipeline_worker import celery_app
 
 _PIPELINE_DIR = Path(settings.PIPELINE_DIR)
 _PIPELINE_PYTHON = settings.PIPELINE_PYTHON
 
-_SECRETS_PATH = Path("/mnt/quant-data/credentials/secrets.env")
-
-
-def _db_connect():
-    return psycopg2.connect(
-        host=os.environ.get("DB_HOST", "127.0.0.1"),
-        port=int(os.environ.get("DB_PORT", 5432)),
-        dbname=os.environ.get("DB_NAME", "marketdata"),
-        user=os.environ.get("DB_USER", "quant"),
-        password=os.environ["DB_PASSWORD"],
-    )
+_SECRETS_PATH = Path(settings.SECRETS_PATH)
 
 
 def _load_secrets() -> dict:
@@ -144,7 +135,7 @@ SCRIPT_REGISTRY: dict[str, dict] = {
 # ─── DB helpers ─────────────────────────────────────────────────────────────
 
 def _job_create(script_name: str, module: str, params: dict, triggered_by: str) -> str:
-    conn = _db_connect()
+    conn = get_worker_conn()
     cur = conn.cursor()
     cur.execute(
         """
@@ -165,7 +156,7 @@ def _job_create(script_name: str, module: str, params: dict, triggered_by: str) 
 def _job_finalize(run_id: str, exit_code: int, stdout_tail: str, stderr_tail: str) -> None:
     status = "complete" if exit_code == 0 else "failed"
     error_msg = None if exit_code == 0 else f"exit={exit_code}"
-    conn = _db_connect()
+    conn = get_worker_conn()
     cur = conn.cursor()
     cur.execute(
         """

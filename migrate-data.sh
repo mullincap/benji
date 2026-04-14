@@ -42,22 +42,6 @@ $SCP "$BASE/binetl/data/marketcap/marketcap_daily.parquet" "$EC2_HOST:/data/mark
 echo "→ [3/7] Uploading coins_universe.parquet..."
 $SCP "$BASE/binetl/data/marketcap/coins_universe.parquet" "$EC2_HOST:/data/marketcap/"
 
-# 3. Deploy files (370 files, ~2.5 MB total)
-#echo "→ [4/7] Uploading deploys_*.csv (370 files)..."
-#$SCP $BASE/deploys_*.csv "$EC2_HOST:/data/"
-
-# 4. Portfolio matrix
-#echo "→ [5/7] Uploading portfolio_matrix_gated.csv..."
-#$SCP "$BASE/portfolio_matrix_gated.csv" "$EC2_HOST:/data/"
-
-## 5. Dispersion cache
-#echo "→ [6/7] Uploading dispersion_cache.csv..."
-#$SCP "$BASE/dispersion_cache.csv" "$EC2_HOST:/data/"
-
-# 6. ADV calibration
-#echo "→ [7/7] Uploading adv_per_symbol.csv..."
-#$SCP "$BASE/adv_per_symbol.csv" "$EC2_HOST:/data/"
-
 # Verify
 echo ""
 echo "→ Verifying remote files..."

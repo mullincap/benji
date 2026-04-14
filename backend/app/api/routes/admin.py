@@ -26,13 +26,12 @@ Dependency:
 from __future__ import annotations
 
 import os
-from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from pydantic import BaseModel
 
-from ...core.config import settings
+from ...core.config import settings, load_secrets
 from ...services.admin_sessions import (
     SESSION_TTL_HOURS,
     create_session,
@@ -40,14 +39,7 @@ from ...services.admin_sessions import (
     validate_session,
 )
 
-# ── Self-load secrets.env for INTERNAL_API_TOKEN on the server ────────────────
-_SECRETS = Path("/mnt/quant-data/credentials/secrets.env")
-if _SECRETS.exists():
-    for _line in _SECRETS.read_text().splitlines():
-        _line = _line.strip()
-        if _line and not _line.startswith("#") and "=" in _line:
-            _k, _, _v = _line.partition("=")
-            os.environ.setdefault(_k.strip(), _v.strip())
+load_secrets()
 
 INTERNAL_API_TOKEN = settings.INTERNAL_API_TOKEN or os.environ.get("INTERNAL_API_TOKEN", "")
 

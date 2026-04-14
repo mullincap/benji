@@ -32,30 +32,23 @@ import logging
 from decimal import Decimal
 from typing import Any
 from uuid import uuid4
-from pathlib import Path
 import requests as http_requests
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
 from ...db import get_cursor
+from ...core.config import load_secrets
 from ...services.encryption import encrypt_key, decrypt_key
 from .auth import get_current_user
 
 log = logging.getLogger(__name__)
 
+load_secrets()
+
 router = APIRouter(
     prefix="/api/allocator",
     tags=["allocator"],
 )
-
-# ── Self-load secrets for BloFin API keys ────────────────────────────────────
-_SECRETS = Path("/mnt/quant-data/credentials/secrets.env")
-if _SECRETS.exists():
-    for _line in _SECRETS.read_text().splitlines():
-        _line = _line.strip()
-        if _line and not _line.startswith("#") and "=" in _line:
-            _k, _, _v = _line.partition("=")
-            os.environ.setdefault(_k.strip(), _v.strip())
 
 BLOFIN_BASE_URL = os.environ.get("BLOFIN_BASE_URL", "https://openapi.blofin.com")
 

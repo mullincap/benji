@@ -15,13 +15,11 @@ This worker is intentionally separate from `pipeline_worker.py` because:
   - keeping it isolated avoids complicating the existing simulator path
 """
 
-import os
 import subprocess
 from pathlib import Path
 
-import psycopg2
-
 from app.core.config import settings
+from app.db import get_worker_conn
 # Register tasks against the SHARED celery_app from pipeline_worker so the
 # existing `celery -A app.workers.pipeline_worker.celery_app worker` picks
 # them up without a docker-compose change.
@@ -35,22 +33,9 @@ _BACKFILL_SCRIPT = _PIPELINE_DIR / "db" / "backfill_leaderboards_bulk.py"
 VALID_METRICS = ("price", "open_interest", "volume")
 
 
-def _db_connect():
-    """Open a fresh psycopg2 connection using the same env vars
-    pipeline/db/connection.py reads. Kept inline so the worker has no
-    dependency on the pipeline package."""
-    return psycopg2.connect(
-        host=os.environ.get("DB_HOST", "127.0.0.1"),
-        port=int(os.environ.get("DB_PORT", 5432)),
-        dbname=os.environ.get("DB_NAME", "marketdata"),
-        user=os.environ.get("DB_USER", "quant"),
-        password=os.environ["DB_PASSWORD"],
-    )
-
-
 def _job_create(metric: str, triggered_by: str = "ui") -> str:
     """Insert a new row in market.indexer_jobs and return its job_id."""
-    conn = _db_connect()
+    conn = get_worker_conn()
     cur = conn.cursor()
     cur.execute(
         """
@@ -69,7 +54,7 @@ def _job_create(metric: str, triggered_by: str = "ui") -> str:
 
 
 def _job_complete(job_id: str, rows_written: int) -> None:
-    conn = _db_connect()
+    conn = get_worker_conn()
     cur = conn.cursor()
     cur.execute(
         """
@@ -85,7 +70,7 @@ def _job_complete(job_id: str, rows_written: int) -> None:
 
 
 def _job_fail(job_id: str, error_msg: str) -> None:
-    conn = _db_connect()
+    conn = get_worker_conn()
     cur = conn.cursor()
     cur.execute(
         """

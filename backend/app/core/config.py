@@ -1,5 +1,7 @@
-from pydantic_settings import BaseSettings
+import os
 from pathlib import Path
+
+from pydantic_settings import BaseSettings
 
 # .env lives at the project root (parent of backend/)
 _ENV_FILE = Path(__file__).resolve().parents[3] / ".env"
@@ -23,7 +25,8 @@ class Settings(BaseSettings):
     NODE_BIN: str = "node"
 
     # Python binary used to run pipeline scripts (needs pandas, pyarrow, etc.)
-    PIPELINE_PYTHON: str = "/opt/homebrew/Caskroom/miniforge/base/bin/python"
+    # Override in .env for local dev (e.g. /opt/homebrew/Caskroom/miniforge/base/bin/python)
+    PIPELINE_PYTHON: str = "python"
 
     # ─── TimescaleDB connection (used by compiler/indexer routers) ───────────
     # Local dev: requires an SSH tunnel forwarding remote 5432 to local DB_PORT.
@@ -61,7 +64,30 @@ class Settings(BaseSettings):
     # ─── Anthropic API (manager chat) ───────────────────────────────────────
     ANTHROPIC_API_KEY: str = ""
 
+    # ─── Server-side secrets.env path ───────────────────────────────────────
+    SECRETS_PATH: str = "/mnt/quant-data/credentials/secrets.env"
+
+    # ─── Claude model config ────────────────────────────────────────────────
+    CLAUDE_MODEL: str = "claude-sonnet-4-20250514"
+    CLAUDE_MAX_TOKENS: int = 1000
+
     class Config:
         env_file = str(_ENV_FILE)
 
 settings = Settings()
+
+
+def load_secrets() -> None:
+    """Load key=value pairs from the server-side secrets.env into os.environ.
+
+    Safe to call multiple times — uses setdefault so existing env vars win.
+    No-op if the secrets file doesn't exist (e.g. local dev).
+    """
+    secrets_path = Path(settings.SECRETS_PATH)
+    if not secrets_path.exists():
+        return
+    for line in secrets_path.read_text().splitlines():
+        line = line.strip()
+        if line and not line.startswith("#") and "=" in line:
+            k, _, v = line.partition("=")
+            os.environ.setdefault(k.strip(), v.strip())

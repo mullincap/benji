@@ -4,6 +4,7 @@ import os
 import sys
 import csv
 import time
+import logging
 import argparse
 import requests
 import gspread
@@ -148,7 +149,7 @@ def connect_sheets():
     client = gspread.authorize(creds)
     sheet = client.open_by_key(SHEET_ID)
     try:ws = sheet.worksheet(WORKSHEET_NAME)
-    except:ws = sheet.add_worksheet(title=WORKSHEET_NAME,rows=1,cols=1)
+    except gspread.exceptions.WorksheetNotFound:ws = sheet.add_worksheet(title=WORKSHEET_NAME,rows=1,cols=1)
     return ws
 def connect_daily_sheet(date_obj):
     """ Creates / connects to a DAILY spreadsheet, Example: OI_RAW_20250212, Inside it creates worksheet: OI_20250212"""
@@ -177,12 +178,13 @@ def connect_daily_sheet(date_obj):
         sh = client.create(spreadsheet_name)
         # Optional — move to same folder as master sheet
         try:sh.share(None,perm_type="anyone",role="writer")
-        except: pass
+        except Exception:
+            pass
     try:
         ws = sh.worksheet(worksheet_name)
-        print(f"📄 Using existing worksheet → {worksheet_name}")
-    except:
-        print(f"🆕 Creating worksheet → {worksheet_name}")
+        logging.info("Using existing worksheet → %s", worksheet_name)
+    except gspread.exceptions.WorksheetNotFound:
+        logging.info("Creating worksheet → %s", worksheet_name)
         ws = sh.add_worksheet(title=worksheet_name,rows=NEW_SHEET_ROWS,cols=NEW_SHEET_COLS)
     return ws
 def parse_amber_ts(value):
@@ -227,7 +229,7 @@ def rl_sleep():
         _next_allowed = max(_next_allowed, now) + (1.0 / RATE_LIMIT_RPS)
 def f(x):
     try: return float(x)
-    except: return 0.0
+    except (ValueError, TypeError): return 0.0
 def safe_result(futures, key, default):
     if key not in futures: return default
     try: return futures[key].result()
@@ -364,7 +366,7 @@ def r5(value):
     """Round to 5 decimals safely, Handles None / NaN / inf """
     if value is None:return None
     try: return round(float(value), 5)
-    except: return None
+    except (ValueError, TypeError): return None
 def first_after(rows, target):
     ts_list = [r["ts"] for r in rows]
     idx = bisect_left(ts_list, target)
@@ -972,7 +974,7 @@ def create_daily_summary(ws_raw, date_str):
         row_data = {"ts": ts}
         for col, idx in col_index.items():
             try: row_data[col] = float(r[idx])
-            except: row_data[col] = 0
+            except (ValueError, TypeError, IndexError): row_data[col] = 0
         hist.setdefault(sym, []).append(row_data)
 
     pre_start = datetime.strptime(f"{date_str} 00:00:00","%Y-%m-%d %H:%M:%S")
@@ -1008,7 +1010,7 @@ def create_daily_summary_from_rows_basic(rows, header, date_str):
         row_data = {"ts": ts}
         for col, idx in col_index.items():
             try: row_data[col] = float(r[idx])
-            except: row_data[col] = 0
+            except (ValueError, TypeError, IndexError): row_data[col] = 0
         hist.setdefault(sym, []).append(row_data)
     pre_start = datetime.strptime(f"{date_str} 00:00:00","%Y-%m-%d %H:%M:%S")
     pre_end = datetime.strptime(f"{date_str} 06:00:00","%Y-%m-%d %H:%M:%S")
@@ -1048,7 +1050,7 @@ def create_daily_summary_from_rows(rows, header, date_str):
         row_data = {"ts": ts}
         for col, idx in col_index.items():
             try: row_data[col] = float(r[idx])
-            except: row_data[col] = 0.0
+            except (ValueError, TypeError, IndexError): row_data[col] = 0.0
         hist.setdefault(sym, []).append(row_data)
 
     # ─────────────────────────────
@@ -1154,9 +1156,9 @@ def write_summary_sheet(date_str, summary_rows):
     try:
         ws = sh.worksheet(tab_name)
         ws.clear()
-    except: ws = sh.add_worksheet(title=tab_name,rows=1000,cols=10)
+    except gspread.exceptions.WorksheetNotFound: ws = sh.add_worksheet(title=tab_name,rows=1000,cols=10)
     total_symbols = len(summary_rows)
-    print(f"🔢 Total symbols in summary: {total_symbols}")
+    logging.info("Total symbols in summary: %d", total_symbols)
     header = build_summary_header()
     ws.append_row(header)
     ws.append_rows(summary_rows)
