@@ -45,6 +45,8 @@ services:
       - NODE_BIN=node
       - BASE_DATA_DIR=/mnt/quant-data
       - DATA_ROOT=/mnt/quant-data
+      - OVERLAP_SOURCE=db
+      - MARKETCAP_DIR=/mnt/quant-data/raw/coingecko
     volumes:
       - jobs_data:/app/backend/jobs
       - /data:/data
