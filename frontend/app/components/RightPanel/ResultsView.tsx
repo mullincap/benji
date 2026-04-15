@@ -14676,6 +14676,228 @@ export default function ResultsView({ results, jobId, startingCapital, params }:
                     </div>
                   </div>
                 </div>
+
+                {/* ── Risk Management Effectiveness ──────────────────── */}
+                {(() => {
+                  const whipsawed = activeDays.filter(([,v]) => v.raw_roi > 0 && v.strat_roi < 0);
+                  const protected_ = activeDays.filter(([,v]) => v.raw_roi < -3 && v.strat_roi > v.raw_roi * 1.33);
+                  const whipsawCost = whipsawed.reduce((s,[,v]) => s + (v.raw_roi - v.strat_roi), 0);
+                  const protectionValue = protected_.reduce((s,[,v]) => s + (v.strat_roi - v.raw_roi * 1.33), 0);
+                  return (
+                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginBottom: 14 }}>
+                      <div style={kpiStyle}>
+                        <div style={kpiLabel}>Whipsaw Cost (raw win → strat loss)</div>
+                        <div style={{ ...kpiVal, color: 'var(--amber)' }}>{whipsawed.length} days</div>
+                        <div style={kpiSub}>Lost {whipsawCost.toFixed(1)}% cumulative from stops on recovering days</div>
+                      </div>
+                      <div style={kpiStyle}>
+                        <div style={kpiLabel}>Protection Value (raw deep loss → strat less bad)</div>
+                        <div style={{ ...kpiVal, color: 'var(--green)' }}>{protected_.length} days</div>
+                        <div style={kpiSub}>Saved {protectionValue.toFixed(1)}% cumulative from risk controls</div>
+                      </div>
+                    </div>
+                  );
+                })()}
+
+                {/* ── Filter Analysis ────────────────────────────────── */}
+                {(() => {
+                  // What would have happened on filtered days if we traded?
+                  // We can only show raw_roi=0 for filtered days, but we know
+                  // the conviction/strat_roi for days that passed filter but failed conviction
+                  const convFailRois = convFailDays.map(([,v]) => v.raw_roi);
+                  const filteredCount = filteredDays.length;
+                  const convFailCount = convFailDays.length;
+                  return (
+                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 8, marginBottom: 14 }}>
+                      <div style={kpiStyle}>
+                        <div style={kpiLabel}>Filtered Days (sat flat)</div>
+                        <div style={{ ...kpiVal, color: 'var(--t1)' }}>{filteredCount}</div>
+                        <div style={kpiSub}>{(filteredCount / days.length * 100).toFixed(1)}% of all days</div>
+                      </div>
+                      <div style={kpiStyle}>
+                        <div style={kpiLabel}>Conviction Failures</div>
+                        <div style={{ ...kpiVal, color: convFailCount > 0 ? 'var(--amber)' : 'var(--t1)' }}>{convFailCount}</div>
+                        <div style={kpiSub}>{convFailCount > 0 ? `Avg raw ROI on fail days: ${avg(convFailRois).toFixed(2)}%` : 'No conviction failures'}</div>
+                      </div>
+                      <div style={kpiStyle}>
+                        <div style={kpiLabel}>Filter Hit Rate</div>
+                        <div style={{ ...kpiVal, color: 'var(--t0)' }}>{activeDays.length > 0 ? (rawWins.length / activeDays.length * 100).toFixed(1) : '0'}%</div>
+                        <div style={kpiSub}>of active days were profitable (raw)</div>
+                      </div>
+                    </div>
+                  );
+                })()}
+
+                {/* ── Symbol Frequency Analysis ──────────────────────── */}
+                {(() => {
+                  const symbolStats: Record<string, { count: number; wins: number; totalRaw: number; totalStrat: number }> = {};
+                  activeDays.forEach(([,v]) => {
+                    const isWin = v.raw_roi > 0;
+                    v.symbols.forEach(sym => {
+                      if (!symbolStats[sym]) symbolStats[sym] = { count: 0, wins: 0, totalRaw: 0, totalStrat: 0 };
+                      symbolStats[sym].count++;
+                      if (isWin) symbolStats[sym].wins++;
+                      symbolStats[sym].totalRaw += v.raw_roi / Math.max(v.symbols.length, 1);
+                      symbolStats[sym].totalStrat += v.strat_roi / Math.max(v.symbols.length, 1);
+                    });
+                  });
+                  const sorted = Object.entries(symbolStats).sort(([,a],[,b]) => b.count - a.count);
+                  const top10 = sorted.slice(0, 10);
+                  const uniqueSymbols = sorted.length;
+                  const topConcentration = top10.reduce((s,[,v]) => s + v.count, 0);
+                  const totalAppearances = sorted.reduce((s,[,v]) => s + v.count, 0);
+                  return (
+                    <div style={{ marginBottom: 14, border: '1px solid var(--line)', borderRadius: 3, padding: 10, background: 'var(--bg2)' }}>
+                      <div style={{ ...kpiLabel, marginBottom: 8 }}>
+                        Symbol Frequency · {uniqueSymbols} unique symbols · top 10 = {totalAppearances > 0 ? (topConcentration / totalAppearances * 100).toFixed(0) : 0}% of appearances
+                      </div>
+                      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+                        {top10.map(([sym, s]) => (
+                          <div key={sym} style={{ padding: '4px 8px', border: '1px solid var(--line)', borderRadius: 3, background: 'var(--bg1)', fontSize: 9, fontFamily: 'var(--font-space-mono)' }}>
+                            <span style={{ color: 'var(--t0)', fontWeight: 700 }}>{sym}</span>
+                            <span style={{ color: 'var(--t3)', margin: '0 4px' }}>×{s.count}</span>
+                            <span style={{ color: s.wins / s.count >= 0.5 ? 'var(--green)' : 'var(--red)', fontWeight: 700 }}>{(s.wins / s.count * 100).toFixed(0)}%W</span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  );
+                })()}
+
+                {/* ── Temporal Patterns ──────────────────────────────── */}
+                {(() => {
+                  const dowNames = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+                  const dowStats: Record<number, { count: number; wins: number; totalRaw: number; totalStrat: number }> = {};
+                  const monthStats: Record<string, { count: number; wins: number; totalRaw: number; totalStrat: number }> = {};
+                  activeDays.forEach(([dateStr, v]) => {
+                    const d = new Date(dateStr + 'T00:00:00Z');
+                    const dow = d.getUTCDay();
+                    if (!dowStats[dow]) dowStats[dow] = { count: 0, wins: 0, totalRaw: 0, totalStrat: 0 };
+                    dowStats[dow].count++;
+                    if (v.strat_roi > 0) dowStats[dow].wins++;
+                    dowStats[dow].totalRaw += v.raw_roi;
+                    dowStats[dow].totalStrat += v.strat_roi;
+
+                    const monthKey = dateStr.slice(0, 7);
+                    if (!monthStats[monthKey]) monthStats[monthKey] = { count: 0, wins: 0, totalRaw: 0, totalStrat: 0 };
+                    monthStats[monthKey].count++;
+                    if (v.strat_roi > 0) monthStats[monthKey].wins++;
+                    monthStats[monthKey].totalRaw += v.raw_roi;
+                    monthStats[monthKey].totalStrat += v.strat_roi;
+                  });
+
+                  // Streaks
+                  let maxWinStreak = 0, maxLossStreak = 0, curWin = 0, curLoss = 0;
+                  activeDays.forEach(([,v]) => {
+                    if (v.strat_roi > 0) { curWin++; curLoss = 0; maxWinStreak = Math.max(maxWinStreak, curWin); }
+                    else { curLoss++; curWin = 0; maxLossStreak = Math.max(maxLossStreak, curLoss); }
+                  });
+
+                  return (
+                    <>
+                      <div style={{ display: 'grid', gridTemplateColumns: '2fr 1fr', gap: 8, marginBottom: 14 }}>
+                        {/* Day of Week */}
+                        <div style={{ border: '1px solid var(--line)', borderRadius: 3, padding: 10, background: 'var(--bg2)' }}>
+                          <div style={{ ...kpiLabel, marginBottom: 8 }}>Performance by Day of Week</div>
+                          <div style={{ display: 'flex', gap: 4 }}>
+                            {[1,2,3,4,5,6,0].map(dow => {
+                              const s = dowStats[dow];
+                              if (!s || s.count === 0) return (
+                                <div key={dow} style={{ flex: 1, textAlign: 'center', padding: '6px 0' }}>
+                                  <div style={{ fontSize: 9, color: 'var(--t3)' }}>{dowNames[dow]}</div>
+                                  <div style={{ fontSize: 9, color: 'var(--t3)' }}>—</div>
+                                </div>
+                              );
+                              const avgRet = s.totalStrat / s.count;
+                              return (
+                                <div key={dow} style={{ flex: 1, textAlign: 'center', padding: '6px 4px', borderRadius: 2, background: avgRet > 0 ? 'var(--green-dim)' : 'var(--red-dim)' }}>
+                                  <div style={{ fontSize: 9, color: 'var(--t2)', marginBottom: 2 }}>{dowNames[dow]}</div>
+                                  <div style={{ fontSize: 11, fontWeight: 700, color: avgRet >= 0 ? 'var(--green)' : 'var(--red)', fontFamily: 'var(--font-space-mono)' }}>{avgRet >= 0 ? '+' : ''}{avgRet.toFixed(1)}%</div>
+                                  <div style={{ fontSize: 8, color: 'var(--t3)' }}>{s.count}d · {(s.wins/s.count*100).toFixed(0)}%W</div>
+                                </div>
+                              );
+                            })}
+                          </div>
+                        </div>
+                        {/* Streaks */}
+                        <div style={kpiStyle}>
+                          <div style={kpiLabel}>Streaks</div>
+                          <div style={{ display: 'flex', gap: 16 }}>
+                            <div>
+                              <div style={{ ...kpiVal, color: 'var(--green)' }}>{maxWinStreak}</div>
+                              <div style={kpiSub}>longest win</div>
+                            </div>
+                            <div>
+                              <div style={{ ...kpiVal, color: 'var(--red)' }}>{maxLossStreak}</div>
+                              <div style={kpiSub}>longest loss</div>
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+
+                      {/* Monthly Heatmap */}
+                      <div style={{ border: '1px solid var(--line)', borderRadius: 3, padding: 10, background: 'var(--bg2)', marginBottom: 14 }}>
+                        <div style={{ ...kpiLabel, marginBottom: 8 }}>Monthly Performance (Strat ROI)</div>
+                        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
+                          {Object.entries(monthStats).sort(([a],[b]) => a.localeCompare(b)).map(([month, s]) => {
+                            const avgRet = s.totalStrat / s.count;
+                            return (
+                              <div key={month} style={{ padding: '4px 8px', borderRadius: 2, background: avgRet > 0 ? 'var(--green-dim)' : 'var(--red-dim)', border: `1px solid ${avgRet > 0 ? 'var(--green)' : 'var(--red)'}`, minWidth: 80, textAlign: 'center' }}>
+                                <div style={{ fontSize: 9, color: 'var(--t2)' }}>{month}</div>
+                                <div style={{ fontSize: 11, fontWeight: 700, color: avgRet >= 0 ? 'var(--green)' : 'var(--red)', fontFamily: 'var(--font-space-mono)' }}>{avgRet >= 0 ? '+' : ''}{avgRet.toFixed(1)}%</div>
+                                <div style={{ fontSize: 8, color: 'var(--t3)' }}>{s.count}d · {(s.wins/s.count*100).toFixed(0)}%W</div>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    </>
+                  );
+                })()}
+
+                {/* ── Portfolio Construction ─────────────────────────── */}
+                {(() => {
+                  const sizeStats: Record<number, { count: number; totalRaw: number; totalStrat: number; wins: number }> = {};
+                  activeDays.forEach(([,v]) => {
+                    const size = v.symbols.length;
+                    if (!sizeStats[size]) sizeStats[size] = { count: 0, totalRaw: 0, totalStrat: 0, wins: 0 };
+                    sizeStats[size].count++;
+                    sizeStats[size].totalRaw += v.raw_roi;
+                    sizeStats[size].totalStrat += v.strat_roi;
+                    if (v.strat_roi > 0) sizeStats[size].wins++;
+                  });
+                  const avgSize = activeDays.length > 0 ? activeDays.reduce((s,[,v]) => s + v.symbols.length, 0) / activeDays.length : 0;
+                  const winAvgSize = rawWins.length > 0 ? activeDays.filter(([,v]) => v.raw_roi > 0).reduce((s,[,v]) => s + v.symbols.length, 0) / rawWins.length : 0;
+                  const lossAvgSize = rawLosses.length > 0 ? activeDays.filter(([,v]) => v.raw_roi < 0).reduce((s,[,v]) => s + v.symbols.length, 0) / rawLosses.length : 0;
+                  return (
+                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 2fr', gap: 8, marginBottom: 14 }}>
+                      <div style={kpiStyle}>
+                        <div style={kpiLabel}>Portfolio Size</div>
+                        <div style={{ ...kpiVal, color: 'var(--t0)' }}>{avgSize.toFixed(1)}</div>
+                        <div style={kpiSub}>avg symbols/day</div>
+                        <div style={{ marginTop: 6, fontSize: 9, color: 'var(--t2)' }}>
+                          Win days: {winAvgSize.toFixed(1)} avg · Loss days: {lossAvgSize.toFixed(1)} avg
+                        </div>
+                      </div>
+                      <div style={{ border: '1px solid var(--line)', borderRadius: 3, padding: 10, background: 'var(--bg2)' }}>
+                        <div style={{ ...kpiLabel, marginBottom: 8 }}>Return by Portfolio Size</div>
+                        <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
+                          {Object.entries(sizeStats).sort(([a],[b]) => Number(a) - Number(b)).map(([size, s]) => {
+                            const avgRet = s.totalStrat / s.count;
+                            return (
+                              <div key={size} style={{ padding: '4px 8px', borderRadius: 2, background: avgRet > 0 ? 'var(--green-dim)' : 'var(--red-dim)', border: `1px solid ${avgRet > 0 ? 'var(--green)' : 'var(--red)'}`, textAlign: 'center', minWidth: 60 }}>
+                                <div style={{ fontSize: 9, color: 'var(--t2)' }}>{size} sym{Number(size)!==1?'s':''}</div>
+                                <div style={{ fontSize: 11, fontWeight: 700, color: avgRet >= 0 ? 'var(--green)' : 'var(--red)', fontFamily: 'var(--font-space-mono)' }}>{avgRet >= 0 ? '+' : ''}{avgRet.toFixed(1)}%</div>
+                                <div style={{ fontSize: 8, color: 'var(--t3)' }}>{s.count}d · {(s.wins/s.count*100).toFixed(0)}%W</div>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })()}
+
                 <div style={{ overflowX: 'auto' }}>
                   <table style={{ width: '100%', borderCollapse: 'collapse', fontFamily: 'var(--font-space-mono), Space Mono, monospace' }}>
                     <thead>
