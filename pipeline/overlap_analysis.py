@@ -691,6 +691,7 @@ def _load_frequency_from_db(
 
     eff_lookback = _resolve_sort_lookback()
     window_start_hour = DEPLOYMENT_START_HOUR - eff_lookback
+    anchor_hour = (DEPLOYMENT_START_HOUR - INDEX_LOOKBACK) % 24
 
     # Build mcap WHERE clauses dynamically
     mcap_join = ""
@@ -726,13 +727,15 @@ def _load_frequency_from_db(
             JOIN market.symbols s ON s.symbol_id = l.symbol_id
             {mcap_join}
             WHERE l.metric = %s
+              AND l.anchor_hour = %s
+              AND l.variant = 'close'
               AND l.rank <= %s
               AND EXTRACT(HOUR FROM l.timestamp_utc)::int = %s
               AND EXTRACT(MINUTE FROM l.timestamp_utc)::int = 0
               {mcap_where}
             GROUP BY l.timestamp_utc::date, s.binance_id
             ORDER BY l.timestamp_utc::date
-        """, (metric, freq_width, DEPLOYMENT_START_HOUR, *mcap_params))
+        """, (metric, anchor_hour, freq_width, DEPLOYMENT_START_HOUR, *mcap_params))
     else:
         cur.execute(f"""
             SELECT
@@ -743,6 +746,8 @@ def _load_frequency_from_db(
             JOIN market.symbols s ON s.symbol_id = l.symbol_id
             {mcap_join}
             WHERE l.metric = %s
+              AND l.anchor_hour = %s
+              AND l.variant = 'close'
               AND l.rank <= %s
               AND EXTRACT(HOUR FROM l.timestamp_utc)::int >= %s
               AND EXTRACT(HOUR FROM l.timestamp_utc)::int < %s
@@ -753,7 +758,7 @@ def _load_frequency_from_db(
               {mcap_where}
             GROUP BY l.timestamp_utc::date, s.binance_id
             ORDER BY l.timestamp_utc::date
-        """, (metric, freq_width, window_start_hour, DEPLOYMENT_START_HOUR,
+        """, (metric, anchor_hour, freq_width, window_start_hour, DEPLOYMENT_START_HOUR,
               window_start_hour, sample_interval, *mcap_params))
 
     rows = cur.fetchall()
