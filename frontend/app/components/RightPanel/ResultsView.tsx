@@ -14542,7 +14542,7 @@ export default function ResultsView({ results, jobId, startingCapital, params }:
           {/* ── Per-Day Portfolio Breakdown ──────────────────────────── */}
           {(() => {
             const dp = (results as Record<string, unknown>)?.metrics as Record<string, unknown> | undefined;
-            const portfolio = dp?.daily_portfolio as Record<string, {
+            type PortfolioDay = {
               symbols: string[];
               filter: string;
               filter_name: string;
@@ -14550,7 +14550,22 @@ export default function ResultsView({ results, jobId, startingCapital, params }:
               raw_roi: number;
               strat_roi: number;
               exit_reason: string;
-            }> | undefined;
+            };
+            // Prefer per-filter portfolio keyed by selectedFilter, fall back to legacy single portfolio
+            const byFilter = dp?.daily_portfolio_by_filter as Record<string, Record<string, PortfolioDay>> | undefined;
+            const portfolio: Record<string, PortfolioDay> | undefined = (() => {
+              if (byFilter && selectedFilter) {
+                // Try exact match first, then normalized match
+                const exact = byFilter[selectedFilter];
+                if (exact) return exact;
+                const normSel = selectedFilter.replace(/\s+/g, '_');
+                for (const [k, v] of Object.entries(byFilter)) {
+                  if (k.replace(/\s+/g, '_') === normSel) return v;
+                }
+              }
+              // Fall back to legacy single portfolio
+              return dp?.daily_portfolio as Record<string, PortfolioDay> | undefined;
+            })();
             if (!portfolio || Object.keys(portfolio).length === 0) return null;
             const days = Object.entries(portfolio).sort(([a], [b]) => a.localeCompare(b));
 

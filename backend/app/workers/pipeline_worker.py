@@ -82,6 +82,10 @@ _FINAL_DD_RE          = re.compile(r"FINAL_DD_SERIES\([^)]+\):\s*(\[[\d.,\s\-]+\
 _FINAL_INTRADAY_RE    = re.compile(r"^FINAL_INTRADAY_BARS:\s*(\{.+\})\s*$", re.MULTILINE)
 _FINAL_EXIT_BARS_RE   = re.compile(r"^FINAL_INTRADAY_EXIT_BARS:\s*(\{.+\})\s*$", re.MULTILINE)
 _FINAL_PORTFOLIO_RE   = re.compile(r"^FINAL_DAILY_PORTFOLIO:\s*(\{.+\})\s*$", re.MULTILINE)
+_FINAL_PORTFOLIO_FILTER_RE = re.compile(
+    r"^FINAL_DAILY_PORTFOLIO_(?P<tag>[A-Za-z0-9_\-]+):\s*(?P<json>\{.+\})\s*$",
+    re.MULTILINE,
+)
 
 # Filter comparison table rows, e.g.:
 #   A - No Filter                             2.053    450.2%   -53.23%      398    1.206     248.9%   3.49×   -6.10%  -21.05%  -29.58%   91.8%    54 ◄
@@ -357,6 +361,17 @@ def _parse_metrics(audit_output_path: Path) -> dict:
             metrics["daily_portfolio"] = _json.loads(m.group(1))
         except Exception:
             pass
+
+    # Per-filter daily portfolios: FINAL_DAILY_PORTFOLIO_<tag>: {...}
+    _dp_by_filter: dict[str, object] = {}
+    for _dp_m in _FINAL_PORTFOLIO_FILTER_RE.finditer(text):
+        try:
+            _dp_tag = _dp_m.group("tag").replace("_", " ")
+            _dp_by_filter[_dp_tag] = _json.loads(_dp_m.group("json"))
+        except Exception:
+            pass
+    if _dp_by_filter:
+        metrics["daily_portfolio_by_filter"] = _dp_by_filter
 
     def _parse_opt_float(v: str | None) -> float | None:
         if v is None:

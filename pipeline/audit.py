@@ -18967,71 +18967,67 @@ def main():
                 if _dp_syms:
                     _dp_symbols_by_date[_dp_date] = _dp_syms
 
-        # Get fees_rows and exit_bars from the first filter's simulation
-        # (typically "A - No Filter" which is the canonical baseline)
-        _dp_best_fees = []
-        _dp_best_exits = {}
-        _dp_best_filter_name = ""
-        for _dp_label in _fees_rows_by_filter:
-            _dp_best_fees = _fees_rows_by_filter[_dp_label]
-            _dp_best_exits = _exit_bars_by_filter.get(_dp_label, {})
-            _dp_best_filter_name = _dp_label
-            break
+        # Build a daily portfolio for EACH filter so the UI can switch views
+        import json as _json_dp
+        _dp_first_portfolio: dict | None = None
+        for _dp_label, _dp_fees in _fees_rows_by_filter.items():
+            _dp_exits = _exit_bars_by_filter.get(_dp_label, {})
+            _dp_portfolio: dict = {}
+            for _dp_frow in _dp_fees:
+                _dp_dt    = _dp_frow[0]   # date string
+                _dp_mg    = _dp_frow[2]   # margin (-1.0 = no entry, -2.0 = ratchet)
+                _dp_lev   = _dp_frow[3]   # leverage
+                _dp_gr    = _dp_frow[9]   # gross return %
+                _dp_nr    = _dp_frow[10]  # net return %
 
-        _dp_portfolio: dict = {}
-        for _dp_frow in _dp_best_fees:
-            _dp_dt    = _dp_frow[0]   # date string
-            _dp_mg    = _dp_frow[2]   # margin (-1.0 = no entry, -2.0 = ratchet)
-            _dp_lev   = _dp_frow[3]   # leverage
-            _dp_gr    = _dp_frow[9]   # gross return %
-            _dp_nr    = _dp_frow[10]  # net return %
-
-            # Determine filter/conviction status
-            if _dp_mg < 0:
-                # No entry — determine reason
-                if _dp_mg == -2.0:
-                    _dp_filter = "ratchet_off"
-                    _dp_conviction = "n/a"
-                else:
-                    # margin == -1.0: could be filter or conviction
-                    # Check if leverage was 0 (filtered) or > 0 (conviction fail)
-                    if _dp_lev == 0.0:
-                        _dp_filter = "filtered"
+                # Determine filter/conviction status
+                if _dp_mg < 0:
+                    if _dp_mg == -2.0:
+                        _dp_filter = "ratchet_off"
                         _dp_conviction = "n/a"
                     else:
-                        _dp_filter = "pass"
-                        _dp_conviction = "fail"
-            else:
-                _dp_filter = "pass"
-                _dp_conviction = "pass"
+                        if _dp_lev == 0.0:
+                            _dp_filter = "filtered"
+                            _dp_conviction = "n/a"
+                        else:
+                            _dp_filter = "pass"
+                            _dp_conviction = "fail"
+                else:
+                    _dp_filter = "pass"
+                    _dp_conviction = "pass"
 
-            # Raw ROI = gross return / leverage (unleveraged)
-            _dp_raw = round(_dp_gr / _dp_lev, 4) if _dp_lev and _dp_lev > 0 else 0.0
+                _dp_raw = round(_dp_gr / _dp_lev, 4) if _dp_lev and _dp_lev > 0 else 0.0
 
-            # Exit reason from exit_bars
-            _dp_exit_bar = _dp_best_exits.get(_dp_dt)
-            if _dp_filter == "filtered":
-                _dp_exit_reason = "filtered"
-            elif _dp_conviction == "fail":
-                _dp_exit_reason = "no_entry"
-            elif _dp_exit_bar == -1 or _dp_exit_bar is None:
-                _dp_exit_reason = "held"
-            else:
-                _dp_exit_reason = "early_exit"
+                _dp_exit_bar = _dp_exits.get(_dp_dt)
+                if _dp_filter == "filtered":
+                    _dp_exit_reason = "filtered"
+                elif _dp_conviction == "fail":
+                    _dp_exit_reason = "no_entry"
+                elif _dp_exit_bar == -1 or _dp_exit_bar is None:
+                    _dp_exit_reason = "held"
+                else:
+                    _dp_exit_reason = "early_exit"
 
-            _dp_portfolio[_dp_dt] = {
-                "symbols": _dp_symbols_by_date.get(_dp_dt, []),
-                "filter": _dp_filter,
-                "filter_name": _dp_best_filter_name,
-                "conviction": _dp_conviction,
-                "raw_roi": round(_dp_raw, 2),
-                "strat_roi": round(_dp_nr, 2),
-                "exit_reason": _dp_exit_reason,
-            }
+                _dp_portfolio[_dp_dt] = {
+                    "symbols": _dp_symbols_by_date.get(_dp_dt, []),
+                    "filter": _dp_filter,
+                    "filter_name": _dp_label,
+                    "conviction": _dp_conviction,
+                    "raw_roi": round(_dp_raw, 2),
+                    "strat_roi": round(_dp_nr, 2),
+                    "exit_reason": _dp_exit_reason,
+                }
 
-        if _dp_portfolio:
-            import json as _json_dp
-            print(f"FINAL_DAILY_PORTFOLIO: {_json_dp.dumps(_dp_portfolio)}")
+            if _dp_portfolio:
+                # Tag uses underscores for spaces, matching FINAL_FILTER_VALUE convention
+                _dp_tag = _dp_label.replace(" ", "_")
+                print(f"FINAL_DAILY_PORTFOLIO_{_dp_tag}: {_json_dp.dumps(_dp_portfolio)}")
+                if _dp_first_portfolio is None:
+                    _dp_first_portfolio = _dp_portfolio
+
+        # Legacy single-emission for backward compat with older parsers
+        if _dp_first_portfolio:
+            print(f"FINAL_DAILY_PORTFOLIO: {_json_dp.dumps(_dp_first_portfolio)}")
     except Exception as _dp_err:
         print(f"  [daily_portfolio] Error building portfolio breakdown: {_dp_err}")
 
