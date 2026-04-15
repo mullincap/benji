@@ -232,7 +232,7 @@ function LiveMode({ instanceId }: { instanceId: string }) {
           <div style={{ display: "flex", gap: 14 }}>
             <Toggle on={isLive} onColor="var(--green)" offColor="var(--t2)" onToggle={() => {
               if (isLive) { setConfirmPause(true); } else {
-                const exExists = exchanges.some(e => e.name === inst.exchangeName);
+                const exExists = exchanges.some(e => e.id === inst.exchangeId);
                 if (exExists) {
                   allocatorApi.updateAllocation(inst.id, { status: "active" }).catch(() => {});
                   updateInstance(inst.id, { status: "live" }); setExchangeLost(false);

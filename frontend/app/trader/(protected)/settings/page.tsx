@@ -56,6 +56,8 @@ function LinkWizard({ onComplete, onCancel }: { onComplete: (e: Exchange) => voi
   useEffect(() => { if (logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight; }, [log]);
 
   const [verifyError, setVerifyError] = useState<string | null>(null);
+  const [verifiedConnectionId, setVerifiedConnectionId] = useState<string | null>(null);
+  const [verifiedMaskedKey, setVerifiedMaskedKey] = useState<string | null>(null);
 
   async function runVerify() {
     setVerifyStatus("checking");
@@ -68,12 +70,14 @@ function LinkWizard({ onComplete, onCancel }: { onComplete: (e: Exchange) => voi
 
     try {
       addLog("> Storing encrypted credentials...");
-      await allocatorApi.storeExchangeKeys({
+      const result = await allocatorApi.storeExchangeKeys({
         exchange: exName.toLowerCase(),
         label: exName,
         api_key: apiKey,
         api_secret: secretKey,
       });
+      setVerifiedConnectionId(result.connection_id);
+      setVerifiedMaskedKey(result.masked_key);
 
       addLog("> Credentials stored securely");
       addLog("> Verifying key ownership...");
@@ -197,28 +201,27 @@ function LinkWizard({ onComplete, onCancel }: { onComplete: (e: Exchange) => voi
               onMouseLeave={e => { e.currentTarget.style.color = "var(--t2)"; }}
               style={{ background: "transparent", border: "none", color: "var(--t2)", fontSize: 9, cursor: "pointer", transition: "color 0.15s ease" }}>{"\u2190"} Back</button>
             <button onClick={async () => {
+              // Keys were already stored in step 2 (runVerify) — use the saved connection_id
+              const connId = verifiedConnectionId;
+              if (!connId) {
+                // Shouldn't happen — verify step should have set this
+                onComplete({ id: exName.toLowerCase().replace(/\s+/g, "-") + "-" + Date.now(), name: exName, maskedKey: mask(apiKey), lastSynced: "just now", balance: 0 });
+                return;
+              }
               try {
-                // Store keys via API and get the real connection_id
-                const result = await allocatorApi.storeExchangeKeys({
-                  exchange: exName.toLowerCase(),
-                  label: exName,
-                  api_key: apiKey,
-                  api_secret: secretKey,
-                });
                 // Trigger snapshot to get real balance
                 const snapResult = await allocatorApi.refreshSnapshots().catch(() => null);
-                const snap = snapResult?.snapshots?.find(s => s.connection_id === result.connection_id);
+                const snap = snapResult?.snapshots?.find(s => s.connection_id === connId);
                 onComplete({
-                  id: result.connection_id,
+                  id: connId,
                   name: exName,
-                  maskedKey: result.masked_key,
+                  maskedKey: verifiedMaskedKey ?? mask(apiKey),
                   lastSynced: "just now",
                   balance: snap?.total_equity_usd ?? 0,
                 });
               } catch {
                 // Fallback: still add locally with 0 balance
-                const id = exName.toLowerCase().replace(/\s+/g, "-") + "-" + Date.now();
-                onComplete({ id, name: exName, maskedKey: mask(apiKey), lastSynced: "just now", balance: 0 });
+                onComplete({ id: connId, name: exName, maskedKey: verifiedMaskedKey ?? mask(apiKey), lastSynced: "just now", balance: 0 });
               }
             }} style={{ padding: "10px 24px", background: "var(--green)", color: "var(--bg0)", border: "none", borderRadius: 3, fontSize: 9, fontWeight: 700, letterSpacing: "0.12em", textTransform: "uppercase", cursor: "pointer" }}>DONE</button>
           </div>
@@ -275,7 +278,7 @@ export default function SettingsPage() {
                     </div>
                   ) : (
                     <button onClick={() => {
-                      const liveOnExchange = instances.filter(i => i.exchangeName === ex.name && i.status === "live");
+                      const liveOnExchange = instances.filter(i => i.exchangeId === ex.id && i.status === "live");
                       if (liveOnExchange.length > 0) {
                         setBlockedRemove(ex.id);
                         setConfirmRemove(null);
@@ -295,7 +298,7 @@ export default function SettingsPage() {
                   <span style={{ color: "var(--t2)" }}>synced {ex.lastSynced}</span>
                 </div>
                 {blockedRemove === ex.id && (() => {
-                  const liveOnExchange = instances.filter(i => i.exchangeName === ex.name && i.status === "live");
+                  const liveOnExchange = instances.filter(i => i.exchangeId === ex.id && i.status === "live");
                   return (
                     <div style={{
                       background: "var(--bg2)", border: "0.5px solid #ff4d4d30", borderRadius: 6,
@@ -359,7 +362,7 @@ export default function SettingsPage() {
                 </thead>
                 <tbody>
                   {exchanges.map((ex, idx) => {
-                    const exInstances = instances.filter(i => i.exchangeName === ex.name && i.status === "live");
+                    const exInstances = instances.filter(i => i.exchangeId === ex.id && i.status === "live");
                     const exAllocated = exInstances.reduce((s, i) => s + (i.allocation ?? 0), 0);
                     const pctDeployed = ex.balance > 0 ? Math.min(100, (exAllocated / ex.balance) * 100).toFixed(1) : "0.0";
                     return (

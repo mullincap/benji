@@ -534,7 +534,7 @@ def remove_exchange(connection_id: str, user_id: str = Depends(get_current_user)
 
     cur.execute("""
         UPDATE user_mgmt.exchange_connections
-        SET status = 'removed', updated_at = NOW()
+        SET status = 'revoked', updated_at = NOW()
         WHERE connection_id = %s::uuid AND user_id = %s::uuid AND status = 'active'
     """, (connection_id, user_id))
     return {"removed": True, "connection_id": connection_id}
@@ -557,7 +557,7 @@ def get_allocations(user_id: str = Depends(get_current_user), cur=Depends(get_cu
         JOIN audit.strategy_versions sv ON sv.strategy_version_id = a.strategy_version_id
         JOIN audit.strategies s ON s.strategy_id = sv.strategy_id
         JOIN user_mgmt.exchange_connections ec ON ec.connection_id = a.connection_id
-        WHERE a.status = 'active' AND a.user_id = %s::uuid
+        WHERE a.status IN ('active', 'paused') AND a.user_id = %s::uuid
         ORDER BY a.created_at
     """, (user_id,))
     allocations = cur.fetchall()
