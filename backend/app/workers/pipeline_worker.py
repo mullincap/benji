@@ -81,6 +81,7 @@ _FINAL_EQUITY_RE      = re.compile(r"FINAL_EQUITY_SERIES\([^)]+\):\s*(\[[\d.,\s\
 _FINAL_DD_RE          = re.compile(r"FINAL_DD_SERIES\([^)]+\):\s*(\[[\d.,\s\-]+\])")
 _FINAL_INTRADAY_RE    = re.compile(r"^FINAL_INTRADAY_BARS:\s*(\{.+\})\s*$", re.MULTILINE)
 _FINAL_EXIT_BARS_RE   = re.compile(r"^FINAL_INTRADAY_EXIT_BARS:\s*(\{.+\})\s*$", re.MULTILINE)
+_FINAL_PORTFOLIO_RE   = re.compile(r"^FINAL_DAILY_PORTFOLIO:\s*(\{.+\})\s*$", re.MULTILINE)
 
 # Filter comparison table rows, e.g.:
 #   A - No Filter                             2.053    450.2%   -53.23%      398    1.206     248.9%   3.49×   -6.10%  -21.05%  -29.58%   91.8%    54 ◄
@@ -348,6 +349,12 @@ def _parse_metrics(audit_output_path: Path) -> dict:
     if m:
         try:
             metrics["intraday_exit_bars"] = _json.loads(m.group(1))
+        except Exception:
+            pass
+    m = _FINAL_PORTFOLIO_RE.search(text)
+    if m:
+        try:
+            metrics["daily_portfolio"] = _json.loads(m.group(1))
         except Exception:
             pass
 

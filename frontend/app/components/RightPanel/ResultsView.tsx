@@ -14538,6 +14538,82 @@ export default function ResultsView({ results, jobId, startingCapital, params }:
             )}
             </>
           )}
+
+          {/* ── Per-Day Portfolio Breakdown ──────────────────────────── */}
+          {(() => {
+            const dp = (results as Record<string, unknown>)?.metrics as Record<string, unknown> | undefined;
+            const portfolio = dp?.daily_portfolio as Record<string, {
+              symbols: string[];
+              filter: string;
+              filter_name: string;
+              conviction: string;
+              raw_roi: number;
+              strat_roi: number;
+              exit_reason: string;
+            }> | undefined;
+            if (!portfolio || Object.keys(portfolio).length === 0) return null;
+            const days = Object.entries(portfolio).sort(([a], [b]) => a.localeCompare(b));
+            return (
+              <div style={{ marginTop: 16, border: '1px solid var(--line)', borderRadius: 3, padding: 12, background: 'var(--bg1)' }}>
+                <div style={{ fontSize: 9, color: 'var(--t3)', textTransform: 'uppercase', letterSpacing: '0.12em', fontWeight: 700, marginBottom: 10 }}>
+                  Daily Portfolio Breakdown
+                </div>
+                <div style={{ overflowX: 'auto' }}>
+                  <table style={{ width: '100%', borderCollapse: 'collapse', fontFamily: 'var(--font-space-mono), Space Mono, monospace' }}>
+                    <thead>
+                      <tr>
+                        {['Date', 'Symbols', 'Filter', 'Conviction', 'Raw ROI', 'Strat ROI', 'Exit'].map((h) => (
+                          <th key={h} style={{
+                            fontSize: 9, fontWeight: 700, letterSpacing: '0.08em',
+                            color: 'var(--t3)', textTransform: 'uppercase',
+                            textAlign: h === 'Symbols' ? 'left' : 'right',
+                            padding: '8px 8px', borderBottom: '1px solid var(--line)',
+                            whiteSpace: 'nowrap',
+                          }}>{h}</th>
+                        ))}
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {days.map(([date, d]) => {
+                        const filterColor = d.filter === 'pass' ? 'var(--green)' : d.filter === 'filtered' ? 'var(--amber)' : 'var(--t3)';
+                        const filterBg = d.filter === 'pass' ? 'var(--green-dim)' : d.filter === 'filtered' ? 'var(--amber-dim)' : 'transparent';
+                        const convColor = d.conviction === 'pass' ? 'var(--green)' : d.conviction === 'fail' ? 'var(--red)' : 'var(--t3)';
+                        const convBg = d.conviction === 'pass' ? 'var(--green-dim)' : d.conviction === 'fail' ? 'var(--red-dim)' : 'transparent';
+                        const exitLabel = d.exit_reason === 'held' ? '' : d.exit_reason === 'filtered' ? '' : d.exit_reason === 'no_entry' ? '' : d.exit_reason === 'early_exit' ? 'EXIT' : d.exit_reason.toUpperCase();
+                        return (
+                          <tr key={date} style={{ borderBottom: '1px solid var(--line)' }}>
+                            <td style={{ fontSize: 10, color: 'var(--t0)', fontWeight: 700, padding: '6px 8px', whiteSpace: 'nowrap', textAlign: 'right' }}>{date}</td>
+                            <td style={{ fontSize: 9, color: 'var(--t2)', padding: '6px 8px', maxWidth: 300, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={d.symbols.join(', ')}>
+                              {d.symbols.length > 0 ? d.symbols.join(', ') : '—'}
+                            </td>
+                            <td style={{ padding: '6px 8px', textAlign: 'right' }}>
+                              <span style={{ fontSize: 8, fontWeight: 700, letterSpacing: '0.06em', padding: '2px 5px', borderRadius: 2, background: filterBg, color: filterColor, border: `1px solid ${filterColor}` }}>
+                                {d.filter === 'pass' ? 'PASS' : d.filter === 'filtered' ? 'FLAT' : d.filter.toUpperCase()}
+                              </span>
+                            </td>
+                            <td style={{ padding: '6px 8px', textAlign: 'right' }}>
+                              <span style={{ fontSize: 8, fontWeight: 700, letterSpacing: '0.06em', padding: '2px 5px', borderRadius: 2, background: convBg, color: convColor, border: `1px solid ${convColor}` }}>
+                                {d.conviction === 'n/a' ? '—' : d.conviction === 'pass' ? 'PASS' : 'FAIL'}
+                              </span>
+                            </td>
+                            <td style={{ fontSize: 10, fontWeight: 700, padding: '6px 8px', textAlign: 'right', color: d.raw_roi >= 0 ? 'var(--green)' : 'var(--red)' }}>
+                              {d.filter === 'filtered' || d.conviction === 'fail' ? '—' : `${d.raw_roi >= 0 ? '+' : ''}${d.raw_roi.toFixed(2)}%`}
+                            </td>
+                            <td style={{ fontSize: 10, fontWeight: 700, padding: '6px 8px', textAlign: 'right', color: d.strat_roi >= 0 ? 'var(--green)' : 'var(--red)' }}>
+                              {d.filter === 'filtered' || d.conviction === 'fail' ? '—' : `${d.strat_roi >= 0 ? '+' : ''}${d.strat_roi.toFixed(2)}%`}
+                            </td>
+                            <td style={{ fontSize: 9, color: 'var(--t3)', padding: '6px 8px', textAlign: 'right' }}>
+                              {exitLabel || '—'}
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            );
+          })()}
         </div>
       )}
 
