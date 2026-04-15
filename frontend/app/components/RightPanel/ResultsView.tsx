@@ -14553,10 +14553,128 @@ export default function ResultsView({ results, jobId, startingCapital, params }:
             }> | undefined;
             if (!portfolio || Object.keys(portfolio).length === 0) return null;
             const days = Object.entries(portfolio).sort(([a], [b]) => a.localeCompare(b));
+
+            // Compute KPIs
+            const activeDays = days.filter(([,v]) => v.filter === 'pass' && v.conviction === 'pass');
+            const filteredDays = days.filter(([,v]) => v.filter === 'filtered');
+            const convFailDays = days.filter(([,v]) => v.conviction === 'fail');
+            const rawRois = activeDays.map(([,v]) => v.raw_roi);
+            const stratRois = activeDays.map(([,v]) => v.strat_roi);
+            const rawWins = rawRois.filter(r => r > 0);
+            const rawLosses = rawRois.filter(r => r < 0);
+            const stratWins = stratRois.filter(r => r > 0);
+            const stratLosses = stratRois.filter(r => r < 0);
+            const avg = (arr: number[]) => arr.length > 0 ? arr.reduce((a,b) => a+b, 0) / arr.length : 0;
+            const rawWinRate = rawRois.length > 0 ? (rawWins.length / rawRois.length * 100) : 0;
+            const stratWinRate = stratRois.length > 0 ? (stratWins.length / stratRois.length * 100) : 0;
+            const exitReasons: Record<string, number> = {};
+            activeDays.forEach(([,v]) => { exitReasons[v.exit_reason] = (exitReasons[v.exit_reason] || 0) + 1; });
+
+            const kpiStyle: React.CSSProperties = { background: 'var(--bg2)', border: '1px solid var(--line)', borderRadius: 3, padding: '10px 12px', flex: 1, minWidth: 0 };
+            const kpiLabel: React.CSSProperties = { fontSize: 8, fontWeight: 700, letterSpacing: '0.12em', color: 'var(--t3)', textTransform: 'uppercase', marginBottom: 4 };
+            const kpiVal: React.CSSProperties = { fontSize: 14, fontWeight: 700, fontFamily: 'var(--font-space-mono), Space Mono, monospace' };
+            const kpiSub: React.CSSProperties = { fontSize: 9, color: 'var(--t2)', marginTop: 2 };
+
             return (
               <div style={{ marginTop: 16, border: '1px solid var(--line)', borderRadius: 3, padding: 12, background: 'var(--bg1)' }}>
                 <div style={{ fontSize: 9, color: 'var(--t3)', textTransform: 'uppercase', letterSpacing: '0.12em', fontWeight: 700, marginBottom: 10 }}>
                   Daily Portfolio Breakdown
+                </div>
+
+                {/* KPI Cards: Raw vs Strategy comparison */}
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 8, marginBottom: 14 }}>
+                  <div style={kpiStyle}>
+                    <div style={kpiLabel}>Days</div>
+                    <div style={{ ...kpiVal, color: 'var(--t0)' }}>{activeDays.length} / {days.length}</div>
+                    <div style={kpiSub}>active · {filteredDays.length} filtered · {convFailDays.length} conv fail</div>
+                  </div>
+                  <div style={kpiStyle}>
+                    <div style={kpiLabel}>Win Rate</div>
+                    <div style={{ display: 'flex', gap: 12 }}>
+                      <div>
+                        <div style={{ ...kpiVal, color: rawWinRate >= 50 ? 'var(--green)' : 'var(--red)' }}>{rawWinRate.toFixed(1)}%</div>
+                        <div style={kpiSub}>raw</div>
+                      </div>
+                      <div>
+                        <div style={{ ...kpiVal, color: stratWinRate >= 50 ? 'var(--green)' : 'var(--red)' }}>{stratWinRate.toFixed(1)}%</div>
+                        <div style={kpiSub}>strat</div>
+                      </div>
+                    </div>
+                  </div>
+                  <div style={kpiStyle}>
+                    <div style={kpiLabel}>Avg Return / Day</div>
+                    <div style={{ display: 'flex', gap: 12 }}>
+                      <div>
+                        <div style={{ ...kpiVal, color: avg(rawRois) >= 0 ? 'var(--green)' : 'var(--red)' }}>{avg(rawRois) >= 0 ? '+' : ''}{avg(rawRois).toFixed(2)}%</div>
+                        <div style={kpiSub}>raw</div>
+                      </div>
+                      <div>
+                        <div style={{ ...kpiVal, color: avg(stratRois) >= 0 ? 'var(--green)' : 'var(--red)' }}>{avg(stratRois) >= 0 ? '+' : ''}{avg(stratRois).toFixed(2)}%</div>
+                        <div style={kpiSub}>strat</div>
+                      </div>
+                    </div>
+                  </div>
+                  <div style={kpiStyle}>
+                    <div style={kpiLabel}>Cumulative</div>
+                    <div style={{ display: 'flex', gap: 12 }}>
+                      <div>
+                        <div style={{ ...kpiVal, fontSize: 12, color: rawRois.reduce((a,b)=>a+b,0) >= 0 ? 'var(--green)' : 'var(--red)' }}>{rawRois.reduce((a,b)=>a+b,0) >= 0 ? '+' : ''}{rawRois.reduce((a,b)=>a+b,0).toFixed(1)}%</div>
+                        <div style={kpiSub}>raw</div>
+                      </div>
+                      <div>
+                        <div style={{ ...kpiVal, fontSize: 12, color: stratRois.reduce((a,b)=>a+b,0) >= 0 ? 'var(--green)' : 'var(--red)' }}>{stratRois.reduce((a,b)=>a+b,0) >= 0 ? '+' : ''}{stratRois.reduce((a,b)=>a+b,0).toFixed(1)}%</div>
+                        <div style={kpiSub}>strat</div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Second row: Avg Win/Loss + Best/Worst + Exit Reasons */}
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 8, marginBottom: 14 }}>
+                  <div style={kpiStyle}>
+                    <div style={kpiLabel}>Avg Win / Avg Loss</div>
+                    <div style={{ display: 'flex', gap: 16 }}>
+                      <div>
+                        <div style={{ fontSize: 10, color: 'var(--t2)', marginBottom: 2 }}>Raw</div>
+                        <span style={{ fontSize: 11, fontWeight: 700, color: 'var(--green)', fontFamily: 'var(--font-space-mono)' }}>+{avg(rawWins).toFixed(2)}%</span>
+                        <span style={{ fontSize: 10, color: 'var(--t3)', margin: '0 4px' }}>/</span>
+                        <span style={{ fontSize: 11, fontWeight: 700, color: 'var(--red)', fontFamily: 'var(--font-space-mono)' }}>{avg(rawLosses).toFixed(2)}%</span>
+                      </div>
+                      <div>
+                        <div style={{ fontSize: 10, color: 'var(--t2)', marginBottom: 2 }}>Strat</div>
+                        <span style={{ fontSize: 11, fontWeight: 700, color: 'var(--green)', fontFamily: 'var(--font-space-mono)' }}>+{avg(stratWins).toFixed(2)}%</span>
+                        <span style={{ fontSize: 10, color: 'var(--t3)', margin: '0 4px' }}>/</span>
+                        <span style={{ fontSize: 11, fontWeight: 700, color: 'var(--red)', fontFamily: 'var(--font-space-mono)' }}>{avg(stratLosses).toFixed(2)}%</span>
+                      </div>
+                    </div>
+                  </div>
+                  <div style={kpiStyle}>
+                    <div style={kpiLabel}>Best / Worst Day</div>
+                    <div style={{ display: 'flex', gap: 16 }}>
+                      <div>
+                        <div style={{ fontSize: 10, color: 'var(--t2)', marginBottom: 2 }}>Raw</div>
+                        <span style={{ fontSize: 11, fontWeight: 700, color: 'var(--green)', fontFamily: 'var(--font-space-mono)' }}>+{rawRois.length ? Math.max(...rawRois).toFixed(2) : '0.00'}%</span>
+                        <span style={{ fontSize: 10, color: 'var(--t3)', margin: '0 4px' }}>/</span>
+                        <span style={{ fontSize: 11, fontWeight: 700, color: 'var(--red)', fontFamily: 'var(--font-space-mono)' }}>{rawRois.length ? Math.min(...rawRois).toFixed(2) : '0.00'}%</span>
+                      </div>
+                      <div>
+                        <div style={{ fontSize: 10, color: 'var(--t2)', marginBottom: 2 }}>Strat</div>
+                        <span style={{ fontSize: 11, fontWeight: 700, color: 'var(--green)', fontFamily: 'var(--font-space-mono)' }}>+{stratRois.length ? Math.max(...stratRois).toFixed(2) : '0.00'}%</span>
+                        <span style={{ fontSize: 10, color: 'var(--t3)', margin: '0 4px' }}>/</span>
+                        <span style={{ fontSize: 11, fontWeight: 700, color: 'var(--red)', fontFamily: 'var(--font-space-mono)' }}>{stratRois.length ? Math.min(...stratRois).toFixed(2) : '0.00'}%</span>
+                      </div>
+                    </div>
+                  </div>
+                  <div style={kpiStyle}>
+                    <div style={kpiLabel}>Exit Reasons</div>
+                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+                      {Object.entries(exitReasons).sort(([,a],[,b]) => b - a).map(([reason, count]) => (
+                        <span key={reason} style={{ fontSize: 9, padding: '2px 6px', border: '1px solid var(--line2)', borderRadius: 2, color: 'var(--t2)', fontFamily: 'var(--font-space-mono)' }}>
+                          {reason === 'early_exit' ? 'EXIT' : reason === 'held' ? 'HELD' : reason.toUpperCase()} {count}
+                        </span>
+                      ))}
+                    </div>
+                  </div>
                 </div>
                 <div style={{ overflowX: 'auto' }}>
                   <table style={{ width: '100%', borderCollapse: 'collapse', fontFamily: 'var(--font-space-mono), Space Mono, monospace' }}>
