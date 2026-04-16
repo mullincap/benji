@@ -83,7 +83,7 @@ _FINAL_INTRADAY_RE    = re.compile(r"^FINAL_INTRADAY_BARS:\s*(\{.+\})\s*$", re.M
 _FINAL_EXIT_BARS_RE   = re.compile(r"^FINAL_INTRADAY_EXIT_BARS:\s*(\{.+\})\s*$", re.MULTILINE)
 _FINAL_PORTFOLIO_RE   = re.compile(r"^FINAL_DAILY_PORTFOLIO:\s*(\{.+\})\s*$", re.MULTILINE)
 _FINAL_PORTFOLIO_FILTER_RE = re.compile(
-    r"^FINAL_DAILY_PORTFOLIO_(?P<tag>[A-Za-z0-9_\-]+):\s*(?P<json>\{.+\})\s*$",
+    r"^FINAL_DAILY_PORTFOLIO_(?P<tag>[A-Za-z0-9_\-+.]+):\s*(?P<json>\{.+\})\s*$",
     re.MULTILINE,
 )
 
