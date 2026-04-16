@@ -98,7 +98,7 @@ MAX_RETRIES     = 3
 # -- Output -----------------------------------------------------------------
 DEPLOYS_CSV          = Path("live_deploys_signal.csv")
 DEPLOYS_RETAIN_DAYS  = 90     # prune rows older than this many days
-FILTER_NAME          = "Tail + Dispersion"
+FILTER_NAME          = "Tail Guardrail"
 LOG_FILE             = Path("daily_signal.log")
 
 

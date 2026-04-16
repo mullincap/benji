@@ -122,7 +122,7 @@ FUNDING_RATE_DAILY_PCT = 0.0002   # ~0.02% per day (2 windows x ~0.01%)
 
 # -- Signal files ----------------------------------------------------------
 DEPLOYS_CSV   = Path("live_deploys_signal.csv")
-ACTIVE_FILTER = "Tail + Dispersion"
+ACTIVE_FILTER = "Tail Guardrail"
 SYMBOL_SUFFIX = "-USDT"
 
 # -- Price source for session monitoring (conviction, stops, fills) ----------
