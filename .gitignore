@@ -27,3 +27,8 @@ pipeline/**/__pycache__/
 pipeline/**/*.pyc
 checkpoint_*.txt
 .claude/
+
+
+# Live-trader runtime artifacts (execution reports + portfolio NDJSON backup)
+blofin_execution_reports/
+

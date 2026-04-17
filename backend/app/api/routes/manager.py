@@ -19,6 +19,7 @@ import os
 import json
 import datetime
 from decimal import Decimal
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -769,3 +770,168 @@ async def briefing(cur=Depends(get_cursor)) -> dict[str, Any]:
     )
 
     return {"conversation_id": conversation_id}
+
+
+# ── Execution reports ────────────────────────────────────────────────────────
+
+def _resolve_reports_dir() -> Path:
+    """
+    Resolve the BloFin execution reports directory.
+    Override via env BLOFIN_REPORTS_DIR; otherwise use <project_root>/blofin_execution_reports
+    where project_root is the parent of the backend/ directory (the same layout
+    the trader writes to when invoked from the repo root).
+    """
+    override = os.environ.get("BLOFIN_REPORTS_DIR")
+    if override:
+        return Path(override)
+    return Path(__file__).resolve().parents[4] / "blofin_execution_reports"
+
+
+@router.get("/execution-reports")
+def list_execution_reports() -> dict[str, Any]:
+    """
+    Return all BloFin execution reports sorted by date descending.
+    Each report is the raw JSON written by trader-blofin.py.
+    Malformed files are skipped (logged-silently) rather than failing the endpoint.
+    """
+    reports_dir = _resolve_reports_dir()
+    if not reports_dir.exists():
+        return {"reports": [], "source_dir": str(reports_dir)}
+
+    reports: list[dict[str, Any]] = []
+    for p in sorted(reports_dir.glob("*.json"), reverse=True):
+        try:
+            with open(p) as f:
+                reports.append(json.load(f))
+        except Exception:
+            continue
+    return {"reports": reports, "source_dir": str(reports_dir)}
+
+
+# ── Portfolio time series (SQL-backed) ──────────────────────────────────────
+# The Manager UI reads exclusively from user_mgmt.portfolio_sessions +
+# user_mgmt.portfolio_bars, which the trader writes live every 5 minutes.
+# The trader also writes a parallel NDJSON backup at
+# blofin_execution_reports/portfolios/YYYY-MM-DD.ndjson for recovery; those
+# files are NOT read by this API.
+
+def _fmt_utc(dt: Any) -> str | None:
+    """Format a TIMESTAMPTZ or None as 'YYYY-MM-DD HH:MM:SS' in UTC."""
+    if dt is None:
+        return None
+    if isinstance(dt, str):
+        return dt
+    if isinstance(dt, datetime.datetime):
+        if dt.tzinfo is None:
+            return dt.strftime("%Y-%m-%d %H:%M:%S")
+        return dt.astimezone(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+    return str(dt)
+
+
+@router.get("/portfolios")
+def list_portfolios(cur=Depends(get_cursor)) -> dict[str, Any]:
+    """
+    Return one summary row per portfolio session, sorted by date descending.
+    Cached summary columns on portfolio_sessions (populated by the trader on
+    each bar append) mean the list endpoint doesn't need to aggregate bars.
+    Response shape matches the legacy NDJSON version so the frontend is
+    unchanged.
+    """
+    cur.execute("""
+        SELECT signal_date,
+               status,
+               session_start_utc,
+               exit_time_utc,
+               exit_reason,
+               eff_lev::double precision                         AS eff_lev,
+               lev_int,
+               symbols,
+               entered,
+               bars_count,
+               COALESCE(final_portfolio_return, 0)::double precision AS final_incr,
+               COALESCE(peak_portfolio_return,  0)::double precision AS peak,
+               COALESCE(max_dd_from_peak,       0)::double precision AS max_dd_from_peak,
+               sym_stops
+        FROM user_mgmt.portfolio_sessions
+        ORDER BY signal_date DESC
+    """)
+    rows = cur.fetchall()
+    out: list[dict[str, Any]] = []
+    for r in rows:
+        out.append({
+            "date":              r["signal_date"].isoformat(),
+            "status":            r["status"],
+            "session_start_utc": _fmt_utc(r["session_start_utc"]),
+            "exit_time_utc":     _fmt_utc(r["exit_time_utc"]),
+            "exit_reason":       r["exit_reason"],
+            "eff_lev":           r["eff_lev"],
+            "lev_int":           r["lev_int"],
+            "symbols":           list(r["symbols"] or []),
+            "entered":           list(r["entered"] or []),
+            "bars_count":        r["bars_count"],
+            "final_incr":        r["final_incr"],
+            "peak":              r["peak"],
+            "max_dd_from_peak":  r["max_dd_from_peak"],
+            "sym_stops":         sorted(list(r["sym_stops"] or [])),
+        })
+    return {"portfolios": out}
+
+
+@router.get("/portfolios/{date}")
+def get_portfolio(date: str, cur=Depends(get_cursor)) -> dict[str, Any]:
+    """
+    Return {meta, bars[]} for one session, sorted by bar_number.
+    Safe to poll while meta.status == "active"; the trader upserts bars every
+    5 minutes.
+    """
+    # Basic guard against path-ish inputs — only YYYY-MM-DD shape allowed.
+    if len(date) != 10 or date[4] != "-" or date[7] != "-":
+        raise HTTPException(status_code=400, detail="invalid date")
+
+    cur.execute("""
+        SELECT portfolio_session_id, signal_date, status,
+               session_start_utc, exit_time_utc, exit_reason,
+               symbols, entered,
+               eff_lev::double precision AS eff_lev,
+               lev_int
+        FROM user_mgmt.portfolio_sessions
+        WHERE signal_date = %s
+    """, (date,))
+    session = cur.fetchone()
+    if session is None:
+        raise HTTPException(status_code=404, detail="portfolio not found")
+
+    cur.execute("""
+        SELECT bar_number,
+               bar_timestamp_utc,
+               portfolio_return::double precision AS incr,
+               peak_return::double precision      AS peak,
+               symbol_returns,
+               stopped
+        FROM user_mgmt.portfolio_bars
+        WHERE portfolio_session_id = %s
+        ORDER BY bar_number
+    """, (session["portfolio_session_id"],))
+    bar_rows = cur.fetchall()
+
+    meta = {
+        "date":              session["signal_date"].isoformat(),
+        "status":            session["status"],
+        "session_start_utc": _fmt_utc(session["session_start_utc"]),
+        "exit_time_utc":     _fmt_utc(session["exit_time_utc"]),
+        "exit_reason":       session["exit_reason"],
+        "symbols":           list(session["symbols"] or []),
+        "entered":           list(session["entered"] or []),
+        "eff_lev":           session["eff_lev"],
+        "lev_int":           session["lev_int"],
+    }
+    bars = [{
+        "bar":         b["bar_number"],
+        "ts":          _fmt_utc(b["bar_timestamp_utc"]),
+        "incr":        b["incr"],
+        "peak":        b["peak"],
+        "sym_returns": b["symbol_returns"] or {},
+        "stopped":     list(b["stopped"] or []),
+    } for b in bar_rows]
+
+    return {"meta": meta, "bars": bars}

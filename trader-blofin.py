@@ -145,6 +145,10 @@ STATE_FILE  = Path("blofin_executor_state.json")
 RETURNS_LOG = Path("blofin_returns_log.csv")
 ALERTS_LOG  = Path("blofin_alerts.log")
 LOCK_FILE   = Path(".trader_session.lock")
+REPORTS_DIR = Path("blofin_execution_reports")
+PORTFOLIO_DIR = REPORTS_DIR / "portfolios"
+
+_SESSION_ALERT_COUNT = 0
 LOG_FILE    = Path("blofin_executor.log")
 
 
@@ -172,6 +176,8 @@ def alert(msg: str, subject: str = "trader-blofin ALERT"):
     Write a critical alert to the alerts log and optionally send email.
     Called on: failed closes, crash recovery start, unclosed positions.
     """
+    global _SESSION_ALERT_COUNT
+    _SESSION_ALERT_COUNT += 1
     ts = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
     line = f"[{ts}] {subject}: {msg}"
     log.error(f"ALERT -- {msg}")
@@ -268,6 +274,257 @@ def load_state() -> dict:
 def save_state(state: dict):
     with open(STATE_FILE, "w") as f:
         json.dump(state, f, indent=2, default=str)
+
+
+def write_execution_report(report: dict):
+    """
+    Persist a per-session execution report as
+    blofin_execution_reports/YYYY-MM-DD.json.
+    Best-effort: swallows IOError and logs a warning so reporting
+    never blocks the trading session.
+    """
+    try:
+        REPORTS_DIR.mkdir(parents=True, exist_ok=True)
+        date = report.get("date") or utc_today()
+        path = REPORTS_DIR / f"{date}.json"
+        with open(path, "w") as f:
+            json.dump(report, f, indent=2, default=str)
+        log.info(f"  Execution report written: {path}")
+    except Exception as e:
+        log.warning(f"  Could not write execution report: {e}")
+
+
+# ── Portfolio time series (bar-by-bar NDJSON) ───────────────────────────────
+# Schema: first line is {"type":"meta", ...}, then per-bar lines
+# {"type":"bar", ...}, then a final {"type":"meta_update", status:"closed", ...}
+# at session end. Reader merges meta_update fields into the initial meta.
+# Append-only writes ensure the file is always parseable mid-session — the UI
+# can poll while session.status == "active".
+
+def _portfolio_path(date: str) -> Path:
+    return PORTFOLIO_DIR / f"{date}.ndjson"
+
+
+def init_portfolio_record(date: str, symbols: list, entered: list,
+                          session_start_utc: str,
+                          eff_lev: float, lev_int: int) -> None:
+    """
+    Write the initial meta line for a new portfolio record. Idempotent: if the
+    file already exists (e.g. --resume after crash), preserves the existing
+    timeline and meta — no overwrite.
+
+    `symbols` is the full signaled+priceable universe; `entered` is the subset
+    that actually got positions on the exchange (the difference = failed entry).
+    """
+    try:
+        PORTFOLIO_DIR.mkdir(parents=True, exist_ok=True)
+        path = _portfolio_path(date)
+        if path.exists():
+            return
+        meta = {
+            "type":              "meta",
+            "date":              date,
+            "status":            "active",
+            "session_start_utc": session_start_utc,
+            "exit_time_utc":     None,
+            "symbols":           list(symbols),
+            "entered":           list(entered),
+            "eff_lev":           eff_lev,
+            "lev_int":           lev_int,
+            "exit_reason":       None,
+        }
+        with open(path, "w") as f:
+            f.write(json.dumps(meta, default=str) + "\n")
+    except Exception as e:
+        log.warning(f"  Could not init portfolio record: {e}")
+
+
+def append_portfolio_bar(date: str, bar: int, ts: str,
+                         incr: float, peak: float,
+                         sym_returns: dict, stopped: list) -> None:
+    """
+    Append one bar's snapshot. Best-effort — never raises so a write hiccup
+    can't crash the monitoring loop.
+    """
+    try:
+        line = {
+            "type":        "bar",
+            "bar":         bar,
+            "ts":          ts,
+            "incr":        round(incr, 6),
+            "peak":        round(peak, 6),
+            "sym_returns": {k: round(float(v), 6) for k, v in sym_returns.items()},
+            "stopped":     list(stopped),
+        }
+        with open(_portfolio_path(date), "a") as f:
+            f.write(json.dumps(line, default=str) + "\n")
+    except Exception as e:
+        log.warning(f"  Could not append portfolio bar: {e}")
+
+
+def update_portfolio_meta(date: str, **fields) -> None:
+    """
+    Append a meta_update line. The reader merges these fields into the initial
+    meta in-order, so the latest value wins per field.
+    """
+    try:
+        line = {"type": "meta_update", **fields}
+        with open(_portfolio_path(date), "a") as f:
+            f.write(json.dumps(line, default=str) + "\n")
+    except Exception as e:
+        log.warning(f"  Could not update portfolio meta: {e}")
+
+
+# ── Portfolio time series (SQL mirror, primary store) ───────────────────────
+# The trader writes to both NDJSON (above) and Postgres for every hook point.
+# These run INDEPENDENTLY and are both best-effort: a DB outage does not block
+# the NDJSON write, and an NDJSON I/O error does not block the DB write. The
+# Manager UI reads only from SQL; NDJSON remains a local backup.
+
+def _trader_db_connect():
+    """
+    Short-lived DB connection for trader-side writes. Matches the existing
+    conviction-write pattern already used in run_session. 5s connect timeout
+    so a DB outage can't hang the 5-minute bar loop.
+    """
+    import psycopg2
+    return psycopg2.connect(
+        host=os.environ.get("DB_HOST", "127.0.0.1"),
+        user=os.environ.get("DB_USER", "quant"),
+        password=os.environ.get("DB_PASSWORD", ""),
+        dbname=os.environ.get("DB_NAME", "marketdata"),
+        connect_timeout=5,
+    )
+
+
+def init_portfolio_session_sql(date: str, symbols: list, entered: list,
+                               session_start_utc: str,
+                               eff_lev: float, lev_int: int) -> None:
+    """
+    Insert the session row with status='active'. Idempotent via
+    ON CONFLICT (signal_date) DO NOTHING so --resume after a crash is safe.
+    session_start_utc is a "YYYY-MM-DD HH:MM:SS" UTC string.
+    """
+    try:
+        start_dt = datetime.datetime.strptime(
+            session_start_utc, "%Y-%m-%d %H:%M:%S"
+        ).replace(tzinfo=datetime.timezone.utc)
+        conn = _trader_db_connect()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    INSERT INTO user_mgmt.portfolio_sessions
+                        (signal_date, session_start_utc, status,
+                         symbols, entered, eff_lev, lev_int)
+                    VALUES (%s, %s, 'active', %s, %s, %s, %s)
+                    ON CONFLICT (signal_date) DO NOTHING
+                """, (date, start_dt, list(symbols), list(entered),
+                      eff_lev, lev_int))
+            conn.commit()
+        finally:
+            conn.close()
+    except Exception as e:
+        log.warning(f"  Could not init portfolio session in DB: {e}")
+
+
+def append_portfolio_bar_sql(date: str, bar: int, ts: str,
+                             incr: float, peak: float,
+                             sym_returns: dict, stopped: list) -> None:
+    """
+    INSERT the bar and UPDATE the session's cached summary fields in a single
+    transaction. If the session row doesn't exist (init failed earlier), both
+    statements silently no-op — NDJSON remains the backup-of-record.
+    """
+    try:
+        bar_dt = datetime.datetime.strptime(
+            ts, "%Y-%m-%d %H:%M:%S"
+        ).replace(tzinfo=datetime.timezone.utc)
+        stopped_list = list(stopped)
+        conn = _trader_db_connect()
+        try:
+            with conn.cursor() as cur:
+                # Insert the bar row (idempotent on --resume via PK conflict).
+                cur.execute("""
+                    INSERT INTO user_mgmt.portfolio_bars
+                        (portfolio_session_id, bar_number, bar_timestamp_utc,
+                         portfolio_return, peak_return, symbol_returns, stopped)
+                    SELECT portfolio_session_id, %s, %s, %s, %s, %s::jsonb, %s
+                    FROM user_mgmt.portfolio_sessions
+                    WHERE signal_date = %s
+                    ON CONFLICT (portfolio_session_id, bar_number) DO NOTHING
+                """, (bar, bar_dt, incr, peak,
+                      json.dumps(sym_returns), stopped_list, date))
+
+                # Refresh cached summary from truth table (idempotent).
+                cur.execute("""
+                    UPDATE user_mgmt.portfolio_sessions
+                    SET bars_count             = (
+                            SELECT COUNT(*)
+                            FROM user_mgmt.portfolio_bars b
+                            WHERE b.portfolio_session_id =
+                                  portfolio_sessions.portfolio_session_id
+                        ),
+                        final_portfolio_return = %s,
+                        peak_portfolio_return  = GREATEST(
+                            COALESCE(peak_portfolio_return, %s), %s
+                        ),
+                        max_dd_from_peak       = LEAST(
+                            COALESCE(max_dd_from_peak, 0), %s
+                        ),
+                        sym_stops              = ARRAY(
+                            SELECT DISTINCT unnest(sym_stops || %s::text[])
+                        ),
+                        updated_at             = NOW()
+                    WHERE signal_date = %s
+                """, (incr, peak, peak, incr - peak, stopped_list, date))
+            conn.commit()
+        finally:
+            conn.close()
+    except Exception as e:
+        log.warning(f"  Could not append portfolio bar in DB: {e}")
+
+
+def update_portfolio_meta_sql(date: str, **fields) -> None:
+    """
+    UPDATE portfolio_sessions with the given fields. Only known columns are
+    persisted — unknown keys are silently ignored so the caller can share the
+    same kwargs it passes to the NDJSON update_portfolio_meta.
+    """
+    ALLOWED = {
+        "status":        "status",
+        "exit_reason":   "exit_reason",
+        "exit_time_utc": "exit_time_utc",
+    }
+    updates = []
+    params: list = []
+    for k, v in fields.items():
+        if k not in ALLOWED:
+            continue
+        if k == "exit_time_utc" and isinstance(v, str):
+            v = datetime.datetime.strptime(
+                v, "%Y-%m-%d %H:%M:%S"
+            ).replace(tzinfo=datetime.timezone.utc)
+        updates.append(f"{ALLOWED[k]} = %s")
+        params.append(v)
+    if not updates:
+        return
+    updates.append("updated_at = NOW()")
+    sql = f"""
+        UPDATE user_mgmt.portfolio_sessions
+        SET {", ".join(updates)}
+        WHERE signal_date = %s
+    """
+    params.append(date)
+    try:
+        conn = _trader_db_connect()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(sql, tuple(params))
+            conn.commit()
+        finally:
+            conn.close()
+    except Exception as e:
+        log.warning(f"  Could not update portfolio meta in DB: {e}")
 
 
 # ==========================================================================
@@ -415,6 +672,23 @@ class BlofinREST:
             "positionSide": position_side,
             "clientOrderId": "",
         })
+
+    def get_fills_history(self, inst_type: str = "SWAP") -> dict:
+        """
+        Fetch recent trade fills. Used to reconcile exit fill prices after
+        close_all_positions, when positions are no longer visible via
+        /api/v1/account/positions.
+        BloFin supports /api/v1/trade/fills-history (historical) and
+        /api/v1/trade/fills (recent). We try fills-history first.
+        """
+        resp = self.request("GET", "/api/v1/trade/fills-history",
+                            params={"instType": inst_type})
+        code = str(resp.get("code", ""))
+        if code not in ("0", ""):
+            # Fallback to /api/v1/trade/fills if -history is not available
+            resp = self.request("GET", "/api/v1/trade/fills",
+                                params={"instType": inst_type})
+        return resp
 
 
 def build_api() -> BlofinREST:
@@ -764,7 +1038,7 @@ def equal_weight_return(current: dict, ref: dict) -> float:
 # ==========================================================================
 
 def enter_positions(api: BlofinREST, inst_ids, entry_prices,
-                    eff_lev, balance, dry_run) -> list:
+                    eff_lev, balance, dry_run) -> tuple:
     """
     Equal-weight market buy. No BloFin TPSL orders -- stops managed at portfolio
     level by the monitoring loop.
@@ -776,6 +1050,11 @@ def enter_positions(api: BlofinREST, inst_ids, entry_prices,
       - maxMarketSize respected via chunked orders
       - instrument state checked (must be "live")
     Also guards against balance=0 which would place 1 contract per symbol.
+
+    Returns (positions_list, fill_report_dict). fill_report_dict has:
+      - usdt_total, usdt_deployable, usdt_per_symbol, margin_buffer_pct
+      - fills: {total_symbols, filled_first_pass, filled_via_retry, failed,
+                fill_rate_pct, symbols[]}
     """
     usdt_total = (balance * CAPITAL_VALUE if CAPITAL_MODE == "pct_balance"
                   else min(CAPITAL_VALUE, balance))
@@ -788,7 +1067,17 @@ def enter_positions(api: BlofinREST, inst_ids, entry_prices,
             subject="trader-blofin CAPITAL ERROR"
         )
         log.error(f"Capital ${usdt_total:.2f} is below $10 minimum -- aborting enter_positions")
-        return []
+        return [], {
+            "usdt_total": round(usdt_total, 2),
+            "usdt_deployable": 0.0,
+            "usdt_per_symbol": 0.0,
+            "margin_buffer_pct": 10,
+            "fills": {
+                "total_symbols": 0, "filled_first_pass": 0,
+                "filled_via_retry": 0, "failed": 0,
+                "fill_rate_pct": 0.0, "symbols": [],
+            },
+        }
 
     tradeable    = [i for i in inst_ids if entry_prices.get(i, 0) > 0]
     n_tradeable  = max(len(tradeable), 1)
@@ -806,10 +1095,32 @@ def enter_positions(api: BlofinREST, inst_ids, entry_prices,
         f"{'[DRY RUN]' if dry_run else '[LIVE]'}"
     )
 
-    opened = []
+    # Per-symbol fill tracking. Keyed by inst_id so partial retries across
+    # rounds aggregate into one entry (prevents duplicate close attempts).
+    symbol_status = {}   # inst_id -> per-symbol report dict
+    opened_by_sym = {}   # inst_id -> position dict (unique per symbol)
     failed = []
+    filled_first_pass = 0
+    filled_via_retry_syms = set()
+
     for inst_id in tradeable:
         price = entry_prices[inst_id]
+        symbol_status[inst_id] = {
+            "inst_id":            inst_id,
+            "target_contracts":   0,
+            "filled_contracts":   0,
+            "fill_pct":           0.0,
+            "est_entry_price":    round(price, 6),
+            "fill_entry_price":   None,
+            "entry_slippage_bps": None,
+            "order_ids":          [],
+            "retry_rounds":       0,
+            "skipped_reason":     None,
+            "lev_int":            lev_int,
+            "eff_lev":            eff_lev,
+            "ctval":              0.0,
+            "notional_usd":       0.0,
+        }
 
         # Fetch instrument constraints (confirmed from mtrader2.py)
         info    = get_instrument_info(api, inst_id)
@@ -818,10 +1129,12 @@ def enter_positions(api: BlofinREST, inst_ids, entry_prices,
         min_sz  = info["minSize"]
         max_mkt = info["maxMarketSize"]
         state   = info["state"]
+        symbol_status[inst_id]["ctval"] = ctval
 
         # Skip suspended/delisted instruments
         if str(state).lower() not in ("live", ""):
             log.warning(f"  {inst_id}: state={state} -- skipping")
+            symbol_status[inst_id]["skipped_reason"] = f"state_{state}"
             continue
 
         # Compute and lot-round contracts
@@ -830,11 +1143,15 @@ def enter_positions(api: BlofinREST, inst_ids, entry_prices,
         # which must be an integer >= eff_lev but should NOT drive sizing.
         raw_contracts = usdt_per_sym * eff_lev / (price * ctval)
         contracts     = _round_to_lot(raw_contracts, lot)
+        symbol_status[inst_id]["target_contracts"] = contracts
 
         if contracts < min_sz:
             log.warning(
                 f"  {inst_id}: computed {contracts} contracts < minSize {min_sz} "
                 f"(price=${price:,.4f} ctval={ctval} lot={lot}) -- skipping"
+            )
+            symbol_status[inst_id]["skipped_reason"] = (
+                f"below_min_size ({contracts}<{min_sz})"
             )
             continue
 
@@ -845,11 +1162,19 @@ def enter_positions(api: BlofinREST, inst_ids, entry_prices,
         )
 
         if dry_run:
-            opened.append({"inst_id": inst_id, "contracts": contracts,
-                           "entry_price": price, "order_id": "DRY_RUN",
-                           "lev_int": lev_int,
-                           "marginMode": MARGIN_MODE,
-                           "positionSide": POSITION_SIDE})
+            opened_by_sym[inst_id] = {
+                "inst_id": inst_id, "contracts": contracts,
+                "entry_price": price, "order_id": "DRY_RUN",
+                "lev_int": lev_int,
+                "marginMode": MARGIN_MODE,
+                "positionSide": POSITION_SIDE,
+                "target_contracts": contracts,
+                "retry_rounds": 0,
+            }
+            symbol_status[inst_id]["filled_contracts"] = contracts
+            symbol_status[inst_id]["fill_pct"] = 100.0
+            symbol_status[inst_id]["order_ids"].append("DRY_RUN")
+            filled_first_pass += 1
             continue
 
         # Set leverage (integer, hard-fail -- wrong leverage = wrong risk exposure)
@@ -862,9 +1187,13 @@ def enter_positions(api: BlofinREST, inst_ids, entry_prices,
                     f"msg={lev_resp.get('msg','')}) -- skipping to avoid "
                     f"wrong leverage exposure"
                 )
+                symbol_status[inst_id]["skipped_reason"] = (
+                    f"set_leverage_rejected_{lev_code}"
+                )
                 continue
         except Exception as le:
             log.error(f"  {inst_id}: set_leverage exception: {le} -- skipping")
+            symbol_status[inst_id]["skipped_reason"] = "set_leverage_exception"
             continue
 
         # Place order(s), chunking if maxMarketSize is set.
@@ -881,11 +1210,19 @@ def enter_positions(api: BlofinREST, inst_ids, entry_prices,
         )
         if ok:
             log.info(f"  ✅ {inst_id}  orderId={order_id}")
-            opened.append({"inst_id": inst_id, "contracts": contracts,
-                           "entry_price": price, "order_id": order_id,
-                           "lev_int": lev_int,
-                           "marginMode": MARGIN_MODE,
-                           "positionSide": POSITION_SIDE})
+            opened_by_sym[inst_id] = {
+                "inst_id": inst_id, "contracts": contracts,
+                "entry_price": price, "order_id": order_id,
+                "lev_int": lev_int,
+                "marginMode": MARGIN_MODE,
+                "positionSide": POSITION_SIDE,
+                "target_contracts": contracts,
+                "retry_rounds": 0,
+            }
+            symbol_status[inst_id]["filled_contracts"] = contracts
+            symbol_status[inst_id]["fill_pct"] = 100.0
+            symbol_status[inst_id]["order_ids"].append(order_id)
+            filled_first_pass += 1
         else:
             log.error(f"  ❌ {inst_id}: order failed -- queued for retry")
             failed.append({
@@ -918,6 +1255,8 @@ def enter_positions(api: BlofinREST, inst_ids, entry_prices,
             half = _round_to_lot(target / 2.0, lot)
             if half < min_sz:
                 log.error(f"  {inst_id}: retry half {half} < minSize {min_sz} -- giving up")
+                if symbol_status[inst_id]["skipped_reason"] is None:
+                    symbol_status[inst_id]["skipped_reason"] = "retry_half_below_min_size"
                 continue
 
             sl_trigger = None
@@ -925,6 +1264,7 @@ def enter_positions(api: BlofinREST, inst_ids, entry_prices,
                 sl_trigger = f"{price * (1 + EXCHANGE_SL_PCT):.8g}"
 
             filled_total = 0.0
+            round_order_ids = []
             ok1, order_id1 = _place_order_chunked(
                 api, inst_id, half, lot, min_sz, max_mkt,
                 sl_trigger_price=sl_trigger,
@@ -932,6 +1272,7 @@ def enter_positions(api: BlofinREST, inst_ids, entry_prices,
             if ok1:
                 log.info(f"  ✅ {inst_id} retry half-1 {half}ct orderId={order_id1}")
                 filled_total += half
+                round_order_ids.append(order_id1)
                 time.sleep(1)
                 remainder_first = _round_to_lot(target - half, lot)
                 if remainder_first >= min_sz:
@@ -942,17 +1283,31 @@ def enter_positions(api: BlofinREST, inst_ids, entry_prices,
                     if ok2:
                         log.info(f"  ✅ {inst_id} retry half-2 {remainder_first}ct orderId={order_id2}")
                         filled_total += remainder_first
+                        round_order_ids.append(order_id2)
                     else:
                         log.error(f"  ❌ {inst_id}: retry half-2 failed")
             else:
                 log.error(f"  ❌ {inst_id}: retry half-1 failed")
 
             if filled_total > 0:
-                opened.append({"inst_id": inst_id, "contracts": filled_total,
-                               "entry_price": price, "order_id": order_id1,
-                               "lev_int": item["lev_int"],
-                               "marginMode": MARGIN_MODE,
-                               "positionSide": POSITION_SIDE})
+                filled_via_retry_syms.add(inst_id)
+                if inst_id in opened_by_sym:
+                    opened_by_sym[inst_id]["contracts"] += filled_total
+                    opened_by_sym[inst_id]["retry_rounds"] = retry_round
+                else:
+                    opened_by_sym[inst_id] = {
+                        "inst_id": inst_id, "contracts": filled_total,
+                        "entry_price": price, "order_id": round_order_ids[0],
+                        "lev_int": item["lev_int"],
+                        "marginMode": MARGIN_MODE,
+                        "positionSide": POSITION_SIDE,
+                        "target_contracts": symbol_status[inst_id]["target_contracts"],
+                        "retry_rounds": retry_round,
+                    }
+                symbol_status[inst_id]["filled_contracts"] += filled_total
+                symbol_status[inst_id]["retry_rounds"] = retry_round
+                symbol_status[inst_id]["order_ids"].extend(round_order_ids)
+
                 unfilled = _round_to_lot(target - filled_total, lot)
                 if unfilled >= min_sz:
                     next_item = dict(item)
@@ -965,8 +1320,49 @@ def enter_positions(api: BlofinREST, inst_ids, entry_prices,
 
     for item in failed:
         log.error(f"RETRY EXHAUSTED {item['inst_id']}: {item['contracts']}ct unfilled after {MAX_ENTRY_RETRIES} rounds")
+        if symbol_status[item["inst_id"]]["skipped_reason"] is None:
+            symbol_status[item["inst_id"]]["skipped_reason"] = (
+                f"retry_exhausted_{MAX_ENTRY_RETRIES}_rounds"
+            )
 
-    return opened
+    # Finalize per-symbol fill_pct and notional (using est_entry_price as the
+    # basis; reconcile_fill_prices will overwrite notional_usd once actual fill
+    # prices are known).
+    for st in symbol_status.values():
+        tgt = st["target_contracts"]
+        if tgt > 0:
+            st["fill_pct"] = round(st["filled_contracts"] / tgt * 100, 2)
+        if st["filled_contracts"] > 0 and st["ctval"] and st["est_entry_price"]:
+            st["notional_usd"] = round(
+                st["filled_contracts"] * st["est_entry_price"] * st["ctval"], 2
+            )
+
+    failed_count = sum(
+        1 for st in symbol_status.values()
+        if st["filled_contracts"] == 0 and st["target_contracts"] > 0
+    )
+    total_syms = len(tradeable)
+    filled_any = sum(
+        1 for st in symbol_status.values() if st["filled_contracts"] > 0
+    )
+    fill_rate_pct = (filled_any / total_syms * 100) if total_syms > 0 else 0.0
+
+    fill_report = {
+        "usdt_total":        round(usdt_total, 2),
+        "usdt_deployable":   round(usdt_deployable, 2),
+        "usdt_per_symbol":   round(usdt_per_sym, 2),
+        "margin_buffer_pct": 10,
+        "fills": {
+            "total_symbols":     total_syms,
+            "filled_first_pass": filled_first_pass,
+            "filled_via_retry":  len(filled_via_retry_syms),
+            "failed":            failed_count,
+            "fill_rate_pct":     round(fill_rate_pct, 2),
+            "symbols":           list(symbol_status.values()),
+        },
+    }
+
+    return list(opened_by_sym.values()), fill_report
 
 def _place_order_chunked(trading_api, inst_id: str, total_contracts: float,
                           lot: float, min_sz: float, max_mkt_sz,
@@ -1041,6 +1437,128 @@ def _place_order_chunked(trading_api, inst_id: str, total_contracts: float,
         log.warning(f"  {inst_id}: unfilled remainder {remaining}ct -- partial fill")
 
     return True, last_id
+
+
+def reconcile_fill_prices(api: BlofinREST, positions: list) -> list:
+    """
+    Fetch actual average-fill prices from BloFin positions and attach to
+    each position dict. Computes slippage in basis points vs est_entry_price.
+    Called once after all orders are placed (bulk, not per-symbol).
+    Leaves fill_entry_price and entry_slippage_bps as None for any symbol
+    that cannot be matched.
+    """
+    if not positions:
+        return positions
+    try:
+        resp = api.get_positions()
+    except Exception as e:
+        log.warning(f"Could not fetch positions for fill reconciliation: {e}")
+        for pos in positions:
+            pos.setdefault("fill_entry_price", None)
+            pos.setdefault("entry_slippage_bps", None)
+        return positions
+
+    by_inst = {}
+    for row in (resp.get("data") or []):
+        iid = row.get("instId", "")
+        avg = (row.get("averagePrice")
+               or row.get("avgPx")
+               or row.get("averagePx"))
+        if iid and avg not in (None, "", "0"):
+            try:
+                by_inst[iid] = float(avg)
+            except (TypeError, ValueError):
+                pass
+
+    summary = []
+    for pos in positions:
+        iid  = pos["inst_id"]
+        est  = pos.get("entry_price")
+        fill = by_inst.get(iid)
+        if fill is None or not est or est <= 0:
+            pos["fill_entry_price"]   = None
+            pos["entry_slippage_bps"] = None
+            log.warning(f"  {iid}: entry fill price not found on BloFin -- leaving null")
+            continue
+        pos["fill_entry_price"]   = round(fill, 6)
+        slip_bps                  = (fill / est - 1.0) * 10000
+        pos["entry_slippage_bps"] = round(slip_bps, 2)
+        summary.append(f"{iid} est=${est:,.4f} fill=${fill:,.4f} slip={slip_bps:+.2f}bps")
+
+    if summary:
+        log.info("  Fill prices: " + "  |  ".join(summary))
+
+    return positions
+
+
+def reconcile_exit_prices(api: BlofinREST, positions: list,
+                          est_exit_prices: dict) -> list:
+    """
+    Fetch actual exit fill prices from BloFin trade-fills history and attach
+    to each position dict. Computes exit slippage in basis points vs the
+    monitoring loop's last price snapshot for that symbol.
+
+    Matches by inst_id + side=sell, picking the most recent matching fill.
+    Negative exit_slippage_bps is favorable (sold higher than estimated).
+    """
+    if not positions:
+        return positions
+    try:
+        resp = api.get_fills_history()
+    except Exception as e:
+        log.warning(f"Could not fetch fills history for exit reconciliation: {e}")
+        for pos in positions:
+            pos.setdefault("fill_exit_price", None)
+            pos.setdefault("exit_slippage_bps", None)
+        return positions
+
+    # Group latest sell fills per instId. Fill rows may include fields named
+    # fillPrice/price/fillPx, side = "buy"/"sell", ts = epoch ms.
+    fills_by_inst = {}
+    for row in (resp.get("data") or []):
+        iid  = row.get("instId", "")
+        side = (row.get("side") or "").lower()
+        if not iid or side != "sell":
+            continue
+        price_raw = (row.get("fillPrice")
+                     or row.get("price")
+                     or row.get("fillPx"))
+        try:
+            price = float(price_raw) if price_raw not in (None, "") else None
+        except (TypeError, ValueError):
+            price = None
+        if price is None:
+            continue
+        ts_raw = row.get("ts") or row.get("fillTime") or row.get("cTime") or 0
+        try:
+            ts = int(ts_raw)
+        except (TypeError, ValueError):
+            ts = 0
+        cur = fills_by_inst.get(iid)
+        if cur is None or ts > cur[0]:
+            fills_by_inst[iid] = (ts, price)
+
+    summary = []
+    for pos in positions:
+        iid  = pos["inst_id"]
+        est  = est_exit_prices.get(iid)
+        hit  = fills_by_inst.get(iid)
+        fill = hit[1] if hit else None
+        if fill is None or not est or est <= 0:
+            pos["fill_exit_price"]   = None
+            pos["exit_slippage_bps"] = None
+            log.warning(f"  {iid}: exit fill price not found in BloFin fills history -- leaving null")
+            continue
+        pos["fill_exit_price"]   = round(fill, 6)
+        slip_bps                 = (fill / est - 1.0) * 10000
+        pos["exit_slippage_bps"] = round(slip_bps, 2)
+        summary.append(f"{iid} est=${est:,.4f} fill=${fill:,.4f} slip={slip_bps:+.2f}bps")
+
+    if summary:
+        log.info("  Exit prices: " + "  |  ".join(summary))
+
+    return positions
+
 
 def close_all_positions(api: BlofinREST, positions, reason, dry_run) -> list:
     """
@@ -1133,8 +1651,11 @@ def close_all_positions(api: BlofinREST, positions, reason, dry_run) -> list:
 # ==========================================================================
 
 def run_session(dry_run: bool = False, resume: bool = False):
+    global _SESSION_ALERT_COUNT
+    _SESSION_ALERT_COUNT = 0
     today = utc_today()
-    start_ts = utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
+    session_start_utc = utcnow().strftime("%Y-%m-%d %H:%M:%S")
+    start_ts = session_start_utc + " UTC"
     log.info("=" * 70)
     log.info(f"  SESSION {today}  "
              f"{'[DRY RUN]' if dry_run else '[LIVE]'}"
@@ -1181,7 +1702,9 @@ def run_session(dry_run: bool = False, resume: bool = False):
         _run_monitoring_loop(
             today, today_date, api, inst_ids,
             open_prices, entry_prices, entry_1x, eff_lev, peak,
-            positions, dry_run
+            positions, dry_run,
+            report_base=None, session_start_utc=session_start_utc,
+            balance_pre_entry=None,
         )
         return
 
@@ -1195,6 +1718,15 @@ def run_session(dry_run: bool = False, resume: bool = False):
         log.info("A -- Filtered: return=0%  fees=none")
         log_daily_return(0.0, "filtered", session_date=today)
         save_state({"date": today, "phase": "filtered", "positions": []})
+        write_execution_report({
+            "date": today,
+            "session_start_utc": session_start_utc,
+            "session_end_utc":   utcnow().strftime("%Y-%m-%d %H:%M:%S"),
+            "signal": {"symbols_signaled": [], "filter": ACTIVE_FILTER, "count": 0},
+            "conviction": None,
+            "exit": {"reason": "filtered"},
+            "alerts_fired": _SESSION_ALERT_COUNT,
+        })
         return
 
     inst_ids = [s + SYMBOL_SUFFIX for s in symbols]
@@ -1308,6 +1840,20 @@ def run_session(dry_run: bool = False, resume: bool = False):
         log_daily_return(0.0, "missed_window", session_date=today)
         save_state({"date": today, "phase": "missed_window",
                     "roi_x": round(roi_x, 6), "positions": []})
+        write_execution_report({
+            "date": today,
+            "session_start_utc": session_start_utc,
+            "session_end_utc":   utcnow().strftime("%Y-%m-%d %H:%M:%S"),
+            "signal": {"symbols_signaled": symbols,
+                       "filter": ACTIVE_FILTER, "count": len(symbols)},
+            "conviction": {
+                "roi_x_pct":  round(roi_x * 100, 4),
+                "kill_y_pct": round(KILL_Y * 100, 4),
+                "passed":     roi_x >= KILL_Y,
+            },
+            "exit": {"reason": "missed_window"},
+            "alerts_fired": _SESSION_ALERT_COUNT,
+        })
         return
 
     if roi_x < KILL_Y:
@@ -1318,6 +1864,20 @@ def run_session(dry_run: bool = False, resume: bool = False):
         log_daily_return(0.0, "no_entry_conviction", session_date=today)
         save_state({"date": today, "phase": "no_entry",
                     "roi_x": round(roi_x, 6), "positions": []})
+        write_execution_report({
+            "date": today,
+            "session_start_utc": session_start_utc,
+            "session_end_utc":   utcnow().strftime("%Y-%m-%d %H:%M:%S"),
+            "signal": {"symbols_signaled": symbols,
+                       "filter": ACTIVE_FILTER, "count": len(symbols)},
+            "conviction": {
+                "roi_x_pct":  round(roi_x * 100, 4),
+                "kill_y_pct": round(KILL_Y * 100, 4),
+                "passed":     False,
+            },
+            "exit": {"reason": "no_entry_conviction"},
+            "alerts_fired": _SESSION_ALERT_COUNT,
+        })
         return
 
     log.info(f"  Conviction passed -- entering at L_HIGH={L_HIGH} x VOL_boost")
@@ -1378,6 +1938,7 @@ def run_session(dry_run: bool = False, resume: bool = False):
     # ── Phase 3: compute leverage and enter ───────────────────────────────
     boost   = compute_vol_boost()
     eff_lev = round(L_HIGH * boost, 4)
+    lev_int = max(1, int(math.ceil(eff_lev)))
     log.info(f"Effective leverage: {L_HIGH} x {boost:.3f} = {eff_lev:.3f}x")
 
     balance = get_account_balance_usdt(api)
@@ -1387,11 +1948,81 @@ def run_session(dry_run: bool = False, resume: bool = False):
     entry_1x     = roi_x
     peak         = 0.0
 
-    positions = enter_positions(
+    balance_pre_entry = balance
+
+    positions, fill_report = enter_positions(
         api, inst_ids, entry_prices, eff_lev, balance, dry_run
     )
+
+    # Reconcile actual fill prices vs est_entry_price. Skip in dry-run since
+    # BloFin won't have any positions to read.
+    if positions and not dry_run:
+        reconcile_fill_prices(api, positions)
+
+    # Sync fill prices + slippage + notional into fill_report's per-symbol
+    # records; compute avg entry slippage across filled symbols.
+    sym_rec_by_id = {s["inst_id"]: s for s in fill_report["fills"]["symbols"]}
+    entry_slips = []
+    for pos in positions:
+        iid = pos["inst_id"]
+        st  = sym_rec_by_id.get(iid)
+        if not st:
+            continue
+        fill_price = pos.get("fill_entry_price")
+        slip       = pos.get("entry_slippage_bps")
+        st["fill_entry_price"]   = fill_price
+        st["entry_slippage_bps"] = slip
+        # Use fill price for notional when known, else fall back to est.
+        price_for_notional = fill_price if fill_price else st.get("est_entry_price") or 0
+        if st.get("ctval") and st.get("filled_contracts"):
+            st["notional_usd"] = round(
+                st["filled_contracts"] * price_for_notional * st["ctval"], 2
+            )
+        if slip is not None:
+            entry_slips.append(slip)
+    avg_entry_slip = (sum(entry_slips) / len(entry_slips)) if entry_slips else None
+    fill_report["fills"]["avg_entry_slippage_bps"] = (
+        round(avg_entry_slip, 2) if avg_entry_slip is not None else None
+    )
+
+    report_base = {
+        "date": today,
+        "session_start_utc": session_start_utc,
+        "signal": {
+            "symbols_signaled": symbols,
+            "filter":           ACTIVE_FILTER,
+            "count":            len(symbols),
+        },
+        "conviction": {
+            "roi_x_pct":  round(roi_x * 100, 4),
+            "kill_y_pct": round(KILL_Y * 100, 4),
+            "passed":     True,
+        },
+        "leverage": {
+            "l_high":    L_HIGH,
+            "vol_boost": round(boost, 4),
+            "eff_lev":   eff_lev,
+            "lev_int":   lev_int,
+        },
+        "capital": {
+            "account_balance":   round(balance, 2),
+            "balance_pre_entry": round(balance_pre_entry, 2),
+            "balance_post_exit": None,
+            "usdt_total":        fill_report["usdt_total"],
+            "margin_buffer_pct": fill_report["margin_buffer_pct"],
+            "usdt_deployable":   fill_report["usdt_deployable"],
+            "usdt_per_symbol":   fill_report["usdt_per_symbol"],
+        },
+        "fills": fill_report["fills"],
+    }
+
     if not positions:
         log.error("No positions entered -- aborting.")
+        report = dict(report_base)
+        report["session_end_utc"] = utcnow().strftime("%Y-%m-%d %H:%M:%S")
+        report["exit"] = {"reason": "no_positions"}
+        report["alerts_fired"] = _SESSION_ALERT_COUNT
+        write_execution_report(report)
         return
 
     save_state({
@@ -1406,13 +2037,17 @@ def run_session(dry_run: bool = False, resume: bool = False):
     _run_monitoring_loop(
         today, today_date, api, inst_ids,
         open_prices, entry_prices, entry_1x, eff_lev, peak,
-        positions, dry_run
+        positions, dry_run,
+        report_base=report_base, session_start_utc=session_start_utc,
+        balance_pre_entry=balance_pre_entry,
     )
 
 
 def _run_monitoring_loop(today, today_date, api: BlofinREST, inst_ids,
                          open_prices, entry_prices, entry_1x, eff_lev,
-                         peak, positions, dry_run):
+                         peak, positions, dry_run,
+                         report_base=None, session_start_utc=None,
+                         balance_pre_entry=None):
     """
     Intraday monitoring loop (bars 7-216).
 
@@ -1448,6 +2083,28 @@ def _run_monitoring_loop(today, today_date, api: BlofinREST, inst_ids,
     # Once stopped, a symbol contributes PORT_SL_PCT (-6%) to the portfolio average.
     sym_stopped = {}   # {inst_id: PORT_SL_PCT}
     active_positions = list(positions)   # shrinks as per-symbol stops fire
+    bars_monitored = 0
+    # Exit-price snapshots for slippage reconciliation.
+    #   sym_exit_prices: price at the bar that tripped a per-symbol stop
+    #   final_exit_snapshot: last `current` dict before final close_all
+    sym_exit_prices    = {}
+    final_exit_snapshot = {}
+
+    # Initialize the bar-by-bar portfolio NDJSON + SQL row. Each write is
+    # independent and best-effort; a DB outage won't block the NDJSON backup
+    # and vice versa. Both are idempotent on --resume.
+    _portfolio_lev_int = max(1, int(math.ceil(eff_lev)))
+    _portfolio_symbols = list(inst_ids)
+    _portfolio_entered = [p["inst_id"] for p in positions]
+    _portfolio_session_start = session_start_utc or utcnow().strftime("%Y-%m-%d %H:%M:%S")
+    init_portfolio_record(
+        today, _portfolio_symbols, _portfolio_entered,
+        _portfolio_session_start, eff_lev, _portfolio_lev_int,
+    )
+    init_portfolio_session_sql(
+        today, _portfolio_symbols, _portfolio_entered,
+        _portfolio_session_start, eff_lev, _portfolio_lev_int,
+    )
 
     log.info("Entering 5-min monitoring loop ...")
 
@@ -1456,6 +2113,7 @@ def _run_monitoring_loop(today, today_date, api: BlofinREST, inst_ids,
         if utcnow() >= session_close_dt:
             break
 
+        bars_monitored += 1
         b       = bar_index()
         current = get_mark_prices(api, list(inst_ids))
         if not current:
@@ -1479,6 +2137,7 @@ def _run_monitoring_loop(today, today_date, api: BlofinREST, inst_ids,
                     f" -- closing symbol and clamping at {PORT_SL_PCT*100:.0f}%"
                 )
                 sym_stopped[iid] = PORT_SL_PCT
+                sym_exit_prices[iid] = price
                 newly_stopped.append(pos)
                 active_positions = [p for p in active_positions if p["inst_id"] != iid]
 
@@ -1488,18 +2147,20 @@ def _run_monitoring_loop(today, today_date, api: BlofinREST, inst_ids,
                 # If close failed, keep in active pool and don't clamp
                 for p in failed:
                     del sym_stopped[p["inst_id"]]
+                    sym_exit_prices.pop(p["inst_id"], None)
                     active_positions.append(p)
                     log.warning(f"  {p['inst_id']}: sym stop close failed -- keeping in pool")
 
         # ── Portfolio return (clamped + active symbols) ────────────────────
         # Mirrors rebuild_portfolio_matrix.py: stopped symbols contribute
         # their clamped value; active symbols use current live return.
-        sym_returns = []
+        sym_returns_map = {}
         for iid in inst_ids:
             if iid in sym_stopped:
-                sym_returns.append(sym_stopped[iid])   # clamped at -6%
+                sym_returns_map[iid] = sym_stopped[iid]   # clamped at -6%
             elif iid in current and entry_prices.get(iid, 0) > 0:
-                sym_returns.append(current[iid] / entry_prices[iid] - 1.0)
+                sym_returns_map[iid] = current[iid] / entry_prices[iid] - 1.0
+        sym_returns = list(sym_returns_map.values())
 
         incr = float(np.mean(sym_returns)) if sym_returns else 0.0
 
@@ -1518,6 +2179,18 @@ def _run_monitoring_loop(today, today_date, api: BlofinREST, inst_ids,
             f"fill={'open' if fill_open else 'closed'}"
         )
 
+        # Persist this bar's snapshot before the break checks so the bar that
+        # tripped an exit is included in the timeline. Both writes are
+        # independent + best-effort.
+        _bar_ts   = utcnow().strftime("%Y-%m-%d %H:%M:%S")
+        _bar_stop = list(sym_stopped.keys())
+        append_portfolio_bar(
+            today, b, _bar_ts, incr, peak, sym_returns_map, _bar_stop,
+        )
+        append_portfolio_bar_sql(
+            today, b, _bar_ts, incr, peak, sym_returns_map, _bar_stop,
+        )
+
         # ── 1st: PORT_SL -- portfolio hard floor ───────────────────────────
         if incr <= PORT_SL_PCT:
             log.warning(
@@ -1525,6 +2198,7 @@ def _run_monitoring_loop(today, today_date, api: BlofinREST, inst_ids,
             )
             exit_reason = "port_sl"
             final_return_1x = incr
+            final_exit_snapshot = dict(current)
             break
 
         # ── 2nd: PORT_TSL -- trailing stop ─────────────────────────────────
@@ -1537,6 +2211,7 @@ def _run_monitoring_loop(today, today_date, api: BlofinREST, inst_ids,
             )
             exit_reason = "port_tsl"
             final_return_1x = tsl_exit
+            final_exit_snapshot = dict(current)
             break
 
         # ── 3rd: EARLY_FILL (bars 7-143 only) ─────────────────────────────
@@ -1548,6 +2223,7 @@ def _run_monitoring_loop(today, today_date, api: BlofinREST, inst_ids,
             )
             exit_reason = "early_fill"
             final_return_1x = fill_ret
+            final_exit_snapshot = dict(current)
             break
 
         save_state({
@@ -1566,6 +2242,7 @@ def _run_monitoring_loop(today, today_date, api: BlofinREST, inst_ids,
         current = get_mark_prices(api, inst_ids)
         if current:
             final_return_1x = equal_weight_return(current, entry_prices)
+            final_exit_snapshot = dict(current)
             log.info(
                 f"F -- SESSION CLOSE (23:55 UTC)  "
                 f"return from entry={final_return_1x*100:+.3f}%  (unbounded)"
@@ -1589,6 +2266,115 @@ def _run_monitoring_loop(today, today_date, api: BlofinREST, inst_ids,
         log_daily_return(net_pct, exit_reason, session_date=today, eff_lev=eff_lev)
     else:
         log.warning("Return not logged (NaN -- price unavailable at close)")
+
+    sym_stops_fired = list(sym_stopped.keys())
+
+    # Build per-symbol est_exit_price: sym-stop price for stopped symbols,
+    # final snapshot for the rest. Then reconcile against BloFin fill history.
+    est_exit_prices = {}
+    for pos in positions:
+        iid = pos["inst_id"]
+        if iid in sym_exit_prices:
+            est_exit_prices[iid] = sym_exit_prices[iid]
+        elif iid in final_exit_snapshot:
+            est_exit_prices[iid] = final_exit_snapshot[iid]
+
+    exit_symbols = []
+    exit_slips   = []
+    if not dry_run:
+        reconcile_exit_prices(api, positions, est_exit_prices)
+        for pos in positions:
+            iid = pos["inst_id"]
+            est = est_exit_prices.get(iid)
+            exit_symbols.append({
+                "inst_id":           iid,
+                "est_exit_price":    round(est, 6) if est else None,
+                "fill_exit_price":   pos.get("fill_exit_price"),
+                "exit_slippage_bps": pos.get("exit_slippage_bps"),
+            })
+            if pos.get("exit_slippage_bps") is not None:
+                exit_slips.append(pos["exit_slippage_bps"])
+    else:
+        for pos in positions:
+            iid = pos["inst_id"]
+            est = est_exit_prices.get(iid)
+            exit_symbols.append({
+                "inst_id":           iid,
+                "est_exit_price":    round(est, 6) if est else None,
+                "fill_exit_price":   None,
+                "exit_slippage_bps": None,
+            })
+    avg_exit_slip = (sum(exit_slips) / len(exit_slips)) if exit_slips else None
+
+    # Actual P&L from balance delta (skipped on dry-run and on --resume where
+    # balance_pre_entry is unknown).
+    balance_post_exit   = None
+    actual_pnl_usd      = None
+    actual_return_pct   = None
+    pnl_vs_est_pct      = None
+    if not dry_run and balance_pre_entry is not None:
+        try:
+            balance_post_exit = get_account_balance_usdt(api)
+            actual_pnl_usd    = balance_post_exit - balance_pre_entry
+            if balance_pre_entry > 0:
+                actual_return_pct = (actual_pnl_usd / balance_pre_entry) * 100.0
+                if not math.isnan(net_pct):
+                    pnl_vs_est_pct = actual_return_pct - net_pct
+        except Exception as e:
+            log.warning(f"  Could not capture balance_post_exit: {e}")
+
+    exit_block = {
+        "reason":                exit_reason,
+        "est_return_1x_pct":     round(final_return_1x * 100, 4) if not math.isnan(final_return_1x) else None,
+        "eff_lev":               eff_lev,
+        "est_net_return_pct":    round(net_pct, 4) if not math.isnan(net_pct) else None,
+        "close_failures":        [p["inst_id"] for p in failed_closes],
+        "close_failure_count":   len(failed_closes),
+        "symbols":               exit_symbols,
+        "avg_exit_slippage_bps": round(avg_exit_slip, 2) if avg_exit_slip is not None else None,
+        "actual_pnl_usd":        round(actual_pnl_usd, 2) if actual_pnl_usd is not None else None,
+        "actual_return_pct":     round(actual_return_pct, 4) if actual_return_pct is not None else None,
+        "pnl_vs_est_pct":        round(pnl_vs_est_pct, 4) if pnl_vs_est_pct is not None else None,
+    }
+    monitoring_block = {
+        "bars_monitored":  bars_monitored,
+        "peak_pct":        round(peak * 100, 4),
+        "sym_stops_fired": sym_stops_fired,
+        "sym_stops_count": len(sym_stops_fired),
+    }
+
+    if report_base is not None:
+        report = dict(report_base)
+        if balance_post_exit is not None and isinstance(report.get("capital"), dict):
+            report["capital"] = dict(report["capital"])
+            report["capital"]["balance_post_exit"] = round(balance_post_exit, 2)
+    else:
+        # --resume path: no pre-built report_base. Write minimal report
+        # with what we have from restored state.
+        report = {
+            "date":              today,
+            "session_start_utc": session_start_utc,
+            "resumed":           True,
+            "leverage":          {"eff_lev": eff_lev},
+            "capital":           {
+                "balance_pre_entry": None,
+                "balance_post_exit": round(balance_post_exit, 2) if balance_post_exit is not None else None,
+            },
+        }
+    report["session_end_utc"] = utcnow().strftime("%Y-%m-%d %H:%M:%S")
+    report["monitoring"]      = monitoring_block
+    report["exit"]            = exit_block
+    report["alerts_fired"]    = _SESSION_ALERT_COUNT
+    write_execution_report(report)
+
+    # Mark the portfolio closed in both stores so the UI stops polling.
+    _close_kwargs = {
+        "status":        "closed",
+        "exit_time_utc": report["session_end_utc"],
+        "exit_reason":   exit_reason,
+    }
+    update_portfolio_meta(today, **_close_kwargs)
+    update_portfolio_meta_sql(today, **_close_kwargs)
 
     save_state({
         "date": today, "phase": "closed",

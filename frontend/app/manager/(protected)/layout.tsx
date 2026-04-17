@@ -207,6 +207,18 @@ function ManagerSidebar({
         active={pathname === "/manager/overview"}
       />
 
+      <NavItem
+        label="Execution"
+        href="/manager/execution"
+        active={pathname === "/manager/execution"}
+      />
+
+      <NavItem
+        label="Portfolios"
+        href="/manager/portfolios"
+        active={pathname === "/manager/portfolios"}
+      />
+
       {/* Divider */}
       <div
         style={{

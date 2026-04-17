@@ -753,6 +753,58 @@ CREATE TABLE IF NOT EXISTS user_mgmt.performance_daily (
 );
 
 
+-- ─── Live-trader portfolio sessions ───────────────────────────────────────────
+-- One row per traded day; bar-by-bar timeline lives in portfolio_bars.
+-- Written live by trader-blofin.py every 5 minutes. The trader also writes an
+-- NDJSON copy at blofin_execution_reports/portfolios/YYYY-MM-DD.ndjson as a
+-- local backup in case of DB connectivity issues. The Manager UI reads only
+-- from these tables. Flat days (filtered / no_entry_conviction / missed_window)
+-- do NOT produce a row — there is no bar data to capture.
+CREATE TABLE IF NOT EXISTS user_mgmt.portfolio_sessions (
+    portfolio_session_id    UUID         PRIMARY KEY DEFAULT gen_random_uuid(),
+    signal_date             DATE         NOT NULL,
+    session_start_utc       TIMESTAMPTZ  NOT NULL,
+    exit_time_utc           TIMESTAMPTZ,                                -- set at close
+    status                  TEXT         NOT NULL DEFAULT 'active'
+                                CHECK (status IN ('active', 'closed')),
+    exit_reason             TEXT,                                       -- null while active
+    symbols                 TEXT[]       NOT NULL,                      -- signaled+priceable universe
+    entered                 TEXT[]       NOT NULL,                      -- subset with actual positions
+    eff_lev                 NUMERIC(6,4) NOT NULL,
+    lev_int                 SMALLINT     NOT NULL,
+
+    -- Cached summary fields maintained by the trader on each bar append so
+    -- the list endpoint returns without aggregating bars per row.
+    bars_count              INTEGER      NOT NULL DEFAULT 0,
+    final_portfolio_return  NUMERIC(10,8),
+    peak_portfolio_return   NUMERIC(10,8),
+    max_dd_from_peak        NUMERIC(10,8),
+    sym_stops               TEXT[]       NOT NULL DEFAULT '{}',
+
+    created_at              TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+    updated_at              TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+
+    UNIQUE (signal_date)
+);
+
+-- One row per 5-min bar. Not a hypertable — ~210 bars/day × 250 trading days
+-- = ~52k rows/year, well within regular-PG territory. Composite PK gives
+-- clustered reads for "all bars for this session in order".
+CREATE TABLE IF NOT EXISTS user_mgmt.portfolio_bars (
+    portfolio_session_id  UUID          NOT NULL
+                              REFERENCES user_mgmt.portfolio_sessions(portfolio_session_id)
+                              ON DELETE CASCADE,
+    bar_number            INTEGER       NOT NULL,                       -- 7..216 per session
+    bar_timestamp_utc     TIMESTAMPTZ   NOT NULL,
+    portfolio_return      NUMERIC(10,8) NOT NULL,                       -- audit "incr"
+    peak_return           NUMERIC(10,8) NOT NULL,
+    symbol_returns        JSONB         NOT NULL,                       -- {"BTC-USDT": 0.0015, ...}
+    stopped               TEXT[]        NOT NULL DEFAULT '{}',          -- sym-stop snapshot as of this bar
+    logged_at             TIMESTAMPTZ   NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (portfolio_session_id, bar_number)
+);
+
+
 -- =============================================================================
 -- INDEXES
 -- =============================================================================
@@ -785,6 +837,8 @@ CREATE INDEX IF NOT EXISTS idx_strategy_perf_date
     ON audit.strategy_performance (strategy_version_id, date DESC);
 CREATE INDEX IF NOT EXISTS idx_connections_user
     ON user_mgmt.exchange_connections (user_id);
+CREATE INDEX IF NOT EXISTS idx_portfolio_sessions_status_date
+    ON user_mgmt.portfolio_sessions (status, signal_date DESC);
 
 -- ─── Exchange snapshots (balance + position logger) ───────────────────────────
 CREATE TABLE IF NOT EXISTS user_mgmt.exchange_snapshots (
