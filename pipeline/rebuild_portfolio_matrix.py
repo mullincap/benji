@@ -431,7 +431,7 @@ def build_portfolio_path(symbols_parquet, session_start, debug=False):
         else:
             price_raw = get_session_prices_parquet(symbols_parquet, t_start, t_end)
         if price_raw.empty:
-            print(f"    ! Parquet fetch returned empty for {symbols_parquet}")
+            print(f"    ! {PRICE_SOURCE.upper()} fetch returned empty for {symbols_parquet}")
             return None, symbols_parquet
         price_rs = (price_raw
                     .resample(f"{BAR_MINUTES}min").last()
@@ -589,7 +589,7 @@ def main():
                 m = _MULTIPLIER_RE.match(base)
                 if m: base = m.group(2)
                 no_data_bases.append(base)
-            print(f"    ! No parquet data for: {no_data_bases} — excluded from portfolio average")
+            print(f"    ! No {PRICE_SOURCE} data for: {no_data_bases} — excluded from portfolio average")
             # Fold into gate accounting so summary is accurate
             n_drop += len(no_data_bases)
             dropped_syms += no_data_bases

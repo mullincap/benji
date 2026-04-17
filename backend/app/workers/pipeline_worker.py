@@ -640,6 +640,13 @@ def run_pipeline(self, job_id: str, params: dict) -> dict:
         **os.environ,
         # Ensure pipeline python's directory is on PATH so subprocess "python3" resolves correctly
         "PATH": str(Path(_PIPELINE_PYTHON).parent) + ":" + os.environ.get("PATH", ""),
+        # Force Python to flush stdout/stderr line-by-line instead of 4KB
+        # block buffering. Without this, log.info() calls emitted by the
+        # pipeline script accumulate in a buffer and only reach our stdout
+        # pipe once the buffer fills or the process exits — which makes the
+        # simulator's "LIVE OUTPUT" pane appear stuck during long quiet
+        # phases (e.g. big DB queries).
+        "PYTHONUNBUFFERED": "1",
         # Infrastructure paths
         "BASE_DATA_DIR":       str(settings.BASE_DATA_DIR),
         "PARQUET_PATH":        settings.PARQUET_PATH,
