@@ -401,15 +401,27 @@ def _fetch_portfolio_context(cur) -> dict[str, Any]:
         for r in intraday_rows if r["equity_usd"] is not None
     ]
 
+    # USD P&L amounts should represent "what this percent is on the live
+    # account" — i.e. pct × current live equity. The dollar totals computed
+    # above (total_dollar_pnl_today / wtd_dollar / mtd_dollar) are derived
+    # from the manual capital_usd allocation, which is stale once the
+    # account drifts from the allocated target. When snapshots are
+    # available, prefer total_live_equity as the base; otherwise fall back
+    # to total_aum_f so the numbers still reflect the best-available base.
+    usd_base = float(total_live_equity) if has_snaps else total_aum_f
+    today_usd = today_pct * usd_base / 100
+    wtd_usd   = wtd_pct   * usd_base / 100
+    mtd_usd   = mtd_pct   * usd_base / 100
+
     return {
         "allocations": alloc_list,
         "total_aum": total_aum_f,
         "today_pct": round(today_pct, 2),
-        "today_usd": round(total_dollar_pnl_today, 2),
+        "today_usd": round(today_usd, 2),
         "wtd_pct": round(wtd_pct, 2),
-        "wtd_usd": round(wtd_dollar, 2),
+        "wtd_usd": round(wtd_usd, 2),
         "mtd_pct": round(mtd_pct, 2),
-        "mtd_usd": round(mtd_dollar, 2),
+        "mtd_usd": round(mtd_usd, 2),
         "max_drawdown": round(max_dd, 1),
         "portfolio_equity_30d": portfolio_equity,
         "intraday_equity": intraday_equity,
