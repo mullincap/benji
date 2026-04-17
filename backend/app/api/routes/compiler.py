@@ -742,13 +742,15 @@ def list_runs(
 
 @router.get("/symbols")
 def list_symbols(
+    days: int = Query(90, ge=1, le=10000, description="Lookback window in days (1-10000, default 90; frontend uses a large value to represent ALL)"),
     source_id: int = Query(1, ge=1),
     cur=Depends(get_cursor),
 ) -> dict[str, Any]:
     """
     Coverage summary for every active symbol — one row per symbol with
     most-recent-day completeness for price (close), open_interest, and
-    volume, plus a 90-day count of distinct days with any data.
+    volume, plus a count of distinct days with any data within the
+    `days` lookback window.
 
     Backed by `market.symbol_day_counts` continuous aggregate (created
     2026-04-08) which pre-aggregates per-day-per-symbol-per-source row
@@ -760,6 +762,7 @@ def list_symbols(
     chunks took ~152s (decompression overhead per symbol × 658 symbols).
     With the cagg this query is sub-50ms.
     """
+    interval_str = f"{days} days"
     cur.execute(
         """
         WITH latest_per_symbol AS (
@@ -769,7 +772,7 @@ def list_symbols(
                 COUNT(DISTINCT day) AS days_with_data
             FROM market.symbol_day_counts
             WHERE source_id = %s
-              AND day >= NOW() - INTERVAL '90 days'
+              AND day >= NOW() - %s::interval
             GROUP BY symbol_id
         )
         SELECT
@@ -790,7 +793,7 @@ def list_symbols(
         WHERE s.active = TRUE
         ORDER BY days_with_data DESC, s.base ASC
         """,
-        (source_id, source_id),
+        (source_id, interval_str, source_id),
     )
     rows = cur.fetchall()
 
@@ -825,7 +828,7 @@ def list_symbols(
 
     return {
         "source_id":        source_id,
-        "lookback_days":    90,
+        "lookback_days":    days,
         "symbols_returned": len(payload),
         "symbols":          payload,
     }

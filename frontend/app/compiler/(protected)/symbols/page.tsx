@@ -677,17 +677,34 @@ const SORT_CHIPS: { key: SortKey; label: string }[] = [
   { key: "days_with_data", label: "Days" },
 ];
 
+// Lookback window passed to /api/compiler/symbols?days=… . "ALL" sends
+// 10000 to cover the full retained history in market.futures_1m. Default
+// to ALL so first-load matches the Coverage Map's universe.
+const LOOKBACK_PRESETS = [
+  { label: "30",  days: 30 },
+  { label: "90",  days: 90 },
+  { label: "365", days: 365 },
+  { label: "ALL", days: 10000 },
+] as const;
+type LookbackPreset = (typeof LOOKBACK_PRESETS)[number];
+const DEFAULT_LOOKBACK: LookbackPreset = LOOKBACK_PRESETS[3];
+
 function CoverageTable({ onSelectSymbol }: { onSelectSymbol: (symbol: string) => void }) {
   const [state, setState] = useState<CoverageState>({ kind: "loading" });
   const [filter, setFilter] = useState<FilterKey>("all");
   const [sort, setSort]     = useState<SortKey>("days_with_data");
   const [page, setPage]     = useState(0);
+  const [lookback, setLookback] = useState<LookbackPreset>(DEFAULT_LOOKBACK);
 
   useEffect(() => {
     let cancelled = false;
     async function load() {
+      setState({ kind: "loading" });
       try {
-        const res = await fetch(`${API_BASE}/api/compiler/symbols`, { credentials: "include" });
+        const res = await fetch(
+          `${API_BASE}/api/compiler/symbols?days=${lookback.days}`,
+          { credentials: "include" },
+        );
         if (cancelled) return;
         if (res.status === 401) {
           setState({ kind: "error", message: "Session expired. Please log in again." });
@@ -706,7 +723,7 @@ function CoverageTable({ onSelectSymbol }: { onSelectSymbol: (symbol: string) =>
     }
     load();
     return () => { cancelled = true; };
-  }, []);
+  }, [lookback]);
 
   // Reset to page 0 whenever the filter or sort changes — no point being on
   // page 5 of a filtered subset that may only have 2 pages.
@@ -781,6 +798,27 @@ function CoverageTable({ onSelectSymbol }: { onSelectSymbol: (symbol: string) =>
 
       {state.kind === "ready" && (
         <>
+          <div style={{
+            display: "flex",
+            gap: 6,
+            marginBottom: 10,
+            flexWrap: "wrap",
+            alignItems: "center",
+          }}>
+            <span style={{
+              fontSize: 9, color: "var(--t3)", letterSpacing: "0.12em",
+              textTransform: "uppercase", marginRight: 4,
+            }}>Lookback</span>
+            {LOOKBACK_PRESETS.map((preset) => (
+              <CoverageChip
+                key={preset.label}
+                label={preset.label}
+                active={lookback.label === preset.label}
+                onClick={() => setLookback(preset)}
+              />
+            ))}
+          </div>
+
           <div style={{
             display: "flex",
             gap: 6,
