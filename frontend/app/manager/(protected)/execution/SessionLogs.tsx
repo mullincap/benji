@@ -28,6 +28,20 @@ const BOTTOM_THRESHOLD_PX = 20;
 const LOAD_LIMIT = 500;
 const MAX_HEIGHT_PX = 500;
 
+// Build a relative or absolute URL safely. Using `new URL()` directly would
+// throw on prod where API_BASE is "" (nginx proxies same-origin requests),
+// because URL requires an absolute base. String concat + URLSearchParams
+// matches the convention used by the other Manager endpoints.
+function buildLogsUrl(params: Record<string, string | number | undefined>): string {
+  const qs = new URLSearchParams();
+  for (const [k, v] of Object.entries(params)) {
+    if (v === undefined || v === null) continue;
+    qs.set(k, String(v));
+  }
+  const q = qs.toString();
+  return `${API_BASE}/api/manager/execution-logs${q ? `?${q}` : ""}`;
+}
+
 interface LogLine {
   n: number;
   ts: string;
@@ -117,10 +131,11 @@ export default function SessionLogs({
     setLoading(true);
     setError(null);
     try {
-      const url = new URL(`${API_BASE}/api/manager/execution-logs`);
-      if (date) url.searchParams.set("date", date);
-      url.searchParams.set("limit", String(LOAD_LIMIT));
-      const res = await fetch(url.toString(), { credentials: "include" });
+      const url = buildLogsUrl({
+        date: date ?? undefined,
+        limit: LOAD_LIMIT,
+      });
+      const res = await fetch(url, { credentials: "include" });
       if (res.status === 401) throw new Error("Session expired");
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data: LogResponse = await res.json();
@@ -144,11 +159,12 @@ export default function SessionLogs({
 
   const pollNew = useCallback(async () => {
     try {
-      const url = new URL(`${API_BASE}/api/manager/execution-logs`);
-      if (sessionDate) url.searchParams.set("date", sessionDate);
-      url.searchParams.set("since_line", String(lastNRef.current));
-      url.searchParams.set("limit", String(LOAD_LIMIT));
-      const res = await fetch(url.toString(), { credentials: "include" });
+      const url = buildLogsUrl({
+        date: sessionDate ?? undefined,
+        since_line: lastNRef.current,
+        limit: LOAD_LIMIT,
+      });
+      const res = await fetch(url, { credentials: "include" });
       if (!res.ok) return;
       const data: LogResponse = await res.json();
       setTotal(data.total_lines);
@@ -184,11 +200,12 @@ export default function SessionLogs({
       const targetStart = Math.max(0, fromLine - LOAD_LIMIT);
       const sinceParam = targetStart - 1;
 
-      const url = new URL(`${API_BASE}/api/manager/execution-logs`);
-      if (sessionDate) url.searchParams.set("date", sessionDate);
-      url.searchParams.set("since_line", String(sinceParam));
-      url.searchParams.set("limit", String(LOAD_LIMIT));
-      const res = await fetch(url.toString(), { credentials: "include" });
+      const url = buildLogsUrl({
+        date: sessionDate ?? undefined,
+        since_line: sinceParam,
+        limit: LOAD_LIMIT,
+      });
+      const res = await fetch(url, { credentials: "include" });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data: LogResponse = await res.json();
       setLines((prev) => {
