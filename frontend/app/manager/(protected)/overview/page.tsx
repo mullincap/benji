@@ -72,8 +72,11 @@ interface OverviewData {
   allocations: Allocation[];
   total_aum: number;
   today_pct: number;
+  today_usd: number;
   wtd_pct: number;
+  wtd_usd: number;
   mtd_pct: number;
+  mtd_usd: number;
   max_drawdown: number;
   portfolio_equity_30d: { date: string; equity_usd: number }[];
   intraday_equity: { time: string; equity_usd: number }[];
@@ -99,6 +102,12 @@ function pctColor(v: number): string {
 function fmtPct(v: number): string {
   const sign = v > 0 ? "+" : "";
   return `${sign}${v.toFixed(2)}%`;
+}
+
+function fmtUsdSigned(v: number): string {
+  const sign = v > 0 ? "+" : v < 0 ? "−" : "";
+  const abs = Math.abs(v);
+  return `${sign}$${abs.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 }
 
 function statusBadge(status: string) {
@@ -154,10 +163,12 @@ function KpiCard({
   label,
   value,
   color,
+  subvalue,
 }: {
   label: string;
   value: string;
   color?: string;
+  subvalue?: string;
 }) {
   return (
     <div
@@ -192,6 +203,19 @@ function KpiCard({
       >
         {value}
       </div>
+      {subvalue && (
+        <div
+          style={{
+            fontSize: 11,
+            color: color || "var(--t2)",
+            fontFamily: "var(--font-space-mono), Space Mono, monospace",
+            marginTop: 4,
+            opacity: 0.8,
+          }}
+        >
+          {subvalue}
+        </div>
+      )}
     </div>
   );
 }
@@ -325,16 +349,19 @@ export default function OverviewPage() {
         <KpiCard
           label="Today"
           value={fmtPct(data.today_pct)}
+          subvalue={fmtUsdSigned(data.today_usd)}
           color={pctColor(data.today_pct)}
         />
         <KpiCard
           label="WTD"
           value={fmtPct(data.wtd_pct)}
+          subvalue={fmtUsdSigned(data.wtd_usd)}
           color={pctColor(data.wtd_pct)}
         />
         <KpiCard
           label="MTD"
           value={fmtPct(data.mtd_pct)}
+          subvalue={fmtUsdSigned(data.mtd_usd)}
           color={pctColor(data.mtd_pct)}
         />
         <KpiCard
