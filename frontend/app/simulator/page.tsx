@@ -10,6 +10,7 @@ import EmptyState from '../components/RightPanel/EmptyState';
 import RunningView from '../components/RightPanel/RunningView';
 import ResultsView from '../components/RightPanel/ResultsView';
 import AuditHistory from '../components/RightSidebar/AuditHistory';
+import PromoteStrategyModal, { type PromoteFilterOption, type PromoteResult } from './PromoteStrategyModal';
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE || '';
 
@@ -201,6 +202,134 @@ interface AuditHistoryItem {
   updated_at?: number;
 }
 
+function extractPromoteFilters(results: Record<string, unknown> | null): PromoteFilterOption[] {
+  if (!results) return [];
+  const metrics = (results.metrics ?? {}) as Record<string, unknown>;
+  const filters = (metrics.filters as Array<Record<string, unknown>> | undefined) ?? [];
+  const out: PromoteFilterOption[] = [];
+  for (const f of filters) {
+    if (!f || typeof f !== 'object') continue;
+    const name = f.filter;
+    if (typeof name !== 'string' || !name) continue;
+    const sharpe = typeof f.sharpe === 'number' ? f.sharpe : null;
+    out.push({ filter: name, sharpe });
+  }
+  return out;
+}
+
+function extractBestFilter(results: Record<string, unknown> | null): string | null {
+  if (!results) return null;
+  const metrics = (results.metrics ?? {}) as Record<string, unknown>;
+  const bf = metrics.best_filter;
+  return typeof bf === 'string' && bf ? bf : null;
+}
+
+function PromoteBar({
+  jobData,
+  promoteToast,
+  onOpen,
+}: {
+  jobData: Record<string, unknown> | null;
+  promoteToast: { kind: 'ok' | 'err'; msg: string } | null;
+  onOpen: () => void;
+}) {
+  const strategyVersionId = jobData?.strategy_version_id as string | null | undefined;
+  const promotedAt = jobData?.promoted_at as string | null | undefined;
+  const isPromoted = Boolean(strategyVersionId);
+
+  return (
+    <div
+      style={{
+        display: 'flex',
+        alignItems: 'center',
+        gap: 12,
+        padding: '10px 14px',
+        background: 'var(--bg1)',
+        border: '1px solid var(--line)',
+        borderRadius: 4,
+        margin: '0 0 12px 0',
+      }}
+    >
+      <span
+        style={{
+          fontSize: 9,
+          fontWeight: 700,
+          letterSpacing: '0.12em',
+          color: 'var(--t3)',
+          textTransform: 'uppercase',
+        }}
+      >
+        Strategy Promotion
+      </span>
+
+      <div style={{ flex: 1, fontSize: 10, color: 'var(--t2)' }}>
+        {isPromoted ? (
+          <span>
+            Published as strategy version{' '}
+            <span style={{ color: 'var(--t0)' }}>{strategyVersionId}</span>
+            {promotedAt ? ` on ${new Date(promotedAt).toLocaleString()}` : ''}.
+          </span>
+        ) : (
+          <span>Admin: promote this audit as a strategy version for allocators to use.</span>
+        )}
+      </div>
+
+      {promoteToast && (
+        <span
+          style={{
+            fontSize: 10,
+            color: promoteToast.kind === 'ok' ? 'var(--green)' : 'var(--red)',
+            background: promoteToast.kind === 'ok' ? 'var(--green-dim)' : 'var(--red-dim)',
+            border: `1px solid ${promoteToast.kind === 'ok' ? 'var(--green)' : 'var(--red)'}`,
+            borderRadius: 3,
+            padding: '3px 8px',
+          }}
+        >
+          {promoteToast.msg}
+        </span>
+      )}
+
+      {isPromoted ? (
+        <span
+          style={{
+            fontSize: 9,
+            fontWeight: 700,
+            letterSpacing: '0.12em',
+            textTransform: 'uppercase',
+            color: 'var(--green)',
+            background: 'var(--green-dim)',
+            border: '1px solid var(--green)',
+            borderRadius: 3,
+            padding: '4px 10px',
+          }}
+        >
+          Already Promoted
+        </span>
+      ) : (
+        <button
+          type="button"
+          onClick={onOpen}
+          style={{
+            background: 'var(--green-dim)',
+            border: '1px solid var(--green)',
+            color: 'var(--green)',
+            borderRadius: 4,
+            padding: '6px 14px',
+            fontSize: 9,
+            fontWeight: 700,
+            letterSpacing: '0.12em',
+            textTransform: 'uppercase',
+            fontFamily: 'var(--font-space-mono), Space Mono, monospace',
+            cursor: 'pointer',
+          }}
+        >
+          Promote as Strategy
+        </button>
+      )}
+    </div>
+  );
+}
+
 export default function Home() {
   const [appState, setAppState] = useState<'idle' | 'running' | 'results' | 'failed'>('idle');
   const [jobId, setJobId] = useState<string | null>(null);
@@ -226,6 +355,9 @@ export default function Home() {
   const [cancellingAudit, setCancellingAudit] = useState(false);
   const [editingFromResults, setEditingFromResults] = useState(false);
   const [collapseAuditConfigsSignal, setCollapseAuditConfigsSignal] = useState(0);
+  const [isAdmin, setIsAdmin] = useState(false);
+  const [promoteOpen, setPromoteOpen] = useState(false);
+  const [promoteToast, setPromoteToast] = useState<{ kind: 'ok' | 'err'; msg: string } | null>(null);
 
   const pollingRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const lastStageRef = useRef<string | null>(null);
@@ -236,6 +368,25 @@ export default function Home() {
     const id = setInterval(() => setClockTick(Date.now()), 1000);
     return () => clearInterval(id);
   }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await fetch(`${API_BASE}/api/admin/whoami`, { credentials: 'include' });
+        if (!cancelled) setIsAdmin(res.ok);
+      } catch {
+        if (!cancelled) setIsAdmin(false);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, []);
+
+  useEffect(() => {
+    if (!promoteToast) return;
+    const id = setTimeout(() => setPromoteToast(null), 6000);
+    return () => clearTimeout(id);
+  }, [promoteToast]);
 
   // Elapsed is derived from jobData.created_at vs either now() (running) or
   // updated_at (terminal). Navigation between audits therefore always shows
@@ -690,6 +841,13 @@ export default function Home() {
                   scrollbarGutter: 'stable both-edges',
                 }}
               >
+                {isAdmin && jobId && (
+                  <PromoteBar
+                    jobData={jobData}
+                    promoteToast={promoteToast}
+                    onOpen={() => setPromoteOpen(true)}
+                  />
+                )}
                 <ResultsView
                   key={jobId ?? 'results-none'}
                   results={results}
@@ -698,6 +856,27 @@ export default function Home() {
                   params={params}
                 />
               </div>
+            )}
+            {promoteOpen && jobId && (
+              <PromoteStrategyModal
+                jobId={jobId}
+                filters={extractPromoteFilters(results)}
+                defaultFilter={extractBestFilter(results)}
+                onCancel={() => setPromoteOpen(false)}
+                onSuccess={(result: PromoteResult) => {
+                  setPromoteOpen(false);
+                  setPromoteToast({
+                    kind: 'ok',
+                    msg: `Promoted as "${result.strategy_name}" (${result.version_label}).`,
+                  });
+                  setJobData((prev) => (prev ? {
+                    ...prev,
+                    strategy_version_id: result.strategy_version_id,
+                    promoted_at: new Date().toISOString(),
+                  } : prev));
+                  loadAuditHistory(true);
+                }}
+              />
             )}
             {appState === 'failed' && (
               <RunningView
