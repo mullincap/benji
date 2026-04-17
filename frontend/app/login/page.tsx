@@ -1,41 +1,44 @@
 "use client";
 
 /**
- * frontend/app/compiler/(public)/login/page.tsx
- * =============================================
- * Compiler admin login page.
+ * frontend/app/login/page.tsx
+ * ===========================
+ * Neutral admin login page. Shared across compiler / indexer / manager via the
+ * `admin_session` cookie.
  *
- * UX:
- *   - Single passphrase input field, centered, dark theme
- *   - Submit POSTs to /api/admin/login (credentials: include) so the
- *     admin_session cookie is captured by the browser
- *   - On success → router.push('/compiler') which redirects to /coverage
- *   - On 401 → shows "Invalid passphrase" in --red below the field
- *   - On mount, calls /api/admin/whoami; if already authed, redirects
- *     immediately to /compiler so reloading after a successful login
- *     doesn't strand the user on the login page
- *
- * The form is intentionally minimal — no logo, no help text, no rememberme.
- * This is an admin tool, not a marketing surface.
+ * Accepts ?next=<path> to return the user to their originating route after
+ * login. `next` is sanitized to same-origin paths ("/..." but not "//...") —
+ * anything else falls back to /compiler.
  */
 
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE || "";
-// The accent color comes from the active theme via the --module-accent CSS
-// variable. Topbar.tsx sets this on :root when the active route is under
-// /compiler/*. We deliberately do NOT hardcode a hex here — the compiler
-// module follows the user's selected theme like every other module.
+const DEFAULT_NEXT = "/compiler";
 
-export default function CompilerLoginPage() {
+function sanitizeNext(raw: string | null): string {
+  if (!raw) return DEFAULT_NEXT;
+  // Must be a same-origin path; reject protocol-relative (//host) and absolute URLs
+  if (!raw.startsWith("/") || raw.startsWith("//")) return DEFAULT_NEXT;
+  return raw;
+}
+
+export default function LoginPage() {
   const router = useRouter();
   const [passphrase, setPassphrase] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [checkingExisting, setCheckingExisting] = useState(true);
+  const [nextPath, setNextPath] = useState(DEFAULT_NEXT);
 
-  // If the user is already authenticated, skip the login form
+  // Read ?next= from the URL on mount (client-only; avoids Suspense boundary)
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    setNextPath(sanitizeNext(params.get("next")));
+  }, []);
+
+  // If already authenticated, skip the form
   useEffect(() => {
     let cancelled = false;
     fetch(`${API_BASE}/api/admin/whoami`, { credentials: "include" })
@@ -43,7 +46,7 @@ export default function CompilerLoginPage() {
       .then((data) => {
         if (cancelled) return;
         if (data?.authenticated) {
-          router.replace("/compiler");
+          router.replace(nextPath);
         } else {
           setCheckingExisting(false);
         }
@@ -54,7 +57,7 @@ export default function CompilerLoginPage() {
     return () => {
       cancelled = true;
     };
-  }, [router]);
+  }, [router, nextPath]);
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -69,7 +72,7 @@ export default function CompilerLoginPage() {
         body: JSON.stringify({ passphrase }),
       });
       if (res.status === 200) {
-        router.replace("/compiler");
+        router.replace(nextPath);
       } else if (res.status === 401) {
         setError("Invalid passphrase");
       } else if (res.status === 503) {
@@ -113,7 +116,7 @@ export default function CompilerLoginPage() {
         fontSize: 9, fontWeight: 700, letterSpacing: "0.12em",
         color: "var(--t3)", textTransform: "uppercase",
       }}>
-        Compiler · Admin
+        Admin
       </div>
 
       <div style={{

@@ -445,6 +445,8 @@ export default function ManagerProtectedLayout({
   // Auth check
   useEffect(() => {
     let cancelled = false;
+    const next = encodeURIComponent(window.location.pathname + window.location.search);
+    const loginUrl = `/login?next=${next}`;
     fetch(`${API_BASE}/api/admin/whoami`, { credentials: "include" })
       .then((r) => r.json())
       .then((data) => {
@@ -453,13 +455,13 @@ export default function ManagerProtectedLayout({
           setAuthState("authed");
         } else {
           setAuthState("unauthed");
-          router.replace("/compiler/login");
+          router.replace(loginUrl);
         }
       })
       .catch(() => {
         if (cancelled) return;
         setAuthState("unauthed");
-        router.replace("/compiler/login");
+        router.replace(loginUrl);
       });
     return () => {
       cancelled = true;

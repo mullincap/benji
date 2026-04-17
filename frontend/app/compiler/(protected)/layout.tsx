@@ -3,11 +3,12 @@
 /**
  * frontend/app/compiler/(protected)/layout.tsx
  * ============================================
- * Protected layout for /compiler/* (everything except /compiler/login).
+ * Protected layout for /compiler/*.
  *
  * On mount, calls GET /api/admin/whoami. If unauthenticated, replaces the
- * route with /compiler/login. Renders nothing visible until the auth check
- * resolves so we never flash protected content to an unauthenticated user.
+ * route with /login?next=<current-path>. Renders nothing visible until the
+ * auth check resolves so we never flash protected content to an unauthenticated
+ * user.
  *
  * The layout chrome:
  *   - Topbar (shared component; module accent comes from the active theme via
@@ -16,9 +17,8 @@
  *     left border uses var(--module-accent) so it follows the theme)
  *   - Content area (children render here)
  *
- * Sibling layout: app/compiler/(public)/layout.tsx wraps /compiler/login
- * with NO auth check and NO chrome. The route group parens "(protected)"
- * and "(public)" don't appear in the URL — both still serve under /compiler/.
+ * Login is the shared neutral page at /login (app/login/). Auth is shared
+ * across compiler / indexer / manager via the admin_session cookie.
  */
 
 import { useEffect, useState } from "react";
@@ -166,6 +166,8 @@ export default function CompilerProtectedLayout({ children }: { children: React.
 
   useEffect(() => {
     let cancelled = false;
+    const next = encodeURIComponent(window.location.pathname + window.location.search);
+    const loginUrl = `/login?next=${next}`;
     fetch(`${API_BASE}/api/admin/whoami`, { credentials: "include" })
       .then((r) => r.json())
       .then((data) => {
@@ -174,13 +176,13 @@ export default function CompilerProtectedLayout({ children }: { children: React.
           setAuthState("authed");
         } else {
           setAuthState("unauthed");
-          router.replace("/compiler/login");
+          router.replace(loginUrl);
         }
       })
       .catch(() => {
         if (cancelled) return;
         setAuthState("unauthed");
-        router.replace("/compiler/login");
+        router.replace(loginUrl);
       });
     return () => {
       cancelled = true;
