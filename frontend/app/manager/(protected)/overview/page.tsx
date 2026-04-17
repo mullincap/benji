@@ -247,7 +247,7 @@ export default function OverviewPage() {
         padding: 20,
         display: "flex",
         flexDirection: "column",
-        gap: 24,
+        gap: 10,
         height: "100%",
         overflow: "hidden",
       }}>
@@ -311,7 +311,7 @@ export default function OverviewPage() {
         padding: 20,
         display: "flex",
         flexDirection: "column",
-        gap: 24,
+        gap: 10,
         height: "100%",
         overflow: "hidden",
       }}
