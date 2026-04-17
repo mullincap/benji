@@ -16,15 +16,16 @@ Every module uses Next.js route groups for auth-gating:
 
 ```
 frontend/app/
+  login/                  neutral admin login (shared by compiler, indexer, manager)
   compiler/(protected)/   coverage | days | marketcap | symbols | jobs
   indexer/(protected)/
   simulator/              page.tsx — single-page audit runner (no subroutes)
-  allocator/(protected)/
+  allocator/(protected)/  trader-user login under /trader/(public)/login (separate auth)
   manager/(protected)/    overview | execution | portfolios | chat
   components/             shared UI (Topbar, StatusBar, Skeleton, RightPanel, LeftPanel, ...)
 ```
 
-`(protected)` routes require a valid session cookie. Public routes (login, etc.) live under `(public)` when they exist.
+`(protected)` routes require a valid session cookie. Compiler / indexer / manager share the admin `admin_session` cookie and all redirect unauthenticated users to `/login?next=<current-path>`, which returns them to the originating route after a successful login. The trader module uses a separate per-user session and still has its own `/trader/login`.
 
 ## API_BASE pattern
 
@@ -42,7 +43,7 @@ fetch(`${API_BASE}/api/...`, { credentials: "include" })
 
 - `credentials: "include"` on every fetch
 - `res.status === 401` → show "Session expired" banner (don't auto-redirect)
-- Admin pages (compiler, indexer, manager) gate on `/api/admin/whoami`; allocator pages use a per-user session via `/api/auth/me`
+- Admin pages (compiler, indexer, manager) gate on `/api/admin/whoami` and redirect to `/login?next=<path>` on 401; allocator pages use a per-user session via `/api/auth/me` and redirect to `/trader/login`
 
 ## Design system tokens
 
