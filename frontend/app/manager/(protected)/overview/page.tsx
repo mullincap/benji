@@ -565,15 +565,12 @@ export default function OverviewPage() {
             border: "1px solid var(--line)",
             borderRadius: 5,
             padding: "12px 16px",
-            // Fixed chart height only when we have data to render; collapse
-            // to fit the "no data" placeholder otherwise so the vertical
-            // gap below matches the page-level gap.
-            height: hasAny ? 330 : undefined,
+            height: 330,
           }}>
             <div style={{ fontSize: 9, fontWeight: 700, letterSpacing: "0.12em", color: "var(--t3)", textTransform: "uppercase", marginBottom: 8 }}>
               Intraday Equity (today) · 06:00–00:00 UTC
             </div>
-            <div style={{ height: hasAny ? "calc(100% - 24px)" : "auto" }}>
+            <div style={{ height: "calc(100% - 24px)" }}>
               {hasAny ? (
                 <Line
                   data={{
