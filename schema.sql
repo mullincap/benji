@@ -356,14 +356,19 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_one_active_version_per_strategy
     WHERE is_active = TRUE;
 
 -- ─── Audit jobs ────────────────────────────────────────────────────────────────
--- One row per simulation run. Points to strategy_version_id for exact reproducibility.
+-- One row per simulation run. Auto-inserted at finalize by the celery worker
+-- with strategy_version_id=NULL. The promote flow assigns the version once an
+-- admin explicitly approves the audit as a strategy (see /api/simulator/audits/
+-- {id}/promote). promoted_at is set in the same transaction as the version
+-- assignment so the UI can render an "Already promoted" badge without a join.
 CREATE TABLE IF NOT EXISTS audit.jobs (
     job_id               UUID    PRIMARY KEY DEFAULT gen_random_uuid(),
-    strategy_version_id  UUID    NOT NULL REFERENCES audit.strategy_versions(strategy_version_id),
+    strategy_version_id  UUID    REFERENCES audit.strategy_versions(strategy_version_id),
     status               TEXT    NOT NULL DEFAULT 'queued',  -- queued|running|complete|failed
     created_at           TIMESTAMPTZ DEFAULT NOW(),
     started_at           TIMESTAMPTZ,
     completed_at         TIMESTAMPTZ,
+    promoted_at          TIMESTAMPTZ,
     error_msg            TEXT,
     date_from            DATE    NOT NULL,
     date_to              DATE    NOT NULL,
@@ -375,6 +380,11 @@ CREATE TABLE IF NOT EXISTS audit.jobs (
     -- Frontend reads this directly for full drill-down; DB stores queryable scalars.
     output_path          TEXT
 );
+
+-- Pre-existing rows were created with NOT NULL + no promoted_at; bring the
+-- live table in line with the declarations above. Both are idempotent.
+ALTER TABLE audit.jobs ALTER COLUMN strategy_version_id DROP NOT NULL;
+ALTER TABLE audit.jobs ADD COLUMN IF NOT EXISTS promoted_at TIMESTAMPTZ;
 
 -- ─── Audit results ─────────────────────────────────────────────────────────────
 -- One row per (job, filter_mode). Stores all queryable scalar metrics from the
@@ -485,6 +495,14 @@ CREATE TABLE IF NOT EXISTS audit.results (
 
     created_at              TIMESTAMPTZ DEFAULT NOW()
 );
+
+-- One result row per (job, filter_mode). Prevents duplicate promotes of the
+-- same filter from silently creating parallel rows. Added 2026-04-17 as part
+-- of the Simulator→Allocator promote flow.
+ALTER TABLE audit.results
+    DROP CONSTRAINT IF EXISTS audit_results_job_filter_uniq;
+ALTER TABLE audit.results
+    ADD CONSTRAINT audit_results_job_filter_uniq UNIQUE (job_id, filter_mode);
 
 -- ─── Daily equity curves ───────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS audit.equity_curves (

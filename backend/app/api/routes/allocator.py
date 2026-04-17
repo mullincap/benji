@@ -40,6 +40,7 @@ from ...db import get_cursor
 from ...core.config import load_secrets
 from ...services.encryption import encrypt_key, decrypt_key
 from .auth import get_current_user
+from .admin import require_admin
 
 log = logging.getLogger(__name__)
 
@@ -410,6 +411,50 @@ def get_strategies(user_id: str = Depends(get_current_user), cur=Depends(get_cur
         })
 
     return {"strategies": result}
+
+
+# ── Strategy publish / unpublish (admin-only) ──────────────────────────────
+# Toggles audit.strategies.is_published — the filter the list query above
+# applies. Admin-gated because controlling what regular allocator users can
+# attach capital to is a governance action.
+
+def _set_strategy_published(
+    strategy_id: int, publish: bool, cur,
+) -> dict[str, Any]:
+    cur.execute(
+        """
+        UPDATE audit.strategies
+        SET is_published = %s
+        WHERE strategy_id = %s
+        RETURNING strategy_id, name, display_name, is_published
+        """,
+        (publish, strategy_id),
+    )
+    row = cur.fetchone()
+    if row is None:
+        raise HTTPException(status_code=404, detail="Strategy not found")
+    return {
+        "strategy_id":   row["strategy_id"],
+        "name":          row["name"],
+        "display_name":  row["display_name"],
+        "is_published":  row["is_published"],
+    }
+
+
+@router.post(
+    "/strategies/{strategy_id}/publish",
+    dependencies=[Depends(require_admin)],
+)
+def publish_strategy(strategy_id: int, cur=Depends(get_cursor)) -> dict[str, Any]:
+    return _set_strategy_published(strategy_id, True, cur)
+
+
+@router.post(
+    "/strategies/{strategy_id}/unpublish",
+    dependencies=[Depends(require_admin)],
+)
+def unpublish_strategy(strategy_id: int, cur=Depends(get_cursor)) -> dict[str, Any]:
+    return _set_strategy_published(strategy_id, False, cur)
 
 
 # ── Exchanges ───────────────────────────────────────────────────────────────

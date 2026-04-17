@@ -11,6 +11,7 @@ from app.api.routes.admin import router as admin_router
 from app.api.routes.auth import router as auth_router
 from app.api.routes.allocator import router as allocator_router
 from app.api.routes.manager import router as manager_router
+from app.api.routes.simulator import router as simulator_router
 from app.core.config import settings
 
 app = FastAPI(title="Benji3m Audit API", version="0.1.0")
@@ -30,6 +31,7 @@ app.include_router(compiler_router)
 app.include_router(indexer_router)
 app.include_router(allocator_router)
 app.include_router(manager_router)
+app.include_router(simulator_router)
 
 
 @app.on_event("startup")

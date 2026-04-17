@@ -1,3 +1,4 @@
+import logging
 import subprocess
 import uuid
 from pathlib import Path
@@ -8,6 +9,7 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
 from app.core.config import settings
+from app.db import get_worker_conn
 from app.services.job_store import (
     create_job, delete_job, get_job, list_jobs, update_job,
     list_folders, create_folder, rename_folder, delete_folder,
@@ -252,6 +254,12 @@ class JobResponse(BaseModel):
     error:      str | None
     created_at: float
     updated_at: float
+    # Populated from audit.jobs (DB) when the job has been promoted as a
+    # strategy version. NULL for audits that were never promoted. Frontend
+    # uses strategy_version_id to render an "Already promoted" badge on the
+    # Results view without a second round-trip.
+    strategy_version_id: str | None = None
+    promoted_at:         str | None = None
 
 
 class JobPatchRequest(BaseModel):
@@ -275,10 +283,64 @@ def create_job_endpoint(req: JobRequest) -> JobCreateResponse:
     return JobCreateResponse(job_id=job_id, status="queued")
 
 
+_jobs_log = logging.getLogger("jobs_route")
+
+
+def _fetch_promote_state(job_ids: list[str]) -> dict[str, dict[str, Any]]:
+    """
+    Best-effort lookup of strategy_version_id + promoted_at for a set of
+    job_ids. Returns a dict keyed by job_id; absent entries = unknown. A DB
+    failure logs a warning and returns {} so the endpoint still serves the
+    primary JSON-file data.
+    """
+    if not job_ids:
+        return {}
+    try:
+        conn = get_worker_conn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT job_id::text AS job_id,
+                           strategy_version_id::text AS strategy_version_id,
+                           promoted_at
+                    FROM audit.jobs
+                    WHERE job_id = ANY(%s::uuid[])
+                    """,
+                    (job_ids,),
+                )
+                rows = cur.fetchall()
+        finally:
+            conn.close()
+    except Exception as e:
+        _jobs_log.warning("promote-state lookup failed: %s", e)
+        return {}
+
+    out: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        out[row[0]] = {
+            "strategy_version_id": row[1],
+            "promoted_at": row[2].isoformat() if row[2] is not None else None,
+        }
+    return out
+
+
+def _enrich_with_promote_state(job: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
+    merged = dict(job)
+    merged["strategy_version_id"] = state.get("strategy_version_id")
+    merged["promoted_at"]         = state.get("promoted_at")
+    return merged
+
+
 @router.get("", response_model=list[JobResponse])
 def list_jobs_endpoint() -> list[JobResponse]:
     jobs = list_jobs()[:20]
-    return [_refresh_results_if_needed(job) for job in jobs]
+    refreshed = [_refresh_results_if_needed(job) for job in jobs]
+    promote_state = _fetch_promote_state([j["id"] for j in refreshed])
+    return [
+        _enrich_with_promote_state(j, promote_state.get(j["id"], {}))
+        for j in refreshed
+    ]
 
 
 @router.get("/{job_id}", response_model=JobResponse)
@@ -286,7 +348,8 @@ def get_job_endpoint(job_id: str) -> JobResponse:
     job = get_job(job_id)
     if job is None:
         raise HTTPException(status_code=404, detail="Job not found")
-    return job
+    promote_state = _fetch_promote_state([job_id]).get(job_id, {})
+    return _enrich_with_promote_state(job, promote_state)
 
 
 @router.patch("/{job_id}", response_model=JobResponse)

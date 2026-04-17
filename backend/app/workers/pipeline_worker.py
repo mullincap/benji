@@ -6,6 +6,8 @@ Celery task that orchestrates the full audit pipeline chain:
   4. Write results back to job store
 """
 
+import json
+import logging
 import re
 import subprocess
 from pathlib import Path
@@ -13,7 +15,10 @@ from pathlib import Path
 from celery import Celery
 
 from app.core.config import settings
+from app.db import get_worker_conn
 from app.services.job_store import get_job, update_job
+
+_worker_log = logging.getLogger("pipeline_worker")
 
 celery_app = Celery("pipeline_worker", broker=settings.REDIS_URL, backend=settings.REDIS_URL)
 
@@ -955,7 +960,75 @@ def run_pipeline(self, job_id: str, params: dict) -> dict:
     }
 
     update_job(job_id, status="complete", stage="done", progress=100, results=results)
+
+    # Best-effort: also persist a lightweight audit.jobs row. This seeds the
+    # allocator-visible history without populating audit.results (promotion is
+    # a separate explicit action). Any failure here is logged but must not
+    # disrupt the JSON-file write above — that's still the source of truth
+    # for in-progress jobs and crash recovery.
+    _persist_audit_job_row(job_id, params, metrics)
+
     return results
+
+
+def _persist_audit_job_row(job_id: str, params: dict, metrics: dict) -> None:
+    """
+    INSERT (or re-assert) the audit.jobs row at finalize. strategy_version_id
+    is NULL until the admin explicitly promotes this audit as a strategy via
+    POST /api/simulator/audits/{job_id}/promote.
+
+    Date range is derived from metrics["fees_table"] (first + last row's
+    `date` key). If fees_table is empty or missing both dates, we skip the
+    insert — date_from/date_to are NOT NULL in the schema and we refuse to
+    fabricate values.
+    """
+    fees_table = metrics.get("fees_table") or []
+    if not fees_table:
+        _worker_log.warning(
+            "audit.jobs insert skipped for %s: metrics.fees_table empty "
+            "(cannot derive date_from/date_to)", job_id,
+        )
+        return
+    try:
+        date_from = fees_table[0].get("date")
+        date_to   = fees_table[-1].get("date")
+    except (AttributeError, IndexError, TypeError):
+        _worker_log.warning(
+            "audit.jobs insert skipped for %s: fees_table entries lack a date key",
+            job_id,
+        )
+        return
+    if not date_from or not date_to:
+        _worker_log.warning(
+            "audit.jobs insert skipped for %s: date_from=%r date_to=%r",
+            job_id, date_from, date_to,
+        )
+        return
+
+    try:
+        conn = get_worker_conn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO audit.jobs
+                        (job_id, strategy_version_id, status,
+                         completed_at, date_from, date_to, config_overrides)
+                    VALUES (%s, NULL, 'complete', NOW(), %s, %s, %s::jsonb)
+                    ON CONFLICT (job_id) DO UPDATE SET
+                        status           = 'complete',
+                        completed_at     = EXCLUDED.completed_at,
+                        date_from        = EXCLUDED.date_from,
+                        date_to          = EXCLUDED.date_to,
+                        config_overrides = EXCLUDED.config_overrides
+                    """,
+                    (job_id, date_from, date_to, json.dumps(params)),
+                )
+            conn.commit()
+        finally:
+            conn.close()
+    except Exception as e:
+        _worker_log.warning("audit.jobs insert failed for %s: %s", job_id, e)
 
 
 # ─── Side-effect import: register additional task modules ───────────────────
