@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useMemo, useRef } from 'react';
 import Topbar from '../components/Topbar';
 import StatusBar from '../components/StatusBar';
 import ParamForm from '../components/LeftPanel/ParamForm';
@@ -206,7 +206,13 @@ export default function Home() {
   const [jobId, setJobId] = useState<string | null>(null);
   const [jobData, setJobData] = useState<Record<string, unknown> | null>(null);
   const [results, setResults] = useState<Record<string, unknown> | null>(null);
-  const [elapsedSeconds, setElapsedSeconds] = useState(0);
+  // 1s client clock used to derive elapsedSeconds from jobData.created_at
+  // below. We don't track elapsed imperatively any more — the old approach
+  // (manual interval + setElapsedSeconds calls on every transition) drifted
+  // when the user navigated between audits because the interval only got
+  // started inside handleSubmit, never inside handleSelectAudit for a
+  // running job. Derived state is always correct on mount.
+  const [clockTick, setClockTick] = useState(() => Date.now());
   const [logLines, setLogLines] = useState<string[]>([]);
   const [errorInfo, setErrorInfo] = useState<{ message: string; jobId: string | null } | null>(null);
   const [params, setParams] = useState<Record<string, unknown>>(DEFAULT_PARAMS);
@@ -222,14 +228,35 @@ export default function Home() {
   const [collapseAuditConfigsSignal, setCollapseAuditConfigsSignal] = useState(0);
 
   const pollingRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const elapsedRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const lastStageRef = useRef<string | null>(null);
+
+  // Single mount-level clock: ticks once a second so running-job elapsed
+  // values re-render live. Terminal jobs ignore the tick (memoized).
+  useEffect(() => {
+    const id = setInterval(() => setClockTick(Date.now()), 1000);
+    return () => clearInterval(id);
+  }, []);
+
+  // Elapsed is derived from jobData.created_at vs either now() (running) or
+  // updated_at (terminal). Navigation between audits therefore always shows
+  // the correct elapsed without needing to manage timers across transitions.
+  const elapsedSeconds = useMemo(() => {
+    if (!jobData) return 0;
+    const createdRaw = jobData.created_at as number | string | undefined;
+    const updatedRaw = jobData.updated_at as number | string | undefined;
+    if (createdRaw === undefined) return 0;
+    const createdMs = Number(createdRaw) * 1000;
+    const updatedMs = updatedRaw !== undefined ? Number(updatedRaw) * 1000 : clockTick;
+    const status = String(jobData.status || '').toLowerCase();
+    const TERMINAL = ['complete', 'completed', 'done', 'failed', 'error', 'cancelled', 'canceled'];
+    const refMs = TERMINAL.includes(status) ? updatedMs : clockTick;
+    return Math.max(0, Math.round((refMs - createdMs) / 1000));
+  }, [jobData, clockTick]);
 
   // Stop polling on unmount
   useEffect(() => {
     return () => {
       if (pollingRef.current) clearInterval(pollingRef.current);
-      if (elapsedRef.current) clearInterval(elapsedRef.current);
     };
   }, []);
 
@@ -329,9 +356,8 @@ export default function Home() {
         const rData = await rRes.json();
         setResults(rData);
         setAppState('results');
-        if (job.created_at && job.updated_at) {
-          setElapsedSeconds(Math.max(0, Math.round(job.updated_at - job.created_at)));
-        }
+        // elapsedSeconds is derived from jobData (created_at / updated_at)
+        // and updates automatically when setJobData above lands.
       } catch (err) {
         setErrorInfo({ message: String(err), jobId: job.id });
         setAppState('failed');
@@ -386,10 +412,6 @@ export default function Home() {
       clearInterval(pollingRef.current);
       pollingRef.current = null;
     }
-    if (elapsedRef.current) {
-      clearInterval(elapsedRef.current);
-      elapsedRef.current = null;
-    }
   }
 
   function appendLog(line: string) {
@@ -400,7 +422,6 @@ export default function Home() {
     setEditingFromResults(false);
     setAppState('running');
     setLogLines([]);
-    setElapsedSeconds(0);
     lastStageRef.current = null;
     setJobData(null);
     setResults(null);
@@ -416,11 +437,6 @@ export default function Home() {
       const id: string = data.job_id ?? data.id;
       setJobId(id);
       appendLog(`[${nowHHMMSS()}] job submitted — id: ${id}`);
-
-      // Elapsed timer
-      elapsedRef.current = setInterval(() => {
-        setElapsedSeconds((s) => s + 1);
-      }, 1000);
 
       // Polling
       pollingRef.current = setInterval(async () => {
@@ -489,7 +505,6 @@ export default function Home() {
     setResults(null);
     setErrorInfo(null);
     setLogLines([]);
-    setElapsedSeconds(0);
     lastStageRef.current = null;
     setEditingFromResults(false);
     setCollapseAuditConfigsSignal(0);
