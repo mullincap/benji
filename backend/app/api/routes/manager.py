@@ -401,17 +401,23 @@ def _fetch_portfolio_context(cur) -> dict[str, Any]:
         for r in intraday_rows if r["equity_usd"] is not None
     ]
 
-    # USD P&L amounts should represent "what this percent is on the live
-    # account" — i.e. pct × current live equity. The dollar totals computed
-    # above (total_dollar_pnl_today / wtd_dollar / mtd_dollar) are derived
-    # from the manual capital_usd allocation, which is stale once the
-    # account drifts from the allocated target. When snapshots are
-    # available, prefer total_live_equity as the base; otherwise fall back
-    # to total_aum_f so the numbers still reflect the best-available base.
+    # USD P&L is the actual dollar profit over the window. Given the period
+    # % `p` and the current live equity `E`, the implied period-start equity
+    # is E / (1 + p/100), so profit = E - E/(1+p/100). Applying p directly
+    # to E is wrong — that would treat the % as being on the end value
+    # instead of the start value. Example: E=$4,274.08 at +94.12% MTD
+    # implies a start of $2,201.77 and profit of $2,072.31 (not $4,022.94
+    # which is what pct × E would yield).
+    def _usd_from_pct(pct: float, end_equity: float) -> float:
+        denom = 1.0 + pct / 100.0
+        if end_equity == 0 or denom == 0:
+            return 0.0
+        return end_equity - end_equity / denom
+
     usd_base = float(total_live_equity) if has_snaps else total_aum_f
-    today_usd = today_pct * usd_base / 100
-    wtd_usd   = wtd_pct   * usd_base / 100
-    mtd_usd   = mtd_pct   * usd_base / 100
+    today_usd = _usd_from_pct(today_pct, usd_base)
+    wtd_usd   = _usd_from_pct(wtd_pct,   usd_base)
+    mtd_usd   = _usd_from_pct(mtd_pct,   usd_base)
 
     return {
         "allocations": alloc_list,
