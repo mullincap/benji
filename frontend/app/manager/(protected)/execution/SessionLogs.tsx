@@ -26,7 +26,6 @@ const FONT_MONO = "var(--font-space-mono), Space Mono, monospace";
 const POLL_INTERVAL_MS = 15_000;
 const BOTTOM_THRESHOLD_PX = 20;
 const LOAD_LIMIT = 500;
-const MAX_HEIGHT_PX = 500;
 
 // Build a relative or absolute URL safely. Using `new URL()` directly would
 // throw on prod where API_BASE is "" (nginx proxies same-origin requests),
@@ -105,10 +104,18 @@ function LivePulse() {
 
 export default function SessionLogs({
   selectedDate,
+  expanded,
+  onToggle,
 }: {
   selectedDate: string | null;
+  /**
+   * Parent controls open/closed so the Execution tab can enforce
+   * mutually-exclusive expansion with the Daily Execution Summary.
+   */
+  expanded: boolean;
+  onToggle: () => void;
 }) {
-  const [collapsed, setCollapsed] = useState(true);
+  const collapsed = !expanded;
   const [lines, setLines] = useState<LogLine[]>([]);
   const [total, setTotal] = useState(0);
   const [fromLine, setFromLine] = useState(0);
@@ -278,12 +285,18 @@ export default function SessionLogs({
         border: "1px solid var(--line)",
         borderRadius: 5,
         overflow: "hidden",
+        display: "flex",
+        flexDirection: "column",
+        // Fill available vertical space only when expanded so the collapsed
+        // header sits snug.
+        flex: expanded ? 1 : "0 0 auto",
+        minHeight: 0,
       }}
     >
       {/* Header / toggle */}
       <button
         type="button"
-        onClick={() => setCollapsed((c) => !c)}
+        onClick={onToggle}
         style={{
           width: "100%",
           display: "flex",
@@ -318,7 +331,13 @@ export default function SessionLogs({
 
       {/* Body */}
       {!collapsed && (
-        <div style={{ borderTop: "1px solid var(--line)" }}>
+        <div style={{
+          borderTop: "1px solid var(--line)",
+          display: "flex",
+          flexDirection: "column",
+          flex: 1,
+          minHeight: 0,
+        }}>
           {fromLine > 0 && (
             <div
               style={{
@@ -359,7 +378,8 @@ export default function SessionLogs({
             ref={scrollRef}
             onScroll={handleScroll}
             style={{
-              maxHeight: MAX_HEIGHT_PX,
+              flex: 1,
+              minHeight: 320,
               overflowY: "auto",
               background: "var(--bg1)",
               fontFamily: FONT_MONO,

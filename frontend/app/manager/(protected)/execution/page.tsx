@@ -416,6 +416,13 @@ export default function ExecutionPage() {
   // null → SessionLogs shows the most recent session. Any row click sets this
   // to the clicked row's date so the log viewer correlates with the table.
   const [selectedLogDate, setSelectedLogDate] = useState<string | null>(null);
+  // Mutually-exclusive section expansion: at most one of the two detail
+  // panels (table / logs) is open at a time so each gets full vertical
+  // space when active. null = both collapsed.
+  const [activeSection, setActiveSection] = useState<"table" | "logs" | null>("table");
+  const toggleSection = useCallback((name: "table" | "logs") => {
+    setActiveSection((cur) => (cur === name ? null : name));
+  }, []);
 
   const load = useCallback(() => {
     fetch(`${API_BASE}/api/manager/execution-reports`, {
@@ -570,16 +577,19 @@ export default function ExecutionPage() {
         />
       </div>
 
-      {/* Row 2: Daily summary table */}
+      {/* Row 2: Daily summary table (collapsible; mutually exclusive with logs) */}
       <div
         style={{
           background: "var(--bg2)",
           border: "1px solid var(--line)",
           borderRadius: 5,
-          padding: "12px 16px",
-          overflow: "auto",
-          flex: 1,
+          overflow: "hidden",
+          // Take remaining vertical space only when expanded so the
+          // collapsed header sits snug above the next section.
+          flex: activeSection === "table" ? 1 : "0 0 auto",
           minHeight: 0,
+          display: "flex",
+          flexDirection: "column",
         }}
       >
         <div
@@ -587,15 +597,35 @@ export default function ExecutionPage() {
             display: "flex",
             alignItems: "center",
             justifyContent: "space-between",
-            marginBottom: 10,
+            padding: "12px 16px",
           }}
         >
-          <div style={{ ...sectionLabel, marginBottom: 0 }}>
-            Daily Execution Summary
-            {windowPreset.days !== null && (
+          <button
+            type="button"
+            onClick={() => toggleSection("table")}
+            style={{
+              display: "flex",
+              alignItems: "center",
+              gap: 10,
+              background: "transparent",
+              border: "none",
+              padding: 0,
+              cursor: "pointer",
+              fontFamily: FONT_MONO,
+              color: "var(--t3)",
+              fontSize: 9,
+              fontWeight: 700,
+              letterSpacing: "0.12em",
+              textTransform: "uppercase",
+            }}
+          >
+            <span style={{ color: "var(--t2)", width: 14 }}>
+              {activeSection === "table" ? "▾" : "▸"}
+            </span>
+            <span>Daily Execution Summary</span>
+            {windowPreset.days !== null && activeSection === "table" && (
               <span
                 style={{
-                  marginLeft: 10,
                   color: "var(--t2)",
                   fontWeight: 400,
                   letterSpacing: "0.06em",
@@ -604,12 +634,32 @@ export default function ExecutionPage() {
                 · {visibleReports.length} of {reports.length}
               </span>
             )}
-          </div>
-          <WindowSegmentControl
-            value={windowPreset}
-            onChange={setWindowPreset}
-          />
+            {activeSection !== "table" && reports.length > 0 && (
+              <span
+                style={{
+                  color: "var(--t2)",
+                  fontWeight: 400,
+                  letterSpacing: "0.06em",
+                }}
+              >
+                · {reports.length} sessions
+              </span>
+            )}
+          </button>
+          {activeSection === "table" && (
+            <WindowSegmentControl
+              value={windowPreset}
+              onChange={setWindowPreset}
+            />
+          )}
         </div>
+        {activeSection === "table" && (
+        <div style={{
+          padding: "0 16px 12px",
+          overflow: "auto",
+          flex: 1,
+          minHeight: 0,
+        }}>
         {reports.length === 0 ? (
           <div style={{ fontSize: 11, color: "var(--t3)" }}>
             No execution reports yet. The first session report will appear
@@ -664,11 +714,18 @@ export default function ExecutionPage() {
             </tbody>
           </table>
         )}
+        </div>
+        )}
       </div>
 
       {/* Row 3: Collapsible session log viewer — correlated with the
-          selected row in the table above. */}
-      <SessionLogs selectedDate={selectedLogDate} />
+          selected row in the table above. Mutually exclusive with the
+          table section; opening one closes the other. */}
+      <SessionLogs
+        selectedDate={selectedLogDate}
+        expanded={activeSection === "logs"}
+        onToggle={() => toggleSection("logs")}
+      />
     </div>
   );
 }
