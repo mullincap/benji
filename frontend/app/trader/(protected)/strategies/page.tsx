@@ -1,8 +1,13 @@
 "use client";
 
-import { useState } from "react";
-import { useRouter } from "next/navigation";
+import { useCallback, useEffect, useState } from "react";
+import { useRouter, useSearchParams } from "next/navigation";
 import { useTrader, STRATEGY_CATALOG, CAPACITY_DATA, StrategyType, StrategyCatalogEntry, fmt, RISK_COLOR, RISK_DIM } from "../../context";
+import { allocatorApi } from "../../api";
+
+// TODO: extract a shared useIsAdmin() hook once >2 pages need it (simulator,
+// strategies, manager all duplicate this whoami probe).
+const API_BASE = process.env.NEXT_PUBLIC_API_BASE || "";
 
 function fmtAbbrev(n: number): string {
   if (n >= 1000000) return `$${(n / 1000000).toFixed(1)}m`;
@@ -65,11 +70,250 @@ function GridIcon({ color }: { color: string }) {
 
 // ─── Page ────────────────────────────────────────────────────────────────────
 
+type ToggleError = { strategyId: number; message: string } | null;
+
+function AdminToggleButton({
+  isPublished, busy, onClick,
+}: {
+  isPublished: boolean;
+  busy: boolean;
+  onClick: (e: React.MouseEvent) => void;
+}) {
+  const color = isPublished ? "var(--amber)" : "var(--green)";
+  const bg = isPublished ? "var(--amber-dim)" : "var(--green-dim)";
+  return (
+    <button
+      type="button"
+      disabled={busy}
+      onClick={e => { e.stopPropagation(); onClick(e); }}
+      style={{
+        position: "absolute", top: 8, right: 8,
+        background: bg, border: `1px solid ${color}`, color,
+        borderRadius: 3, padding: "3px 8px",
+        fontSize: 9, fontWeight: 700, letterSpacing: "0.12em",
+        textTransform: "uppercase",
+        fontFamily: "var(--font-space-mono), Space Mono, monospace",
+        cursor: busy ? "not-allowed" : "pointer",
+        opacity: busy ? 0.5 : 1,
+        zIndex: 2,
+      }}
+    >
+      {isPublished ? "Retire" : "Publish"}
+    </button>
+  );
+}
+
+function RetiredPill() {
+  return (
+    <span style={{
+      fontSize: 9, fontWeight: 700, letterSpacing: "0.12em",
+      textTransform: "uppercase",
+      color: "var(--amber)", background: "var(--amber-dim)",
+      border: "1px solid var(--amber)",
+      borderRadius: 3, padding: "3px 8px",
+    }}>
+      Retired
+    </span>
+  );
+}
+
+function ConfirmRetireModal({
+  displayName, submitting, onCancel, onConfirm,
+}: {
+  displayName: string;
+  submitting: boolean;
+  onCancel: () => void;
+  onConfirm: () => void;
+}) {
+  return (
+    <div
+      role="dialog"
+      aria-modal="true"
+      onClick={() => { if (!submitting) onCancel(); }}
+      style={{
+        position: "fixed", inset: 0,
+        background: "rgba(0,0,0,0.7)",
+        display: "flex", alignItems: "center", justifyContent: "center",
+        zIndex: 1000,
+      }}
+    >
+      <div
+        onClick={e => e.stopPropagation()}
+        style={{
+          background: "var(--bg2)",
+          border: "1px solid var(--line2)",
+          borderRadius: 6, padding: "20px 24px",
+          width: 480, maxWidth: "92vw",
+          fontFamily: "var(--font-space-mono), Space Mono, monospace",
+        }}
+      >
+        <div style={{
+          fontSize: 9, fontWeight: 700, letterSpacing: "0.12em",
+          color: "var(--t3)", textTransform: "uppercase",
+          marginBottom: 10,
+        }}>
+          Retire this strategy?
+        </div>
+        <div style={{ fontSize: 11, color: "var(--t1)", lineHeight: 1.6, marginBottom: 16 }}>
+          Retire <span style={{ color: "var(--t0)" }}>&lsquo;{displayName}&rsquo;</span>?
+          Allocator users with active positions will keep them, but no new allocations can be made.
+        </div>
+        <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
+          <button
+            type="button"
+            disabled={submitting}
+            onClick={onCancel}
+            style={{
+              background: "transparent",
+              border: "1px solid var(--line2)",
+              borderRadius: 4, padding: "8px 16px",
+              fontSize: 9, fontWeight: 700, letterSpacing: "0.12em",
+              textTransform: "uppercase",
+              color: "var(--t2)",
+              cursor: submitting ? "not-allowed" : "pointer",
+              fontFamily: "var(--font-space-mono), Space Mono, monospace",
+            }}
+          >
+            Cancel
+          </button>
+          <button
+            type="button"
+            disabled={submitting}
+            onClick={onConfirm}
+            style={{
+              background: "var(--amber-dim)",
+              border: "1px solid var(--amber)",
+              borderRadius: 4, padding: "8px 16px",
+              fontSize: 9, fontWeight: 700, letterSpacing: "0.12em",
+              textTransform: "uppercase",
+              color: "var(--amber)",
+              cursor: submitting ? "not-allowed" : "pointer",
+              fontFamily: "var(--font-space-mono), Space Mono, monospace",
+            }}
+          >
+            Retire
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export default function StrategiesPage() {
   const router = useRouter();
-  const { instances, loading } = useTrader();
+  const searchParams = useSearchParams();
+  const { instances, loading, includeRetired, setIncludeRetired, refresh } = useTrader();
   const [hoveredIndex, setHoveredIndex] = useState<number | null>(null);
   const [view, setView] = useState<"list" | "grid">("list");
+
+  const [isAdmin, setIsAdmin] = useState(false);
+  const [publishOverrides, setPublishOverrides] = useState<Record<number, boolean>>({});
+  const [inflight, setInflight] = useState<Record<number, boolean>>({});
+  const [toggleError, setToggleError] = useState<ToggleError>(null);
+  const [confirmTarget, setConfirmTarget] = useState<
+    { strategyId: number; displayName: string } | null
+  >(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await fetch(`${API_BASE}/api/admin/whoami`, { credentials: "include" });
+        if (!cancelled) setIsAdmin(res.ok);
+      } catch {
+        if (!cancelled) setIsAdmin(false);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, []);
+
+  // URL ?show_retired=1 only honored for admins. Non-admins never see retired strategies
+  // (the server also enforces this via the include_retired admin gate).
+  const urlShowRetired = searchParams?.get("show_retired") === "1";
+  const showRetired = isAdmin && urlShowRetired;
+
+  useEffect(() => {
+    if (showRetired !== includeRetired) {
+      setIncludeRetired(showRetired);
+    }
+  }, [showRetired, includeRetired, setIncludeRetired]);
+
+  const updateShowRetiredParam = useCallback((next: boolean) => {
+    const params = new URLSearchParams(searchParams?.toString() ?? "");
+    if (next) params.set("show_retired", "1");
+    else params.delete("show_retired");
+    const qs = params.toString();
+    router.replace(qs ? `/trader/strategies?${qs}` : "/trader/strategies");
+  }, [router, searchParams]);
+
+  const handleRetire = useCallback(async (strategyId: number) => {
+    setConfirmTarget(null);
+    setInflight(prev => ({ ...prev, [strategyId]: true }));
+    setToggleError(null);
+    const prevValue = publishOverrides[strategyId];
+    setPublishOverrides(prev => ({ ...prev, [strategyId]: false }));
+    try {
+      await allocatorApi.unpublishStrategy(strategyId);
+    } catch (err) {
+      setPublishOverrides(prev => {
+        const next = { ...prev };
+        if (prevValue === undefined) delete next[strategyId];
+        else next[strategyId] = prevValue;
+        return next;
+      });
+      const msg = err instanceof Error ? err.message : String(err);
+      const status = /^API (\d+):/.exec(msg)?.[1];
+      if (status === "401" || status === "403") {
+        setToggleError({ strategyId, message: "Admin access required" });
+      } else if (status === "404") {
+        setToggleError({ strategyId, message: "Strategy not found — may have been deleted." });
+        refresh();
+      } else {
+        setToggleError({ strategyId, message: "Something went wrong. Try again or check server logs." });
+        console.error("unpublishStrategy failed:", err);
+      }
+    } finally {
+      setInflight(prev => {
+        const next = { ...prev };
+        delete next[strategyId];
+        return next;
+      });
+    }
+  }, [publishOverrides, refresh]);
+
+  const handlePublish = useCallback(async (strategyId: number) => {
+    setInflight(prev => ({ ...prev, [strategyId]: true }));
+    setToggleError(null);
+    const prevValue = publishOverrides[strategyId];
+    setPublishOverrides(prev => ({ ...prev, [strategyId]: true }));
+    try {
+      await allocatorApi.publishStrategy(strategyId);
+    } catch (err) {
+      setPublishOverrides(prev => {
+        const next = { ...prev };
+        if (prevValue === undefined) delete next[strategyId];
+        else next[strategyId] = prevValue;
+        return next;
+      });
+      const msg = err instanceof Error ? err.message : String(err);
+      const status = /^API (\d+):/.exec(msg)?.[1];
+      if (status === "401" || status === "403") {
+        setToggleError({ strategyId, message: "Admin access required" });
+      } else if (status === "404") {
+        setToggleError({ strategyId, message: "Strategy not found — may have been deleted." });
+        refresh();
+      } else {
+        setToggleError({ strategyId, message: "Something went wrong. Try again or check server logs." });
+        console.error("publishStrategy failed:", err);
+      }
+    } finally {
+      setInflight(prev => {
+        const next = { ...prev };
+        delete next[strategyId];
+        return next;
+      });
+    }
+  }, [publishOverrides, refresh]);
 
   const CATALOG_ENTRIES = Object.entries(STRATEGY_CATALOG) as [string, StrategyCatalogEntry][];
 
@@ -89,6 +333,24 @@ export default function StrategiesPage() {
             STRATEGIES
           </div>
           <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
+            {isAdmin && (
+              <label
+                style={{
+                  display: "inline-flex", alignItems: "center", gap: 6,
+                  fontSize: 9, fontWeight: 700, letterSpacing: "0.12em",
+                  color: "var(--t2)", textTransform: "uppercase",
+                  cursor: "pointer", marginRight: 8,
+                }}
+              >
+                <input
+                  type="checkbox"
+                  checked={urlShowRetired}
+                  onChange={e => updateShowRetiredParam(e.target.checked)}
+                  style={{ cursor: "pointer" }}
+                />
+                Show retired
+              </label>
+            )}
             <button
               onClick={() => setView("list")}
               style={{
@@ -127,6 +389,18 @@ export default function StrategiesPage() {
           {CATALOG_ENTRIES.map(([type, cat], index) => {
             const hasInstance = instances.some(i => i.strategyType === type);
             const dominant = isDominant(index);
+            const strategyId = cat.strategyId;
+            const hasAdminToggle = isAdmin && strategyId > 0;
+            const effectivePublished = publishOverrides[strategyId] ?? cat.isPublished;
+            const busy = Boolean(inflight[strategyId]);
+            const cardError = toggleError && toggleError.strategyId === strategyId ? toggleError.message : null;
+            const onAdminToggle = () => {
+              if (effectivePublished) {
+                setConfirmTarget({ strategyId, displayName: cat.name });
+              } else {
+                handlePublish(strategyId);
+              }
+            };
 
             if (view === "list") {
               return (
@@ -138,9 +412,18 @@ export default function StrategiesPage() {
                     border: `1px solid ${hasInstance && dominant ? "var(--green-mid)" : "var(--line)"}`,
                     borderRadius: 5, padding: "20px 22px",
                     transition: trans, cursor: "pointer",
+                    position: "relative",
+                    opacity: effectivePublished ? 1 : 0.5,
                   }}
                   onClick={() => router.push(`/trader/strategies/${type}`)}
                 >
+                  {hasAdminToggle && (
+                    <AdminToggleButton
+                      isPublished={effectivePublished}
+                      busy={busy}
+                      onClick={onAdminToggle}
+                    />
+                  )}
                   {/* Top row */}
                   <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", marginBottom: 16 }}>
                     <div style={{ flex: 1 }}>
@@ -151,7 +434,13 @@ export default function StrategiesPage() {
                           color: RISK_COLOR[cat.risk], background: RISK_DIM[cat.risk],
                           borderRadius: 3, padding: "3px 8px",
                         }}>{cat.risk}</span>
+                        {!effectivePublished && <RetiredPill />}
                       </div>
+                      {cardError && (
+                        <div style={{ fontSize: 9, color: "var(--red)", marginTop: 4, letterSpacing: "0.06em" }}>
+                          {cardError}
+                        </div>
+                      )}
                       <p style={{ fontSize: 10, color: dominant ? "var(--t1)" : "var(--t3)", margin: 0, lineHeight: 1.5, maxWidth: 560, transition: trans }}>
                         {cat.description.split(".")[0]}.
                       </p>
@@ -222,17 +511,32 @@ export default function StrategiesPage() {
                   borderRadius: 5, padding: "20px 18px",
                   display: "flex", flexDirection: "column",
                   transition: trans, cursor: "pointer",
+                  position: "relative",
+                  opacity: effectivePublished ? 1 : 0.5,
                 }}
               >
+                {hasAdminToggle && (
+                  <AdminToggleButton
+                    isPublished={effectivePublished}
+                    busy={busy}
+                    onClick={onAdminToggle}
+                  />
+                )}
                 {/* Name + badge */}
-                <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 8, flexWrap: "wrap" }}>
                   <h3 style={{ fontSize: 13, fontWeight: 700, color: dominant ? "var(--t0)" : "var(--t2)", margin: 0, transition: trans }}>{cat.name}</h3>
                   <span style={{
                     fontSize: 9, fontWeight: 700, letterSpacing: "0.12em", textTransform: "uppercase",
                     color: RISK_COLOR[cat.risk], background: RISK_DIM[cat.risk],
                     borderRadius: 3, padding: "3px 8px",
                   }}>{cat.risk}</span>
+                  {!effectivePublished && <RetiredPill />}
                 </div>
+                {cardError && (
+                  <div style={{ fontSize: 9, color: "var(--red)", marginBottom: 6, letterSpacing: "0.06em" }}>
+                    {cardError}
+                  </div>
+                )}
 
                 {/* Description */}
                 <p style={{ fontSize: 10, color: dominant ? "var(--t1)" : "var(--t3)", margin: "0 0 14px", lineHeight: 1.5, flex: 1, transition: trans }}>
@@ -290,6 +594,15 @@ export default function StrategiesPage() {
           })}
         </div>
       </div>
+
+      {confirmTarget && (
+        <ConfirmRetireModal
+          displayName={confirmTarget.displayName}
+          submitting={Boolean(inflight[confirmTarget.strategyId])}
+          onCancel={() => setConfirmTarget(null)}
+          onConfirm={() => handleRetire(confirmTarget.strategyId)}
+        />
+      )}
     </div>
   );
 }

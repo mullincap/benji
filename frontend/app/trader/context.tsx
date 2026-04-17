@@ -65,8 +65,10 @@ export interface StrategyCatalogEntry {
   compoundedReturn: number;
   avgWinLoss: number;
   // Backend references
+  strategyId: number;
   strategyVersionId: string;
   capitalCapUsd: number | null;
+  isPublished: boolean;
 }
 
 export interface CapacityData {
@@ -104,8 +106,10 @@ function mapApiStrategyToCatalog(s: ApiStrategy): StrategyCatalogEntry {
     simpleReturn: m.total_return_pct ?? 0,
     compoundedReturn: m.cagr_pct ?? 0,
     avgWinLoss: m.profit_factor ?? 0,
+    strategyId: s.strategy_id,
     strategyVersionId: s.strategy_version_id,
     capitalCapUsd: s.capital_cap_usd,
+    isPublished: s.is_published,
   };
 }
 
@@ -118,7 +122,7 @@ const FALLBACK_CATALOG: Record<string, StrategyCatalogEntry> = {
     sharpe: 1.84, maxDd: 8.2, winRate: 61, ytd: 14.2, cagr: 18.7,
     profitFactor: 1.88, avg1m: 1.2, activeDays: 312, vol: 6.4,
     simpleReturn: 14.2, compoundedReturn: 18.7, avgWinLoss: 1.42,
-    strategyVersionId: "", capitalCapUsd: null,
+    strategyId: 0, strategyVersionId: "", capitalCapUsd: null, isPublished: true,
   },
   "alpha-mid": {
     name: "Alpha Mid", risk: "medium",
@@ -126,7 +130,7 @@ const FALLBACK_CATALOG: Record<string, StrategyCatalogEntry> = {
     sharpe: 2.63, maxDd: 14.6, winRate: 63, ytd: 38.2, cagr: 42.1,
     profitFactor: 2.25, avg1m: 2.4, activeDays: 342, vol: 11.8,
     simpleReturn: 38.2, compoundedReturn: 42.1, avgWinLoss: 1.71,
-    strategyVersionId: "", capitalCapUsd: null,
+    strategyId: 0, strategyVersionId: "", capitalCapUsd: null, isPublished: true,
   },
   "alpha-high": {
     name: "Alpha High", risk: "high",
@@ -134,7 +138,7 @@ const FALLBACK_CATALOG: Record<string, StrategyCatalogEntry> = {
     sharpe: 3.90, maxDd: 19.9, winRate: 67, ytd: 91.4, cagr: 187.3,
     profitFactor: 3.09, avg1m: 3.2, activeDays: 358, vol: 18.2,
     simpleReturn: 91.4, compoundedReturn: 187.3, avgWinLoss: 2.34,
-    strategyVersionId: "", capitalCapUsd: null,
+    strategyId: 0, strategyVersionId: "", capitalCapUsd: null, isPublished: true,
   },
 };
 
@@ -167,6 +171,10 @@ interface TraderState {
   // Loading / error
   loading: boolean;
   error: string | null;
+
+  // Admin-only: include retired strategies in the catalog
+  includeRetired: boolean;
+  setIncludeRetired: (v: boolean) => void;
 
   // Mutations (keep same interface for components)
   addExchange: (e: Exchange) => void;
@@ -224,6 +232,7 @@ export function TraderProvider({ children }: { children: ReactNode }) {
   const [instances, setInstances] = useState<StrategyInstance[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [includeRetired, setIncludeRetired] = useState(false);
 
   const refresh = useCallback(async () => {
     try {
@@ -232,7 +241,7 @@ export function TraderProvider({ children }: { children: ReactNode }) {
 
       // Fetch all data in parallel
       const [strategiesRes, exchangesRes, snapshotsRes, allocationsRes] = await Promise.all([
-        allocatorApi.getStrategies().catch(() => ({ strategies: [] as ApiStrategy[] })),
+        allocatorApi.getStrategies({ includeRetired }).catch(() => ({ strategies: [] as ApiStrategy[] })),
         allocatorApi.getExchanges().catch(() => ({ exchanges: [] as ApiExchange[] })),
         allocatorApi.getSnapshots().catch(() => ({ snapshots: [] as ApiSnapshot[], total_live_equity_usd: null, total_unrealized_pnl: null })),
         allocatorApi.getAllocations().catch(() => ({ allocations: [] as ApiAllocation[] })),
@@ -333,7 +342,7 @@ export function TraderProvider({ children }: { children: ReactNode }) {
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [includeRetired]);
 
   useEffect(() => { refresh(); }, [refresh]);
 
@@ -348,6 +357,7 @@ export function TraderProvider({ children }: { children: ReactNode }) {
   return (
     <TraderContext.Provider value={{
       exchanges, instances, loading, error,
+      includeRetired, setIncludeRetired,
       addExchange, removeExchange, addInstance, updateInstance, removeInstance,
       refresh,
     }}>

@@ -31,6 +31,7 @@ export interface ApiStrategy {
   filter_mode: string;
   capital_cap_usd: number | null;
   version_label: string;
+  is_published: boolean;
   metrics: {
     sharpe: number | null;
     sortino: number | null;
@@ -125,8 +126,22 @@ export interface ApiPnl {
 
 export const allocatorApi = {
   // Strategies
-  getStrategies: () =>
-    apiFetch<{ strategies: ApiStrategy[] }>("/api/allocator/strategies"),
+  getStrategies: (opts?: { includeRetired?: boolean }) =>
+    apiFetch<{ strategies: ApiStrategy[] }>(
+      `/api/allocator/strategies${opts?.includeRetired ? "?include_retired=true" : ""}`,
+    ),
+
+  publishStrategy: (strategyId: number) =>
+    apiFetch<{ strategy_id: number; name: string; display_name: string; is_published: boolean }>(
+      `/api/allocator/strategies/${strategyId}/publish`,
+      { method: "POST" },
+    ),
+
+  unpublishStrategy: (strategyId: number) =>
+    apiFetch<{ strategy_id: number; name: string; display_name: string; is_published: boolean }>(
+      `/api/allocator/strategies/${strategyId}/unpublish`,
+      { method: "POST" },
+    ),
 
   // Exchanges
   getExchanges: () =>

@@ -33,14 +33,16 @@ from decimal import Decimal
 from typing import Any
 from uuid import uuid4
 import requests as http_requests
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 
+from ...core.config import settings
 from ...db import get_cursor
 from ...core.config import load_secrets
+from ...services.admin_sessions import validate_session as _validate_admin_session
 from ...services.encryption import encrypt_key, decrypt_key
 from .auth import get_current_user
-from .admin import require_admin
+from .admin import require_admin, COOKIE_NAME as _ADMIN_COOKIE_NAME
 
 log = logging.getLogger(__name__)
 
@@ -314,22 +316,57 @@ def snapshots_refresh(user_id: str = Depends(get_current_user), cur=Depends(get_
 
 # ── Strategies ──────────────────────────────────────────────────────────────
 
+def _caller_is_admin(request: Request) -> bool:
+    """Best-effort admin check using the admin_session cookie. Mirrors
+    require_admin() but never raises — used to gate optional query params."""
+    from .admin import INTERNAL_API_TOKEN
+    internal_token = request.headers.get("X-Internal-Token")
+    if internal_token and INTERNAL_API_TOKEN and internal_token == INTERNAL_API_TOKEN:
+        return True
+    token = request.cookies.get(_ADMIN_COOKIE_NAME)
+    return bool(_validate_admin_session(settings.ADMIN_SESSIONS_FILE, token))
+
+
 @router.get("/strategies")
-def get_strategies(user_id: str = Depends(get_current_user), cur=Depends(get_cursor)) -> dict[str, Any]:
+def get_strategies(
+    request: Request,
+    include_retired: bool = False,
+    user_id: str = Depends(get_current_user),
+    cur=Depends(get_cursor),
+) -> dict[str, Any]:
     """
-    Return published strategies with their latest audit metrics.
-    Joins strategies → strategy_versions → latest audit results.
+    Return strategies with their latest audit metrics. By default only
+    published + active strategies are returned. Pass `include_retired=true`
+    (requires a valid admin session) to include retired strategies.
     """
-    cur.execute("""
-        SELECT
-            s.strategy_id, s.name, s.display_name, s.description,
-            s.filter_mode, s.capital_cap_usd,
-            sv.strategy_version_id, sv.version_label, sv.is_active
-        FROM audit.strategies s
-        JOIN audit.strategy_versions sv ON sv.strategy_id = s.strategy_id
-        WHERE s.is_published = TRUE AND sv.is_active = TRUE
-        ORDER BY s.strategy_id
-    """)
+    if include_retired and not _caller_is_admin(request):
+        raise HTTPException(
+            status_code=403,
+            detail="Admin session required to include retired strategies",
+        )
+
+    if include_retired:
+        cur.execute("""
+            SELECT
+                s.strategy_id, s.name, s.display_name, s.description,
+                s.filter_mode, s.capital_cap_usd, s.is_published,
+                sv.strategy_version_id, sv.version_label, sv.is_active
+            FROM audit.strategies s
+            JOIN audit.strategy_versions sv ON sv.strategy_id = s.strategy_id
+            WHERE sv.is_active = TRUE
+            ORDER BY s.is_published DESC, s.strategy_id
+        """)
+    else:
+        cur.execute("""
+            SELECT
+                s.strategy_id, s.name, s.display_name, s.description,
+                s.filter_mode, s.capital_cap_usd, s.is_published,
+                sv.strategy_version_id, sv.version_label, sv.is_active
+            FROM audit.strategies s
+            JOIN audit.strategy_versions sv ON sv.strategy_id = s.strategy_id
+            WHERE s.is_published = TRUE AND sv.is_active = TRUE
+            ORDER BY s.strategy_id
+        """)
     strategies = cur.fetchall()
 
     version_ids = [s["strategy_version_id"] for s in strategies]
@@ -402,6 +439,7 @@ def get_strategies(user_id: str = Depends(get_current_user), cur=Depends(get_cur
             "filter_mode": s["filter_mode"],
             "capital_cap_usd": s["capital_cap_usd"],
             "version_label": s["version_label"],
+            "is_published": bool(s["is_published"]),
             "metrics": metrics,
             "capacity": {
                 "allocators": cap_info["allocators"],
