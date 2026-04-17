@@ -247,7 +247,7 @@ export default function OverviewPage() {
         padding: 20,
         display: "flex",
         flexDirection: "column",
-        gap: 14,
+        gap: 24,
         height: "100%",
         overflow: "hidden",
       }}>
@@ -311,7 +311,7 @@ export default function OverviewPage() {
         padding: 20,
         display: "flex",
         flexDirection: "column",
-        gap: 14,
+        gap: 24,
         height: "100%",
         overflow: "hidden",
       }}
@@ -565,13 +565,15 @@ export default function OverviewPage() {
             border: "1px solid var(--line)",
             borderRadius: 5,
             padding: "12px 16px",
-            marginBottom: 10,
-            height: 330,
+            // Fixed chart height only when we have data to render; collapse
+            // to fit the "no data" placeholder otherwise so the vertical
+            // gap below matches the page-level gap.
+            height: hasAny ? 330 : undefined,
           }}>
             <div style={{ fontSize: 9, fontWeight: 700, letterSpacing: "0.12em", color: "var(--t3)", textTransform: "uppercase", marginBottom: 8 }}>
               Intraday Equity (today) · 06:00–00:00 UTC
             </div>
-            <div style={{ height: "calc(100% - 24px)" }}>
+            <div style={{ height: hasAny ? "calc(100% - 24px)" : "auto" }}>
               {hasAny ? (
                 <Line
                   data={{
