@@ -1,0 +1,397 @@
+"use client";
+
+/**
+ * SessionLogs.tsx
+ * ================
+ * Collapsible terminal-style viewer for the trader log, shown below the
+ * Daily Execution Summary on the Execution tab.
+ *
+ * Behavior:
+ *   - Default collapsed. Click header to expand.
+ *   - `selectedDate` prop (from the parent page) chooses which session to
+ *     display. null → server returns the most recent session.
+ *   - Expanded + session_active=true → polls /execution-logs every 15s with
+ *     `since_line` so only new lines cross the wire.
+ *   - Auto-scrolls to the latest line when new lines arrive, UNLESS the user
+ *     has scrolled up (we detect via the bottom-threshold check on scroll).
+ *   - "Load earlier lines" button appears when from_line > 0; prepends older
+ *     lines while preserving the visual scroll position via a scroll-height
+ *     delta adjustment.
+ */
+
+import { useCallback, useEffect, useRef, useState } from "react";
+
+const API_BASE = process.env.NEXT_PUBLIC_API_BASE || "";
+const FONT_MONO = "var(--font-space-mono), Space Mono, monospace";
+const POLL_INTERVAL_MS = 15_000;
+const BOTTOM_THRESHOLD_PX = 20;
+const LOAD_LIMIT = 500;
+const MAX_HEIGHT_PX = 500;
+
+interface LogLine {
+  n: number;
+  ts: string;
+  level: string;
+  text: string;
+}
+
+interface LogResponse {
+  date: string | null;
+  total_lines: number;
+  from_line: number;
+  lines: LogLine[];
+  session_active: boolean;
+}
+
+function levelColor(level: string): string {
+  switch (level) {
+    case "ERROR":
+    case "CRITICAL":
+      return "var(--red)";
+    case "WARNING":
+    case "WARN":
+      return "var(--amber)";
+    default:
+      return "#e0e0e0";
+  }
+}
+
+// Extract HH:MM:SS from "YYYY-MM-DD HH:MM:SS"
+function shortTime(ts: string): string {
+  return ts.split(" ")[1] ?? ts;
+}
+
+function LivePulse() {
+  return (
+    <span
+      style={{
+        display: "inline-flex",
+        alignItems: "center",
+        gap: 5,
+        color: "var(--green)",
+        fontSize: 9,
+        fontWeight: 700,
+        letterSpacing: "0.12em",
+        fontFamily: FONT_MONO,
+      }}
+    >
+      <span
+        style={{
+          width: 7,
+          height: 7,
+          borderRadius: "50%",
+          background: "var(--green)",
+          animation: "portfolio-pulse 1.6s ease-in-out infinite",
+        }}
+      />
+      LIVE
+    </span>
+  );
+}
+
+export default function SessionLogs({
+  selectedDate,
+}: {
+  selectedDate: string | null;
+}) {
+  const [collapsed, setCollapsed] = useState(true);
+  const [lines, setLines] = useState<LogLine[]>([]);
+  const [total, setTotal] = useState(0);
+  const [fromLine, setFromLine] = useState(0);
+  const [sessionActive, setSessionActive] = useState(false);
+  const [sessionDate, setSessionDate] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [loadingEarlier, setLoadingEarlier] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const bottomedOutRef = useRef(true);
+  // Keep the latest n without retriggering pollNew on every lines update.
+  const lastNRef = useRef(-1);
+
+  useEffect(() => {
+    lastNRef.current = lines.length ? lines[lines.length - 1].n : -1;
+  }, [lines]);
+
+  const fetchInitial = useCallback(async (date: string | null) => {
+    setLoading(true);
+    setError(null);
+    try {
+      const url = new URL(`${API_BASE}/api/manager/execution-logs`);
+      if (date) url.searchParams.set("date", date);
+      url.searchParams.set("limit", String(LOAD_LIMIT));
+      const res = await fetch(url.toString(), { credentials: "include" });
+      if (res.status === 401) throw new Error("Session expired");
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data: LogResponse = await res.json();
+      setLines(data.lines);
+      setTotal(data.total_lines);
+      setFromLine(data.from_line);
+      setSessionActive(data.session_active);
+      setSessionDate(data.date);
+      bottomedOutRef.current = true;
+      // Scroll to bottom after layout.
+      requestAnimationFrame(() => {
+        const el = scrollRef.current;
+        if (el) el.scrollTop = el.scrollHeight;
+      });
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  const pollNew = useCallback(async () => {
+    try {
+      const url = new URL(`${API_BASE}/api/manager/execution-logs`);
+      if (sessionDate) url.searchParams.set("date", sessionDate);
+      url.searchParams.set("since_line", String(lastNRef.current));
+      url.searchParams.set("limit", String(LOAD_LIMIT));
+      const res = await fetch(url.toString(), { credentials: "include" });
+      if (!res.ok) return;
+      const data: LogResponse = await res.json();
+      setTotal(data.total_lines);
+      setSessionActive(data.session_active);
+      if (data.lines.length === 0) return;
+      setLines((prev) => {
+        const byN = new Map<number, LogLine>();
+        for (const l of prev) byN.set(l.n, l);
+        for (const l of data.lines) byN.set(l.n, l);
+        return Array.from(byN.values()).sort((a, b) => a.n - b.n);
+      });
+      if (bottomedOutRef.current) {
+        requestAnimationFrame(() => {
+          const el = scrollRef.current;
+          if (el) el.scrollTop = el.scrollHeight;
+        });
+      }
+    } catch {
+      // Swallow transient polling errors silently; the next tick will retry.
+    }
+  }, [sessionDate]);
+
+  const loadEarlier = useCallback(async () => {
+    if (fromLine <= 0 || loadingEarlier) return;
+    setLoadingEarlier(true);
+    try {
+      const el = scrollRef.current;
+      const prevScrollHeight = el?.scrollHeight ?? 0;
+      const prevScrollTop = el?.scrollTop ?? 0;
+
+      // Request the chunk of `LOAD_LIMIT` lines ending just before fromLine.
+      // API returns lines with n > since_line, so since_line = start - 1.
+      const targetStart = Math.max(0, fromLine - LOAD_LIMIT);
+      const sinceParam = targetStart - 1;
+
+      const url = new URL(`${API_BASE}/api/manager/execution-logs`);
+      if (sessionDate) url.searchParams.set("date", sessionDate);
+      url.searchParams.set("since_line", String(sinceParam));
+      url.searchParams.set("limit", String(LOAD_LIMIT));
+      const res = await fetch(url.toString(), { credentials: "include" });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data: LogResponse = await res.json();
+      setLines((prev) => {
+        const byN = new Map<number, LogLine>();
+        for (const l of data.lines) byN.set(l.n, l);
+        for (const l of prev) byN.set(l.n, l);
+        return Array.from(byN.values()).sort((a, b) => a.n - b.n);
+      });
+      setFromLine(data.from_line);
+      setTotal(data.total_lines);
+
+      // Preserve the user's view: when we prepend, scrollHeight grows.
+      // Keep scrollTop offset by the growth so the currently-visible lines
+      // stay where they are on screen.
+      requestAnimationFrame(() => {
+        const nextEl = scrollRef.current;
+        if (!nextEl) return;
+        const delta = nextEl.scrollHeight - prevScrollHeight;
+        nextEl.scrollTop = prevScrollTop + delta;
+      });
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setLoadingEarlier(false);
+    }
+  }, [fromLine, sessionDate, loadingEarlier]);
+
+  const handleScroll = () => {
+    const el = scrollRef.current;
+    if (!el) return;
+    bottomedOutRef.current =
+      el.scrollHeight - el.scrollTop - el.clientHeight <= BOTTOM_THRESHOLD_PX;
+  };
+
+  // (Re)fetch when expanded OR when selectedDate changes while expanded.
+  useEffect(() => {
+    if (collapsed) return;
+    fetchInitial(selectedDate);
+  }, [collapsed, selectedDate, fetchInitial]);
+
+  // Poll while expanded + active.
+  useEffect(() => {
+    if (collapsed || !sessionActive) return;
+    const id = setInterval(pollNew, POLL_INTERVAL_MS);
+    return () => clearInterval(id);
+  }, [collapsed, sessionActive, pollNew]);
+
+  // Header summary text on the right side
+  const headerRight = (() => {
+    if (loading && lines.length === 0) {
+      return <span style={{ color: "var(--t3)" }}>loading…</span>;
+    }
+    if (error) {
+      return <span style={{ color: "var(--red)" }}>{error}</span>;
+    }
+    if (total > 0) {
+      return (
+        <span style={{ color: "var(--t2)", fontSize: 10 }}>
+          {total.toLocaleString()} lines
+        </span>
+      );
+    }
+    return null;
+  })();
+
+  return (
+    <div
+      style={{
+        background: "var(--bg2)",
+        border: "1px solid var(--line)",
+        borderRadius: 5,
+        overflow: "hidden",
+      }}
+    >
+      {/* Header / toggle */}
+      <button
+        type="button"
+        onClick={() => setCollapsed((c) => !c)}
+        style={{
+          width: "100%",
+          display: "flex",
+          alignItems: "center",
+          gap: 10,
+          background: "transparent",
+          border: "none",
+          padding: "12px 16px",
+          cursor: "pointer",
+          textAlign: "left",
+          fontFamily: FONT_MONO,
+          color: "var(--t3)",
+          fontSize: 9,
+          fontWeight: 700,
+          letterSpacing: "0.12em",
+          textTransform: "uppercase",
+        }}
+      >
+        <span style={{ color: "var(--t2)", width: 14 }}>
+          {collapsed ? "▸" : "▾"}
+        </span>
+        <span>Session Logs</span>
+        {sessionDate && (
+          <span style={{ color: "var(--t2)", fontWeight: 400, letterSpacing: "0.06em" }}>
+            — {sessionDate}
+          </span>
+        )}
+        <span style={{ flex: 1 }} />
+        {sessionActive && <LivePulse />}
+        {headerRight}
+      </button>
+
+      {/* Body */}
+      {!collapsed && (
+        <div style={{ borderTop: "1px solid var(--line)" }}>
+          {fromLine > 0 && (
+            <div
+              style={{
+                display: "flex",
+                justifyContent: "center",
+                padding: "8px",
+                borderBottom: "1px solid var(--line)",
+                background: "var(--bg1)",
+              }}
+            >
+              <button
+                type="button"
+                onClick={loadEarlier}
+                disabled={loadingEarlier}
+                style={{
+                  background: "transparent",
+                  border: "1px solid var(--line)",
+                  borderRadius: 4,
+                  color: "var(--t2)",
+                  fontSize: 9,
+                  fontWeight: 700,
+                  letterSpacing: "0.12em",
+                  textTransform: "uppercase",
+                  padding: "4px 14px",
+                  cursor: loadingEarlier ? "default" : "pointer",
+                  fontFamily: FONT_MONO,
+                  opacity: loadingEarlier ? 0.6 : 1,
+                }}
+              >
+                {loadingEarlier
+                  ? "Loading…"
+                  : `Load earlier lines (${fromLine.toLocaleString()} hidden)`}
+              </button>
+            </div>
+          )}
+
+          <div
+            ref={scrollRef}
+            onScroll={handleScroll}
+            style={{
+              maxHeight: MAX_HEIGHT_PX,
+              overflowY: "auto",
+              background: "var(--bg1)",
+              fontFamily: FONT_MONO,
+              fontSize: 10,
+              lineHeight: "18px",
+              padding: "8px 0",
+            }}
+          >
+            {lines.length === 0 && !loading && !error && (
+              <div
+                style={{
+                  padding: "24px",
+                  textAlign: "center",
+                  color: "var(--t3)",
+                  fontSize: 10,
+                }}
+              >
+                No log lines for this session yet.
+              </div>
+            )}
+            {lines.map((line) => (
+              <LogRow key={line.n} line={line} />
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function LogRow({ line }: { line: LogLine }) {
+  const color = levelColor(line.level);
+  return (
+    <div
+      style={{
+        display: "grid",
+        gridTemplateColumns: "48px 72px 48px 1fr",
+        gap: 8,
+        padding: "0 14px",
+        whiteSpace: "pre-wrap",
+        wordBreak: "break-word",
+      }}
+    >
+      <span style={{ color: "var(--t3)", textAlign: "right" }}>{line.n}</span>
+      <span style={{ color: "var(--t3)" }}>{shortTime(line.ts)}</span>
+      <span style={{ color: color, fontWeight: 700 }}>
+        {line.level === "WARNING" ? "WARN" : line.level}
+      </span>
+      <span style={{ color: color }}>{line.text}</span>
+    </div>
+  );
+}

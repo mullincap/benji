@@ -21,10 +21,18 @@ services:
       - PIPELINE_DIR=/app/pipeline
       - PIPELINE_PYTHON=python
       - NODE_BIN=node
+      # Trader runs on the host (not in a container) and writes to the
+      # project-root-relative paths below. The backend reads them via the
+      # :ro bind mount defined in `volumes`.
+      - BLOFIN_LOG_FILE=/host_trader/blofin_executor.log
+      - BLOFIN_REPORTS_DIR=/host_trader/blofin_execution_reports
     volumes:
       - jobs_data:/app/backend/jobs
       - backend_data:/app/backend/data
       - /data:/data
+      # Read-only view of the trader's working dir so the Manager API can
+      # serve execution reports and the trader log stream.
+      - /root/benji:/host_trader:ro
     depends_on:
       redis:
         condition: service_healthy

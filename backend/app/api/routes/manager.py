@@ -16,6 +16,7 @@ Endpoints:
 from __future__ import annotations
 
 import os
+import re
 import json
 import datetime
 from decimal import Decimal
@@ -23,7 +24,7 @@ from pathlib import Path
 from typing import Any
 
 import httpx
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel
 
 from ...db import get_cursor
@@ -935,3 +936,163 @@ def get_portfolio(date: str, cur=Depends(get_cursor)) -> dict[str, Any]:
     } for b in bar_rows]
 
     return {"meta": meta, "bars": bars}
+
+
+# ── Trader log stream (session-windowed, paginated) ──────────────────────────
+# Reads the trader's append-only log file (blofin_executor.log), segments by
+# SESSION {date} headers the trader emits at each session start, and returns
+# a line-numbered page for the requested session. Designed for live polling:
+# the frontend passes the last line number it has and gets only newer lines.
+#
+# Path is configurable via BLOFIN_LOG_FILE env var. In Docker, the backend
+# container needs a bind mount pointing at the host's project dir — see
+# docker-compose.yml (`/host_trader:/ro`).
+
+_LOG_LINE_RE = re.compile(
+    # "YYYY-MM-DD HH:MM:SS[,ms] [LEVEL] message..."
+    r"^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})(?:,\d+)?\s+\[(\w+)\]\s+(.*)$"
+)
+_SESSION_HEADER_RE = re.compile(r"^\s*SESSION\s+(\d{4}-\d{2}-\d{2})")
+
+
+def _resolve_log_path() -> Path:
+    """
+    BLOFIN_LOG_FILE env override, else project-root-relative
+    blofin_executor.log (same project-root resolution as _resolve_reports_dir).
+    """
+    override = os.environ.get("BLOFIN_LOG_FILE")
+    if override:
+        return Path(override)
+    return Path(__file__).resolve().parents[4] / "blofin_executor.log"
+
+
+def _parse_log_line(raw: str) -> dict[str, str] | None:
+    """Return {ts, level, text} for a well-formed line; None for continuations."""
+    m = _LOG_LINE_RE.match(raw)
+    if not m:
+        return None
+    return {"ts": m.group(1), "level": m.group(2), "text": m.group(3)}
+
+
+def _read_trader_log() -> list[dict[str, str]]:
+    """
+    Parse the entire log file, folding continuation lines (tracebacks, etc.)
+    into the previous entry's text. Returns entries in file order.
+    """
+    path = _resolve_log_path()
+    if not path.exists():
+        return []
+    out: list[dict[str, str]] = []
+    with open(path, encoding="utf-8", errors="replace") as f:
+        for raw in f:
+            raw = raw.rstrip("\n")
+            if not raw:
+                continue
+            ent = _parse_log_line(raw)
+            if ent is not None:
+                out.append(ent)
+            elif out:
+                out[-1]["text"] = out[-1]["text"] + "\n" + raw
+    return out
+
+
+def _session_window(
+    entries: list[dict[str, str]],
+    target_date: str | None,
+) -> tuple[str | None, list[dict[str, str]]]:
+    """
+    Return (session_date, entries_in_window) for the requested session.
+
+    Primary strategy: find the SESSION {date} header the trader writes at
+    session start. Window is [that header .. next SESSION header or EOF].
+    --resume emits a new SESSION header with the same date; we pick the
+    latest matching marker so resumed sessions show the most recent window.
+
+    Fallback when no matching header: all entries whose ts starts with the
+    target date (UTC trading-day approximation).
+    """
+    markers: list[tuple[int, str]] = []
+    for i, e in enumerate(entries):
+        mm = _SESSION_HEADER_RE.match(e["text"])
+        if mm:
+            markers.append((i, mm.group(1)))
+
+    if not markers:
+        if target_date is None:
+            return None, []
+        return target_date, [e for e in entries if e["ts"].startswith(target_date)]
+
+    if target_date is None:
+        start_idx, date = markers[-1]
+    else:
+        matching = [m for m in markers if m[1] == target_date]
+        if not matching:
+            return target_date, [e for e in entries if e["ts"].startswith(target_date)]
+        start_idx, date = matching[-1]
+
+    next_starts = [m[0] for m in markers if m[0] > start_idx]
+    end_idx = next_starts[0] if next_starts else len(entries)
+    return date, entries[start_idx:end_idx]
+
+
+@router.get("/execution-logs")
+def execution_logs(
+    date: str | None = None,
+    since_line: int | None = None,
+    limit: int = Query(default=500, ge=1, le=2000),
+    cur=Depends(get_cursor),
+) -> dict[str, Any]:
+    """
+    Return trader log lines for one session window.
+
+    date:        YYYY-MM-DD; omitted → most recent session.
+    since_line:  return only lines with n > since_line (live-polling cursor).
+                 Omitted → tail the last `limit` lines.
+    limit:       1..2000, default 500.
+
+    Response: {date, total_lines, from_line, lines[], session_active}.
+    session_active is true iff user_mgmt.portfolio_sessions shows status
+    'active' for the session's date (covers the common "is trader still
+    running?" UI-polling question).
+    """
+    if date is not None:
+        if len(date) != 10 or date[4] != "-" or date[7] != "-":
+            raise HTTPException(status_code=400, detail="invalid date")
+
+    entries = _read_trader_log()
+    session_date, window = _session_window(entries, date)
+    total = len(window)
+
+    if since_line is None:
+        start = max(0, total - limit)
+    else:
+        start = max(0, since_line + 1)
+    end = min(total, start + limit)
+
+    lines = [
+        {"n": start + i,
+         "ts": e["ts"],
+         "level": e["level"],
+         "text": e["text"]}
+        for i, e in enumerate(window[start:end])
+    ]
+
+    session_active = False
+    if session_date:
+        cur.execute(
+            """
+            SELECT 1
+            FROM user_mgmt.portfolio_sessions
+            WHERE signal_date = %s AND status = 'active'
+            """,
+            (session_date,),
+        )
+        session_active = cur.fetchone() is not None
+
+    return {
+        "date":           session_date,
+        "total_lines":    total,
+        "from_line":      start,
+        "lines":          lines,
+        "session_active": session_active,
+    }

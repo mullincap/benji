@@ -32,3 +32,5 @@ checkpoint_*.txt
 # Live-trader runtime artifacts (execution reports + portfolio NDJSON backup)
 blofin_execution_reports/
 
+blofin_executor.log
+blofin_executor_state.json

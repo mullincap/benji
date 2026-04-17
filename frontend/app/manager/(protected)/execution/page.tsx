@@ -13,6 +13,7 @@
  */
 
 import { useCallback, useEffect, useMemo, useState } from "react";
+import SessionLogs from "./SessionLogs";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE || "";
 
@@ -412,6 +413,9 @@ export default function ExecutionPage() {
   const [error, setError] = useState<string | null>(null);
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [windowPreset, setWindowPreset] = useState<WindowPreset>(DEFAULT_WINDOW);
+  // null → SessionLogs shows the most recent session. Any row click sets this
+  // to the clicked row's date so the log viewer correlates with the table.
+  const [selectedLogDate, setSelectedLogDate] = useState<string | null>(null);
 
   const load = useCallback(() => {
     fetch(`${API_BASE}/api/manager/execution-reports`, {
@@ -437,6 +441,8 @@ export default function ExecutionPage() {
       else next.add(date);
       return next;
     });
+    // Correlate the log viewer with the clicked row.
+    setSelectedLogDate(date);
   }, []);
 
   // Aggregate KPIs across all reports
@@ -659,6 +665,10 @@ export default function ExecutionPage() {
           </table>
         )}
       </div>
+
+      {/* Row 3: Collapsible session log viewer — correlated with the
+          selected row in the table above. */}
+      <SessionLogs selectedDate={selectedLogDate} />
     </div>
   );
 }
@@ -678,8 +688,14 @@ function DayRow({
   const flat = FLAT_REASONS.has(exitReason);
 
   if (flat) {
+    // Flat rows aren't expandable (no fill/monitoring data), but clicking
+    // still points the SessionLogs viewer at this day's logs — handy for
+    // understanding why a filter blocked the session.
     return (
-      <tr style={{ opacity: 0.5 }}>
+      <tr
+        onClick={onToggle}
+        style={{ opacity: 0.6, cursor: "pointer" }}
+      >
         <td style={tdStyle}></td>
         <td style={{ ...tdStyle, color: "var(--t2)" }}>{report.date}</td>
         <td style={tdStyle}>{report.signal?.count ?? 0}</td>
