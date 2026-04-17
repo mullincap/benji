@@ -73,7 +73,7 @@ CONVICTION_BAR     = 6        # bar-6 closes at 35 min (06:35 UTC)
 FILL_MAX_BAR       = 143      # EARLY_FILL gate closes at bar 143 (18:00 UTC)
 
 # -- Strategy parameters (must match backtest exactly) ---------------------
-L_HIGH       = 2.0     # base leverage floor; L_BASE=0 never selected
+L_HIGH       = 2.3     # base leverage floor; L_BASE=0 never selected
 KILL_Y       = 0.003   # 0.3%  -- bar-6 conviction threshold
 CONVICTION_EXEC_BUFFER_MIN = 20 # minutes after 06:35 within which we still execute so 6:45 UTC
                                  # if conviction passes. After 06:46, log but don't trade.
