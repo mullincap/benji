@@ -419,6 +419,16 @@ def _fetch_portfolio_context(cur) -> dict[str, Any]:
     wtd_usd   = _usd_from_pct(wtd_pct,   usd_base)
     mtd_usd   = _usd_from_pct(mtd_pct,   usd_base)
 
+    # Total P&L since first recorded day. Uses the earliest equity in the
+    # portfolio_equity_30d series as the baseline — same anchor the chart
+    # visually starts from, so the card value is consistent with the curve
+    # above it.
+    initial_equity = portfolio_equity[0]["equity_usd"] if portfolio_equity else 0.0
+    total_pnl_usd = (usd_base - initial_equity) if initial_equity else 0.0
+    total_pnl_pct = (
+        (total_pnl_usd / initial_equity * 100) if initial_equity else 0.0
+    )
+
     return {
         "allocations": alloc_list,
         "total_aum": total_aum_f,
@@ -428,6 +438,8 @@ def _fetch_portfolio_context(cur) -> dict[str, Any]:
         "wtd_usd": round(wtd_usd, 2),
         "mtd_pct": round(mtd_pct, 2),
         "mtd_usd": round(mtd_usd, 2),
+        "total_pnl_usd": round(total_pnl_usd, 2),
+        "total_pnl_pct": round(total_pnl_pct, 2),
         "max_drawdown": round(max_dd, 1),
         "portfolio_equity_30d": portfolio_equity,
         "intraday_equity": intraday_equity,

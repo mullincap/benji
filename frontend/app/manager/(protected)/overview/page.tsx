@@ -77,6 +77,8 @@ interface OverviewData {
   wtd_usd: number;
   mtd_pct: number;
   mtd_usd: number;
+  total_pnl_usd: number;
+  total_pnl_pct: number;
   max_drawdown: number;
   portfolio_equity_30d: { date: string; equity_usd: number }[];
   intraday_equity: { time: string; equity_usd: number }[];
@@ -164,11 +166,14 @@ function KpiCard({
   value,
   color,
   subvalue,
+  subvalueColor,
 }: {
   label: string;
   value: string;
   color?: string;
   subvalue?: string;
+  /** Override color for the subvalue line only. Defaults to the main `color`. */
+  subvalueColor?: string;
 }) {
   return (
     <div
@@ -207,7 +212,7 @@ function KpiCard({
         <div
           style={{
             fontSize: 11,
-            color: color || "var(--t2)",
+            color: subvalueColor || color || "var(--t2)",
             fontFamily: "var(--font-space-mono), Space Mono, monospace",
             marginTop: 4,
             opacity: 0.8,
@@ -345,6 +350,12 @@ export default function OverviewPage() {
         <KpiCard
           label="Total AUM"
           value={`$${(data.total_live_equity_usd ?? data.total_aum).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`}
+          subvalue={`${fmtUsdSigned(data.total_pnl_usd)} (${fmtPct(data.total_pnl_pct)})`}
+          subvalueColor={
+            data.total_pnl_usd > 0 ? "var(--green)"
+            : data.total_pnl_usd < 0 ? "var(--red)"
+            : "var(--t1)"
+          }
         />
         <KpiCard
           label="Today"
