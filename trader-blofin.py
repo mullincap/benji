@@ -121,7 +121,13 @@ TAKER_FEE_PCT          = 0.0008   # 0.04% per side x 2 = 0.08% round-trip
 FUNDING_RATE_DAILY_PCT = 0.0002   # ~0.02% per day (2 windows x ~0.01%)
 
 # -- Signal files ----------------------------------------------------------
-DEPLOYS_CSV   = Path("live_deploys_signal.csv")
+# All paths anchored to the script's own directory so invocation from any
+# cwd (including cron, whose default cwd is the user's home) writes to the
+# project root. Before this anchor was added, root-user cron invocations
+# landed files in /root/ instead of /root/benji/, which broke the Manager
+# backend's /host_trader bind-mount view of trader artifacts.
+_SCRIPT_DIR   = Path(__file__).resolve().parent
+DEPLOYS_CSV   = _SCRIPT_DIR / "live_deploys_signal.csv"
 ACTIVE_FILTER = "Tail Guardrail"
 SYMBOL_SUFFIX = "-USDT"
 
@@ -141,15 +147,16 @@ BINANCE_BASE  = "https://fapi.binance.com"
 ALERT_EMAIL = os.environ.get("ALERT_EMAIL", "")
 
 # -- Persistence -----------------------------------------------------------
-STATE_FILE  = Path("blofin_executor_state.json")
-RETURNS_LOG = Path("blofin_returns_log.csv")
-ALERTS_LOG  = Path("blofin_alerts.log")
-LOCK_FILE   = Path(".trader_session.lock")
-REPORTS_DIR = Path("blofin_execution_reports")
+# See comment above _SCRIPT_DIR for why every path is anchored.
+STATE_FILE    = _SCRIPT_DIR / "blofin_executor_state.json"
+RETURNS_LOG   = _SCRIPT_DIR / "blofin_returns_log.csv"
+ALERTS_LOG    = _SCRIPT_DIR / "blofin_alerts.log"
+LOCK_FILE     = _SCRIPT_DIR / ".trader_session.lock"
+REPORTS_DIR   = _SCRIPT_DIR / "blofin_execution_reports"
 PORTFOLIO_DIR = REPORTS_DIR / "portfolios"
 
 _SESSION_ALERT_COUNT = 0
-LOG_FILE    = Path("blofin_executor.log")
+LOG_FILE      = _SCRIPT_DIR / "blofin_executor.log"
 
 
 # ==========================================================================

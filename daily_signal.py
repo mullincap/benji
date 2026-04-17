@@ -86,8 +86,13 @@ DISPERSION_SYMBOLS = [
     "ENAUSDT","APTUSDT","FILUSDT","STXUSDT","ARBUSDT",
 ]
 
+# Anchor every output path to the script's dir so cron invocations (which
+# have cwd=/root) still write to /root/benji/ where the backend container's
+# /host_trader bind mount can see them.
+_SCRIPT_DIR           = Path(__file__).resolve().parent
+
 # Cache file for daily returns (avoids re-fetching on every run)
-DISPERSION_CACHE_FILE = Path("dispersion_returns_cache.csv")
+DISPERSION_CACHE_FILE = _SCRIPT_DIR / "dispersion_returns_cache.csv"
 
 # -- Binance API ------------------------------------------------------------
 BINANCE_BASE    = "https://fapi.binance.com"
@@ -96,10 +101,10 @@ REQUEST_DELAY   = 0.08    # seconds between requests (rate-limit safety)
 MAX_RETRIES     = 3
 
 # -- Output -----------------------------------------------------------------
-DEPLOYS_CSV          = Path("live_deploys_signal.csv")
+DEPLOYS_CSV          = _SCRIPT_DIR / "live_deploys_signal.csv"
 DEPLOYS_RETAIN_DAYS  = 90     # prune rows older than this many days
 FILTER_NAME          = "Tail Guardrail"
-LOG_FILE             = Path("daily_signal.log")
+LOG_FILE             = _SCRIPT_DIR / "daily_signal.log"
 
 
 # ==========================================================================
