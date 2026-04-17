@@ -21,9 +21,22 @@ pipeline/     Pure Python CLI scripts (data compilation, indexing, audit engine)
 | **Compiler** | Downloads and compiles market data (Binance, BloFin, CoinGecko, Amberdata) |
 | **Indexer** | Builds intraday leaderboards and ranking signals |
 | **Simulator** | Backtesting engine with risk audit pipeline |
-| **Manager** | Claude-powered portfolio intelligence layer |
+| **Manager** | Portfolio intelligence — Overview / Execution / Portfolios / Chat tabs (see below) |
 | **Allocator** | Live exchange connections and allocation management |
 | **Trader** | Live trading interface (BloFin) |
+
+## Manager surface
+
+Four tabs under `/manager`:
+
+- **Overview** — total AUM, allocations, pipeline status, 30-day equity curve, today's intraday equity
+- **Execution** — per-session trader scorecards (signal / conviction / fills with bps slippage / retries / P&L vs estimate) backed by `blofin_execution_reports/YYYY-MM-DD.json`. Collapsible Session Logs viewer tails the live trader log with 15s polling during active sessions
+- **Portfolios** — bar-by-bar live-trader timeline per traded day. List view + drill-down with Chart.js cumulative ROI chart (per-symbol + portfolio overlay) and a 5-min ROI matrix. 30s polling when a session is active. Backed by `user_mgmt.portfolio_sessions` + `user_mgmt.portfolio_bars`
+- **Chat** — conversational Claude interface over the portfolio context
+
+The trader (`trader-blofin.py`) is the source of truth for Execution + Portfolios data — it writes to disk + Postgres on every 5-minute bar. The dashboards are read-only views over those stores.
+
+See `CLAUDE.md`, `CLAUDE_FRONTEND.md`, `CLAUDE_BACKEND.md`, `CLAUDE_PIPELINE.md` for domain-specific context.
 
 ## Local Development
 
