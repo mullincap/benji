@@ -792,35 +792,23 @@ def enter_positions(api: BlofinREST, inst_ids, entry_prices,
 
     tradeable    = [i for i in inst_ids if entry_prices.get(i, 0) > 0]
     n_tradeable  = max(len(tradeable), 1)
-    usdt_per_sym = usdt_total / n_tradeable
+    MARGIN_BUFFER = 0.10
+    usdt_deployable = usdt_total * (1 - MARGIN_BUFFER)
+    usdt_per_sym    = usdt_deployable / n_tradeable
 
     # BloFin requires integer leverage
     lev_int = max(1, int(math.ceil(eff_lev)))
 
     log.info(
         f"Entering {len(tradeable)} positions  "
-        f"${usdt_total:,.0f} total  ${usdt_per_sym:,.0f}/symbol  "
+        f"${usdt_total:,.0f} total  ${usdt_deployable:,.0f} deployable (10% buffer)  ${usdt_per_sym:,.0f}/symbol  "
         f"lev={eff_lev:.3f}x (set as {lev_int}x integer)  "
         f"{'[DRY RUN]' if dry_run else '[LIVE]'}"
     )
 
     opened = []
-    remaining_syms = len(tradeable)
+    failed = []
     for inst_id in tradeable:
-        price = entry_prices[inst_id]
-
-        # Re-fetch live balance so each order uses actual remaining equity,
-        # preventing the last symbol from failing due to rounding/fee drift.
-        if not dry_run:
-            live_bal = get_account_balance_usdt(api)
-            if live_bal >= 10:
-                usdt_per_sym = (live_bal * CAPITAL_VALUE
-                                if CAPITAL_MODE == "pct_balance"
-                                else min(CAPITAL_VALUE, live_bal)) / remaining_syms
-            else:
-                log.warning(f"  Live balance refetch returned ${live_bal:.2f} -- using original allocation")
-
-        remaining_syms -= 1
         price = entry_prices[inst_id]
 
         # Fetch instrument constraints (confirmed from mtrader2.py)
@@ -899,7 +887,84 @@ def enter_positions(api: BlofinREST, inst_ids, entry_prices,
                            "marginMode": MARGIN_MODE,
                            "positionSide": POSITION_SIDE})
         else:
-            log.error(f"  ❌ {inst_id}: order failed -- skipped")
+            log.error(f"  ❌ {inst_id}: order failed -- queued for retry")
+            failed.append({
+                "inst_id":  inst_id,
+                "contracts": contracts,
+                "lot":      lot,
+                "min_sz":   min_sz,
+                "max_mkt":  max_mkt,
+                "price":    price,
+                "lev_int":  lev_int,
+                "ctval":    ctval,
+            })
+
+    MAX_ENTRY_RETRIES = 3
+    retry_round = 0
+    while failed and not dry_run and retry_round < MAX_ENTRY_RETRIES:
+        retry_round += 1
+        time.sleep(5)
+        log.info(f"RETRY round {retry_round}/{MAX_ENTRY_RETRIES} -- {len(failed)} symbol(s)")
+        still_failed = []
+        for item in failed:
+            inst_id = item["inst_id"]
+            target  = item["contracts"]
+            lot     = item["lot"]
+            min_sz  = item["min_sz"]
+            max_mkt = item["max_mkt"]
+            price   = item["price"]
+            ctval   = item["ctval"]
+
+            half = _round_to_lot(target / 2.0, lot)
+            if half < min_sz:
+                log.error(f"  {inst_id}: retry half {half} < minSize {min_sz} -- giving up")
+                continue
+
+            sl_trigger = None
+            if EXCHANGE_SL_ENABLED:
+                sl_trigger = f"{price * (1 + EXCHANGE_SL_PCT):.8g}"
+
+            filled_total = 0.0
+            ok1, order_id1 = _place_order_chunked(
+                api, inst_id, half, lot, min_sz, max_mkt,
+                sl_trigger_price=sl_trigger,
+            )
+            if ok1:
+                log.info(f"  ✅ {inst_id} retry half-1 {half}ct orderId={order_id1}")
+                filled_total += half
+                time.sleep(1)
+                remainder_first = _round_to_lot(target - half, lot)
+                if remainder_first >= min_sz:
+                    ok2, order_id2 = _place_order_chunked(
+                        api, inst_id, remainder_first, lot, min_sz, max_mkt,
+                        sl_trigger_price=None,
+                    )
+                    if ok2:
+                        log.info(f"  ✅ {inst_id} retry half-2 {remainder_first}ct orderId={order_id2}")
+                        filled_total += remainder_first
+                    else:
+                        log.error(f"  ❌ {inst_id}: retry half-2 failed")
+            else:
+                log.error(f"  ❌ {inst_id}: retry half-1 failed")
+
+            if filled_total > 0:
+                opened.append({"inst_id": inst_id, "contracts": filled_total,
+                               "entry_price": price, "order_id": order_id1,
+                               "lev_int": item["lev_int"],
+                               "marginMode": MARGIN_MODE,
+                               "positionSide": POSITION_SIDE})
+                unfilled = _round_to_lot(target - filled_total, lot)
+                if unfilled >= min_sz:
+                    next_item = dict(item)
+                    next_item["contracts"] = unfilled
+                    still_failed.append(next_item)
+            else:
+                still_failed.append(item)
+
+        failed = still_failed
+
+    for item in failed:
+        log.error(f"RETRY EXHAUSTED {item['inst_id']}: {item['contracts']}ct unfilled after {MAX_ENTRY_RETRIES} rounds")
 
     return opened
 
