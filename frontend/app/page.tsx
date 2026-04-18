@@ -706,7 +706,7 @@ export default function LandingPage() {
           Early access
         </div>
         <h2 style={{ fontSize: 'clamp(28px, 4vw, 54px)', fontWeight: 700, lineHeight: 1.05, letterSpacing: -1, color: 'var(--t0)', maxWidth: 600, marginBottom: '1.25rem' }}>
-          Audit your risk.<br />Deploy with consistent profits.
+          Audit your risk.<br />Collect your profits
         </h2>
         <p style={{ fontSize: 12, color: 'var(--t1)', maxWidth: 380, lineHeight: 1.9, marginBottom: '3rem' }}>
           Join the waitlist for early access to the full 3M platform. We onboard a limited number of new funds each month.
@@ -736,7 +736,7 @@ export default function LandingPage() {
               opacity: wlSubmitted ? 0.4 : 1, whiteSpace: 'nowrap',
             }}
           >
-            Request Access
+            Join Waitlist
           </button>
         </div>
         <p style={{ fontSize: 10, color: wlMsgColor, marginTop: '1rem', letterSpacing: '0.04em' }}>{wlMsg}</p>
