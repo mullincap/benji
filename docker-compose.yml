@@ -33,6 +33,10 @@ services:
       # Read-only view of the trader's working dir so the Manager API can
       # serve execution reports and the trader log stream.
       - /root/benji:/host_trader:ro
+      # Writable host-shared data for the containerized trader copy
+      # (backend/app/cli/trader_blofin.py). Mirrors celery's mount so
+      # both services see the same pipeline artifacts + trader state.
+      - /mnt/quant-data:/mnt/quant-data
     depends_on:
       redis:
         condition: service_healthy

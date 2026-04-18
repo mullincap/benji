@@ -885,6 +885,47 @@ CREATE INDEX IF NOT EXISTS idx_exchange_snapshots_connection_time
 CREATE INDEX IF NOT EXISTS idx_exchange_snapshots_time
     ON user_mgmt.exchange_snapshots (snapshot_at DESC);
 
+-- ─── Multi-tenant trader foundation (added 2026-04-18) ────────────────────────
+-- Ties allocations to per-session portfolio rows so a date can have multiple
+-- sessions (one per allocation + one for the master account with NULL).
+
+ALTER TABLE user_mgmt.portfolio_sessions
+    ADD COLUMN IF NOT EXISTS allocation_id UUID REFERENCES user_mgmt.allocations(allocation_id);
+ALTER TABLE user_mgmt.portfolio_sessions
+    DROP CONSTRAINT IF EXISTS portfolio_sessions_signal_date_key;
+DO $$ BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conname = 'portfolio_sessions_signal_date_allocation_key'
+    ) THEN
+        ALTER TABLE user_mgmt.portfolio_sessions
+            ADD CONSTRAINT portfolio_sessions_signal_date_allocation_key
+            UNIQUE (signal_date, allocation_id);
+    END IF;
+END $$;
+CREATE INDEX IF NOT EXISTS idx_portfolio_sessions_allocation
+    ON user_mgmt.portfolio_sessions (allocation_id)
+    WHERE allocation_id IS NOT NULL;
+
+ALTER TABLE user_mgmt.allocations
+    ADD COLUMN IF NOT EXISTS runtime_state JSONB,
+    ADD COLUMN IF NOT EXISTS lock_acquired_at TIMESTAMPTZ;
+
+-- Per-allocation session return log (multi-tenant analog of blofin_returns_log.csv).
+CREATE TABLE IF NOT EXISTS user_mgmt.allocation_returns (
+    allocation_id        UUID        NOT NULL REFERENCES user_mgmt.allocations(allocation_id),
+    session_date         DATE        NOT NULL,
+    net_return_pct       NUMERIC(10,6),
+    gross_return_pct     NUMERIC(10,6),
+    exit_reason          TEXT,
+    effective_leverage   NUMERIC(10,4),
+    capital_deployed_usd NUMERIC(18,2),
+    logged_at            TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (allocation_id, session_date)
+);
+CREATE INDEX IF NOT EXISTS idx_allocation_returns_date
+    ON user_mgmt.allocation_returns (session_date DESC);
+
 -- ─── Manager conversations + messages ─────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS user_mgmt.manager_conversations (
     conversation_id  UUID PRIMARY KEY DEFAULT gen_random_uuid(),
