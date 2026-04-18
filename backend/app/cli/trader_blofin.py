@@ -144,7 +144,9 @@ FUNDING_RATE_DAILY_PCT = 0.0002   # ~0.02% per day (2 windows x ~0.01%)
 # containerized copy reads it via the bind mount.
 _TRADER_DATA_DIR = Path("/mnt/quant-data/trader")
 _TRADER_DATA_DIR.mkdir(parents=True, exist_ok=True)
-DEPLOYS_CSV   = Path("/root/benji") / "live_deploys_signal.csv"  # produced by host daily_signal.py
+# Host daily_signal.py writes to /root/benji/live_deploys_signal.csv, read-only
+# bind-mounted into the container at /host_trader/.
+DEPLOYS_CSV   = Path("/host_trader") / "live_deploys_signal.csv"
 ACTIVE_FILTER = "Tail Guardrail"
 SYMBOL_SUFFIX = "-USDT"
 
