@@ -344,7 +344,7 @@ function LinkWizard({ onComplete, onCancel }: { onComplete: (connectionId: strin
               </div>
               <div>&middot; <span style={{ color: "var(--t1)" }}>Enable Reading</span></div>
               <div>&middot; <span style={{ color: "var(--t1)" }}>Enable Spot &amp; Margin Trading</span></div>
-              <div>&middot; Do NOT enable <span style={{ color: "var(--red)" }}>Withdrawals</span></div>
+              <div>&middot; Do not enable <span style={{ color: "var(--t1)" }}>Withdrawals</span></div>
             </div>
           )}
           {exchange === "blofin" && (
@@ -357,7 +357,7 @@ function LinkWizard({ onComplete, onCancel }: { onComplete: (connectionId: strin
                 Create a BloFin API key with:
               </div>
               <div>&middot; <span style={{ color: "var(--t1)" }}>Read + Trade</span> permissions</div>
-              <div>&middot; Do NOT enable <span style={{ color: "var(--red)" }}>Transfer</span> or <span style={{ color: "var(--red)" }}>Withdraw</span></div>
+              <div>&middot; Do not enable <span style={{ color: "var(--t1)" }}>Transfer</span> or <span style={{ color: "var(--t1)" }}>Withdraw</span></div>
             </div>
           )}
 
