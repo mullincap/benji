@@ -10,7 +10,10 @@ the live script, one of them has drifted from the audit-matched baseline.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
+
+log = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -87,22 +90,53 @@ class TraderConfig:
         Strategy-level params come from the JSONB payload that was frozen into
         the audited strategy version. Allocation-level capital_usd overrides
         capital_mode to 'fixed_usd'.
+
+        Field lookup is case-insensitive. Each field has a list of alias names
+        ordered by preference — first match wins, and if nothing matches, the
+        master default is used and a WARN is logged (greppable signal for
+        future strategy configs with unknown field names).
         """
         cfg = strategy_version_config or {}
+        # Lowercase once at entry — all alias lookups are lowercase.
+        cfg_lower = {str(k).lower(): v for k, v in cfg.items() if k is not None}
+
+        defaults = cls()  # master baseline
+
+        def _pick(field: str, aliases: list[str], default):
+            for alias in aliases:
+                if alias in cfg_lower:
+                    return cfg_lower[alias]
+            log.warning(
+                "TraderConfig.from_strategy_version: field %r not found "
+                "(tried aliases %s). Using master default %r.",
+                field, aliases, default,
+            )
+            return default
+
+        # Aliases grounded in observed prod configs — see investigation
+        # output in the PR description for the raw config dumps.
         return cls(
-            l_high=float(cfg.get("L_HIGH", 2.3)),
-            kill_y=float(cfg.get("KILL_Y", 0.003)),
-            port_sl_pct=float(cfg.get("PORT_SL_PCT", -0.06)),
-            port_tsl_pct=float(cfg.get("PORT_TSL_PCT", -0.075)),
-            early_fill_y=float(cfg.get("EARLY_FILL_Y", 0.09)),
-            active_filter=cfg.get(
-                "active_filter", cfg.get("ACTIVE_FILTER", "Tail Guardrail")
-            ),
+            l_high=float(_pick("l_high", ["l_high"], defaults.l_high)),
+            kill_y=float(_pick("kill_y", ["kill_y", "early_kill_y"], defaults.kill_y)),
+            port_sl_pct=float(_pick(
+                "port_sl_pct", ["port_sl_pct", "port_sl"], defaults.port_sl_pct,
+            )),
+            port_tsl_pct=float(_pick(
+                "port_tsl_pct", ["port_tsl_pct", "port_tsl"], defaults.port_tsl_pct,
+            )),
+            early_fill_y=float(_pick(
+                "early_fill_y", ["early_fill_y"], defaults.early_fill_y,
+            )),
+            active_filter=str(_pick(
+                "active_filter",
+                ["active_filter", "filter_mode"],
+                defaults.active_filter,
+            )),
             capital_mode="fixed_usd",
             capital_value=capital_usd,
             vol_boost_enabled=False,
-            # All other fields intentionally use defaults — they're exchange
-            # mechanics and session timing, not strategy parameters.
+            # All other fields intentionally use master defaults — they're
+            # exchange mechanics and session timing, not strategy parameters.
         )
 
 
