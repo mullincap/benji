@@ -1,8 +1,10 @@
 import os
 from pathlib import Path
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
 from app.api.routes.jobs import router as jobs_router
 from app.api.routes.compiler import router as compiler_router
@@ -15,6 +17,22 @@ from app.api.routes.simulator import router as simulator_router
 from app.core.config import settings
 
 app = FastAPI(title="Benji3m Audit API", version="0.1.0")
+
+
+@app.exception_handler(RequestValidationError)
+async def validation_error_handler(_request: Request, exc: RequestValidationError):
+    """Strip the `input` field from every validation error entry.
+
+    FastAPI's default 422 response echoes the full submitted payload back under
+    `detail[i].input`. Endpoints that accept secrets (exchanges/keys, auth login,
+    etc.) must never expose submitted credentials — this handler is a blanket
+    defense regardless of the specific endpoint or client error handling.
+    """
+    clean_errors = [
+        {k: v for k, v in err.items() if k != "input"}
+        for err in exc.errors()
+    ]
+    return JSONResponse(status_code=422, content={"detail": clean_errors})
 
 app.add_middleware(
     CORSMiddleware,

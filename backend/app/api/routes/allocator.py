@@ -720,7 +720,7 @@ SUPPORTED_EXCHANGES = {"binance", "blofin"}
 
 class ExchangeKeysRequest(BaseModel):
     exchange: str
-    label: str
+    label: str | None = None
     api_key: str
     api_secret: str
     passphrase: str | None = None

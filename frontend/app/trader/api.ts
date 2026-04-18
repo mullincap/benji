@@ -22,19 +22,46 @@ async function apiFetch<T>(path: string, opts?: RequestInit): Promise<T> {
 
 /**
  * Extract {status, detail} from errors thrown by apiFetch.
- * Returns status=0 when the message doesn't match the expected shape (network,
- * unexpected throw, etc). `detail` falls back to the raw message.
+ *
+ * CRITICAL — never render raw response bodies. FastAPI's 422 validation
+ * responses include the submitted request payload under `detail[i].input`,
+ * which can contain API keys, secrets, and passphrases. When the detail is
+ * a Pydantic error array, extract only the `msg` + `loc` fields. Fall back
+ * to a generic message if parsing fails — never expose the raw JSON.
  */
 export function parseApiError(err: unknown): { status: number; detail: string } {
-  if (!(err instanceof Error)) return { status: 0, detail: String(err) };
+  if (!(err instanceof Error)) return { status: 0, detail: "Request failed" };
   const match = err.message.match(/^API (\d+):\s*([\s\S]*)$/);
   if (!match) return { status: 0, detail: err.message };
   const status = parseInt(match[1], 10);
-  let detail = match[2];
+  const rawBody = match[2];
+
+  let detail = "Request failed";
   try {
-    const body = JSON.parse(detail);
-    if (body && typeof body.detail === "string") detail = body.detail;
-  } catch { /* not JSON */ }
+    const body = JSON.parse(rawBody);
+    if (body && typeof body.detail === "string") {
+      detail = body.detail;
+    } else if (body && Array.isArray(body.detail)) {
+      // Pydantic validation errors — extract msg + loc, drop `input` (secrets).
+      detail = body.detail
+        .map((e: unknown) => {
+          if (!e || typeof e !== "object") return "Validation error";
+          const entry = e as { loc?: unknown; msg?: unknown };
+          const loc = Array.isArray(entry.loc)
+            ? entry.loc.filter(x => x !== "body").join(".")
+            : "";
+          const msg = typeof entry.msg === "string" ? entry.msg : "Validation error";
+          return loc ? `${loc}: ${msg}` : msg;
+        })
+        .join("; ");
+    }
+    // Any other body shape falls through to the "Request failed" default.
+    // Never dump rawBody — it may contain echoed secrets.
+  } catch {
+    // Body was not JSON — it's either already a clean server message or
+    // something unexpected. Return a generic string, not the raw text.
+    detail = "Request failed";
+  }
   return { status, detail };
 }
 
