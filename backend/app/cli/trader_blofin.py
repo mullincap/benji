@@ -50,6 +50,14 @@ from pathlib import Path
 # safe to import before creds are present.
 from app.services.trading.blofin_auth import get_headers as _shared_get_headers
 
+# Multi-tenant allocation mode — only used when --allocation-id is set.
+# Master-account execution path doesn't touch any of these.
+from app.services.trading.trader_config import TraderConfig
+from app.services.trading.credential_loader import (
+    load_credentials,
+    CredentialDecryptError,
+)
+
 # ==========================================================================
 # CONFIGURATION
 # ==========================================================================
@@ -549,7 +557,13 @@ def update_portfolio_meta_sql(date: str, **fields) -> None:
 # SIGNAL READER
 # ==========================================================================
 
-def get_today_symbols(date_str: str) -> list:
+def get_today_symbols(date_str: str, active_filter: str | None = None) -> list:
+    # Master path passes no active_filter → use module constant. Allocation
+    # mode passes its per-strategy filter from TraderConfig.active_filter.
+    # Behavior on the master path is bit-for-bit identical when called with
+    # one positional arg, since active_filter falls through to ACTIVE_FILTER.
+    filter_name = active_filter if active_filter is not None else ACTIVE_FILTER
+
     if not DEPLOYS_CSV.exists():
         raise FileNotFoundError(
             f"Deploys CSV not found: {DEPLOYS_CSV}\n"
@@ -563,11 +577,11 @@ def get_today_symbols(date_str: str) -> list:
         log.warning(f"No row for {date_str} in deploys CSV -- flat day.")
         return []
 
-    if ACTIVE_FILTER:
+    if filter_name:
         today_rows = [r for r in today_rows
-                      if r.get("filter", "").strip().lower() == ACTIVE_FILTER.strip().lower()]
+                      if r.get("filter", "").strip().lower() == filter_name.strip().lower()]
         if not today_rows:
-            log.info(f"Filter '{ACTIVE_FILTER}' blocked today -> A: Filtered (0%, no fees)")
+            log.info(f"Filter '{filter_name}' blocked today -> A: Filtered (0%, no fees)")
             return []
 
     symbols = set()
@@ -2071,7 +2085,12 @@ def _run_monitoring_loop(today, today_date, api: BlofinREST, inst_ids,
                          open_prices, entry_prices, entry_1x, eff_lev,
                          peak, positions, dry_run,
                          report_base=None, session_start_utc=None,
-                         balance_pre_entry=None):
+                         balance_pre_entry=None,
+                         *,
+                         allocation_id: str | None = None,
+                         config: "TraderConfig | None" = None,
+                         session_id: str | None = None,
+                         capital_deployed_usd: float = 0.0):
     """
     Intraday monitoring loop (bars 7-216).
 
@@ -2090,13 +2109,23 @@ def _run_monitoring_loop(today, today_date, api: BlofinREST, inst_ids,
 
     incr is computed over the ACTIVE pool only, with stopped symbols
     contributing their clamped -6% value -- matching the matrix builder.
+
+    Multi-tenant mode (allocation_id set): uses per-call `config` for strategy
+    constants instead of module-level constants, writes to allocation-aware
+    storage (runtime_state JSONB + allocation_returns + portfolio_session_id)
+    instead of filesystem state + signal_date-keyed rows, and skips the
+    master-only execution_report scaffold. The per-bar check order and
+    portfolio-return math are a single source of truth shared by both modes.
     """
+    cfg = config if config is not None else TraderConfig.master_defaults()
+    log_prefix = f"[alloc {allocation_id[:8]}] " if allocation_id else ""
+
     session_open = datetime.datetime.combine(
-        today_date, datetime.time(SESSION_START_HOUR, 0, 0)
+        today_date, datetime.time(cfg.session_start_hour, 0, 0)
     )
     session_close_dt = datetime.datetime.combine(today_date, datetime.time(23, 55, 0))
     fill_gate_dt     = session_open + datetime.timedelta(
-        minutes=FILL_MAX_BAR * BAR_MINUTES + BAR_MINUTES   # 720 min = 18:00 UTC
+        minutes=cfg.fill_max_bar * cfg.bar_minutes + cfg.bar_minutes   # 720 min = 18:00 UTC
     )
 
     exit_reason     = None
@@ -2121,16 +2150,21 @@ def _run_monitoring_loop(today, today_date, api: BlofinREST, inst_ids,
     _portfolio_symbols = list(inst_ids)
     _portfolio_entered = [p["inst_id"] for p in positions]
     _portfolio_session_start = session_start_utc or utcnow().strftime("%Y-%m-%d %H:%M:%S")
-    init_portfolio_record(
-        today, _portfolio_symbols, _portfolio_entered,
-        _portfolio_session_start, eff_lev, _portfolio_lev_int,
-    )
-    init_portfolio_session_sql(
-        today, _portfolio_symbols, _portfolio_entered,
-        _portfolio_session_start, eff_lev, _portfolio_lev_int,
-    )
+    if allocation_id is None:
+        # Master path: initialize both NDJSON + master-schema session row.
+        # Allocation mode already persisted its session row via
+        # _init_portfolio_session_for_allocation_inline before entering this
+        # function; skip these writes here.
+        init_portfolio_record(
+            today, _portfolio_symbols, _portfolio_entered,
+            _portfolio_session_start, eff_lev, _portfolio_lev_int,
+        )
+        init_portfolio_session_sql(
+            today, _portfolio_symbols, _portfolio_entered,
+            _portfolio_session_start, eff_lev, _portfolio_lev_int,
+        )
 
-    log.info("Entering 5-min monitoring loop ...")
+    log.info(f"{log_prefix}Entering 5-min monitoring loop ...")
 
     while utcnow() < session_close_dt:
         sleep_until_next_bar()
@@ -2141,7 +2175,7 @@ def _run_monitoring_loop(today, today_date, api: BlofinREST, inst_ids,
         b       = bar_index()
         current = get_mark_prices(api, list(inst_ids))
         if not current:
-            log.warning(f"Bar {b}: all price fetches failed -- skipping bar")
+            log.warning(f"{log_prefix}Bar {b}: all price fetches failed -- skipping bar")
             continue
 
         # ── Per-symbol stop check ──────────────────────────────────────────
@@ -2155,12 +2189,12 @@ def _run_monitoring_loop(today, today_date, api: BlofinREST, inst_ids,
             if not ref or not price:
                 continue
             sym_ret = price / ref - 1.0
-            if sym_ret <= PORT_SL_PCT:
+            if sym_ret <= cfg.port_sl_pct:
                 log.warning(
-                    f"  SYM STOP: {iid} ret={sym_ret*100:.3f}% <= {PORT_SL_PCT*100:.0f}%"
-                    f" -- closing symbol and clamping at {PORT_SL_PCT*100:.0f}%"
+                    f"{log_prefix}  SYM STOP: {iid} ret={sym_ret*100:.3f}% <= {cfg.port_sl_pct*100:.0f}%"
+                    f" -- closing symbol and clamping at {cfg.port_sl_pct*100:.0f}%"
                 )
-                sym_stopped[iid] = PORT_SL_PCT
+                sym_stopped[iid] = cfg.port_sl_pct
                 sym_exit_prices[iid] = price
                 newly_stopped.append(pos)
                 active_positions = [p for p in active_positions if p["inst_id"] != iid]
@@ -2173,7 +2207,7 @@ def _run_monitoring_loop(today, today_date, api: BlofinREST, inst_ids,
                     del sym_stopped[p["inst_id"]]
                     sym_exit_prices.pop(p["inst_id"], None)
                     active_positions.append(p)
-                    log.warning(f"  {p['inst_id']}: sym stop close failed -- keeping in pool")
+                    log.warning(f"{log_prefix}  {p['inst_id']}: sym stop close failed -- keeping in pool")
 
         # ── Portfolio return (clamped + active symbols) ────────────────────
         # Mirrors rebuild_portfolio_matrix.py: stopped symbols contribute
@@ -2196,7 +2230,7 @@ def _run_monitoring_loop(today, today_date, api: BlofinREST, inst_ids,
         fill_open = utcnow() <= fill_gate_dt
 
         log.info(
-            f"Bar {b:3d} | incr={incr*100:+.3f}%  peak={peak*100:.3f}%  "
+            f"{log_prefix}Bar {b:3d} | incr={incr*100:+.3f}%  peak={peak*100:.3f}%  "
             f"tsl={tsl_dist*100:+.3f}%  sess={session_ret*100:+.3f}%  "
             f"active={len(active_positions)}/{len(positions)}  "
             f"stopped={len(sym_stopped)}  "
@@ -2208,17 +2242,27 @@ def _run_monitoring_loop(today, today_date, api: BlofinREST, inst_ids,
         # independent + best-effort.
         _bar_ts   = utcnow().strftime("%Y-%m-%d %H:%M:%S")
         _bar_stop = list(sym_stopped.keys())
-        append_portfolio_bar(
-            today, b, _bar_ts, incr, peak, sym_returns_map, _bar_stop,
-        )
-        append_portfolio_bar_sql(
-            today, b, _bar_ts, incr, peak, sym_returns_map, _bar_stop,
-        )
+        if allocation_id is None:
+            # Master: NDJSON + master-schema SQL row (matched by signal_date).
+            append_portfolio_bar(
+                today, b, _bar_ts, incr, peak, sym_returns_map, _bar_stop,
+            )
+            append_portfolio_bar_sql(
+                today, b, _bar_ts, incr, peak, sym_returns_map, _bar_stop,
+            )
+        else:
+            # Allocation: session row is FK-identified by session_id; no NDJSON.
+            _append_portfolio_bar_for_session(
+                session_id=session_id, bar=b,
+                ts_utc=utcnow().replace(tzinfo=datetime.timezone.utc),
+                incr=incr, peak=peak,
+                sym_returns=sym_returns_map, stopped=_bar_stop,
+            )
 
         # ── 1st: PORT_SL -- portfolio hard floor ───────────────────────────
-        if incr <= PORT_SL_PCT:
+        if incr <= cfg.port_sl_pct:
             log.warning(
-                f"  C -- HARD STOP: portfolio incr={incr*100:.3f}% <= {PORT_SL_PCT*100:.0f}%"
+                f"{log_prefix}  C -- HARD STOP: portfolio incr={incr*100:.3f}% <= {cfg.port_sl_pct*100:.0f}%"
             )
             exit_reason = "port_sl"
             final_return_1x = incr
@@ -2226,10 +2270,10 @@ def _run_monitoring_loop(today, today_date, api: BlofinREST, inst_ids,
             break
 
         # ── 2nd: PORT_TSL -- trailing stop ─────────────────────────────────
-        if tsl_dist <= PORT_TSL_PCT:
-            tsl_exit = peak + PORT_TSL_PCT
+        if tsl_dist <= cfg.port_tsl_pct:
+            tsl_exit = peak + cfg.port_tsl_pct
             log.warning(
-                f"  D -- TRAIL STOP: (incr-peak)={tsl_dist*100:.3f}%  "
+                f"{log_prefix}  D -- TRAIL STOP: (incr-peak)={tsl_dist*100:.3f}%  "
                 f"exit at {tsl_exit*100:.3f}%  "
                 f"({'loss' if tsl_exit < 0 else 'profit'})"
             )
@@ -2239,10 +2283,10 @@ def _run_monitoring_loop(today, today_date, api: BlofinREST, inst_ids,
             break
 
         # ── 3rd: EARLY_FILL (bars 7-143 only) ─────────────────────────────
-        if fill_open and session_ret >= EARLY_FILL_Y:
+        if fill_open and session_ret >= cfg.early_fill_y:
             fill_ret = session_ret - entry_1x
             log.info(
-                f"  E -- EARLY FILL: sess={session_ret*100:.3f}% >= {EARLY_FILL_Y*100:.0f}%  "
+                f"{log_prefix}  E -- EARLY FILL: sess={session_ret*100:.3f}% >= {cfg.early_fill_y*100:.0f}%  "
                 f"return from entry={fill_ret*100:.3f}%"
             )
             exit_reason = "early_fill"
@@ -2250,7 +2294,7 @@ def _run_monitoring_loop(today, today_date, api: BlofinREST, inst_ids,
             final_exit_snapshot = dict(current)
             break
 
-        save_state({
+        _state = {
             "date": today, "phase": "active", "bar": b,
             "incr": round(incr, 6), "peak": round(peak, 6),
             "session_ret": round(session_ret, 6),
@@ -2259,7 +2303,14 @@ def _run_monitoring_loop(today, today_date, api: BlofinREST, inst_ids,
             "open_prices":  {k: v for k, v in open_prices.items()},
             "entry_prices": {k: v for k, v in entry_prices.items()},
             "positions": active_positions,
-        })
+        }
+        if allocation_id is None:
+            save_state(_state)
+        else:
+            _state["session_id"] = session_id
+            _state["symbols"] = list(inst_ids)
+            _state["capital_deployed_usd"] = float(capital_deployed_usd)
+            _mark_runtime_state(allocation_id, _state)
 
     # ── Phase 5: Exit ─────────────────────────────────────────────────────
     if exit_reason is None:
@@ -2268,12 +2319,12 @@ def _run_monitoring_loop(today, today_date, api: BlofinREST, inst_ids,
             final_return_1x = equal_weight_return(current, entry_prices)
             final_exit_snapshot = dict(current)
             log.info(
-                f"F -- SESSION CLOSE (23:55 UTC)  "
+                f"{log_prefix}F -- SESSION CLOSE (23:55 UTC)  "
                 f"return from entry={final_return_1x*100:+.3f}%  (unbounded)"
             )
         else:
             final_return_1x = float("nan")
-            log.warning("F -- SESSION CLOSE: price fetch failed -- not logging return")
+            log.warning(f"{log_prefix}F -- SESSION CLOSE: price fetch failed -- not logging return")
         exit_reason = "session_close"
 
     # Close remaining active positions (sym_stopped symbols already closed above)
@@ -2281,20 +2332,32 @@ def _run_monitoring_loop(today, today_date, api: BlofinREST, inst_ids,
 
     net_pct = final_return_1x * eff_lev * 100
     log.info(
-        f"Session done -- {exit_reason}  "
+        f"{log_prefix}Session done -- {exit_reason}  "
         f"return_1x={final_return_1x*100 if not math.isnan(final_return_1x) else 'nan':+.3f}%  "
         f"lev={eff_lev:.3f}x  net~{net_pct if not math.isnan(net_pct) else 'nan':+.3f}%"
     )
 
     if not math.isnan(final_return_1x):
-        log_daily_return(net_pct, exit_reason, session_date=today, eff_lev=eff_lev)
+        if allocation_id is None:
+            log_daily_return(net_pct, exit_reason, session_date=today, eff_lev=eff_lev)
+        else:
+            # Mirror of log_daily_return — applies same fee + funding drag internally.
+            _log_allocation_return(
+                allocation_id, today,
+                net_return_pct=net_pct,
+                exit_reason=exit_reason,
+                effective_leverage=eff_lev,
+                capital_deployed_usd=float(capital_deployed_usd),
+                config=cfg,
+            )
     else:
-        log.warning("Return not logged (NaN -- price unavailable at close)")
+        log.warning(f"{log_prefix}Return not logged (NaN -- price unavailable at close)")
 
     sym_stops_fired = list(sym_stopped.keys())
 
     # Build per-symbol est_exit_price: sym-stop price for stopped symbols,
     # final snapshot for the rest. Then reconcile against BloFin fill history.
+    # Both master and allocation paths use this for exit slippage reconciliation.
     est_exit_prices = {}
     for pos in positions:
         iid = pos["inst_id"]
@@ -2303,112 +2366,144 @@ def _run_monitoring_loop(today, today_date, api: BlofinREST, inst_ids,
         elif iid in final_exit_snapshot:
             est_exit_prices[iid] = final_exit_snapshot[iid]
 
-    exit_symbols = []
-    exit_slips   = []
-    if not dry_run:
-        reconcile_exit_prices(api, positions, est_exit_prices)
-        for pos in positions:
-            iid = pos["inst_id"]
-            est = est_exit_prices.get(iid)
-            exit_symbols.append({
-                "inst_id":           iid,
-                "est_exit_price":    round(est, 6) if est else None,
-                "fill_exit_price":   pos.get("fill_exit_price"),
-                "exit_slippage_bps": pos.get("exit_slippage_bps"),
-            })
-            if pos.get("exit_slippage_bps") is not None:
-                exit_slips.append(pos["exit_slippage_bps"])
-    else:
-        for pos in positions:
-            iid = pos["inst_id"]
-            est = est_exit_prices.get(iid)
-            exit_symbols.append({
-                "inst_id":           iid,
-                "est_exit_price":    round(est, 6) if est else None,
-                "fill_exit_price":   None,
-                "exit_slippage_bps": None,
-            })
-    avg_exit_slip = (sum(exit_slips) / len(exit_slips)) if exit_slips else None
+    if allocation_id is None:
+        # ── Master-only: execution report scaffold ────────────────────────
+        # Per-symbol exit slippage tracking, balance-delta P&L, exit_block +
+        # monitoring_block, JSON execution report. Allocation mode skips this
+        # — it records aggregates via _log_allocation_return and runtime_state.
+        exit_symbols = []
+        exit_slips   = []
+        if not dry_run:
+            reconcile_exit_prices(api, positions, est_exit_prices)
+            for pos in positions:
+                iid = pos["inst_id"]
+                est = est_exit_prices.get(iid)
+                exit_symbols.append({
+                    "inst_id":           iid,
+                    "est_exit_price":    round(est, 6) if est else None,
+                    "fill_exit_price":   pos.get("fill_exit_price"),
+                    "exit_slippage_bps": pos.get("exit_slippage_bps"),
+                })
+                if pos.get("exit_slippage_bps") is not None:
+                    exit_slips.append(pos["exit_slippage_bps"])
+        else:
+            for pos in positions:
+                iid = pos["inst_id"]
+                est = est_exit_prices.get(iid)
+                exit_symbols.append({
+                    "inst_id":           iid,
+                    "est_exit_price":    round(est, 6) if est else None,
+                    "fill_exit_price":   None,
+                    "exit_slippage_bps": None,
+                })
+        avg_exit_slip = (sum(exit_slips) / len(exit_slips)) if exit_slips else None
 
-    # Actual P&L from balance delta (skipped on dry-run and on --resume where
-    # balance_pre_entry is unknown).
-    balance_post_exit   = None
-    actual_pnl_usd      = None
-    actual_return_pct   = None
-    pnl_vs_est_pct      = None
-    if not dry_run and balance_pre_entry is not None:
-        try:
-            balance_post_exit = get_account_balance_usdt(api)
-            actual_pnl_usd    = balance_post_exit - balance_pre_entry
-            if balance_pre_entry > 0:
-                actual_return_pct = (actual_pnl_usd / balance_pre_entry) * 100.0
-                if not math.isnan(net_pct):
-                    pnl_vs_est_pct = actual_return_pct - net_pct
-        except Exception as e:
-            log.warning(f"  Could not capture balance_post_exit: {e}")
+        # Actual P&L from balance delta (skipped on dry-run and on --resume where
+        # balance_pre_entry is unknown).
+        balance_post_exit   = None
+        actual_pnl_usd      = None
+        actual_return_pct   = None
+        pnl_vs_est_pct      = None
+        if not dry_run and balance_pre_entry is not None:
+            try:
+                balance_post_exit = get_account_balance_usdt(api)
+                actual_pnl_usd    = balance_post_exit - balance_pre_entry
+                if balance_pre_entry > 0:
+                    actual_return_pct = (actual_pnl_usd / balance_pre_entry) * 100.0
+                    if not math.isnan(net_pct):
+                        pnl_vs_est_pct = actual_return_pct - net_pct
+            except Exception as e:
+                log.warning(f"  Could not capture balance_post_exit: {e}")
 
-    exit_block = {
-        "reason":                exit_reason,
-        "est_return_1x_pct":     round(final_return_1x * 100, 4) if not math.isnan(final_return_1x) else None,
-        "eff_lev":               eff_lev,
-        "est_net_return_pct":    round(net_pct, 4) if not math.isnan(net_pct) else None,
-        "close_failures":        [p["inst_id"] for p in failed_closes],
-        "close_failure_count":   len(failed_closes),
-        "symbols":               exit_symbols,
-        "avg_exit_slippage_bps": round(avg_exit_slip, 2) if avg_exit_slip is not None else None,
-        "actual_pnl_usd":        round(actual_pnl_usd, 2) if actual_pnl_usd is not None else None,
-        "actual_return_pct":     round(actual_return_pct, 4) if actual_return_pct is not None else None,
-        "pnl_vs_est_pct":        round(pnl_vs_est_pct, 4) if pnl_vs_est_pct is not None else None,
-    }
-    monitoring_block = {
-        "bars_monitored":  bars_monitored,
-        "peak_pct":        round(peak * 100, 4),
-        "sym_stops_fired": sym_stops_fired,
-        "sym_stops_count": len(sym_stops_fired),
-    }
-
-    if report_base is not None:
-        report = dict(report_base)
-        if balance_post_exit is not None and isinstance(report.get("capital"), dict):
-            report["capital"] = dict(report["capital"])
-            report["capital"]["balance_post_exit"] = round(balance_post_exit, 2)
-    else:
-        # --resume path: no pre-built report_base. Write minimal report
-        # with what we have from restored state.
-        report = {
-            "date":              today,
-            "session_start_utc": session_start_utc,
-            "resumed":           True,
-            "leverage":          {"eff_lev": eff_lev},
-            "capital":           {
-                "balance_pre_entry": None,
-                "balance_post_exit": round(balance_post_exit, 2) if balance_post_exit is not None else None,
-            },
+        exit_block = {
+            "reason":                exit_reason,
+            "est_return_1x_pct":     round(final_return_1x * 100, 4) if not math.isnan(final_return_1x) else None,
+            "eff_lev":               eff_lev,
+            "est_net_return_pct":    round(net_pct, 4) if not math.isnan(net_pct) else None,
+            "close_failures":        [p["inst_id"] for p in failed_closes],
+            "close_failure_count":   len(failed_closes),
+            "symbols":               exit_symbols,
+            "avg_exit_slippage_bps": round(avg_exit_slip, 2) if avg_exit_slip is not None else None,
+            "actual_pnl_usd":        round(actual_pnl_usd, 2) if actual_pnl_usd is not None else None,
+            "actual_return_pct":     round(actual_return_pct, 4) if actual_return_pct is not None else None,
+            "pnl_vs_est_pct":        round(pnl_vs_est_pct, 4) if pnl_vs_est_pct is not None else None,
         }
-    report["session_end_utc"] = utcnow().strftime("%Y-%m-%d %H:%M:%S")
-    report["monitoring"]      = monitoring_block
-    report["exit"]            = exit_block
-    report["alerts_fired"]    = _SESSION_ALERT_COUNT
-    write_execution_report(report)
+        monitoring_block = {
+            "bars_monitored":  bars_monitored,
+            "peak_pct":        round(peak * 100, 4),
+            "sym_stops_fired": sym_stops_fired,
+            "sym_stops_count": len(sym_stops_fired),
+        }
 
-    # Mark the portfolio closed in both stores so the UI stops polling.
-    _close_kwargs = {
-        "status":        "closed",
-        "exit_time_utc": report["session_end_utc"],
-        "exit_reason":   exit_reason,
-    }
-    update_portfolio_meta(today, **_close_kwargs)
-    update_portfolio_meta_sql(today, **_close_kwargs)
+        if report_base is not None:
+            report = dict(report_base)
+            if balance_post_exit is not None and isinstance(report.get("capital"), dict):
+                report["capital"] = dict(report["capital"])
+                report["capital"]["balance_post_exit"] = round(balance_post_exit, 2)
+        else:
+            # --resume path: no pre-built report_base. Write minimal report
+            # with what we have from restored state.
+            report = {
+                "date":              today,
+                "session_start_utc": session_start_utc,
+                "resumed":           True,
+                "leverage":          {"eff_lev": eff_lev},
+                "capital":           {
+                    "balance_pre_entry": None,
+                    "balance_post_exit": round(balance_post_exit, 2) if balance_post_exit is not None else None,
+                },
+            }
+        report["session_end_utc"] = utcnow().strftime("%Y-%m-%d %H:%M:%S")
+        report["monitoring"]      = monitoring_block
+        report["exit"]            = exit_block
+        report["alerts_fired"]    = _SESSION_ALERT_COUNT
+        write_execution_report(report)
 
-    save_state({
-        "date": today, "phase": "closed",
-        "exit_reason": exit_reason,
-        "final_return_1x_pct": round(final_return_1x * 100, 4) if not math.isnan(final_return_1x) else None,
-        "effective_leverage": eff_lev,
-        "net_return_approx_pct": round(net_pct, 4) if not math.isnan(net_pct) else None,
-        "positions": failed_closes,
-        "unclosed_count": len(failed_closes),
-    })
+        # Mark the portfolio closed in both stores so the UI stops polling.
+        _close_kwargs = {
+            "status":        "closed",
+            "exit_time_utc": report["session_end_utc"],
+            "exit_reason":   exit_reason,
+        }
+        update_portfolio_meta(today, **_close_kwargs)
+        update_portfolio_meta_sql(today, **_close_kwargs)
+
+        save_state({
+            "date": today, "phase": "closed",
+            "exit_reason": exit_reason,
+            "final_return_1x_pct": round(final_return_1x * 100, 4) if not math.isnan(final_return_1x) else None,
+            "effective_leverage": eff_lev,
+            "net_return_approx_pct": round(net_pct, 4) if not math.isnan(net_pct) else None,
+            "positions": failed_closes,
+            "unclosed_count": len(failed_closes),
+        })
+    else:
+        # ── Allocation-mode close ─────────────────────────────────────────
+        # Exit-price reconcile still fires (same data, different surface).
+        # No execution report. Session row + runtime_state closed via
+        # allocation-aware writers.
+        if not dry_run and est_exit_prices:
+            try:
+                reconcile_exit_prices(api, positions, est_exit_prices)
+            except Exception as e:
+                log.warning(f"{log_prefix}Exit-price reconcile failed: {e}")
+
+        _close_portfolio_session_for_allocation(
+            session_id=session_id,
+            exit_reason=exit_reason,
+            exit_time_utc=utcnow().replace(tzinfo=datetime.timezone.utc),
+        )
+        _mark_runtime_state(allocation_id, {
+            "phase": "closed",
+            "exit_reason": exit_reason,
+            "final_return_1x_pct": round(final_return_1x * 100, 4) if not math.isnan(final_return_1x) else None,
+            "net_return_approx_pct": round(net_pct, 4) if not math.isnan(net_pct) else None,
+            "effective_leverage": float(eff_lev),
+            "session_id": session_id,
+            "unclosed_count": len(failed_closes),
+            "bars_monitored": bars_monitored,
+            "sym_stops_fired": sym_stops_fired,
+        })
     log.info("=" * 70)
 
 
@@ -2452,6 +2547,704 @@ def seed_returns_log(filepath: str):
 
 
 # ==========================================================================
+# ALLOCATION MODE (multi-tenant)
+# ==========================================================================
+# Everything below this banner is only reached when --allocation-id is set.
+# The master-account execution path above does not call any of this.
+#
+# High-level flow:
+#   1. _acquire_allocation_lock — atomic CAS on allocations.lock_acquired_at
+#      (24h staleness threshold, same semantic as the filesystem LOCK_FILE)
+#   2. Load allocation row → TraderConfig via strategy_version.config JSONB
+#   3. Decrypt per-user BloFin creds via credential_loader
+#   4. Build a per-call BlofinREST instance with those creds
+#   5. Branch on runtime_state.phase: resume active / already-finished / fresh
+#   6. Persist runtime_state JSONB (replaces filesystem STATE_FILE) at the
+#      same logical save points as the master script's save_state() calls
+#   7. Write per-allocation portfolio_sessions row + allocation_returns on close
+
+# ─── Helpers ────────────────────────────────────────────────────────────────
+
+def _acquire_allocation_lock(allocation_id: str) -> bool:
+    """Atomic CAS on allocations.lock_acquired_at.
+
+    Returns True if the lock was acquired (we own this allocation's session
+    and should proceed). False if another subprocess holds a lock that's
+    less than 24 hours old — we back off and exit cleanly.
+    """
+    conn = _trader_db_connect()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE user_mgmt.allocations
+                SET lock_acquired_at = NOW(), updated_at = NOW()
+                WHERE allocation_id = %s::uuid
+                  AND status = 'active'
+                  AND (lock_acquired_at IS NULL
+                       OR lock_acquired_at < NOW() - INTERVAL '24 hours')
+                RETURNING allocation_id
+                """,
+                (allocation_id,),
+            )
+            got_lock = cur.fetchone() is not None
+        conn.commit()
+        return got_lock
+    finally:
+        conn.close()
+
+
+def _release_allocation_lock(allocation_id: str) -> None:
+    """Release the lock unconditionally. Called from finally-block."""
+    conn = _trader_db_connect()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE user_mgmt.allocations
+                SET lock_acquired_at = NULL, updated_at = NOW()
+                WHERE allocation_id = %s::uuid
+                """,
+                (allocation_id,),
+            )
+        conn.commit()
+    except Exception as e:
+        log.warning(f"  Could not release allocation lock {allocation_id}: {e}")
+    finally:
+        conn.close()
+
+
+def _fetch_allocation(allocation_id: str) -> dict:
+    """Load allocation row as a dict. Raises ValueError if not found."""
+    conn = _trader_db_connect()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT allocation_id, user_id, strategy_version_id, connection_id,
+                       capital_usd, status, runtime_state
+                FROM user_mgmt.allocations
+                WHERE allocation_id = %s::uuid
+                """,
+                (allocation_id,),
+            )
+            row = cur.fetchone()
+    finally:
+        conn.close()
+    if row is None:
+        raise ValueError(f"No allocation: {allocation_id}")
+    cols = ["allocation_id", "user_id", "strategy_version_id", "connection_id",
+            "capital_usd", "status", "runtime_state"]
+    return dict(zip(cols, row))
+
+
+def _fetch_strategy_version(strategy_version_id: str) -> dict:
+    """Load strategy_version row (for config JSONB + identity)."""
+    conn = _trader_db_connect()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT strategy_version_id, version_label, config, is_active
+                FROM audit.strategy_versions
+                WHERE strategy_version_id = %s::uuid
+                """,
+                (strategy_version_id,),
+            )
+            row = cur.fetchone()
+    finally:
+        conn.close()
+    if row is None:
+        raise ValueError(f"No strategy_version: {strategy_version_id}")
+    cols = ["strategy_version_id", "version_label", "config", "is_active"]
+    return dict(zip(cols, row))
+
+
+def _mark_runtime_state(allocation_id: str, state: dict) -> None:
+    """Merge + persist runtime_state JSONB.
+
+    Replaces the filesystem save_state() call for allocation mode. Adds today's
+    UTC date + an updated_at timestamp so resume logic can detect stale state.
+    Best-effort — logs on failure but doesn't raise (mirrors master's
+    save_state error handling pattern: a DB outage must not block the loop).
+    """
+    payload = {**state, "date": utc_today(),
+               "updated_at": utcnow().strftime("%Y-%m-%d %H:%M:%S")}
+    conn = _trader_db_connect()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE user_mgmt.allocations
+                SET runtime_state = %s::jsonb, updated_at = NOW()
+                WHERE allocation_id = %s::uuid
+                """,
+                (json.dumps(payload), allocation_id),
+            )
+        conn.commit()
+    except Exception as e:
+        log.warning(f"  Could not persist runtime_state for {allocation_id}: {e}")
+    finally:
+        conn.close()
+
+
+_FLAT_EXIT_REASONS = (
+    "filtered", "no_entry_conviction", "missed_window",
+    "stale_closed", "stale_close_failed", "no_entry", "errored",
+    "entry_failed",
+)
+
+
+def _log_allocation_return(
+    allocation_id: str, session_date: str,
+    net_return_pct: float,                # gross × lev × 100, BEFORE fees (same
+                                          # shape master's log_daily_return takes)
+    exit_reason: str,
+    effective_leverage: float,
+    capital_deployed_usd: float,
+    config: "TraderConfig",
+) -> None:
+    """Mirror of log_daily_return for user allocations — applies the same fee +
+    funding drag internally so net P&L accounting stays identical across master
+    and allocation paths.
+
+    net_return_pct signature intentionally matches master's log_daily_return:
+    caller passes `final_return_1x * effective_leverage * 100` (gross leveraged
+    percent before fees). This helper subtracts fee_drag + funding_drag and
+    records both gross and net.
+
+    Upsert semantics so --resume or re-runs don't duplicate. Called for every
+    terminal outcome — including filtered / conviction-kill paths that deploy
+    no capital — so the return history is dense.
+    """
+    gross_pct = net_return_pct
+    if effective_leverage > 0 and exit_reason not in _FLAT_EXIT_REASONS:
+        fee_drag = config.taker_fee_pct * effective_leverage
+        funding_drag = config.funding_rate_daily_pct * effective_leverage
+        net_return_pct = net_return_pct - (fee_drag + funding_drag) * 100
+
+    conn = _trader_db_connect()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO user_mgmt.allocation_returns
+                    (allocation_id, session_date, net_return_pct,
+                     gross_return_pct, exit_reason, effective_leverage,
+                     capital_deployed_usd)
+                VALUES (%s::uuid, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (allocation_id, session_date) DO UPDATE SET
+                    net_return_pct       = EXCLUDED.net_return_pct,
+                    gross_return_pct     = EXCLUDED.gross_return_pct,
+                    exit_reason          = EXCLUDED.exit_reason,
+                    effective_leverage   = EXCLUDED.effective_leverage,
+                    capital_deployed_usd = EXCLUDED.capital_deployed_usd,
+                    logged_at            = NOW()
+                """,
+                (allocation_id, session_date, net_return_pct, gross_pct,
+                 exit_reason, effective_leverage, capital_deployed_usd),
+            )
+        conn.commit()
+    except Exception as e:
+        log.warning(f"  Could not log allocation_returns for {allocation_id}: {e}")
+    finally:
+        conn.close()
+
+
+def _init_portfolio_session_for_allocation_inline(
+    *,
+    allocation_id: str,
+    signal_date: str,
+    symbols: list,
+    entered: list,
+    session_start_utc: datetime.datetime,
+    eff_lev: float,
+    lev_int: int,
+) -> str:
+    """Temporary inline INSERT for portfolio_sessions with allocation_id.
+
+    Part 2a.5 will merge this into the shared init_portfolio_session_sql.
+    Uses the new UNIQUE (signal_date, allocation_id) constraint from the
+    schema migration. Returns the new portfolio_session_id as a string.
+    """
+    conn = _trader_db_connect()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO user_mgmt.portfolio_sessions
+                    (allocation_id, signal_date, session_start_utc, status,
+                     symbols, entered, eff_lev, lev_int)
+                VALUES (%s::uuid, %s, %s, 'active', %s, %s, %s, %s)
+                ON CONFLICT ON CONSTRAINT portfolio_sessions_signal_date_allocation_key
+                DO UPDATE SET
+                    session_start_utc = EXCLUDED.session_start_utc,
+                    symbols           = EXCLUDED.symbols,
+                    entered           = EXCLUDED.entered,
+                    eff_lev           = EXCLUDED.eff_lev,
+                    lev_int           = EXCLUDED.lev_int,
+                    updated_at        = NOW()
+                RETURNING portfolio_session_id
+                """,
+                (allocation_id, signal_date, session_start_utc,
+                 list(symbols), list(entered),
+                 float(eff_lev), int(lev_int)),
+            )
+            session_id = cur.fetchone()[0]
+        conn.commit()
+        return str(session_id)
+    finally:
+        conn.close()
+
+
+def _run_fresh_session_for_allocation(
+    allocation_id: str,
+    config: TraderConfig,
+    api: BlofinREST,
+    dry_run: bool = False,
+) -> None:
+    """Entry + monitoring-loop-handoff for one user allocation.
+
+    Mirrors master's run_session() happy path. Substitutes per-allocation
+    DB-backed state for filesystem, allocation-aware SQL writes for master's,
+    and per-allocation credentials/api for module-level build_api(). At every
+    master save_state() checkpoint, calls _mark_runtime_state() with the
+    equivalent dict. At terminal-state exits, also calls _log_allocation_return()
+    so the trader dashboard has a row to render for filtered/no-entry days.
+    """
+    today = utc_today()  # "YYYY-MM-DD" string
+    today_date = utcnow().date()
+
+    # ── Phase 1: load signal scoped to this allocation's filter ──────────
+    # TODO(open-work-list): replace CSV with per-strategy-version signal
+    # source once a second strategy version exists. All published versions
+    # today route through the same CSV filter-column path.
+    symbols = get_today_symbols(today, active_filter=config.active_filter)
+    if not symbols:
+        log.info(
+            f"Allocation {allocation_id}: A -- Filtered, no symbols for "
+            f"{today} (filter={config.active_filter!r})"
+        )
+        _mark_runtime_state(allocation_id, {"phase": "filtered", "positions": []})
+        _log_allocation_return(
+            allocation_id, today,
+            net_return_pct=0.0, gross_return_pct=0.0,
+            exit_reason="filtered",
+            effective_leverage=0.0, capital_deployed_usd=0.0,
+        )
+        return
+
+    inst_ids = [s + config.symbol_suffix for s in symbols]
+
+    # ── Phase 2: sleep to conviction bar, then fetch 06:00 + 06:35 prices ─
+    session_open = datetime.datetime.combine(
+        today_date, datetime.time(config.session_start_hour, 0, 0)
+    )
+    conviction_dt = session_open + datetime.timedelta(
+        minutes=config.conviction_bar * config.bar_minutes + config.bar_minutes
+    )
+    exec_cutoff_dt = conviction_dt + datetime.timedelta(
+        minutes=config.conviction_exec_buffer_min
+    )
+
+    sleep_until(conviction_dt, f"conviction bar (allocation {allocation_id})")
+    now = utcnow()
+    past_cutoff = now > exec_cutoff_dt
+
+    log.info(
+        f"Allocation {allocation_id}: fetching 06:00 + {conviction_dt.strftime('%H:%M')} "
+        "UTC prices from Binance kline history"
+    )
+    open_prices = _get_prices_at_timestamp(inst_ids, session_open)
+    bar6_prices = _get_prices_at_timestamp(inst_ids, conviction_dt)
+
+    # Fallback to live marks for symbols missing from kline history
+    missing = [i for i in inst_ids if i not in open_prices or i not in bar6_prices]
+    if missing:
+        log.warning(f"  {len(missing)} symbols missing from kline history — falling back to live")
+        live = get_mark_prices(api, missing)
+        for i in missing:
+            if i not in open_prices and i in live: open_prices[i] = live[i]
+            if i not in bar6_prices and i in live: bar6_prices[i] = live[i]
+
+    if not open_prices:
+        log.error(f"Allocation {allocation_id}: could not fetch session-open prices — aborting")
+        _mark_runtime_state(allocation_id, {"phase": "errored", "reason": "open_prices_fetch_failed"})
+        _log_allocation_return(
+            allocation_id, today, 0.0, 0.0, "errored", 0.0, 0.0,
+        )
+        return
+
+    inst_ids = [i for i in inst_ids if i in open_prices and i in bar6_prices]
+
+    # Compute conviction. Order matches master line 1829: (current, ref).
+    roi_x = equal_weight_return(bar6_prices, open_prices)
+    log.info(
+        f"Allocation {allocation_id}: roi_x={roi_x * 100:.4f}%  "
+        f"kill_y={config.kill_y * 100:.2f}%"
+    )
+
+    # ── Phase 2a: missed execution window ────────────────────────────────
+    if past_cutoff:
+        log.warning(
+            f"Allocation {allocation_id}: past conviction exec cutoff "
+            f"(now={now.strftime('%H:%M:%S')} UTC, cutoff={exec_cutoff_dt.strftime('%H:%M:%S')} UTC). "
+            "No trade this session."
+        )
+        _mark_runtime_state(allocation_id, {
+            "phase": "missed_window",
+            "roi_x": round(float(roi_x), 6),
+            "positions": [],
+        })
+        _log_allocation_return(
+            allocation_id, today, 0.0, 0.0, "missed_window", 0.0, 0.0,
+        )
+        return
+
+    # ── Phase 2b: conviction gate ────────────────────────────────────────
+    if roi_x < config.kill_y:
+        log.info(
+            f"Allocation {allocation_id}: B -- No Entry  roi_x < kill_y  "
+            "(return=0%, no fees)"
+        )
+        _mark_runtime_state(allocation_id, {
+            "phase": "no_entry",
+            "roi_x": round(float(roi_x), 6),
+            "positions": [],
+        })
+        _log_allocation_return(
+            allocation_id, today, 0.0, 0.0, "no_entry_conviction", 0.0, 0.0,
+        )
+        return
+
+    log.info(f"Allocation {allocation_id}: conviction passed — entering at {config.l_high}x")
+
+    # ── Phase 3: stale-position sweep (this account only) ────────────────
+    # Mirrors master lines 1904-1939. Uses per-allocation api so only this
+    # user's BloFin account is touched.
+    existing = get_actual_positions(api, inst_ids)
+    if existing:
+        log.warning(
+            f"Allocation {allocation_id}: {len(existing)} stale position(s) "
+            f"found before entry: {list(existing.keys())}. Closing them first."
+        )
+        stale = [{"inst_id": iid, "contracts": int(sz),
+                  "marginMode": config.margin_mode,
+                  "positionSide": config.position_side}
+                 for iid, sz in existing.items()]
+        failed_stale = close_all_positions(api, stale, "pre_entry_cleanup", dry_run)
+        if failed_stale:
+            log.error(
+                f"Allocation {allocation_id}: could not close all stale positions. "
+                "Aborting entry to avoid double exposure."
+            )
+            _mark_runtime_state(allocation_id, {
+                "phase": "stale_close_failed",
+                "positions": failed_stale,
+                "unclosed_count": len(failed_stale),
+            })
+            _log_allocation_return(
+                allocation_id, today, 0.0, 0.0, "stale_close_failed", 0.0, 0.0,
+            )
+            return
+        log.info(f"Allocation {allocation_id}: stale positions closed")
+
+    # ── Phase 4: compute leverage (no VOL boost this release) ────────────
+    # Open work list: VOL boost from strategy_version.vol_boost_config.
+    eff_lev = float(config.l_high)
+    lev_int = max(1, int(math.ceil(eff_lev)))
+
+    # ── Phase 5: balance + enter positions ────────────────────────────────
+    balance = get_account_balance_usdt(api)
+    log.info(f"Allocation {allocation_id}: USDT available=${balance:,.2f}")
+
+    # Master's enter_positions applies the 90% buffer internally
+    # (MARGIN_BUFFER = 0.10) and refuses to trade if balance < $10.
+    entry_prices = bar6_prices
+    entry_1x = roi_x
+    peak = 0.0
+
+    positions, fill_report = enter_positions(
+        api, inst_ids, entry_prices, eff_lev, balance, dry_run
+    )
+
+    if not positions:
+        log.error(f"Allocation {allocation_id}: enter_positions returned no fills")
+        _mark_runtime_state(allocation_id, {
+            "phase": "errored",
+            "reason": "entry_failed",
+            "fill_report": fill_report,
+        })
+        _log_allocation_return(
+            allocation_id, today, 0.0, 0.0, "entry_failed", float(eff_lev), 0.0,
+        )
+        return
+
+    # ── Phase 5b: reconcile fills (mutates `positions` in place) ─────────
+    if not dry_run:
+        reconcile_fill_prices(api, positions)
+
+    capital_deployed_usd = float(fill_report.get("usdt_deployable") or 0.0)
+
+    # ── Phase 6: persist portfolio_sessions row with allocation_id ───────
+    session_start_dt = utcnow()
+    entered_inst_ids = [p["inst_id"] for p in positions]
+    session_id = _init_portfolio_session_for_allocation_inline(
+        allocation_id=allocation_id,
+        signal_date=today,
+        symbols=list(inst_ids),
+        entered=entered_inst_ids,
+        session_start_utc=session_start_dt.replace(tzinfo=datetime.timezone.utc),
+        eff_lev=eff_lev,
+        lev_int=lev_int,
+    )
+    log.info(f"Allocation {allocation_id}: portfolio_session_id={session_id}")
+
+    # ── Phase 7: mark runtime_state=active, handoff to monitoring loop ───
+    _mark_runtime_state(allocation_id, {
+        "phase": "active",
+        "session_id": session_id,
+        "entry_1x": round(float(entry_1x), 6),
+        "effective_leverage": float(eff_lev),
+        "peak": float(peak),
+        "open_prices": {k: float(v) for k, v in open_prices.items()},
+        "entry_prices": {k: float(v) for k, v in entry_prices.items()},
+        "positions": positions,
+        "symbols": list(inst_ids),
+        "capital_deployed_usd": capital_deployed_usd,
+    })
+
+    # ── Phase 8: monitoring loop — parameterized shared function ─────────
+    # Master's _run_monitoring_loop accepts allocation-mode kwargs (config,
+    # session_id, allocation_id, capital_deployed_usd) and branches at the
+    # write sites. Per-bar check order + portfolio-return math are shared.
+    _run_monitoring_loop(
+        today, today_date, api, inst_ids,
+        open_prices, entry_prices, entry_1x, eff_lev,
+        peak, positions, dry_run,
+        allocation_id=allocation_id,
+        config=config,
+        session_id=session_id,
+        capital_deployed_usd=capital_deployed_usd,
+    )
+
+
+def _append_portfolio_bar_for_session(
+    *,
+    session_id: str,
+    bar: int,
+    ts_utc: datetime.datetime,
+    incr: float,
+    peak: float,
+    sym_returns: dict,
+    stopped: list,
+) -> None:
+    """Temporary inline per-bar INSERT for allocation mode.
+
+    Part 2a.5 will extend the shared append_portfolio_bar_sql to accept an
+    allocation_id. For now, write directly by portfolio_session_id (which
+    already FK-encodes the allocation via the session row).
+
+    Idempotent on (portfolio_session_id, bar_number) PK. Best-effort —
+    a DB outage must not block the 5-min loop.
+    """
+    stopped_list = list(stopped)
+    try:
+        conn = _trader_db_connect()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO user_mgmt.portfolio_bars
+                        (portfolio_session_id, bar_number, bar_timestamp_utc,
+                         portfolio_return, peak_return, symbol_returns, stopped)
+                    VALUES (%s::uuid, %s, %s, %s, %s, %s::jsonb, %s)
+                    ON CONFLICT (portfolio_session_id, bar_number) DO NOTHING
+                    """,
+                    (session_id, bar, ts_utc, float(incr), float(peak),
+                     json.dumps(sym_returns), stopped_list),
+                )
+                cur.execute(
+                    """
+                    UPDATE user_mgmt.portfolio_sessions
+                    SET bars_count             = (
+                            SELECT COUNT(*) FROM user_mgmt.portfolio_bars b
+                            WHERE b.portfolio_session_id = %s::uuid
+                        ),
+                        final_portfolio_return = %s,
+                        peak_portfolio_return  = GREATEST(
+                            COALESCE(peak_portfolio_return, %s), %s
+                        ),
+                        max_dd_from_peak       = LEAST(
+                            COALESCE(max_dd_from_peak, 0), %s
+                        ),
+                        sym_stops              = ARRAY(
+                            SELECT DISTINCT unnest(sym_stops || %s::text[])
+                        ),
+                        updated_at             = NOW()
+                    WHERE portfolio_session_id = %s::uuid
+                    """,
+                    (session_id, float(incr), float(peak), float(peak),
+                     float(incr) - float(peak), stopped_list, session_id),
+                )
+            conn.commit()
+        finally:
+            conn.close()
+    except Exception as e:
+        log.warning(f"  Could not append portfolio bar (session {session_id}): {e}")
+
+
+def _close_portfolio_session_for_allocation(
+    *,
+    session_id: str,
+    exit_reason: str,
+    exit_time_utc: datetime.datetime,
+) -> None:
+    """Mark the per-allocation portfolio_sessions row closed. Best-effort."""
+    try:
+        conn = _trader_db_connect()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE user_mgmt.portfolio_sessions
+                    SET status        = 'closed',
+                        exit_reason   = %s,
+                        exit_time_utc = %s,
+                        updated_at    = NOW()
+                    WHERE portfolio_session_id = %s::uuid
+                    """,
+                    (exit_reason, exit_time_utc, session_id),
+                )
+            conn.commit()
+        finally:
+            conn.close()
+    except Exception as e:
+        log.warning(f"  Could not close portfolio session {session_id}: {e}")
+
+
+
+def run_session_for_allocation(allocation_id: str, dry_run: bool = False) -> None:
+    """Execute one session for one user allocation.
+
+    Replaces module-level credentials, filesystem state, and hardcoded strategy
+    constants with per-allocation DB-backed equivalents. Otherwise follows the
+    same phase sequence as master's run_session().
+    """
+    # 1. Acquire per-allocation lock (24-hour staleness threshold).
+    if not _acquire_allocation_lock(allocation_id):
+        log.warning(
+            f"Allocation {allocation_id} already locked or stale-but-recent. "
+            "Exiting without running a session."
+        )
+        return
+
+    try:
+        # 2. Load allocation context.
+        alloc = _fetch_allocation(allocation_id)
+        if alloc["status"] != "active":
+            log.info(
+                f"Allocation {allocation_id} status={alloc['status']!r}; skipping."
+            )
+            return
+
+        # 3. Build TraderConfig from the frozen strategy_version.config JSONB.
+        strategy_version = _fetch_strategy_version(alloc["strategy_version_id"])
+        config = TraderConfig.from_strategy_version(
+            strategy_version["config"],
+            capital_usd=float(alloc["capital_usd"]),
+        )
+        log.info(
+            f"Allocation {allocation_id}  "
+            f"strategy_version={strategy_version['version_label']}  "
+            f"capital=${float(alloc['capital_usd']):,.2f}  "
+            f"l_high={config.l_high}  kill_y={config.kill_y}  "
+            f"port_sl={config.port_sl_pct}  port_tsl={config.port_tsl_pct}  "
+            f"filter={config.active_filter!r}"
+        )
+
+        # 4. Decrypt exchange credentials (Fernet via the encryption service).
+        try:
+            creds = load_credentials(alloc["connection_id"])
+        except (ValueError, CredentialDecryptError) as e:
+            log.error(
+                f"Allocation {allocation_id}: credential load failed ({e}). "
+                "Marking runtime_state errored and exiting."
+            )
+            _mark_runtime_state(
+                allocation_id,
+                {"phase": "errored", "reason": f"credential load: {e}"},
+            )
+            return
+
+        if creds.exchange != "blofin":
+            log.warning(
+                f"Allocation {allocation_id} uses {creds.exchange!r} — only "
+                "blofin is supported in this release. Skipping."
+            )
+            _mark_runtime_state(
+                allocation_id,
+                {"phase": "skipped",
+                 "reason": f"exchange {creds.exchange} not supported"},
+            )
+            return
+
+        # 5. Build a per-allocation BlofinREST instance with the decrypted keys.
+        # Note: NOT build_api() — that reads module-level creds for the master
+        # account. Each allocation gets its own instance with its own keys.
+        api = BlofinREST(
+            api_key=creds.api_key,
+            api_secret=creds.api_secret,
+            passphrase=creds.passphrase,
+            demo=False,
+        )
+
+        # 6. Resume vs fresh branch on runtime_state.
+        state = alloc.get("runtime_state") or {}
+        today = utc_today()
+
+        if state.get("date") == today and state.get("phase") == "active":
+            log.info(
+                f"Allocation {allocation_id}: resuming active session from "
+                "runtime_state."
+            )
+            # Rehydrate the positional args the shared loop expects.
+            _open_prices  = {k: float(v) for k, v in state["open_prices"].items()}
+            _entry_prices = {k: float(v) for k, v in state["entry_prices"].items()}
+            _inst_ids     = list(state.get("symbols", _open_prices.keys()))
+            _today_date   = utcnow().date()
+            _run_monitoring_loop(
+                today, _today_date, api, _inst_ids,
+                _open_prices, _entry_prices,
+                float(state.get("entry_1x", 0.0)),
+                float(state.get("effective_leverage", config.l_high)),
+                float(state.get("peak", 0.0)),
+                state["positions"], dry_run,
+                allocation_id=allocation_id,
+                config=config,
+                session_id=state.get("session_id"),
+                capital_deployed_usd=float(state.get("capital_deployed_usd", 0.0)),
+            )
+            return
+
+        if state.get("date") == today and state.get("phase") in (
+            "closed", "filtered", "no_entry", "missed_window",
+            "skipped", "errored", "stale_close_failed",
+        ):
+            log.info(
+                f"Allocation {allocation_id}: already finished today "
+                f"(phase={state['phase']}). Exiting."
+            )
+            return
+
+        # 7. Fresh session — entry + monitoring + close.
+        _run_fresh_session_for_allocation(allocation_id, config, api, dry_run=dry_run)
+
+    finally:
+        _release_allocation_lock(allocation_id)
+
+
+# ==========================================================================
 # ENTRY POINT
 # ==========================================================================
 
@@ -2467,6 +3260,13 @@ if __name__ == "__main__":
                         help="Seed returns log from a CSV to warm up VOL boost engine")
     parser.add_argument("--close-all",    action="store_true",
                         help="Force-close all open positions on BloFin and exit")
+    parser.add_argument(
+        "--allocation-id", type=str, default=None,
+        help="UUID of user_mgmt.allocations row to execute. When set, runs in "
+             "multi-tenant mode: decrypts per-user credentials, uses per-"
+             "allocation runtime_state, writes with allocation_id. When unset, "
+             "runs master account mode (legacy, unchanged).",
+    )
     args = parser.parse_args()
 
     if args.status:
@@ -2496,17 +3296,31 @@ if __name__ == "__main__":
         log.info("All positions closed successfully.")
         sys.exit(0)
 
-    acquire_lock()
-    try:
-        run_session(dry_run=args.dry_run, resume=args.resume)
-    except KeyboardInterrupt:
-        log.warning("Interrupted by user.")
-        alert("Session interrupted by KeyboardInterrupt. Check for open positions.",
-              subject="trader-blofin INTERRUPTED")
-    except Exception as e:
-        log.exception(f"Unhandled exception: {e}")
-        alert(f"Unhandled exception: {e}. Session may have open positions.",
-              subject="trader-blofin CRASH")
-        raise
-    finally:
-        release_lock()
+    if args.allocation_id:
+        # Multi-tenant mode: per-allocation lock (DB-backed) instead of the
+        # filesystem LOCK_FILE. Master-account path below is unchanged.
+        try:
+            run_session_for_allocation(args.allocation_id, dry_run=args.dry_run)
+        except KeyboardInterrupt:
+            log.warning(f"Allocation {args.allocation_id}: interrupted by user.")
+        except Exception as e:
+            log.exception(
+                f"Allocation {args.allocation_id}: unhandled exception: {e}"
+            )
+            raise
+    else:
+        # Master account mode — legacy, behavior bit-for-bit identical.
+        acquire_lock()
+        try:
+            run_session(dry_run=args.dry_run, resume=args.resume)
+        except KeyboardInterrupt:
+            log.warning("Interrupted by user.")
+            alert("Session interrupted by KeyboardInterrupt. Check for open positions.",
+                  subject="trader-blofin INTERRUPTED")
+        except Exception as e:
+            log.exception(f"Unhandled exception: {e}")
+            alert(f"Unhandled exception: {e}. Session may have open positions.",
+                  subject="trader-blofin CRASH")
+            raise
+        finally:
+            release_lock()
