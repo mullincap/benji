@@ -208,14 +208,36 @@ export default function LandingPage() {
         @media (max-width: 700px) {
           .lp-section { padding: 80px 1.5rem !important; }
           .lp-modules-grid { grid-template-columns: 1fr 1fr !important; }
-          .lp-hero-actions { flex-direction: column; }
+          .lp-hero-actions { flex-direction: column !important; width: 100%; align-items: stretch; }
+          .lp-hero-actions > a { text-align: center; }
+          .lp-nav { padding: 0 1.25rem !important; }
+          .lp-nav-links { display: none !important; }
+          .lp-hero { padding: 110px 1.25rem 70px !important; }
+          .lp-hero-stats { flex-wrap: wrap !important; }
+          .lp-hero-stats > div {
+            flex: 1 0 33.333% !important;
+            border-right: 1px solid var(--line) !important;
+            border-bottom: 1px solid var(--line);
+            padding: 18px 0 !important;
+          }
+          .lp-hero-stats > div:nth-child(3n) { border-right: none !important; }
+          .lp-hero-stats > div:nth-last-child(-n+2) { border-bottom: none; }
+          .lp-waitlist { padding: 100px 1.25rem !important; }
+          .lp-footer { padding: 2rem 1.25rem !important; }
+          .lp-footer-links { gap: 1.25rem !important; flex-wrap: wrap; justify-content: center; }
+        }
+        @media (max-width: 480px) {
+          .lp-modules-grid { grid-template-columns: 1fr !important; }
+          .lp-waitlist-form { flex-direction: column !important; gap: 8px !important; }
+          .lp-waitlist-form > input { border-right: 1px solid var(--line2) !important; }
+          .lp-waitlist-form > button { padding: 14px !important; }
         }
       `}</style>
 
       <NeuralCanvas />
 
       {/* Nav */}
-      <nav style={{
+      <nav className="lp-nav" style={{
         position: 'fixed', top: 0, left: 0, right: 0, zIndex: 100,
         display: 'flex', alignItems: 'center', justifyContent: 'space-between',
         padding: '0 4rem', height: 64,
@@ -235,7 +257,7 @@ export default function LandingPage() {
           }} />
           3M
         </a>
-        <ul style={{ display: 'flex', alignItems: 'center', gap: '2.5rem', listStyle: 'none' }}>
+        <ul className="lp-nav-links" style={{ display: 'flex', alignItems: 'center', gap: '2.5rem', listStyle: 'none' }}>
           {['Modules', 'Process', 'Metrics', 'Pricing'].map((label) => (
             <li key={label}>
               <a href={`#${label.toLowerCase()}`} className="lp-nav-link" style={{
@@ -256,7 +278,7 @@ export default function LandingPage() {
       </nav>
 
       {/* Hero */}
-      <section style={{
+      <section className="lp-hero" style={{
         position: 'relative', zIndex: 1, minHeight: '100vh',
         display: 'grid', placeItems: 'center',
         padding: '120px 4rem 80px', textAlign: 'center',
@@ -289,7 +311,7 @@ export default function LandingPage() {
             Built for fund managers and allocators who demand rigor.
           </p>
 
-          <div className="lp-rise-4" style={{ display: 'flex', gap: 12, marginBottom: '5rem' }}>
+          <div className="lp-rise-4 lp-hero-actions" style={{ display: 'flex', gap: 12, marginBottom: '5rem' }}>
             <Link href="/simulator" className="lp-btn-primary" style={{
               padding: '13px 32px', background: 'var(--green)', color: '#000',
               fontFamily: 'var(--font-space-mono)', fontWeight: 700,
@@ -306,7 +328,7 @@ export default function LandingPage() {
             </a>
           </div>
 
-          <div className="lp-rise-5" style={{
+          <div className="lp-rise-5 lp-hero-stats" style={{
             display: 'flex', gap: 0, borderTop: '1px solid var(--line)',
             width: '100%', maxWidth: 680,
           }}>
@@ -674,7 +696,7 @@ export default function LandingPage() {
       <div style={{ width: '100%', height: 1, background: 'var(--line)', position: 'relative', zIndex: 1 }} />
 
       {/* Waitlist */}
-      <div id="waitlist" style={{
+      <div id="waitlist" className="lp-waitlist" style={{
         position: 'relative', zIndex: 1, padding: '140px 4rem',
         maxWidth: 1200, margin: '0 auto',
         display: 'flex', flexDirection: 'column', alignItems: 'center', textAlign: 'center',
@@ -689,7 +711,7 @@ export default function LandingPage() {
         <p style={{ fontSize: 12, color: 'var(--t1)', maxWidth: 380, lineHeight: 1.9, marginBottom: '3rem' }}>
           Join the waitlist for early access to the full 3M platform. We onboard a limited number of new funds each month.
         </p>
-        <div style={{ display: 'flex', maxWidth: 400, width: '100%', gap: 0 }}>
+        <div className="lp-waitlist-form" style={{ display: 'flex', maxWidth: 400, width: '100%', gap: 0 }}>
           <input
             type="email"
             placeholder="your@fund.com"
@@ -721,7 +743,7 @@ export default function LandingPage() {
       </div>
 
       {/* Footer */}
-      <footer style={{
+      <footer className="lp-footer" style={{
         position: 'relative', zIndex: 1, borderTop: '1px solid var(--line)',
         padding: '2rem 4rem', display: 'flex', justifyContent: 'space-between',
         alignItems: 'center', gap: '1rem', flexWrap: 'wrap',
@@ -737,7 +759,7 @@ export default function LandingPage() {
           3M
         </a>
         <p style={{ fontSize: 10, color: 'var(--t3)', letterSpacing: '0.04em' }}>© 2025 Mullin Capital. All rights reserved.</p>
-        <ul style={{ display: 'flex', gap: '2rem', listStyle: 'none' }}>
+        <ul className="lp-footer-links" style={{ display: 'flex', gap: '2rem', listStyle: 'none' }}>
           {['Privacy', 'Terms'].map((label) => (
             <li key={label}>
               <a href="#" className="lp-footer-link" style={{
