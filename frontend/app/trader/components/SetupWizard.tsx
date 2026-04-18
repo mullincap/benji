@@ -507,7 +507,7 @@ export default function SetupWizard({ strategyName, onActivate, onCancel }: Setu
                 }}>{badge}</div>
                 <div>
                   <div style={{ fontSize: 13, fontWeight: 700, color: "var(--t0)" }}>{selectedExchangeName}</div>
-                  <div style={{ fontSize: 9, color: "var(--t3)" }}>Read-only &middot; encrypted &middot; never stored in plain text</div>
+                  <div style={{ fontSize: 9, color: "var(--t3)" }}>Encrypted &middot; never stored in plain text</div>
                 </div>
               </div>
               <span
@@ -554,9 +554,8 @@ export default function SetupWizard({ strategyName, onActivate, onCancel }: Setu
               display: "flex", alignItems: "flex-start", gap: 8,
             }}>
               <span style={{ width: 5, height: 5, borderRadius: "50%", background: "var(--t2)", flexShrink: 0, marginTop: 5 }} />
-              <span style={{ fontSize: 10, lineHeight: 1.6 }}>
-                <span style={{ color: "var(--t1)", fontWeight: 700 }}>Read-only access only.</span>
-                <span style={{ color: "var(--t2)" }}> We can never place trades, move funds, or withdraw on your behalf. Your keys are encrypted at rest and never leave your server.</span>
+              <span style={{ fontSize: 10, lineHeight: 1.6, color: "var(--t2)" }}>
+                Your keys are encrypted at rest and never leave your server.
               </span>
             </div>
 

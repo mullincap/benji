@@ -670,7 +670,6 @@ export default function SettingsPage() {
                 {ex.status === "active" && (
                   <div style={{ display: "flex", gap: 16, fontSize: 10, color: "var(--t1)" }}>
                     <span>{ex.maskedKey}</span>
-                    <span style={{ color: "var(--t2)" }}>read-only</span>
                     <span style={{ color: "var(--t2)" }}>synced {ex.lastSynced}</span>
                     {ex.balance > 0 && (
                       <span style={{ color: "var(--t1)" }}>
