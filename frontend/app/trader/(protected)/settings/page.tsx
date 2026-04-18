@@ -91,42 +91,34 @@ const inlineErrorStyle: React.CSSProperties = {
 
 // ─── Permissions step (live data from backend) ───────────────────────────────
 
-// Policy: keys must be trade-capable (they execute strategies) but cannot withdraw.
-//   required:  read; spot_trade is required on Binance
-//   allowed:   spot_trade (BloFin), futures_trade
-//   rejected:  withdrawals
-// Mirrors backend validate_permissions() in permissions.py.
+// Step 3 is INFORMATIONAL, not a gate. If the backend returned 200 on step 2,
+// the key was already accepted by policy — step 3 just surfaces what it can do.
+// Per-exchange role map:
+//   required: must be ENABLED for the account type
+//   allowed:  can be either; informational
+//   rejected: must be DISABLED (backend already enforces)
+//   inferred: BloFin's query-apikey can't distinguish this permission — we trust
+//             the user's key configuration and surface that ambiguity explicitly
 
-type PermRowSpec = {
+type RoleName = "required" | "allowed" | "rejected" | "inferred";
+
+type RowSpec = {
   key: keyof ExchangePermissions;
   label: string;
-  /** What this field means under the new policy. */
-  role: "required" | "allowed" | "rejected";
+  binance: Exclude<RoleName, "inferred">;
+  blofin:  RoleName;
 };
 
-function rowSpecsForExchange(exchange: string): PermRowSpec[] {
-  const spotRole: "required" | "allowed" =
-    exchange === "binance" ? "required" : "allowed";
-  return [
-    { key: "read",          label: "Read account info",     role: "required" },
-    { key: "spot_trade",    label: "Spot & margin trading", role: spotRole   },
-    { key: "futures_trade", label: "Futures trading",       role: "allowed"  },
-    { key: "withdrawals",   label: "Withdrawals",           role: "rejected" },
-  ];
-}
+const PERMISSION_ROWS: RowSpec[] = [
+  { key: "read",          label: "Read account info",     binance: "required", blofin: "required" },
+  { key: "spot_trade",    label: "Spot & margin trading", binance: "required", blofin: "inferred" },
+  { key: "futures_trade", label: "Futures trading",       binance: "allowed",  blofin: "inferred" },
+  { key: "withdrawals",   label: "Enable withdrawals",    binance: "rejected", blofin: "inferred" },
+];
 
-function permissionsAreValid(exchange: string, p: ExchangePermissions | null): boolean {
-  if (!p) return false;
-  if (p.read !== true) return false;
-  if (p.withdrawals === true) return false;
-  if (exchange === "binance" && p.spot_trade !== true) return false;
-  if (exchange === "blofin") {
-    // BloFin readOnly=1 → both trade fields false; readOnly=0 → both true.
-    if (p.spot_trade === null || p.futures_trade === null) return false;
-    if (p.spot_trade === false && p.futures_trade === false) return false;
-  }
-  return true;
-}
+const BLOFIN_INFERRED_TOOLTIP =
+  "BloFin doesn't distinguish trade from withdrawal permissions via API. " +
+  "Verify your key is Trade-only on BloFin's side.";
 
 function PermissionsStep({
   exchange, permissions,
@@ -135,74 +127,100 @@ function PermissionsStep({
   permissions: ExchangePermissions | null;
 }) {
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 5, marginBottom: 14 }}>
-      {rowSpecsForExchange(exchange).map(row => {
-        const value = permissions?.[row.key];
-        // Resolve pill based on role + value.
-        let pillColor: string, pillBg: string, pillBorder: string, pillText: string;
-        if (row.role === "required") {
-          if (value === true) {
-            pillColor = "var(--green)"; pillBg = "var(--green-dim)"; pillBorder = "var(--green-mid)";
-            pillText = "ENABLED";
-          } else if (value === false) {
-            pillColor = "var(--red)"; pillBg = "var(--red-dim)"; pillBorder = "var(--red)";
-            pillText = "MISSING";
+    <div>
+      <div style={{
+        fontSize: 9, fontWeight: 700, letterSpacing: "0.12em",
+        color: "var(--t3)", textTransform: "uppercase", marginBottom: 10,
+      }}>
+        Key permissions
+      </div>
+      <div style={{ display: "flex", flexDirection: "column", gap: 5, marginBottom: 14 }}>
+        {PERMISSION_ROWS.map(row => {
+          const role: RoleName = exchange === "blofin" ? row.blofin : row.binance;
+          const value = permissions?.[row.key] ?? null;
+          // Resolve pill + row bg by role × value.
+          let pillColor: string, pillBg: string, pillBorder: string;
+          let pillText: string;
+          let tooltip: string | undefined;
+          let isGoodState = false;
+
+          if (role === "required") {
+            if (value === true) {
+              pillColor = "var(--green)"; pillBg = "var(--green-dim)"; pillBorder = "var(--green-mid)";
+              pillText = "ACTIVE"; isGoodState = true;
+            } else if (value === false) {
+              pillColor = "var(--red)"; pillBg = "var(--red-dim)"; pillBorder = "var(--red)";
+              pillText = "MISSING";
+            } else {
+              pillColor = "var(--amber)"; pillBg = "var(--amber-dim)"; pillBorder = "var(--amber)";
+              pillText = "UNKNOWN";
+            }
+          } else if (role === "allowed") {
+            if (value === true) {
+              pillColor = "var(--t1)"; pillBg = "var(--bg2)"; pillBorder = "var(--line2)";
+              pillText = "ENABLED";
+            } else if (value === false) {
+              pillColor = "var(--t2)"; pillBg = "var(--bg2)"; pillBorder = "var(--line)";
+              pillText = "DISABLED";
+            } else {
+              pillColor = "var(--t2)"; pillBg = "var(--bg2)"; pillBorder = "var(--line)";
+              pillText = "UNKNOWN";
+            }
+          } else if (role === "rejected") {
+            if (value === true) {
+              pillColor = "var(--red)"; pillBg = "var(--red-dim)"; pillBorder = "var(--red)";
+              pillText = "ENABLED — SHOULD NOT BE";
+            } else if (value === false) {
+              pillColor = "var(--green)"; pillBg = "var(--green-dim)"; pillBorder = "var(--green-mid)";
+              pillText = "DISABLED"; isGoodState = true;
+            } else {
+              pillColor = "var(--amber)"; pillBg = "var(--amber-dim)"; pillBorder = "var(--amber)";
+              pillText = "UNKNOWN";
+            }
           } else {
-            pillColor = "var(--amber)"; pillBg = "var(--amber-dim)"; pillBorder = "var(--amber)";
-            pillText = "UNKNOWN";
+            // inferred (BloFin) — API can't distinguish trade from transfer/withdraw.
+            // Treat true and null both as ambiguous "trust setup" since readOnly=0
+            // means the key is non-read-only but we can't prove which category.
+            if (value === true || value === null) {
+              pillColor = "var(--amber)"; pillBg = "var(--amber-dim)"; pillBorder = "var(--amber)";
+              pillText = "UNCLEAR — TRUST SETUP";
+              tooltip = BLOFIN_INFERRED_TOOLTIP;
+            } else {
+              pillColor = "var(--t2)"; pillBg = "var(--bg2)"; pillBorder = "var(--line)";
+              pillText = "NOT APPLICABLE";
+            }
           }
-        } else if (row.role === "rejected") {
-          if (value === true) {
-            pillColor = "var(--red)"; pillBg = "var(--red-dim)"; pillBorder = "var(--red)";
-            pillText = "ENABLED — REJECTED";
-          } else if (value === false) {
-            pillColor = "var(--t2)"; pillBg = "var(--bg2)"; pillBorder = "var(--line)";
-            pillText = "DISABLED";
-          } else {
-            // e.g. BloFin readOnly=0 leaves withdrawals=null (can't distinguish)
-            pillColor = "var(--amber)"; pillBg = "var(--amber-dim)"; pillBorder = "var(--amber)";
-            pillText = "NOT VERIFIED";
-          }
-        } else {
-          // allowed
-          if (value === true) {
-            pillColor = "var(--green)"; pillBg = "var(--green-dim)"; pillBorder = "var(--green-mid)";
-            pillText = "ENABLED";
-          } else if (value === false) {
-            pillColor = "var(--t2)"; pillBg = "var(--bg2)"; pillBorder = "var(--line)";
-            pillText = "DISABLED";
-          } else {
-            pillColor = "var(--t2)"; pillBg = "var(--bg2)"; pillBorder = "var(--line)";
-            pillText = "NOT SET";
-          }
-        }
-        const isGoodState =
-          (row.role === "required" && value === true)
-          || (row.role === "rejected" && value === false)
-          || (row.role === "allowed" && value === true);
-        const rowBg = isGoodState ? "var(--green-dim)" : "var(--bg2)";
-        const rowBorder = isGoodState ? "var(--green-mid)" : "var(--line)";
-        const dotColor = value === true ? pillColor : "var(--line)";
-        return (
-          <div key={row.key} style={{
-            display: "flex", alignItems: "center", justifyContent: "space-between",
-            padding: "8px 12px", background: rowBg,
-            border: `1px solid ${rowBorder}`, borderRadius: 3,
-          }}>
-            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-              <div style={{ width: 5, height: 5, borderRadius: "50%", background: dotColor }} />
-              <span style={{ fontSize: 10, color: row.role === "required" ? "var(--t1)" : "var(--t2)" }}>{row.label}</span>
-            </div>
-            <span style={{
-              fontSize: 9, fontWeight: 700, letterSpacing: "0.12em",
-              color: pillColor, background: pillBg,
-              border: `1px solid ${pillBorder}`, borderRadius: 3, padding: "2px 7px",
+
+          const rowBg = isGoodState ? "var(--green-dim)" : "var(--bg2)";
+          const rowBorder = isGoodState ? "var(--green-mid)" : "var(--line)";
+          const dotColor = value === true ? pillColor : "var(--line)";
+          return (
+            <div key={row.key} style={{
+              display: "flex", alignItems: "center", justifyContent: "space-between",
+              padding: "8px 12px", background: rowBg,
+              border: `1px solid ${rowBorder}`, borderRadius: 3,
             }}>
-              {pillText}
-            </span>
-          </div>
-        );
-      })}
+              <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                <div style={{ width: 5, height: 5, borderRadius: "50%", background: dotColor }} />
+                <span style={{ fontSize: 10, color: role === "required" ? "var(--t1)" : "var(--t2)" }}>
+                  {row.label}
+                </span>
+              </div>
+              <span
+                title={tooltip}
+                style={{
+                  fontSize: 9, fontWeight: 700, letterSpacing: "0.12em",
+                  color: pillColor, background: pillBg,
+                  border: `1px solid ${pillBorder}`, borderRadius: 3, padding: "2px 7px",
+                  cursor: tooltip ? "help" : "default",
+                }}
+              >
+                {pillText}
+              </span>
+            </div>
+          );
+        })}
+      </div>
     </div>
   );
 }
@@ -506,12 +524,13 @@ function LinkWizard({ onComplete, onCancel }: { onComplete: (connectionId: strin
               onMouseEnter={e => { e.currentTarget.style.color = "var(--t0)"; }}
               onMouseLeave={e => { e.currentTarget.style.color = "var(--t2)"; }}
               style={textBtnStyle}>{"\u2190"} Back</button>
-            {(() => {
-              const valid = verify.kind === "ok" && permissionsAreValid(verify.result.exchange, verify.result.permissions);
-              return valid
-                ? <button onClick={() => setStep(4)} style={primaryBtnStyle}>PERMISSIONS OK &rarr;</button>
-                : <button disabled style={disabledBtnStyle}>UNEXPECTED PERMISSIONS — CONTACT SUPPORT</button>;
-            })()}
+            {/* Step 3 is informational — backend already accepted the key on step 2.
+                Gate only on having a permissions payload (defensive for malformed responses). */}
+            {verify.kind === "ok" && verify.result.permissions ? (
+              <button onClick={() => setStep(4)} style={primaryBtnStyle}>CONTINUE &rarr;</button>
+            ) : (
+              <button disabled style={disabledBtnStyle}>MISSING PERMISSIONS DATA</button>
+            )}
           </div>
         </div>
       )}
