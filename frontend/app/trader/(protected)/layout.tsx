@@ -187,10 +187,13 @@ function Sidebar() {
         <div style={{ flex: 1, overflowY: "auto" }}>
           {/* Sidebar donut */}
           {(() => {
-            const totalBalance = exchanges.reduce((s, e) => s + e.balance, 0);
+            // Only active (validated + read-only) exchanges contribute to the balance donut.
+            // pending_validation / invalid / errored rows are excluded — they don't represent real capital.
+            const activeExchanges = exchanges.filter(e => e.status === "active");
+            const totalBalance = activeExchanges.reduce((s, e) => s + e.balance, 0);
             const totalAllocated = instances.filter(i => i.status === "live" || i.status === "paused").reduce((s, i) => s + (i.allocation ?? 0), 0);
             const available = Math.max(0, totalBalance - totalAllocated);
-            const hasExchanges = exchanges.length > 0;
+            const hasExchanges = activeExchanges.length > 0;
             const fmtAbbrev = (n: number) => n >= 1000000 ? `$${(n / 1000000).toFixed(1)}m` : n >= 1000 ? `$${Math.round(n / 1000)}k` : `$${n}`;
 
             const donutData = hasExchanges ? {

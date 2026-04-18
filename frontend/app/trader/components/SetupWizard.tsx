@@ -1,16 +1,22 @@
 "use client";
 
+// TODO(prompt-b-followup): update permissions rendering, error handling to
+// match LinkWizard. This wizard still uses the cosmetic-terminal-log verify
+// flow and hardcoded permissions assumptions; only the credential submission
+// has been tightened to the new strict types. Tracked separately.
+
 import React, { useState, useEffect, useRef } from "react";
 import { useTrader, Exchange, fmt, mask } from "../context";
-import { allocatorApi } from "../api";
+import { allocatorApi, type ExchangeSlug } from "../api";
 import AllocationPicker from "./AllocationPicker";
 
 // ─── Exchange catalog ───────────────────────────────────────────────────────
 
-const EXCHANGE_OPTIONS = [
-  { name: "Binance", badge: "BN", markets: "Spot · Futures · Margin" },
-  { name: "Bybit", badge: "BY", markets: "Spot · Derivatives" },
-  { name: "OKX", badge: "OK", markets: "Spot · Futures · Options" },
+// Only backend-supported exchanges. Bybit/OKX were previously listed but
+// would 400 on submit — removed until backend support is added.
+const EXCHANGE_OPTIONS: { name: string; slug: ExchangeSlug; badge: string; markets: string }[] = [
+  { name: "Binance", slug: "binance", badge: "BN", markets: "Spot · Futures · Margin" },
+  { name: "BloFin",  slug: "blofin",  badge: "BF", markets: "Futures" },
 ];
 
 const EXCHANGE_KEY_STEPS: Record<string, string[]> = {
@@ -20,17 +26,11 @@ const EXCHANGE_KEY_STEPS: Record<string, string[]> = {
     "Enable Read Info only \u2014 disable trading and withdrawals",
     "Copy API Key and Secret Key and paste below",
   ],
-  Bybit: [
-    "Log into Bybit \u2192 profile icon \u2192 API",
-    "Click Create New Key \u2192 System-generated",
-    "Enable Read-Only permissions only",
-    "Copy API Key and Secret Key and paste below",
-  ],
-  OKX: [
-    "Log into OKX \u2192 profile icon \u2192 API",
-    "Click Create API Key \u2192 choose Read only",
-    "Set passphrase \u2192 confirm permissions",
-    "Copy API Key and Secret Key and paste below",
+  BloFin: [
+    "Log into BloFin \u2192 profile icon \u2192 API",
+    "Click Create API Key \u2192 set passphrase",
+    "Enable READ only \u2014 disable TRADE and TRANSFER",
+    "Copy API Key, Secret Key, and your passphrase below",
   ],
 };
 
@@ -102,6 +102,7 @@ export default function SetupWizard({ strategyName, onActivate, onCancel }: Setu
   // Keys form
   const [inlineApiKey, setInlineApiKey] = useState("");
   const [inlineSecretKey, setInlineSecretKey] = useState("");
+  const [inlinePassphrase, setInlinePassphrase] = useState("");
   const [verifyStatus, setVerifyStatus] = useState<"idle" | "checking" | "ok">("idle");
   const [verifyLog, setVerifyLog] = useState<string[]>([]);
   const logRef = useRef<HTMLDivElement>(null);
@@ -111,7 +112,11 @@ export default function SetupWizard({ strategyName, onActivate, onCancel }: Setu
 
   useEffect(() => { if (logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight; }, [verifyLog]);
 
-  const inlineValid = inlineApiKey.length > 10 && inlineSecretKey.length > 10;
+  const needsPassphraseStep = EXCHANGE_OPTIONS.find(o => o.name === selectedExchangeName)?.slug === "blofin";
+  const inlineValid =
+    inlineApiKey.length > 10
+    && inlineSecretKey.length > 10
+    && (!needsPassphraseStep || inlinePassphrase.trim().length > 0);
 
   // Check if the selected exchange is already linked
   const linkedExchange = selectedExchangeName ? exchanges.find(e => e.name === selectedExchangeName) : null;
@@ -139,13 +144,32 @@ export default function SetupWizard({ strategyName, onActivate, onCancel }: Setu
 
     addLog(`> Connecting to ${selectedExchangeName} API...`);
 
+    // Narrow the exchange name against the supported list — reject unknowns early.
+    const opt = EXCHANGE_OPTIONS.find(o => o.name === selectedExchangeName);
+    if (!opt) {
+      const msg = `Exchange '${selectedExchangeName}' is not supported.`;
+      addLog(`> Error: ${msg}`);
+      setVerifyError(msg);
+      setVerifyStatus("idle");
+      return;
+    }
+    const slug: ExchangeSlug = opt.slug;
+    if (slug === "blofin" && !inlinePassphrase.trim()) {
+      const msg = "BloFin requires a passphrase.";
+      addLog(`> Error: ${msg}`);
+      setVerifyError(msg);
+      setVerifyStatus("idle");
+      return;
+    }
+
     try {
       addLog("> Storing encrypted credentials...");
       const result = await allocatorApi.storeExchangeKeys({
-        exchange: selectedExchangeName.toLowerCase(),
+        exchange: slug,
         label: selectedExchangeName,
-        api_key: inlineApiKey,
-        api_secret: inlineSecretKey,
+        api_key: inlineApiKey.trim(),
+        api_secret: inlineSecretKey.trim(),
+        passphrase: slug === "blofin" ? inlinePassphrase.trim() : undefined,
       });
 
       addLog("> Credentials stored securely");
@@ -166,10 +190,15 @@ export default function SetupWizard({ strategyName, onActivate, onCancel }: Setu
 
       const newEx: Exchange = {
         id: result.connection_id,
+        exchange: slug,
         name: selectedExchangeName,
         maskedKey: result.masked_key,
         lastSynced: "just now",
         balance,
+        status: "active",
+        lastErrorMsg: null,
+        permissions: result.permissions,
+        lastValidatedAt: new Date().toISOString(),
       };
       addExchange(newEx);
       setSelectedExchangeId(newEx.id);
@@ -451,6 +480,14 @@ export default function SetupWizard({ strategyName, onActivate, onCancel }: Setu
                 style={{ width: "100%", background: "var(--bg0)", border: "1px solid var(--line)", borderRadius: 3, padding: "9px 12px", color: "var(--t0)", fontSize: 10, outline: "none" }}
                 onFocus={e => (e.target.style.borderColor = "var(--green)")} onBlur={e => (e.target.style.borderColor = "var(--line)")} />
             </div>
+            {needsPassphraseStep && (
+              <div style={{ marginBottom: 8 }}>
+                <div style={{ fontSize: 9, color: "var(--t3)", letterSpacing: "0.12em", fontWeight: 700, textTransform: "uppercase", marginBottom: 6 }}>PASSPHRASE</div>
+                <input type="password" placeholder="BloFin passphrase" value={inlinePassphrase} onChange={e => setInlinePassphrase(e.target.value)}
+                  style={{ width: "100%", background: "var(--bg0)", border: "1px solid var(--line)", borderRadius: 3, padding: "9px 12px", color: "var(--t0)", fontSize: 10, outline: "none" }}
+                  onFocus={e => (e.target.style.borderColor = "var(--green)")} onBlur={e => (e.target.style.borderColor = "var(--line)")} />
+              </div>
+            )}
             <div style={{ fontSize: 9, color: "var(--t3)", lineHeight: 1.6, marginBottom: 14 }}>
               Your secret key is only used once to verify your connection and is never stored in plain text.
             </div>

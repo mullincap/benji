@@ -20,6 +20,24 @@ async function apiFetch<T>(path: string, opts?: RequestInit): Promise<T> {
   return res.json();
 }
 
+/**
+ * Extract {status, detail} from errors thrown by apiFetch.
+ * Returns status=0 when the message doesn't match the expected shape (network,
+ * unexpected throw, etc). `detail` falls back to the raw message.
+ */
+export function parseApiError(err: unknown): { status: number; detail: string } {
+  if (!(err instanceof Error)) return { status: 0, detail: String(err) };
+  const match = err.message.match(/^API (\d+):\s*([\s\S]*)$/);
+  if (!match) return { status: 0, detail: err.message };
+  const status = parseInt(match[1], 10);
+  let detail = match[2];
+  try {
+    const body = JSON.parse(detail);
+    if (body && typeof body.detail === "string") detail = body.detail;
+  } catch { /* not JSON */ }
+  return { status, detail };
+}
+
 // ── Types ───────────────────────────────────────────────────────────────────
 
 export interface ApiStrategy {
@@ -54,14 +72,50 @@ export interface ApiStrategy {
   };
 }
 
+export type ExchangeSlug = "binance" | "blofin";
+
+export type ExchangeStatus =
+  | "active"
+  | "pending_validation"
+  | "invalid"
+  | "errored"
+  | "revoked";
+
+export interface ExchangePermissions {
+  read: boolean | null;
+  spot_trade: boolean | null;
+  futures_trade: boolean | null;
+  withdrawals: boolean | null;
+}
+
 export interface ApiExchange {
   connection_id: string;
-  exchange: string;
-  label: string;
+  exchange: string;              // ExchangeSlug at runtime, string for legacy rows
+  label: string | null;
   masked_key: string;
-  status: string;
+  status: ExchangeStatus;
   last_validated_at: string | null;
+  last_error_msg: string | null;
+  permissions: ExchangePermissions | null;
+  balance: number;
   created_at: string | null;
+}
+
+export interface StoreKeysRequest {
+  exchange: ExchangeSlug;
+  label?: string;
+  api_key: string;
+  api_secret: string;
+  passphrase?: string;           // required iff exchange === "blofin"
+}
+
+export interface StoreKeysSuccess {
+  connection_id: string;
+  exchange: ExchangeSlug;
+  label: string | null;
+  masked_key: string;
+  status: "active";
+  permissions: ExchangePermissions;
 }
 
 export interface ApiAllocation {
@@ -147,14 +201,8 @@ export const allocatorApi = {
   getExchanges: () =>
     apiFetch<{ exchanges: ApiExchange[] }>("/api/allocator/exchanges"),
 
-  storeExchangeKeys: (data: {
-    exchange: string;
-    label: string;
-    api_key: string;
-    api_secret: string;
-    passphrase?: string;
-  }) =>
-    apiFetch<{ connection_id: string; exchange: string; label: string; masked_key: string; status: string }>(
+  storeExchangeKeys: (data: StoreKeysRequest) =>
+    apiFetch<StoreKeysSuccess>(
       "/api/allocator/exchanges/keys",
       { method: "POST", body: JSON.stringify(data) },
     ),

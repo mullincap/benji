@@ -2,8 +2,21 @@
 
 import { useState, useEffect, useRef } from "react";
 import { useRouter } from "next/navigation";
-import { useTrader, Exchange, mask } from "../../context";
-import { allocatorApi } from "../../api";
+import { useTrader, Exchange } from "../../context";
+import {
+  allocatorApi,
+  parseApiError,
+  type ExchangeSlug,
+  type ExchangePermissions,
+  type StoreKeysSuccess,
+} from "../../api";
+
+const SUPPORTED_EXCHANGES: ExchangeSlug[] = ["binance", "blofin"];
+const VERIFY_STEP_LOG_LINES = [
+  "> Connecting to exchange API...",
+  "> Verifying key ownership...",
+  "> Checking permissions...",
+];
 
 // ─── Step bar ────────────────────────────────────────────────────────────────
 
@@ -42,63 +55,205 @@ function StepBar({ current }: { current: number }) {
   );
 }
 
+// ─── Shared wizard styling ───────────────────────────────────────────────────
+
+const fieldLabelStyle: React.CSSProperties = {
+  fontSize: 9, color: "var(--t3)", letterSpacing: "0.12em",
+  fontWeight: 700, textTransform: "uppercase", marginBottom: 6,
+};
+
+const inputStyle: React.CSSProperties = {
+  width: "100%", background: "var(--bg3)", border: "1px solid var(--line)",
+  borderRadius: 3, padding: "9px 12px", color: "var(--t0)",
+  fontSize: 10, outline: "none",
+  fontFamily: "var(--font-space-mono), Space Mono, monospace",
+};
+
+const primaryBtnStyle: React.CSSProperties = {
+  padding: "10px 20px", background: "var(--green)", color: "var(--bg0)",
+  border: "none", borderRadius: 3, fontSize: 9, fontWeight: 700,
+  letterSpacing: "0.12em", textTransform: "uppercase", cursor: "pointer",
+};
+
+const disabledBtnStyle: React.CSSProperties = {
+  ...primaryBtnStyle,
+  background: "var(--bg2)", color: "var(--t2)", cursor: "not-allowed",
+};
+
+const textBtnStyle: React.CSSProperties = {
+  background: "transparent", border: "none", color: "var(--t2)",
+  fontSize: 9, cursor: "pointer", transition: "color 0.15s ease",
+};
+
+const inlineErrorStyle: React.CSSProperties = {
+  fontSize: 9, color: "var(--red)", marginTop: 4, letterSpacing: "0.02em",
+};
+
+// ─── Permissions step (live data from backend) ───────────────────────────────
+
+type PermRow = {
+  key: keyof ExchangePermissions;
+  label: string;
+  required: boolean;
+};
+
+const PERMISSION_ROWS: PermRow[] = [
+  { key: "read",          label: "Read account info",     required: true  },
+  { key: "spot_trade",    label: "Spot & margin trading", required: false },
+  { key: "futures_trade", label: "Futures trading",       required: false },
+  { key: "withdrawals",   label: "Enable withdrawals",    required: false },
+];
+
+function permissionsAreValid(p: ExchangePermissions | null): boolean {
+  if (!p) return false;
+  return p.read === true
+    && p.spot_trade === false
+    && p.futures_trade === false
+    && p.withdrawals === false;
+}
+
+function PermissionsStep({ permissions }: { permissions: ExchangePermissions | null }) {
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 5, marginBottom: 14 }}>
+      {PERMISSION_ROWS.map(row => {
+        const value = permissions?.[row.key];
+        // Render classes:
+        //   required + value===true  → green "REQUIRED"
+        //   required + value!==true  → red "MISSING" (shouldn't happen; backend rejects)
+        //   optional + value===false → neutral "DISABLED"
+        //   optional + value===true  → red "ENABLED — REJECTED" (shouldn't happen)
+        //   any + value===null       → amber "UNKNOWN"
+        let pillColor: string, pillBg: string, pillBorder: string, pillText: string;
+        if (row.required) {
+          if (value === true) {
+            pillColor = "var(--green)"; pillBg = "var(--green-dim)"; pillBorder = "var(--green-mid)";
+            pillText = "REQUIRED";
+          } else if (value === false) {
+            pillColor = "var(--red)"; pillBg = "var(--red-dim)"; pillBorder = "var(--red)";
+            pillText = "MISSING";
+          } else {
+            pillColor = "var(--amber)"; pillBg = "var(--amber-dim)"; pillBorder = "var(--amber)";
+            pillText = "UNKNOWN";
+          }
+        } else {
+          if (value === false) {
+            pillColor = "var(--t2)"; pillBg = "var(--bg2)"; pillBorder = "var(--line)";
+            pillText = "DISABLED";
+          } else if (value === true) {
+            pillColor = "var(--red)"; pillBg = "var(--red-dim)"; pillBorder = "var(--red)";
+            pillText = "ENABLED — REJECTED";
+          } else {
+            pillColor = "var(--amber)"; pillBg = "var(--amber-dim)"; pillBorder = "var(--amber)";
+            pillText = "UNKNOWN";
+          }
+        }
+        const rowBg = row.required && value === true ? "var(--green-dim)" : "var(--bg2)";
+        const rowBorder = row.required && value === true ? "var(--green-mid)" : "var(--line)";
+        const dotColor = value === true ? pillColor : "var(--line)";
+        return (
+          <div key={row.key} style={{
+            display: "flex", alignItems: "center", justifyContent: "space-between",
+            padding: "8px 12px", background: rowBg,
+            border: `1px solid ${rowBorder}`, borderRadius: 3,
+          }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              <div style={{ width: 5, height: 5, borderRadius: "50%", background: dotColor }} />
+              <span style={{ fontSize: 10, color: row.required ? "var(--t1)" : "var(--t2)" }}>{row.label}</span>
+            </div>
+            <span style={{
+              fontSize: 9, fontWeight: 700, letterSpacing: "0.12em",
+              color: pillColor, background: pillBg,
+              border: `1px solid ${pillBorder}`, borderRadius: 3, padding: "2px 7px",
+            }}>
+              {pillText}
+            </span>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
 // ─── Link wizard ─────────────────────────────────────────────────────────────
 
-function LinkWizard({ onComplete, onCancel }: { onComplete: (e: Exchange) => void; onCancel: () => void }) {
-  const [step, setStep] = useState(1);
-  const [exName, setExName] = useState("");
+type VerifyState =
+  | { kind: "idle" }
+  | { kind: "checking"; visibleLines: number }
+  | { kind: "ok"; result: StoreKeysSuccess }
+  | { kind: "err"; status: number; detail: string };
+
+function LinkWizard({ onComplete, onCancel }: { onComplete: (connectionId: string) => void; onCancel: () => void }) {
+  const [step, setStep] = useState<1 | 2 | 3 | 4>(1);
+
+  // Step 1 form state
+  const [exchange, setExchange] = useState<"" | ExchangeSlug>("");
+  const [label, setLabel] = useState("");
   const [apiKey, setApiKey] = useState("");
   const [secretKey, setSecretKey] = useState("");
-  const [verifyStatus, setVerifyStatus] = useState<"idle" | "checking" | "ok">("idle");
-  const [log, setLog] = useState<string[]>([]);
+  const [passphrase, setPassphrase] = useState("");
+  const [step1Errors, setStep1Errors] = useState<Record<string, string>>({});
+
+  // Step 2 state
+  const [verify, setVerify] = useState<VerifyState>({ kind: "idle" });
   const logRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight;
+  }, [verify]);
 
-  useEffect(() => { if (logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight; }, [log]);
+  // Passphrase is only required for BloFin
+  const requiresPassphrase = exchange === "blofin";
 
-  const [verifyError, setVerifyError] = useState<string | null>(null);
-  const [verifiedConnectionId, setVerifiedConnectionId] = useState<string | null>(null);
-  const [verifiedMaskedKey, setVerifiedMaskedKey] = useState<string | null>(null);
+  function validateStep1(): boolean {
+    const errors: Record<string, string> = {};
+    if (!exchange) errors.exchange = "Select an exchange.";
+    if (!apiKey.trim()) errors.apiKey = "API key is required.";
+    if (!secretKey.trim()) errors.secretKey = "Secret key is required.";
+    if (requiresPassphrase && !passphrase.trim()) {
+      errors.passphrase = "BloFin requires a passphrase.";
+    }
+    setStep1Errors(errors);
+    return Object.keys(errors).length === 0;
+  }
 
   async function runVerify() {
-    setVerifyStatus("checking");
-    setLog([]);
-    setVerifyError(null);
+    if (!exchange) return; // type-narrowing: impossible given step 1 validation
+    setVerify({ kind: "checking", visibleLines: 0 });
 
-    const addLog = (line: string) => setLog(prev => [...prev, line]);
-
-    addLog(`> Connecting to ${exName || "exchange"} API...`);
+    // Cosmetic log animation — independent of the actual POST
+    const lineTimers: ReturnType<typeof setTimeout>[] = [];
+    for (let i = 0; i < VERIFY_STEP_LOG_LINES.length; i++) {
+      lineTimers.push(setTimeout(() => {
+        setVerify(prev => prev.kind === "checking"
+          ? { kind: "checking", visibleLines: Math.max(prev.visibleLines, i + 1) }
+          : prev);
+      }, (i + 1) * 500));
+    }
 
     try {
-      addLog("> Storing encrypted credentials...");
       const result = await allocatorApi.storeExchangeKeys({
-        exchange: exName.toLowerCase(),
-        label: exName,
-        api_key: apiKey,
-        api_secret: secretKey,
+        exchange,
+        label: label.trim() || undefined,
+        api_key: apiKey.trim(),
+        api_secret: secretKey.trim(),
+        passphrase: requiresPassphrase ? passphrase.trim() : undefined,
       });
-      setVerifiedConnectionId(result.connection_id);
-      setVerifiedMaskedKey(result.masked_key);
-
-      addLog("> Credentials stored securely");
-      addLog("> Verifying key ownership...");
-      addLog("> Connection verified \u2713");
-      setVerifyStatus("ok");
+      lineTimers.forEach(clearTimeout);
+      setVerify({ kind: "ok", result });
+      // Auto-advance to step 3 so user sees live permissions
+      setTimeout(() => setStep(3), 400);
     } catch (err) {
-      const msg = err instanceof Error ? err.message : "Verification failed";
-      addLog(`> Error: ${msg}`);
-      setVerifyError(msg);
-      setVerifyStatus("idle");
+      lineTimers.forEach(clearTimeout);
+      const { status, detail } = parseApiError(err);
+      console.error("storeExchangeKeys failed:", err);
+      setVerify({ kind: "err", status, detail });
     }
   }
 
-  const perms = [
-    { key: "read",    label: "Read account info",    required: true,  enabled: true },
-    { key: "spot",    label: "Spot & margin trading", required: false, enabled: false },
-    { key: "futures", label: "Futures trading",       required: false, enabled: false },
-    { key: "withdraw",label: "Enable withdrawals",    required: false, enabled: false },
-  ];
-
-  const keysValid = exName.length > 0 && apiKey.length > 10 && secretKey.length > 10;
+  const step1Valid =
+    !!exchange
+    && apiKey.trim().length > 0
+    && secretKey.trim().length > 0
+    && (!requiresPassphrase || passphrase.trim().length > 0);
 
   return (
     <div style={{ background: "var(--bg1)", border: "1px solid var(--line)", borderRadius: 5, padding: "20px 22px", marginTop: 14 }}>
@@ -110,50 +265,169 @@ function LinkWizard({ onComplete, onCancel }: { onComplete: (e: Exchange) => voi
 
       {step === 1 && (
         <div>
-          {[{ label: "EXCHANGE NAME", type: "text", placeholder: "e.g. Binance, Bybit, OKX", value: exName, onChange: setExName },
-            { label: "API KEY", type: "text", placeholder: "Your API key", value: apiKey, onChange: setApiKey },
-            { label: "SECRET KEY", type: "password", placeholder: "Your secret key", value: secretKey, onChange: setSecretKey }].map(f => (
-            <div key={f.label} style={{ marginBottom: 10 }}>
-              <div style={{ fontSize: 9, color: "var(--t3)", letterSpacing: "0.12em", fontWeight: 700, textTransform: "uppercase", marginBottom: 6 }}>{f.label}</div>
-              <input type={f.type} placeholder={f.placeholder} value={f.value} onChange={e => f.onChange(e.target.value)}
-                style={{ width: "100%", background: "var(--bg3)", border: "1px solid var(--line)", borderRadius: 3, padding: "9px 12px", color: "var(--t0)", fontSize: 10, outline: "none" }}
-                onFocus={e => (e.target.style.borderColor = "var(--green)")} onBlur={e => (e.target.style.borderColor = "var(--line)")} />
+          {/* Exchange dropdown */}
+          <div style={{ marginBottom: 10 }}>
+            <div style={fieldLabelStyle}>Exchange</div>
+            <select
+              value={exchange}
+              onChange={e => setExchange(e.target.value as "" | ExchangeSlug)}
+              style={{ ...inputStyle, appearance: "none", paddingRight: 28, cursor: "pointer" }}
+            >
+              <option value="">— Select —</option>
+              {SUPPORTED_EXCHANGES.map(slug => (
+                <option key={slug} value={slug}>{slug}</option>
+              ))}
+            </select>
+            {step1Errors.exchange && <div style={inlineErrorStyle}>{step1Errors.exchange}</div>}
+          </div>
+
+          {/* Label */}
+          <div style={{ marginBottom: 10 }}>
+            <div style={fieldLabelStyle}>Label (optional)</div>
+            <input
+              type="text"
+              placeholder="e.g. Main account"
+              value={label}
+              onChange={e => setLabel(e.target.value)}
+              style={inputStyle}
+              onFocus={e => (e.target.style.borderColor = "var(--green)")}
+              onBlur={e => (e.target.style.borderColor = "var(--line)")}
+            />
+          </div>
+
+          {/* API key */}
+          <div style={{ marginBottom: 10 }}>
+            <div style={fieldLabelStyle}>API Key</div>
+            <input
+              type="text"
+              placeholder="Your API key"
+              value={apiKey}
+              onChange={e => setApiKey(e.target.value)}
+              style={inputStyle}
+              onFocus={e => (e.target.style.borderColor = "var(--green)")}
+              onBlur={e => (e.target.style.borderColor = "var(--line)")}
+            />
+            {step1Errors.apiKey && <div style={inlineErrorStyle}>{step1Errors.apiKey}</div>}
+          </div>
+
+          {/* Secret */}
+          <div style={{ marginBottom: 10 }}>
+            <div style={fieldLabelStyle}>Secret Key</div>
+            <input
+              type="password"
+              placeholder="Your secret key"
+              value={secretKey}
+              onChange={e => setSecretKey(e.target.value)}
+              style={inputStyle}
+              onFocus={e => (e.target.style.borderColor = "var(--green)")}
+              onBlur={e => (e.target.style.borderColor = "var(--line)")}
+            />
+            {step1Errors.secretKey && <div style={inlineErrorStyle}>{step1Errors.secretKey}</div>}
+          </div>
+
+          {/* Conditional passphrase for BloFin */}
+          {requiresPassphrase && (
+            <div style={{ marginBottom: 10 }}>
+              <div style={fieldLabelStyle}>Passphrase</div>
+              <input
+                type="password"
+                placeholder="BloFin passphrase"
+                value={passphrase}
+                onChange={e => setPassphrase(e.target.value)}
+                style={inputStyle}
+                onFocus={e => (e.target.style.borderColor = "var(--green)")}
+                onBlur={e => (e.target.style.borderColor = "var(--line)")}
+              />
+              <div style={{ fontSize: 9, color: "var(--t3)", marginTop: 4 }}>
+                BloFin requires the passphrase you set when creating the API key.
+              </div>
+              {step1Errors.passphrase && <div style={inlineErrorStyle}>{step1Errors.passphrase}</div>}
             </div>
-          ))}
+          )}
+
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 10 }}>
             <button onClick={onCancel}
               onMouseEnter={e => { e.currentTarget.style.color = "var(--t0)"; }}
               onMouseLeave={e => { e.currentTarget.style.color = "var(--t2)"; }}
-              style={{ background: "transparent", border: "none", color: "var(--t2)", fontSize: 9, cursor: "pointer", transition: "color 0.15s ease" }}>{"\u2190"} Back</button>
-            <button onClick={() => { if (keysValid) setStep(2); }} disabled={!keysValid} style={{
-              padding: "10px 20px",
-              background: keysValid ? "var(--green)" : "var(--bg2)", color: keysValid ? "var(--bg0)" : "var(--t2)",
-              border: "none", borderRadius: 3, fontSize: 9, fontWeight: 700, letterSpacing: "0.12em", textTransform: "uppercase",
-              cursor: keysValid ? "pointer" : "not-allowed",
-            }}>NEXT &rarr;</button>
+              style={textBtnStyle}>{"\u2190"} Back</button>
+            <button
+              onClick={() => { if (validateStep1()) setStep(2); }}
+              disabled={!step1Valid}
+              style={step1Valid ? primaryBtnStyle : disabledBtnStyle}
+            >
+              NEXT &rarr;
+            </button>
           </div>
         </div>
       )}
 
       {step === 2 && (
         <div>
-          <div ref={logRef} style={{
-            background: "var(--bg0)", border: "1px solid var(--line)", borderRadius: 3,
-            padding: 12, height: 140, overflowY: "auto", marginBottom: 14, fontSize: 10, lineHeight: 1.9,
-          }}>
-            {log.length === 0 && <span style={{ color: "var(--t2)" }}>_ awaiting verification</span>}
-            {log.map((l, i) => (<div key={i} style={{ color: l.includes("\u2713") || l.includes("PASSED") ? "var(--green)" : "var(--t2)" }}>{l}</div>))}
-            {verifyStatus === "checking" && <span style={{ color: "var(--t2)", animation: "blink-cursor 1s step-end infinite" }}>{"\u258C"}</span>}
-          </div>
+          {verify.kind !== "err" && (
+            <div ref={logRef} style={{
+              background: "var(--bg0)", border: "1px solid var(--line)", borderRadius: 3,
+              padding: 12, height: 140, overflowY: "auto", marginBottom: 14, fontSize: 10, lineHeight: 1.9,
+            }}>
+              {verify.kind === "idle" && <span style={{ color: "var(--t2)" }}>_ awaiting verification</span>}
+              {verify.kind === "checking" && (
+                <>
+                  {VERIFY_STEP_LOG_LINES.slice(0, verify.visibleLines).map((l, i) => (
+                    <div key={i} style={{ color: "var(--t2)" }}>{l}</div>
+                  ))}
+                  <span style={{ color: "var(--t2)", animation: "blink-cursor 1s step-end infinite" }}>{"\u258C"}</span>
+                </>
+              )}
+              {verify.kind === "ok" && (
+                <>
+                  {VERIFY_STEP_LOG_LINES.map((l, i) => (
+                    <div key={i} style={{ color: "var(--t2)" }}>{l}</div>
+                  ))}
+                  <div style={{ color: "var(--green)" }}>{"> Connection verified \u2713"}</div>
+                </>
+              )}
+            </div>
+          )}
+
+          {verify.kind === "err" && (
+            <div style={{
+              background: "var(--red-dim)", border: "1px solid var(--red)", borderRadius: 4,
+              padding: "14px 16px", marginBottom: 14,
+            }}>
+              <div style={{ fontSize: 11, fontWeight: 700, color: "var(--red)", marginBottom: 8 }}>
+                {verify.status === 503 ? "\u2717 Exchange unreachable"
+                  : verify.status === 400 ? "\u2717 Connection failed"
+                  : "\u2717 Something went wrong"}
+              </div>
+              {verify.status === 503 && (
+                <div style={{ fontSize: 10, color: "var(--t1)", marginBottom: 6 }}>
+                  This may be temporary. Try again in a minute.
+                </div>
+              )}
+              <div style={{ fontSize: 10, color: "var(--t1)", lineHeight: 1.5 }}>
+                {verify.detail}
+              </div>
+            </div>
+          )}
+
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-            <button onClick={() => { setStep(1); setVerifyStatus("idle"); setLog([]); }}
+            <button
+              onClick={() => { setStep(1); setVerify({ kind: "idle" }); }}
               onMouseEnter={e => { e.currentTarget.style.color = "var(--t0)"; }}
               onMouseLeave={e => { e.currentTarget.style.color = "var(--t2)"; }}
-              style={{ background: "transparent", border: "none", color: "var(--t2)", fontSize: 9, cursor: "pointer", transition: "color 0.15s ease" }}>{"\u2190"} Back</button>
+              style={textBtnStyle}
+            >
+              {"\u2190"} Back
+            </button>
             <div>
-              {verifyStatus === "idle" && <button onClick={runVerify} style={{ padding: "10px 20px", background: "var(--green)", color: "var(--bg0)", border: "none", borderRadius: 3, fontSize: 9, fontWeight: 700, letterSpacing: "0.12em", textTransform: "uppercase", cursor: "pointer" }}>RUN VERIFICATION</button>}
-              {verifyStatus === "checking" && <span style={{ fontSize: 10, color: "var(--t2)" }}>Verifying...</span>}
-              {verifyStatus === "ok" && <button onClick={() => setStep(3)} style={{ padding: "10px 20px", background: "var(--green)", color: "var(--bg0)", border: "none", borderRadius: 3, fontSize: 9, fontWeight: 700, letterSpacing: "0.12em", textTransform: "uppercase", cursor: "pointer" }}>NEXT &rarr;</button>}
+              {verify.kind === "idle" && (
+                <button onClick={runVerify} style={primaryBtnStyle}>RUN VERIFICATION</button>
+              )}
+              {verify.kind === "checking" && (
+                <span style={{ fontSize: 10, color: "var(--t2)" }}>Verifying...</span>
+              )}
+              {verify.kind === "err" && (
+                <button onClick={runVerify} style={primaryBtnStyle}>TRY AGAIN &rarr;</button>
+              )}
             </div>
           </div>
         </div>
@@ -161,69 +435,39 @@ function LinkWizard({ onComplete, onCancel }: { onComplete: (e: Exchange) => voi
 
       {step === 3 && (
         <div>
-          <div style={{ display: "flex", flexDirection: "column", gap: 5, marginBottom: 14 }}>
-            {perms.map(p => (
-              <div key={p.key} style={{
-                display: "flex", alignItems: "center", justifyContent: "space-between", padding: "8px 12px",
-                background: p.required ? "var(--green-dim)" : "var(--bg2)",
-                border: `1px solid ${p.required ? "var(--green-mid)" : "var(--line)"}`, borderRadius: 3,
-              }}>
-                <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                  <div style={{ width: 5, height: 5, borderRadius: "50%", background: p.enabled ? "var(--green)" : "var(--line)" }} />
-                  <span style={{ fontSize: 10, color: p.required ? "var(--t1)" : "var(--t2)" }}>{p.label}</span>
-                </div>
-                <span style={{ fontSize: 9, fontWeight: 700, letterSpacing: "0.12em", color: p.enabled ? (p.required ? "var(--green)" : "var(--red)") : "var(--t2)" }}>
-                  {p.enabled ? (p.required ? "REQUIRED" : "\u26A0 ENABLED") : "DISABLED"}
-                </span>
-              </div>
-            ))}
-          </div>
+          <PermissionsStep permissions={verify.kind === "ok" ? verify.result.permissions : null} />
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
             <button onClick={() => setStep(2)}
               onMouseEnter={e => { e.currentTarget.style.color = "var(--t0)"; }}
               onMouseLeave={e => { e.currentTarget.style.color = "var(--t2)"; }}
-              style={{ background: "transparent", border: "none", color: "var(--t2)", fontSize: 9, cursor: "pointer", transition: "color 0.15s ease" }}>{"\u2190"} Back</button>
-            <button onClick={() => setStep(4)} style={{ padding: "10px 20px", background: "var(--green)", color: "var(--bg0)", border: "none", borderRadius: 3, fontSize: 9, fontWeight: 700, letterSpacing: "0.12em", textTransform: "uppercase", cursor: "pointer" }}>PERMISSIONS OK &rarr;</button>
+              style={textBtnStyle}>{"\u2190"} Back</button>
+            {(() => {
+              const valid = verify.kind === "ok" && permissionsAreValid(verify.result.permissions);
+              return valid
+                ? <button onClick={() => setStep(4)} style={primaryBtnStyle}>PERMISSIONS OK &rarr;</button>
+                : <button disabled style={disabledBtnStyle}>UNEXPECTED PERMISSIONS — CONTACT SUPPORT</button>;
+            })()}
           </div>
         </div>
       )}
 
-      {step === 4 && (
+      {step === 4 && verify.kind === "ok" && (
         <div style={{ padding: "16px 0" }}>
           <div style={{ textAlign: "center", marginBottom: 14 }}>
             <div style={{ fontSize: 48, marginBottom: 10, color: "var(--green)" }}>{"\u2713"}</div>
-            <div style={{ fontSize: 12, fontWeight: 700, color: "var(--t0)", marginBottom: 6 }}>{exName} connected</div>
+            <div style={{ fontSize: 12, fontWeight: 700, color: "var(--t0)", marginBottom: 6 }}>
+              {verify.result.exchange} connected
+            </div>
             <div style={{ fontSize: 10, color: "var(--t2)" }}>Read-only access verified.</div>
           </div>
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
             <button onClick={() => setStep(3)}
               onMouseEnter={e => { e.currentTarget.style.color = "var(--t0)"; }}
               onMouseLeave={e => { e.currentTarget.style.color = "var(--t2)"; }}
-              style={{ background: "transparent", border: "none", color: "var(--t2)", fontSize: 9, cursor: "pointer", transition: "color 0.15s ease" }}>{"\u2190"} Back</button>
-            <button onClick={async () => {
-              // Keys were already stored in step 2 (runVerify) — use the saved connection_id
-              const connId = verifiedConnectionId;
-              if (!connId) {
-                // Shouldn't happen — verify step should have set this
-                onComplete({ id: exName.toLowerCase().replace(/\s+/g, "-") + "-" + Date.now(), name: exName, maskedKey: mask(apiKey), lastSynced: "just now", balance: 0 });
-                return;
-              }
-              try {
-                // Trigger snapshot to get real balance
-                const snapResult = await allocatorApi.refreshSnapshots().catch(() => null);
-                const snap = snapResult?.snapshots?.find(s => s.connection_id === connId);
-                onComplete({
-                  id: connId,
-                  name: exName,
-                  maskedKey: verifiedMaskedKey ?? mask(apiKey),
-                  lastSynced: "just now",
-                  balance: snap?.total_equity_usd ?? 0,
-                });
-              } catch {
-                // Fallback: still add locally with 0 balance
-                onComplete({ id: connId, name: exName, maskedKey: verifiedMaskedKey ?? mask(apiKey), lastSynced: "just now", balance: 0 });
-              }
-            }} style={{ padding: "10px 24px", background: "var(--green)", color: "var(--bg0)", border: "none", borderRadius: 3, fontSize: 9, fontWeight: 700, letterSpacing: "0.12em", textTransform: "uppercase", cursor: "pointer" }}>DONE</button>
+              style={textBtnStyle}>{"\u2190"} Back</button>
+            <button onClick={() => onComplete(verify.result.connection_id)} style={primaryBtnStyle}>
+              DONE
+            </button>
           </div>
         </div>
       )}
@@ -233,12 +477,56 @@ function LinkWizard({ onComplete, onCancel }: { onComplete: (e: Exchange) => voi
 
 // ─── Page ────────────────────────────────────────────────────────────────────
 
+// ─── Status pill (shared between cards + summary table) ─────────────────────
+
+type PillTheme = { label: string; color: string; bg: string; border: string };
+
+function statusTheme(status: Exchange["status"]): PillTheme {
+  switch (status) {
+    case "active":
+      return { label: "CONNECTED", color: "var(--green)", bg: "var(--green-dim)", border: "var(--green-mid)" };
+    case "pending_validation":
+      return { label: "VALIDATING", color: "var(--amber)", bg: "var(--amber-dim)", border: "var(--amber)" };
+    case "invalid":
+      return { label: "INVALID", color: "var(--red)", bg: "var(--red-dim)", border: "var(--red)" };
+    case "errored":
+      return { label: "ERROR", color: "var(--amber)", bg: "var(--amber-dim)", border: "var(--amber)" };
+    case "revoked":
+      return { label: "REVOKED", color: "var(--t3)", bg: "var(--bg2)", border: "var(--line)" };
+  }
+}
+
+function StatusPill({ status, size = "md" }: { status: Exchange["status"]; size?: "sm" | "md" }) {
+  const t = statusTheme(status);
+  return (
+    <span style={{
+      fontSize: size === "sm" ? 8 : 9,
+      fontWeight: 700, letterSpacing: "0.12em",
+      padding: size === "sm" ? "2px 6px" : "3px 8px",
+      borderRadius: 3,
+      background: t.bg, color: t.color, border: `1px solid ${t.border}`,
+      textTransform: "uppercase",
+    }}>
+      {t.label}
+    </span>
+  );
+}
+
 export default function SettingsPage() {
   const router = useRouter();
-  const { exchanges, instances, addExchange, removeExchange, loading } = useTrader();
+  const { exchanges, instances, removeExchange, loading, refresh } = useTrader();
   const [showWizard, setShowWizard] = useState(false);
   const [confirmRemove, setConfirmRemove] = useState<string | null>(null);
   const [blockedRemove, setBlockedRemove] = useState<string | null>(null);
+
+  async function handleWizardComplete() {
+    setShowWizard(false);
+    setConfirmRemove(null);
+    // Trigger a refresh so the new connection appears in the list with status=active.
+    // Snapshot was already fetched inline by the backend; the next /snapshots call picks it up.
+    try { await allocatorApi.refreshSnapshots(); } catch { /* non-fatal */ }
+    await refresh();
+  }
 
   return (
     <div style={{ background: "var(--bg0)", padding: "28px", minHeight: "100%" }}>
@@ -255,7 +543,7 @@ export default function SettingsPage() {
               /* Minimal single-line format when wizard is open */
               <div key={ex.id} style={{ background: "var(--bg2)", border: "1px solid var(--line)", borderRadius: 5, padding: "7px 14px", display: "flex", alignItems: "center", gap: 10 }}>
                 <span style={{ fontSize: 10, fontWeight: 700, color: "var(--t1)" }}>{ex.name}</span>
-                <span style={{ fontSize: 8, fontWeight: 700, letterSpacing: "0.1em", padding: "2px 6px", borderRadius: 3, background: "var(--green-dim)", color: "var(--green)", border: "1px solid var(--green-mid)" }}>CONNECTED</span>
+                <StatusPill status={ex.status} size="sm" />
                 <span style={{ fontSize: 9, color: "var(--t2)" }}>{ex.maskedKey}</span>
               </div>
             ) : (
@@ -264,13 +552,14 @@ export default function SettingsPage() {
                 <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 8 }}>
                   <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
                     <span style={{ fontSize: 12, fontWeight: 700, color: "var(--t0)" }}>{ex.name}</span>
-                    <span style={{ fontSize: 9, fontWeight: 700, letterSpacing: "0.12em", padding: "3px 8px", borderRadius: 3, background: "var(--green-dim)", color: "var(--green)", border: "1px solid var(--green-mid)" }}>CONNECTED</span>
+                    <StatusPill status={ex.status} />
                   </div>
                   {confirmRemove === ex.id ? (
                     <div style={{ display: "flex", gap: 6 }}>
                       <button onClick={async () => {
                         try { await allocatorApi.removeExchange(ex.id); } catch { /* soft-delete may fail if already removed */ }
                         removeExchange(ex.id); setConfirmRemove(null);
+                        refresh();
                       }}
                         style={{ background: "var(--red)", color: "var(--bg0)", border: "none", borderRadius: 3, padding: "4px 10px", fontSize: 9, fontWeight: 700, letterSpacing: "0.12em", cursor: "pointer" }}>CONFIRM</button>
                       <button onClick={() => setConfirmRemove(null)}
@@ -292,11 +581,61 @@ export default function SettingsPage() {
                       style={{ background: "transparent", border: "none", color: "var(--t3)", fontSize: 9, letterSpacing: "0.12em", textTransform: "uppercase", cursor: "pointer", transition: "color 0.15s ease" }}>REMOVE</button>
                   )}
                 </div>
-                <div style={{ display: "flex", gap: 16, fontSize: 10, color: "var(--t1)" }}>
-                  <span>{ex.maskedKey}</span>
-                  <span style={{ color: "var(--t2)" }}>read-only</span>
-                  <span style={{ color: "var(--t2)" }}>synced {ex.lastSynced}</span>
-                </div>
+
+                {/* Status-specific metadata line */}
+                {ex.status === "active" && (
+                  <div style={{ display: "flex", gap: 16, fontSize: 10, color: "var(--t1)" }}>
+                    <span>{ex.maskedKey}</span>
+                    <span style={{ color: "var(--t2)" }}>read-only</span>
+                    <span style={{ color: "var(--t2)" }}>synced {ex.lastSynced}</span>
+                    {ex.balance > 0 && (
+                      <span style={{ color: "var(--t1)" }}>
+                        ${ex.balance.toLocaleString("en-US", { maximumFractionDigits: 2 })}
+                      </span>
+                    )}
+                  </div>
+                )}
+
+                {ex.status === "pending_validation" && (
+                  <>
+                    <div style={{ display: "flex", gap: 16, fontSize: 10, color: "var(--t2)" }}>
+                      <span>{ex.maskedKey}</span>
+                    </div>
+                    <div style={{ fontSize: 10, color: "var(--amber)", marginTop: 4, lineHeight: 1.5 }}>
+                      Awaiting first permissions check. This usually resolves within 5 minutes.
+                    </div>
+                  </>
+                )}
+
+                {ex.status === "invalid" && (
+                  <>
+                    <div style={{ display: "flex", gap: 16, fontSize: 10, color: "var(--t2)" }}>
+                      <span>{ex.maskedKey}</span>
+                    </div>
+                    {ex.lastErrorMsg && (
+                      <div style={{ fontSize: 10, color: "var(--red)", marginTop: 4, lineHeight: 1.5, opacity: 0.9 }}>
+                        {ex.lastErrorMsg}
+                      </div>
+                    )}
+                  </>
+                )}
+
+                {ex.status === "errored" && (
+                  <>
+                    <div style={{ display: "flex", gap: 16, fontSize: 10, color: "var(--t2)" }}>
+                      <span>{ex.maskedKey}</span>
+                    </div>
+                    {ex.lastErrorMsg && (
+                      <div style={{ fontSize: 10, color: "var(--amber)", marginTop: 4, lineHeight: 1.5, opacity: 0.9 }}>
+                        {ex.lastErrorMsg}
+                      </div>
+                    )}
+                    <div style={{ fontSize: 9, color: "var(--t3)", marginTop: 4 }}>
+                      We&rsquo;ll retry automatically in a few minutes.
+                    </div>
+                  </>
+                )}
+
                 {blockedRemove === ex.id && (() => {
                   const liveOnExchange = instances.filter(i => i.exchangeId === ex.id && i.status === "live");
                   return (
@@ -342,7 +681,7 @@ export default function SettingsPage() {
             fontSize: 9, fontWeight: 700, letterSpacing: "0.12em", textTransform: "uppercase", cursor: "pointer",
           }}>+ LINK A NEW EXCHANGE</button>
         ) : (
-          <LinkWizard onComplete={ex => { addExchange(ex); setShowWizard(false); setConfirmRemove(null); }} onCancel={() => setShowWizard(false)} />
+          <LinkWizard onComplete={handleWizardComplete} onCancel={() => setShowWizard(false)} />
         )}
 
         {/* Exchange accounts summary table */}
@@ -362,27 +701,37 @@ export default function SettingsPage() {
                 </thead>
                 <tbody>
                   {exchanges.map((ex, idx) => {
+                    const isActive = ex.status === "active";
                     const exInstances = instances.filter(i => i.exchangeId === ex.id && i.status === "live");
                     const exAllocated = exInstances.reduce((s, i) => s + (i.allocation ?? 0), 0);
                     const pctDeployed = ex.balance > 0 ? Math.min(100, (exAllocated / ex.balance) * 100).toFixed(1) : "0.0";
+                    const dotColor = statusTheme(ex.status).color;
                     return (
                       <tr key={ex.id} style={{ borderBottom: idx < exchanges.length - 1 ? "1px solid var(--line)" : "none" }}>
                         <td style={{ padding: "10px 14px" }}>
                           <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                            <span style={{ width: 5, height: 5, borderRadius: "50%", background: "var(--green)", flexShrink: 0 }} />
+                            <span style={{ width: 5, height: 5, borderRadius: "50%", background: dotColor, flexShrink: 0 }} />
                             <span style={{ fontSize: 10, fontWeight: 700, color: "var(--t0)" }}>{ex.name}</span>
                           </div>
                         </td>
                         <td style={{ padding: "10px 14px" }}>
-                          <div style={{ fontSize: 10, color: "var(--t1)" }}>${ex.balance.toLocaleString("en-US")}</div>
+                          <div style={{ fontSize: 10, color: isActive ? "var(--t1)" : "var(--t3)" }}>
+                            {isActive ? `$${ex.balance.toLocaleString("en-US")}` : "—"}
+                          </div>
                         </td>
                         <td style={{ padding: "10px 14px" }}>
-                          <div style={{ fontSize: 10, color: "var(--t1)" }}>${exAllocated.toLocaleString("en-US")}</div>
-                          <div style={{ fontSize: 9, color: "var(--t3)" }}>{exInstances.length} traders &middot; {pctDeployed}%</div>
+                          <div style={{ fontSize: 10, color: isActive ? "var(--t1)" : "var(--t3)" }}>
+                            {isActive ? `$${exAllocated.toLocaleString("en-US")}` : "—"}
+                          </div>
+                          {isActive && (
+                            <div style={{ fontSize: 9, color: "var(--t3)" }}>{exInstances.length} traders &middot; {pctDeployed}%</div>
+                          )}
                         </td>
-                        <td style={{ padding: "10px 14px", fontSize: 10, color: "var(--t1)" }}>{exInstances.length}</td>
+                        <td style={{ padding: "10px 14px", fontSize: 10, color: isActive ? "var(--t1)" : "var(--t3)" }}>
+                          {isActive ? exInstances.length : "—"}
+                        </td>
                         <td style={{ padding: "10px 14px" }}>
-                          <span style={{ fontSize: 9, fontWeight: 700, padding: "2px 7px", borderRadius: 3, background: "var(--green-dim)", color: "var(--green)", border: "1px solid var(--green-mid)" }}>Connected</span>
+                          <StatusPill status={ex.status} />
                         </td>
                       </tr>
                     );

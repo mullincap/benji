@@ -1,16 +1,24 @@
 "use client";
 
 import { createContext, useContext, useState, useCallback, useEffect, ReactNode } from "react";
-import { allocatorApi, ApiStrategy, ApiExchange, ApiAllocation, ApiSnapshot } from "./api";
+import {
+  allocatorApi, ApiStrategy, ApiExchange, ApiAllocation, ApiSnapshot,
+  ExchangePermissions, ExchangeStatus,
+} from "./api";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
 export interface Exchange {
-  id: string;           // connection_id from backend
-  name: string;         // exchange label (e.g. "BloFin")
+  id: string;                    // connection_id from backend
+  exchange: string;              // canonical slug: "binance" | "blofin"
+  name: string;                  // display label (falls back to exchange if null)
   maskedKey: string;
   lastSynced: string;
-  balance: number;      // total_equity_usd from latest snapshot
+  balance: number;               // total_equity_usd from latest snapshot
+  status: ExchangeStatus;
+  lastErrorMsg: string | null;
+  permissions: ExchangePermissions | null;  // null for grandfathered rows
+  lastValidatedAt: string | null;
 }
 
 export interface Position {
@@ -189,16 +197,21 @@ interface TraderState {
 
 const TraderContext = createContext<TraderState | null>(null);
 
-function mapSnapshotToExchange(snap: ApiSnapshot): Exchange {
-  const timeDiff = snap.snapshot_at
+function mergeExchange(apiEx: ApiExchange, snap: ApiSnapshot | undefined): Exchange {
+  const lastSynced = snap?.snapshot_at
     ? formatTimeDiff(new Date(snap.snapshot_at))
-    : "never";
+    : (apiEx.last_validated_at ? formatTimeDiff(new Date(apiEx.last_validated_at)) : "never");
   return {
-    id: snap.connection_id,
-    name: snap.label || snap.exchange,
-    maskedKey: "••••••",  // will be enriched from exchanges endpoint
-    lastSynced: timeDiff,
-    balance: snap.total_equity_usd ?? 0,
+    id: apiEx.connection_id,
+    exchange: apiEx.exchange,
+    name: apiEx.label || apiEx.exchange,
+    maskedKey: apiEx.masked_key,
+    lastSynced,
+    balance: snap?.total_equity_usd ?? apiEx.balance ?? 0,
+    status: apiEx.status,
+    lastErrorMsg: apiEx.last_error_msg,
+    permissions: apiEx.permissions,
+    lastValidatedAt: apiEx.last_validated_at,
   };
 }
 
@@ -262,37 +275,21 @@ export function TraderProvider({ children }: { children: ReactNode }) {
       STRATEGY_CATALOG = Object.keys(newCatalog).length > 0 ? newCatalog : FALLBACK_CATALOG;
       CAPACITY_DATA = Object.keys(newCapacity).length > 0 ? newCapacity : FALLBACK_CAPACITY;
 
-      // Build snapshot lookup by connection_id
+      // Build snapshot lookup by connection_id (used purely to enrich `lastSynced`
+      // and override `balance` when a snapshot is fresher than last_validated_at).
       const snapByConn: Record<string, ApiSnapshot> = {};
       for (const snap of snapshotsRes.snapshots) {
         snapByConn[snap.connection_id] = snap;
       }
 
-      // Build exchanges from exchange connections + snapshots
-      const exchangeKeyMap: Record<string, string> = {};
-      for (const ex of exchangesRes.exchanges) {
-        exchangeKeyMap[ex.connection_id] = ex.masked_key;
-      }
-
-      const newExchanges: Exchange[] = [];
-      // Use snapshots as primary (has balance), enrich with exchange metadata
-      for (const snap of snapshotsRes.snapshots) {
-        const ex = mapSnapshotToExchange(snap);
-        ex.maskedKey = exchangeKeyMap[snap.connection_id] || "••••••";
-        newExchanges.push(ex);
-      }
-      // Add exchanges that have no snapshot yet
-      for (const apiEx of exchangesRes.exchanges) {
-        if (!snapByConn[apiEx.connection_id]) {
-          newExchanges.push({
-            id: apiEx.connection_id,
-            name: apiEx.label || apiEx.exchange,
-            maskedKey: apiEx.masked_key,
-            lastSynced: "never",
-            balance: 0,
-          });
-        }
-      }
+      // GET /exchanges is authoritative: it returns status, permissions,
+      // last_error_msg, last_validated_at, balance, masked_key. Snapshots are
+      // only consulted for freshness. Rows with no snapshot still render —
+      // status='pending_validation' rows never have snapshots, but they still
+      // belong in the list.
+      const newExchanges: Exchange[] = exchangesRes.exchanges.map(apiEx =>
+        mergeExchange(apiEx, snapByConn[apiEx.connection_id]),
+      );
 
       // Build instances from allocations
       const newInstances: StrategyInstance[] = allocationsRes.allocations.map((a: ApiAllocation) => {
