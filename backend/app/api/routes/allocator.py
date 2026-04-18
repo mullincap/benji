@@ -881,36 +881,49 @@ def store_exchange_keys(
 
 @router.delete("/exchanges/{connection_id}")
 def remove_exchange(connection_id: str, user_id: str = Depends(get_current_user), cur=Depends(get_cursor)) -> dict[str, Any]:
-    """Soft-delete an exchange connection. Verifies ownership before delete."""
-    # Verify ownership
-    cur.execute("""
-        SELECT user_id FROM user_mgmt.exchange_connections
-        WHERE connection_id = %s::uuid AND status = 'active'
-    """, (connection_id,))
+    """Soft-delete an exchange connection — any non-revoked row is removable.
+
+    Returns 404 both for unknown rows and for rows owned by a different user
+    (don't reveal cross-user existence). 409 if the row is still bound to an
+    active allocation (only possible when status='active', since allocations
+    reference active connections).
+    """
+    cur.execute(
+        """
+        SELECT user_id, status FROM user_mgmt.exchange_connections
+        WHERE connection_id = %s::uuid AND status <> 'revoked'
+        """,
+        (connection_id,),
+    )
     row = cur.fetchone()
-    if not row:
+    if not row or str(row["user_id"]) != user_id:
         raise HTTPException(status_code=404, detail="Exchange connection not found")
-    if str(row["user_id"]) != user_id:
-        raise HTTPException(status_code=403, detail="Not your exchange connection")
 
-    # Check for active allocations using this connection
-    cur.execute("""
-        SELECT COUNT(*) AS cnt
-        FROM user_mgmt.allocations
-        WHERE connection_id = %s::uuid AND status = 'active'
-    """, (connection_id,))
-    alloc_row = cur.fetchone()
-    if alloc_row and alloc_row["cnt"] > 0:
-        raise HTTPException(
-            status_code=409,
-            detail=f"Cannot remove: {alloc_row['cnt']} active allocation(s) use this exchange"
+    # Allocation check — only relevant if the row is currently active.
+    if row["status"] == "active":
+        cur.execute(
+            """
+            SELECT COUNT(*) AS cnt
+            FROM user_mgmt.allocations
+            WHERE connection_id = %s::uuid AND status = 'active'
+            """,
+            (connection_id,),
         )
+        alloc_row = cur.fetchone()
+        if alloc_row and alloc_row["cnt"] > 0:
+            raise HTTPException(
+                status_code=409,
+                detail=f"Cannot remove: {alloc_row['cnt']} active allocation(s) use this exchange",
+            )
 
-    cur.execute("""
+    cur.execute(
+        """
         UPDATE user_mgmt.exchange_connections
         SET status = 'revoked', updated_at = NOW()
-        WHERE connection_id = %s::uuid AND user_id = %s::uuid AND status = 'active'
-    """, (connection_id, user_id))
+        WHERE connection_id = %s::uuid AND user_id = %s::uuid AND status <> 'revoked'
+        """,
+        (connection_id, user_id),
+    )
     return {"removed": True, "connection_id": connection_id}
 
 

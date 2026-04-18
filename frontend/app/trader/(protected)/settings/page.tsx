@@ -596,10 +596,86 @@ function StatusPill({ status, size = "md" }: { status: Exchange["status"]; size?
   );
 }
 
+function ConfirmRemoveModal({
+  exchangeName, submitting, onCancel, onConfirm,
+}: {
+  exchangeName: string;
+  submitting: boolean;
+  onCancel: () => void;
+  onConfirm: () => void;
+}) {
+  return (
+    <div
+      role="dialog"
+      aria-modal="true"
+      onClick={() => { if (!submitting) onCancel(); }}
+      style={{
+        position: "fixed", inset: 0, background: "rgba(0,0,0,0.7)",
+        display: "flex", alignItems: "center", justifyContent: "center",
+        zIndex: 1000,
+      }}
+    >
+      <div
+        onClick={e => e.stopPropagation()}
+        style={{
+          background: "var(--bg2)", border: "1px solid var(--line2)",
+          borderRadius: 6, padding: "20px 24px",
+          width: 480, maxWidth: "92vw",
+          fontFamily: "var(--font-space-mono), Space Mono, monospace",
+        }}
+      >
+        <div style={{
+          fontSize: 9, fontWeight: 700, letterSpacing: "0.12em",
+          color: "var(--t3)", textTransform: "uppercase", marginBottom: 10,
+        }}>
+          Remove linked exchange?
+        </div>
+        <div style={{ fontSize: 11, color: "var(--t1)", lineHeight: 1.6, marginBottom: 16 }}>
+          Remove the linked <span style={{ color: "var(--t0)" }}>{exchangeName}</span> exchange?
+          Any traders using this connection will stop.
+        </div>
+        <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
+          <button
+            type="button"
+            disabled={submitting}
+            onClick={onCancel}
+            style={{
+              background: "transparent", border: "1px solid var(--line2)",
+              borderRadius: 4, padding: "8px 16px",
+              fontSize: 9, fontWeight: 700, letterSpacing: "0.12em",
+              textTransform: "uppercase", color: "var(--t2)",
+              cursor: submitting ? "not-allowed" : "pointer",
+              fontFamily: "var(--font-space-mono), Space Mono, monospace",
+            }}
+          >
+            Cancel
+          </button>
+          <button
+            type="button"
+            disabled={submitting}
+            onClick={onConfirm}
+            style={{
+              background: "var(--red-dim)", border: "1px solid var(--red)",
+              borderRadius: 4, padding: "8px 16px",
+              fontSize: 9, fontWeight: 700, letterSpacing: "0.12em",
+              textTransform: "uppercase", color: "var(--red)",
+              cursor: submitting ? "not-allowed" : "pointer",
+              fontFamily: "var(--font-space-mono), Space Mono, monospace",
+            }}
+          >
+            Remove
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export default function SettingsPage() {
   const router = useRouter();
   const { exchanges, instances, removeExchange, loading, refresh } = useTrader();
   const [showWizard, setShowWizard] = useState(false);
+  const [removingId, setRemovingId] = useState<string | null>(null);
   const [confirmRemove, setConfirmRemove] = useState<string | null>(null);
   const [blockedRemove, setBlockedRemove] = useState<string | null>(null);
 
@@ -638,32 +714,39 @@ export default function SettingsPage() {
                     <span style={{ fontSize: 12, fontWeight: 700, color: "var(--t0)" }}>{ex.name}</span>
                     <StatusPill status={ex.status} />
                   </div>
-                  {confirmRemove === ex.id ? (
-                    <div style={{ display: "flex", gap: 6 }}>
-                      <button onClick={async () => {
-                        try { await allocatorApi.removeExchange(ex.id); } catch { /* soft-delete may fail if already removed */ }
-                        removeExchange(ex.id); setConfirmRemove(null);
-                        refresh();
-                      }}
-                        style={{ background: "var(--red)", color: "var(--bg0)", border: "none", borderRadius: 3, padding: "4px 10px", fontSize: 9, fontWeight: 700, letterSpacing: "0.12em", cursor: "pointer" }}>CONFIRM</button>
-                      <button onClick={() => setConfirmRemove(null)}
-                        style={{ background: "transparent", color: "var(--t2)", border: "1px solid var(--line)", borderRadius: 3, padding: "4px 10px", fontSize: 9, cursor: "pointer" }}>CANCEL</button>
-                    </div>
-                  ) : (
-                    <button onClick={() => {
+                  <button
+                    onClick={async () => {
                       const liveOnExchange = instances.filter(i => i.exchangeId === ex.id && i.status === "live");
                       if (liveOnExchange.length > 0) {
                         setBlockedRemove(ex.id);
                         setConfirmRemove(null);
-                      } else {
+                        return;
+                      }
+                      if (ex.status === "active") {
+                        // Non-destructive but in-use — require confirmation modal.
                         setConfirmRemove(ex.id);
                         setBlockedRemove(null);
+                        return;
                       }
+                      // Non-active row (errored / invalid / pending_validation) — single click, no confirm.
+                      setRemovingId(ex.id);
+                      try {
+                        await allocatorApi.removeExchange(ex.id);
+                      } catch (err) {
+                        console.error("removeExchange failed:", err);
+                      } finally {
+                        setRemovingId(null);
+                      }
+                      removeExchange(ex.id);
+                      refresh();
                     }}
-                      onMouseEnter={e => { e.currentTarget.style.color = "var(--red)"; }}
-                      onMouseLeave={e => { e.currentTarget.style.color = "var(--t3)"; }}
-                      style={{ background: "transparent", border: "none", color: "var(--t3)", fontSize: 9, letterSpacing: "0.12em", textTransform: "uppercase", cursor: "pointer", transition: "color 0.15s ease" }}>REMOVE</button>
-                  )}
+                    disabled={removingId === ex.id}
+                    onMouseEnter={e => { e.currentTarget.style.color = "var(--red)"; }}
+                    onMouseLeave={e => { e.currentTarget.style.color = "var(--t3)"; }}
+                    style={{ background: "transparent", border: "none", color: "var(--t3)", fontSize: 9, letterSpacing: "0.12em", textTransform: "uppercase", cursor: removingId === ex.id ? "not-allowed" : "pointer", transition: "color 0.15s ease", opacity: removingId === ex.id ? 0.5 : 1 }}
+                  >
+                    {removingId === ex.id ? "REMOVING…" : "REMOVE"}
+                  </button>
                 </div>
 
                 {/* Status-specific metadata line */}
@@ -825,6 +908,31 @@ export default function SettingsPage() {
           </div>
         )}
       </div>
+
+      {confirmRemove && (() => {
+        const target = exchanges.find(e => e.id === confirmRemove);
+        if (!target) return null;
+        return (
+          <ConfirmRemoveModal
+            exchangeName={target.name || target.exchange}
+            submitting={removingId === target.id}
+            onCancel={() => setConfirmRemove(null)}
+            onConfirm={async () => {
+              setRemovingId(target.id);
+              try {
+                await allocatorApi.removeExchange(target.id);
+              } catch (err) {
+                console.error("removeExchange failed:", err);
+              } finally {
+                setRemovingId(null);
+                setConfirmRemove(null);
+              }
+              removeExchange(target.id);
+              refresh();
+            }}
+          />
+        );
+      })()}
     </div>
   );
 }
