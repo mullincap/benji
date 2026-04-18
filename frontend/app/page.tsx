@@ -152,12 +152,6 @@ export default function LandingPage() {
         @keyframes scan-reveal {
           to { clip-path: inset(0 0% 0 0); }
         }
-        @keyframes scan-line {
-          0%   { top: 0;    opacity: 0; }
-          5%   { opacity: 0.6; }
-          95%  { opacity: 0.6; }
-          100% { top: 100%; opacity: 0; }
-        }
         .lp-rise-1 { opacity: 0; animation: rise 1s cubic-bezier(0.16,1,0.3,1) 0.1s forwards; }
         .lp-rise-2 { opacity: 0; animation: rise 1s cubic-bezier(0.16,1,0.3,1) 0.2s forwards; }
         .lp-rise-3 { opacity: 0; animation: rise 1s cubic-bezier(0.16,1,0.3,1) 0.35s forwards; }
@@ -180,15 +174,6 @@ export default function LandingPage() {
         }
         .lp-breathe { animation: breathe 3s ease-in-out infinite; }
         .lp-breathe-fast { animation: breathe 2s ease-in-out infinite; }
-        .lp-scan-line {
-          position: absolute;
-          left: 0; right: 0;
-          height: 1px;
-          background: linear-gradient(to right, transparent, var(--green), transparent);
-          opacity: 0;
-          animation: scan-line 4s ease-in-out 1s infinite;
-          pointer-events: none;
-        }
         .lp-mod-card { transition: background 0.4s cubic-bezier(0.16,1,0.3,1); }
         .lp-mod-card:hover { background: var(--bg2) !important; }
         .lp-step:hover h3 { color: var(--t0) !important; }
@@ -235,6 +220,10 @@ export default function LandingPage() {
         display: 'flex', alignItems: 'center', justifyContent: 'space-between',
         padding: '0 4rem', height: 64,
         fontFamily: 'var(--font-space-mono), Space Mono, monospace',
+        background: 'rgba(8, 8, 9, 0.72)',
+        backdropFilter: 'blur(12px)',
+        WebkitBackdropFilter: 'blur(12px)',
+        borderBottom: '1px solid var(--line)',
       }}>
         <a href="#" style={{
           fontSize: 13, fontWeight: 700, color: 'var(--t0)', textDecoration: 'none',
@@ -289,7 +278,7 @@ export default function LandingPage() {
             fontSize: 'clamp(36px, 5.5vw, 76px)', fontWeight: 700, lineHeight: 1.0,
             letterSpacing: -1.5, color: 'var(--t0)', marginBottom: '2rem',
           }}>
-            Quantitative engine for{' '}
+            Quant engine for{' '}
             <span className="lp-word-ai" data-text="crypto strategies">crypto strategies</span>
           </h1>
 
@@ -322,11 +311,11 @@ export default function LandingPage() {
             width: '100%', maxWidth: 680,
           }}>
             {[
-              { val: '2.41', cls: 'g', label: 'Sharpe' },
-              { val: '3.18', cls: '', label: 'Sortino' },
-              { val: '−12.4%', cls: 'r', label: 'Max DD' },
-              { val: '68.3%', cls: '', label: 'Win Rate' },
-              { val: '1.92', cls: '', label: 'Calmar' },
+              { val: '3.52', cls: 'g', label: 'Sharpe' },
+              { val: '10.41', cls: '', label: 'Sortino' },
+              { val: '−29.2%', cls: 'r', label: 'Max DD' },
+              { val: '85.7%', cls: '', label: 'Win Rate' },
+              { val: '69.50', cls: '', label: 'Calmar' },
             ].map((m, i, arr) => (
               <div key={m.label} style={{
                 flex: 1, padding: '24px 0',
@@ -452,7 +441,6 @@ export default function LandingPage() {
 
           {/* Audit panel */}
           <div style={{ background: 'var(--bg1)', border: '1px solid var(--line2)', overflow: 'hidden', position: 'sticky', top: 100 }}>
-            <div className="lp-scan-line" />
             <div style={{ padding: '18px 24px', borderBottom: '1px solid var(--line)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
               <span style={{ fontSize: 10, fontWeight: 700, letterSpacing: '0.12em', textTransform: 'uppercase', color: 'var(--t2)' }}>
                 Audit output — momentum_v3
@@ -464,15 +452,15 @@ export default function LandingPage() {
             </div>
             <div>
               {[
-                { key: 'Sharpe ratio', val: '2.41', cls: 'g', badge: 'DSR ✓' },
-                { key: 'Sortino ratio', val: '3.18', cls: 'g' },
-                { key: 'Max drawdown', val: '−12.4%', cls: 'r' },
-                { key: 'Win rate', val: '68.3%', cls: 'g' },
-                { key: 'Calmar ratio', val: '1.92', cls: 'n' },
-                { key: 'Walk-forward IS/OOS', val: '0.87 — robust', cls: 'g' },
+                { key: 'Sharpe ratio', val: '3.52', cls: 'g', badge: 'DSR ✓' },
+                { key: 'Sortino ratio', val: '10.41', cls: 'g' },
+                { key: 'Max drawdown', val: '−29.2%', cls: 'r' },
+                { key: 'Win rate', val: '85.7%', cls: 'g' },
+                { key: 'Calmar ratio', val: '69.50', cls: 'n' },
+                { key: 'Walk-forward (8 folds)', val: '3.39 mean — 100% positive', cls: 'g' },
                 { key: 'Param sensitivity', val: 'Low — stable', cls: 'g' },
                 { key: 'Regime stability', val: 'All environments', cls: 'g' },
-                { key: 'Overfitting score', val: '0.13 — clean', cls: 'g' },
+                { key: 'DSR (overfit prob)', val: '99.6% — clean', cls: 'g' },
               ].map((row, i, arr) => (
                 <div key={row.key} className="lp-ap-row" style={{
                   display: 'flex', justifyContent: 'space-between', alignItems: 'center',
@@ -696,7 +684,7 @@ export default function LandingPage() {
           Early access
         </div>
         <h2 style={{ fontSize: 'clamp(28px, 4vw, 54px)', fontWeight: 700, lineHeight: 1.05, letterSpacing: -1, color: 'var(--t0)', maxWidth: 600, marginBottom: '1.25rem' }}>
-          Audit your strategy.<br />Deploy with conviction.
+          Audit your risk.<br />Deploy with consistent profits.
         </h2>
         <p style={{ fontSize: 12, color: 'var(--t1)', maxWidth: 380, lineHeight: 1.9, marginBottom: '3rem' }}>
           Join the waitlist for early access to the full 3M platform. We onboard a limited number of new funds each month.
