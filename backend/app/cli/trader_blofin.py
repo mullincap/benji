@@ -2828,9 +2828,10 @@ def _run_fresh_session_for_allocation(
         _mark_runtime_state(allocation_id, {"phase": "filtered", "positions": []})
         _log_allocation_return(
             allocation_id, today,
-            net_return_pct=0.0, gross_return_pct=0.0,
+            net_return_pct=0.0,
             exit_reason="filtered",
             effective_leverage=0.0, capital_deployed_usd=0.0,
+            config=config,
         )
         return
 
@@ -2871,7 +2872,11 @@ def _run_fresh_session_for_allocation(
         log.error(f"Allocation {allocation_id}: could not fetch session-open prices — aborting")
         _mark_runtime_state(allocation_id, {"phase": "errored", "reason": "open_prices_fetch_failed"})
         _log_allocation_return(
-            allocation_id, today, 0.0, 0.0, "errored", 0.0, 0.0,
+            allocation_id, today,
+            net_return_pct=0.0,
+            exit_reason="errored",
+            effective_leverage=0.0, capital_deployed_usd=0.0,
+            config=config,
         )
         return
 
@@ -2897,7 +2902,11 @@ def _run_fresh_session_for_allocation(
             "positions": [],
         })
         _log_allocation_return(
-            allocation_id, today, 0.0, 0.0, "missed_window", 0.0, 0.0,
+            allocation_id, today,
+            net_return_pct=0.0,
+            exit_reason="missed_window",
+            effective_leverage=0.0, capital_deployed_usd=0.0,
+            config=config,
         )
         return
 
@@ -2913,7 +2922,11 @@ def _run_fresh_session_for_allocation(
             "positions": [],
         })
         _log_allocation_return(
-            allocation_id, today, 0.0, 0.0, "no_entry_conviction", 0.0, 0.0,
+            allocation_id, today,
+            net_return_pct=0.0,
+            exit_reason="no_entry_conviction",
+            effective_leverage=0.0, capital_deployed_usd=0.0,
+            config=config,
         )
         return
 
@@ -2944,7 +2957,11 @@ def _run_fresh_session_for_allocation(
                 "unclosed_count": len(failed_stale),
             })
             _log_allocation_return(
-                allocation_id, today, 0.0, 0.0, "stale_close_failed", 0.0, 0.0,
+                allocation_id, today,
+                net_return_pct=0.0,
+                exit_reason="stale_close_failed",
+                effective_leverage=0.0, capital_deployed_usd=0.0,
+                config=config,
             )
             return
         log.info(f"Allocation {allocation_id}: stale positions closed")
@@ -2976,7 +2993,11 @@ def _run_fresh_session_for_allocation(
             "fill_report": fill_report,
         })
         _log_allocation_return(
-            allocation_id, today, 0.0, 0.0, "entry_failed", float(eff_lev), 0.0,
+            allocation_id, today,
+            net_return_pct=0.0,
+            exit_reason="entry_failed",
+            effective_leverage=float(eff_lev), capital_deployed_usd=0.0,
+            config=config,
         )
         return
 
