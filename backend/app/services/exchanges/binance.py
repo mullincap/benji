@@ -135,3 +135,16 @@ class BinanceClient:
         except BinanceAuthError:
             # Futures base sometimes returns 401 for keys without futures enabled.
             return None
+
+    def get_margin_account(self) -> dict | None:
+        """GET /sapi/v1/margin/account — cross-margin balances, BTC-denominated totals.
+
+        Returns None if the key lacks margin permission. Other errors (network,
+        5xx) propagate as BinanceNetworkError / BinanceError.
+        """
+        try:
+            return self._get_signed(self._spot_base, "/sapi/v1/margin/account")
+        except BinancePermissionError:
+            return None
+        except BinanceAuthError:
+            return None

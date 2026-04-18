@@ -41,6 +41,10 @@ from ...db import get_cursor
 from ...core.config import load_secrets
 from ...services.admin_sessions import validate_session as _validate_admin_session
 from ...services.encryption import encrypt_key, decrypt_key
+from ...services.exchanges.binance import (
+    BinanceClient,
+    BinanceError,
+)
 from ...services.exchanges.permissions import (
     fetch_permissions,
     validate_permissions,
@@ -165,6 +169,113 @@ def _fetch_live_blofin(
     }
 
 
+# ── Binance live fetch ───────────────────────────────────────────────────────
+
+def _get_binance_btc_price() -> float:
+    """Unsigned BTC/USDT spot ticker — used only for the margin fallback path.
+    No caching; called at most once per sync cycle and only when futures returns empty."""
+    resp = http_requests.get(
+        "https://api.binance.com/api/v3/ticker/price",
+        params={"symbol": "BTCUSDT"},
+        timeout=5,
+    )
+    resp.raise_for_status()
+    return float(resp.json()["price"])
+
+
+def _fetch_live_binance(*, api_key: str, api_secret: str) -> dict:
+    """Fetch balance + positions from Binance.
+
+    Futures-primary: /fapi/v2/account is the authoritative source (USDT-native,
+    matches BloFin's unified-account model). Falls back to cross-margin
+    (/sapi/v1/margin/account, BTC-denominated) only if futures is empty.
+
+    Returns the same dict shape as _fetch_live_blofin:
+        {total_equity, available, used_margin, unrealized_pnl, positions}
+    Raises BinanceError / BinanceNetworkError on hard failure — the caller's
+    except block writes a fail row to exchange_snapshots.
+    """
+    client = BinanceClient(api_key=api_key, api_secret=api_secret)
+
+    # ── Futures primary ─────────────────────────────────────────────────
+    futures = client.get_futures_account()
+    futures_equity = _safe_decimal(futures.get("totalMarginBalance")) if futures else None
+    futures_has_funds = bool(
+        futures and futures_equity is not None and float(futures_equity) > 0
+    )
+
+    if futures_has_funds:
+        total_equity = _safe_decimal(futures.get("totalMarginBalance"))
+        available = _safe_decimal(futures.get("availableBalance"))
+        used_margin = _safe_decimal(futures.get("totalInitialMargin"))
+        unrealized_pnl = _safe_decimal(futures.get("totalUnrealizedProfit"))
+
+        positions = []
+        for p in futures.get("positions") or []:
+            try:
+                amt = float(p.get("positionAmt", 0) or 0)
+            except (TypeError, ValueError):
+                amt = 0.0
+            if amt == 0:
+                continue
+            try:
+                entry = float(p.get("entryPrice", 0) or 0)
+            except (TypeError, ValueError):
+                entry = 0.0
+            try:
+                upl = float(p.get("unRealizedProfit", 0) or 0)
+            except (TypeError, ValueError):
+                upl = 0.0
+            positions.append({
+                "symbol": p.get("symbol", ""),
+                "side": "long" if amt > 0 else "short",
+                "size": abs(amt),
+                "entry_price": entry,
+                "mark_price": 0.0,           # not in /fapi/v2/account payload
+                "unrealized_pnl": upl,
+                "leverage": int(float(p.get("leverage") or 0)),
+                "margin_mode": (p.get("marginType") or "").lower(),
+            })
+
+        return {
+            "total_equity": total_equity,
+            "available": available,
+            "used_margin": used_margin,
+            "unrealized_pnl": unrealized_pnl,
+            "positions": positions,
+        }
+
+    # ── Margin fallback ────────────────────────────────────────────────
+    margin = client.get_margin_account()
+    if margin is None:
+        raise BinanceError(
+            "No tradable account balance found — check that the key has access "
+            "to futures or cross-margin."
+        )
+
+    try:
+        net_btc = float(margin.get("totalNetAssetOfBtc", 0) or 0)
+        asset_btc = float(margin.get("totalAssetOfBtc", 0) or 0)
+        liability_btc = float(margin.get("totalLiabilityOfBtc", 0) or 0)
+    except (TypeError, ValueError) as e:
+        raise BinanceError(f"Binance margin response malformed: {e}") from e
+
+    if asset_btc == 0 and net_btc == 0:
+        raise BinanceError(
+            "No tradable account balance found — check that the key has access "
+            "to futures or cross-margin."
+        )
+
+    btc_price = _get_binance_btc_price()
+    return {
+        "total_equity": _safe_decimal(net_btc * btc_price),
+        "available": _safe_decimal(net_btc * btc_price),  # net-of-liabilities
+        "used_margin": _safe_decimal(liability_btc * btc_price),
+        "unrealized_pnl": _safe_decimal(0),  # not separately exposed on margin
+        "positions": [],                      # no per-position detail on margin
+    }
+
+
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
 def _decimal_or_none(val: Any) -> float | None:
@@ -226,6 +337,16 @@ def refresh_snapshots(cur, *, user_id: str | None = None) -> None:
 
                 data = _fetch_live_blofin(
                     api_key=api_key, api_secret=api_secret, passphrase=passphrase,
+                )
+            elif exchange == "binance":
+                api_key = decrypt_key(conn["api_key_enc"]) if conn["api_key_enc"] else None
+                api_secret = decrypt_key(conn["api_secret_enc"]) if conn["api_secret_enc"] else None
+                if not api_key or not api_secret:
+                    log.warning(f"No API credentials for connection {cid} — skipping")
+                    continue
+
+                data = _fetch_live_binance(
+                    api_key=api_key, api_secret=api_secret,
                 )
             else:
                 log.warning(f"Unsupported exchange '{exchange}' for live fetch — skipping")
