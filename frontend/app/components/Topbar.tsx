@@ -268,7 +268,8 @@ export default function Topbar() {
         flexShrink: 0,
       }}
     >
-      {/* ─── Left side: 3M · MODULE ▾ dropdown ──────────────────────────────── */}
+      {/* ─── Left side: 3M · MODULE ▾ dropdown + pill row ────────────────────── */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 0 }}>
       <div ref={modulesRef} style={{ position: 'relative' }}>
         <button
           onClick={() => { setModulesOpen((v) => !v); setThemeOpen(false); }}
@@ -380,6 +381,53 @@ export default function Topbar() {
             })}
           </div>
         )}
+      </div>
+
+        <Divider />
+
+        {/* ─── Module pill row ──────────────────────────────────────────────── */}
+        {MODULES.map((item) => {
+          const isActive = pathname.startsWith(item.href);
+          const pillAccent = resolveAccent(themeId, item.key);
+          return (
+            <button
+              key={item.key}
+              className={isActive ? 'navbar-pill-active' : ''}
+              onClick={() => router.push(item.href)}
+              style={{
+                fontSize: 8,
+                fontWeight: 700,
+                letterSpacing: '0.06em',
+                padding: '4px 8px',
+                borderRadius: 4,
+                border: isActive
+                  ? `0.5px solid ${pillAccent}4D`   // 30% opacity
+                  : '0.5px solid transparent',
+                background: isActive
+                  ? `${pillAccent}1A`                // 10% opacity
+                  : 'transparent',
+                color: isActive ? pillAccent : 'var(--t3)',
+                cursor: 'pointer',
+                fontFamily: 'var(--font-space-mono), Space Mono, monospace',
+                transition: 'all 0.15s ease',
+              }}
+              onMouseEnter={(e) => {
+                if (!isActive) {
+                  e.currentTarget.style.color = 'var(--t2)';
+                  e.currentTarget.style.background = 'var(--bg2)';
+                }
+              }}
+              onMouseLeave={(e) => {
+                if (!isActive) {
+                  e.currentTarget.style.color = 'var(--t3)';
+                  e.currentTarget.style.background = 'transparent';
+                }
+              }}
+            >
+              {item.pill}
+            </button>
+          );
+        })}
       </div>
 
       {/* ─── Right side ─────────────────────────────────────────────────────── */}
@@ -524,52 +572,6 @@ export default function Topbar() {
             </div>
           )}
         </div>
-
-        <Divider />
-
-        {/* ─── Module pill row ──────────────────────────────────────────────── */}
-        {MODULES.map((item) => {
-          const isActive = pathname.startsWith(item.href);
-          const pillAccent = resolveAccent(themeId, item.key);
-          return (
-            <button
-              key={item.key}
-              className={isActive ? 'navbar-pill-active' : ''}
-              onClick={() => router.push(item.href)}
-              style={{
-                fontSize: 8,
-                fontWeight: 700,
-                letterSpacing: '0.06em',
-                padding: '4px 8px',
-                borderRadius: 4,
-                border: isActive
-                  ? `0.5px solid ${pillAccent}4D`   // 30% opacity
-                  : '0.5px solid transparent',
-                background: isActive
-                  ? `${pillAccent}1A`                // 10% opacity
-                  : 'transparent',
-                color: isActive ? pillAccent : 'var(--t3)',
-                cursor: 'pointer',
-                fontFamily: 'var(--font-space-mono), Space Mono, monospace',
-                transition: 'all 0.15s ease',
-              }}
-              onMouseEnter={(e) => {
-                if (!isActive) {
-                  e.currentTarget.style.color = 'var(--t2)';
-                  e.currentTarget.style.background = 'var(--bg2)';
-                }
-              }}
-              onMouseLeave={(e) => {
-                if (!isActive) {
-                  e.currentTarget.style.color = 'var(--t3)';
-                  e.currentTarget.style.background = 'transparent';
-                }
-              }}
-            >
-              {item.pill}
-            </button>
-          );
-        })}
 
         <Divider />
 
