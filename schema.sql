@@ -630,8 +630,9 @@ CREATE INDEX IF NOT EXISTS idx_user_sessions_expires
     ON user_mgmt.user_sessions (expires_at);
 
 -- ─── Exchange connections ──────────────────────────────────────────────────────
--- API keys stored AES-256-GCM encrypted at the application layer.
--- The database NEVER holds plaintext keys.
+-- API keys stored Fernet (AES-128-CBC + HMAC-SHA256) encrypted via
+-- app.services.encryption at the application layer. The database NEVER holds
+-- plaintext keys.
 -- status lifecycle: active | pending_validation | invalid | revoked | errored
 CREATE TABLE IF NOT EXISTS user_mgmt.exchange_connections (
     connection_id      UUID    PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -650,6 +651,12 @@ CREATE TABLE IF NOT EXISTS user_mgmt.exchange_connections (
     created_at         TIMESTAMPTZ DEFAULT NOW(),
     updated_at         TIMESTAMPTZ DEFAULT NOW()
 );
+
+-- Added 2026-04-17 — snapshot of the permissions payload returned by the
+-- exchange on the last successful validation. Used by the UI to render the
+-- wizard's Permissions step with real data instead of hardcoded assumptions.
+ALTER TABLE user_mgmt.exchange_connections
+    ADD COLUMN IF NOT EXISTS last_permissions JSONB;
 
 -- ─── Strategy allocations ──────────────────────────────────────────────────────
 -- Points to strategy_version_id so the user is always running a specific

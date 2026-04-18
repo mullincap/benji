@@ -41,6 +41,14 @@ from ...db import get_cursor
 from ...core.config import load_secrets
 from ...services.admin_sessions import validate_session as _validate_admin_session
 from ...services.encryption import encrypt_key, decrypt_key
+from ...services.exchanges.permissions import (
+    fetch_permissions,
+    validate_permissions,
+    PermissionAuthError,
+    PermissionNetworkError,
+    PermissionUnsupportedExchange,
+    PermissionProbeError,
+)
 from .auth import get_current_user
 from .admin import require_admin, COOKIE_NAME as _ADMIN_COOKIE_NAME
 
@@ -513,31 +521,80 @@ def _mask_key(enc_value: str | None) -> str:
     return enc_value[:4] + "••••••" + enc_value[-4:]
 
 
+_PUBLIC_PERMISSION_FIELDS = ("read", "spot_trade", "futures_trade", "withdrawals")
+
+
+def _extract_public_permissions(last_permissions: Any, exchange: str) -> dict | None:
+    """
+    Convert the raw exchange payload stored in `last_permissions` into the
+    UI-safe {read, spot_trade, futures_trade, withdrawals} shape. Returns None
+    for grandfathered rows where last_permissions is NULL.
+    """
+    if not last_permissions:
+        return None
+    # Re-parse the raw payload rather than cache the cooked form — keeps a
+    # single source of truth (the parser) and survives parser upgrades.
+    from ...services.exchanges.permissions import _parse_binance, _parse_blofin
+    try:
+        if exchange == "binance":
+            ps = _parse_binance(last_permissions)
+        elif exchange == "blofin":
+            ps = _parse_blofin(last_permissions)
+        else:
+            return None
+        return ps.to_public_dict()
+    except Exception:
+        return None
+
+
 @router.get("/exchanges")
 def get_exchanges(user_id: str = Depends(get_current_user), cur=Depends(get_cursor)) -> dict[str, Any]:
-    """Return active exchange connections with masked keys for the authenticated user."""
+    """
+    Return all non-revoked exchange connections for the authenticated user,
+    enriched with permissions (from last validation) and balance (from latest
+    snapshot). Grandfathered rows (last_permissions NULL) return permissions:null
+    — the frontend should treat them as unvalidated.
+    """
     cur.execute("""
-        SELECT connection_id, exchange, label, status,
-               api_key_enc, last_validated_at, created_at
-        FROM user_mgmt.exchange_connections
-        WHERE status = 'active' AND user_id = %s::uuid
-        ORDER BY created_at
+        SELECT
+            ec.connection_id, ec.exchange, ec.label, ec.status,
+            ec.api_key_enc,
+            ec.last_validated_at, ec.last_error_msg, ec.last_permissions,
+            ec.created_at,
+            snap.total_equity_usd AS balance
+        FROM user_mgmt.exchange_connections ec
+        LEFT JOIN LATERAL (
+            SELECT total_equity_usd
+            FROM user_mgmt.exchange_snapshots
+            WHERE connection_id = ec.connection_id
+            ORDER BY snapshot_at DESC
+            LIMIT 1
+        ) snap ON TRUE
+        WHERE ec.user_id = %s::uuid
+          AND ec.status <> 'revoked'
+        ORDER BY ec.created_at
     """, (user_id,))
     rows = cur.fetchall()
 
     exchanges = []
     for r in rows:
         exchanges.append({
-            "connection_id": str(r["connection_id"]),
-            "exchange": r["exchange"],
-            "label": r["label"],
-            "masked_key": _mask_key(r["api_key_enc"]),
-            "status": r["status"],
+            "connection_id":     str(r["connection_id"]),
+            "exchange":          r["exchange"],
+            "label":             r["label"],
+            "status":            r["status"],
+            "masked_key":        _mask_key(r["api_key_enc"]),
             "last_validated_at": r["last_validated_at"].isoformat() if r["last_validated_at"] else None,
-            "created_at": r["created_at"].isoformat() if r["created_at"] else None,
+            "last_error_msg":    r["last_error_msg"],
+            "permissions":       _extract_public_permissions(r["last_permissions"], r["exchange"]),
+            "balance":           float(r["balance"]) if r["balance"] is not None else 0.0,
+            "created_at":        r["created_at"].isoformat() if r["created_at"] else None,
         })
 
     return {"exchanges": exchanges}
+
+
+SUPPORTED_EXCHANGES = {"binance", "blofin"}
 
 
 class ExchangeKeysRequest(BaseModel):
@@ -548,43 +605,156 @@ class ExchangeKeysRequest(BaseModel):
     passphrase: str | None = None
 
 
+def _update_connection_status(
+    cur, connection_id: str, *,
+    status: str,
+    error_msg: str | None = None,
+    mark_validated: bool = False,
+    last_permissions: dict | None = None,
+) -> None:
+    """Persist a state-machine transition for a connection. Commits immediately
+    so the row reflects reality even if a later step raises."""
+    cur.execute(
+        """
+        UPDATE user_mgmt.exchange_connections
+        SET status             = %s,
+            last_error_msg     = %s,
+            last_error_at      = CASE WHEN %s IS NULL THEN NULL ELSE NOW() END,
+            last_validated_at  = CASE WHEN %s THEN NOW() ELSE last_validated_at END,
+            last_permissions   = COALESCE(%s::jsonb, last_permissions),
+            updated_at         = NOW()
+        WHERE connection_id = %s::uuid
+        """,
+        (
+            status,
+            error_msg,
+            error_msg,
+            mark_validated,
+            json.dumps(last_permissions) if last_permissions is not None else None,
+            connection_id,
+        ),
+    )
+    cur.connection.commit()
+
+
 @router.post("/exchanges/keys")
-def store_exchange_keys(body: ExchangeKeysRequest, user_id: str = Depends(get_current_user), cur=Depends(get_cursor)) -> dict[str, Any]:
+def store_exchange_keys(
+    body: ExchangeKeysRequest,
+    user_id: str = Depends(get_current_user),
+    cur=Depends(get_cursor),
+) -> dict[str, Any]:
     """
-    Store exchange API keys for a new connection.
-    Keys are Fernet-encrypted before INSERT into api_key_enc / api_secret_enc.
+    Store + validate exchange API keys.
+
+    Flow: INSERT with status='pending_validation' → call fetch_permissions →
+    enforce read-only policy → UPDATE status accordingly. Each DB write is
+    committed immediately so the state machine reflects reality across the
+    exchange HTTP call.
     """
+    # ── Step 1: validate body ────────────────────────────────────────────
+    exchange = (body.exchange or "").lower()
+    if exchange not in SUPPORTED_EXCHANGES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Exchange '{body.exchange}' is not supported. Supported: {sorted(SUPPORTED_EXCHANGES)}",
+        )
     if not body.api_key or not body.api_secret:
         raise HTTPException(status_code=400, detail="api_key and api_secret are required")
+    if exchange == "blofin" and not body.passphrase:
+        raise HTTPException(status_code=400, detail="BloFin requires a passphrase")
 
+    # ── Step 2: encrypt ──────────────────────────────────────────────────
+    api_key_enc = encrypt_key(body.api_key)
+    api_secret_enc = encrypt_key(body.api_secret)
+    passphrase_enc = encrypt_key(body.passphrase) if body.passphrase else None
+
+    # ── Step 3: INSERT pending_validation (separate transaction) ─────────
     connection_id = str(uuid4())
-    cur.execute("""
+    cur.execute(
+        """
         INSERT INTO user_mgmt.exchange_connections
-            (connection_id, user_id, exchange, label, api_key_enc, api_secret_enc,
-             passphrase_enc, status, created_at, updated_at)
-        VALUES (%s, %s::uuid, %s, %s, %s, %s, %s, 'active', NOW(), NOW())
-        RETURNING connection_id
-    """, (
-        connection_id,
-        user_id,
-        body.exchange.lower(),
-        body.label,
-        encrypt_key(body.api_key),
-        encrypt_key(body.api_secret),
-        encrypt_key(body.passphrase) if body.passphrase else None,
-    ))
-    # TODO: Existing rows in exchange_connections may contain plaintext keys
-    # from before encryption was added. Do NOT auto-migrate — run a manual
-    # one-time script to re-encrypt legacy values after verifying FERNET_KEY.
+            (connection_id, user_id, exchange, label,
+             api_key_enc, api_secret_enc, passphrase_enc,
+             status, created_at, updated_at)
+        VALUES (%s, %s::uuid, %s, %s, %s, %s, %s,
+                'pending_validation', NOW(), NOW())
+        """,
+        (
+            connection_id, user_id, exchange, body.label,
+            api_key_enc, api_secret_enc, passphrase_enc,
+        ),
+    )
+    cur.connection.commit()
+    log.info("Inserted pending exchange connection %s (%s)", connection_id, exchange)
 
-    log.info("Stored exchange connection %s for %s (keys need encryption)", connection_id, body.exchange)
-    # Never return raw keys — only masked
+    # ── Step 4: probe permissions ────────────────────────────────────────
+    try:
+        perms = fetch_permissions(
+            exchange=exchange,
+            api_key_enc=api_key_enc,
+            api_secret_enc=api_secret_enc,
+            passphrase_enc=passphrase_enc,
+        )
+    except PermissionAuthError as e:
+        _update_connection_status(
+            cur, connection_id,
+            status="invalid",
+            error_msg=f"Authentication failed: {e}",
+        )
+        raise HTTPException(status_code=400, detail=f"Authentication failed: {e}")
+    except PermissionUnsupportedExchange as e:
+        # Shouldn't happen — already validated above — but defensive.
+        _update_connection_status(
+            cur, connection_id, status="invalid", error_msg=str(e),
+        )
+        raise HTTPException(status_code=400, detail=str(e))
+    except PermissionNetworkError as e:
+        _update_connection_status(
+            cur, connection_id, status="errored",
+            error_msg=f"Exchange unreachable: {e}",
+        )
+        raise HTTPException(status_code=503, detail=f"Exchange unreachable: {e}")
+    except PermissionProbeError as e:
+        _update_connection_status(
+            cur, connection_id, status="errored", error_msg=str(e),
+        )
+        raise HTTPException(status_code=502, detail=f"Exchange returned an error: {e}")
+
+    # ── Step 5: enforce read-only policy ─────────────────────────────────
+    is_valid, reason = validate_permissions(perms)
+    if not is_valid:
+        _update_connection_status(
+            cur, connection_id,
+            status="invalid",
+            error_msg=reason,
+            last_permissions=perms.raw,
+        )
+        raise HTTPException(status_code=400, detail=reason)
+
+    # ── Step 6: mark active ──────────────────────────────────────────────
+    _update_connection_status(
+        cur, connection_id,
+        status="active",
+        error_msg=None,
+        mark_validated=True,
+        last_permissions=perms.raw,
+    )
+
+    # ── Step 7: immediate snapshot so UI can render balance without a 2nd rt ─
+    try:
+        refresh_snapshots(cur, user_id=user_id)
+        cur.connection.commit()
+    except Exception as e:
+        # Non-fatal — the connection is valid; balance will fill on next sync.
+        log.warning("Initial snapshot fetch failed for %s: %s", connection_id, e)
+
     return {
         "connection_id": connection_id,
-        "exchange": body.exchange.lower(),
+        "exchange": exchange,
         "label": body.label,
         "masked_key": _mask_key(body.api_key),
         "status": "active",
+        "permissions": perms.to_public_dict(),
     }
 
 
