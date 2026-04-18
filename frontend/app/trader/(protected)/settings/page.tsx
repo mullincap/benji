@@ -116,9 +116,10 @@ const PERMISSION_ROWS: RowSpec[] = [
   // backend confirms trade capability.
   { key: "spot_trade",    label: "Spot & margin trading", binance: "required", blofin: "required" },
   { key: "futures_trade", label: "Futures trading",       binance: "allowed",  blofin: "required" },
-  // Withdrawals stays inferred — this is the field BloFin genuinely can't
-  // distinguish. Parser returns null; render amber "UNCLEAR — TRUST SETUP".
-  { key: "withdrawals",   label: "Enable withdrawals",    binance: "rejected", blofin: "inferred" },
+  // Withdrawals row intentionally omitted — backend still enforces withdrawals=false
+  // via validate_permissions, and the UI guidance text on step 1 already tells
+  // users to leave it disabled. Rendering it here added noise (amber "UNCLEAR"
+  // on BloFin which can't distinguish it) without providing actionable info.
 ];
 
 const BLOFIN_INFERRED_TOOLTIP =
