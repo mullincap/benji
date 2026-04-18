@@ -22,6 +22,8 @@ from pydantic import BaseModel, Field
 
 from ...core.config import settings
 from ...db import get_cursor
+from ...services.audit.config_hash import hash_config
+from ...services.audit.current_metrics import build_current_metrics
 from .admin import require_admin
 
 router = APIRouter(
@@ -71,12 +73,18 @@ _FILTER_TO_RESULTS_COLUMN = {
 # Keys that only exist at metrics top level (best-filter view). Only applied
 # when the promoted filter IS the best filter.
 _TOP_LEVEL_ONLY_COLUMNS = {
-    "sortino":        "sortino",
-    "calmar":         "calmar",
-    "omega":          "omega",
-    "ulcer_index":    "ulcer_index",
-    "fa_oos_sharpe":  "fa_oos_sharpe",
-    "flat_days":      "flat_days",
+    "sortino":           "sortino",
+    "calmar":            "calmar",
+    "omega":             "omega",
+    "ulcer_index":       "ulcer_index",
+    "fa_oos_sharpe":     "fa_oos_sharpe",
+    "flat_days":         "flat_days",
+    # Added alongside the Part 6 _parse_metrics regex extensions.
+    "profit_factor":     "profit_factor",
+    "win_rate_daily":    "win_rate_daily",
+    "avg_daily_ret_pct": "avg_daily_ret_pct",
+    "best_month_pct":    "best_month_pct",
+    "equity_r2":         "equity_r2",
 }
 
 
@@ -239,44 +247,97 @@ def promote_audit(
         )
         strategy_id = cur.fetchone()["strategy_id"]
 
-    # ── Reject duplicate version_label on this strategy ─────────────────
-    cur.execute(
-        """
-        SELECT 1 FROM audit.strategy_versions
-        WHERE strategy_id = %s AND version_label = %s
-        """,
-        (strategy_id, body.version_label),
-    )
-    if cur.fetchone() is not None:
-        raise HTTPException(
-            status_code=409,
-            detail=f"version_label {body.version_label!r} already exists for this strategy",
-        )
+    # ── Persist the user's filter selection into the config JSONB so
+    #    executor paths that read sv.config->>'active_filter' find it
+    #    without falling back to the factory default.
+    config_to_persist = dict(job_json.get("params") or {})
+    config_to_persist["active_filter"] = body.filter_mode
+    new_hash = hash_config(config_to_persist)
 
-    # ── Deactivate other versions, then insert new active version ───────
+    # ── INSERT-vs-UPDATE branch on config_hash match. If this strategy
+    #    already has a version with an identical identity-bearing config,
+    #    treat this promote as a manual refresh of that version rather
+    #    than fabricating a duplicate.
     cur.execute(
         """
-        UPDATE audit.strategy_versions
-        SET is_active = FALSE
-        WHERE strategy_id = %s AND is_active = TRUE
+        SELECT strategy_version_id, version_label
+        FROM audit.strategy_versions
+        WHERE strategy_id = %s AND config_hash = %s
         """,
-        (strategy_id,),
+        (strategy_id, new_hash),
     )
-    cur.execute(
-        """
-        INSERT INTO audit.strategy_versions
-            (strategy_id, version_label, config, notes, is_active, published_at)
-        VALUES (%s, %s, %s::jsonb, %s, TRUE, NOW())
-        RETURNING strategy_version_id
-        """,
-        (
-            strategy_id,
-            body.version_label,
-            json.dumps(job_json.get("params") or {}),
-            body.description,
-        ),
-    )
-    strategy_version_id = str(cur.fetchone()["strategy_version_id"])
+    existing = cur.fetchone()
+
+    if existing is not None:
+        strategy_version_id = str(existing["strategy_version_id"])
+        resolved_version_label = existing["version_label"]
+        reused_existing_version = True
+        # Deactivate any OTHER active versions for this strategy, then
+        # re-activate the matching one. The partial unique index
+        # idx_one_active_version_per_strategy enforces the invariant.
+        cur.execute(
+            """
+            UPDATE audit.strategy_versions
+            SET is_active = FALSE
+            WHERE strategy_id = %s
+              AND is_active = TRUE
+              AND strategy_version_id <> %s
+            """,
+            (strategy_id, strategy_version_id),
+        )
+        cur.execute(
+            """
+            UPDATE audit.strategy_versions
+            SET is_active    = TRUE,
+                published_at = COALESCE(published_at, NOW())
+            WHERE strategy_version_id = %s
+            """,
+            (strategy_version_id,),
+        )
+    else:
+        resolved_version_label = body.version_label
+        reused_existing_version = False
+        # Reject duplicate version_label only on the new-version path. A
+        # config_hash match above reuses whatever label the existing
+        # version already has, so the label the user typed is irrelevant
+        # in that branch.
+        cur.execute(
+            """
+            SELECT 1 FROM audit.strategy_versions
+            WHERE strategy_id = %s AND version_label = %s
+            """,
+            (strategy_id, body.version_label),
+        )
+        if cur.fetchone() is not None:
+            raise HTTPException(
+                status_code=409,
+                detail=f"version_label {body.version_label!r} already exists for this strategy",
+            )
+        # Fresh version: deactivate all current actives, then insert.
+        cur.execute(
+            """
+            UPDATE audit.strategy_versions
+            SET is_active = FALSE
+            WHERE strategy_id = %s AND is_active = TRUE
+            """,
+            (strategy_id,),
+        )
+        cur.execute(
+            """
+            INSERT INTO audit.strategy_versions
+                (strategy_id, version_label, config, config_hash, notes, is_active, published_at)
+            VALUES (%s, %s, %s::jsonb, %s, %s, TRUE, NOW())
+            RETURNING strategy_version_id
+            """,
+            (
+                strategy_id,
+                body.version_label,
+                json.dumps(config_to_persist),
+                new_hash,
+                body.description,
+            ),
+        )
+        strategy_version_id = str(cur.fetchone()["strategy_version_id"])
 
     # ── Insert the result row ───────────────────────────────────────────
     is_best = metrics.get("best_filter") == body.filter_mode
@@ -296,7 +357,7 @@ def promote_audit(
     )
     result_id = str(cur.fetchone()["result_id"])
 
-    # ── Link audit.jobs row to the new version ──────────────────────────
+    # ── Link audit.jobs row to the version (new or reused) ──────────────
     cur.execute(
         """
         UPDATE audit.jobs
@@ -307,14 +368,34 @@ def promote_audit(
         (strategy_version_id, job_id),
     )
 
+    # ── Refresh the denormalized card cache. Derive data_through from the
+    #    fees_table's last row when available (same source the worker's
+    #    audit.jobs persistence uses).
+    fees_table = metrics.get("fees_table") or []
+    data_through = None
+    if fees_table and fees_table[-1].get("date"):
+        data_through = fees_table[-1]["date"]
+    current_metrics = build_current_metrics(result_row)
+    cur.execute(
+        """
+        UPDATE audit.strategy_versions
+        SET current_metrics       = %s::jsonb,
+            metrics_updated_at    = NOW(),
+            metrics_data_through  = %s
+        WHERE strategy_version_id = %s
+        """,
+        (json.dumps(current_metrics), data_through, strategy_version_id),
+    )
+
     return {
-        "strategy_id":          strategy_id,
-        "strategy_version_id":  strategy_version_id,
-        "result_id":            result_id,
-        "strategy_name":        body.strategy_name,
-        "version_label":        body.version_label,
-        "filter_mode":          body.filter_mode,
-        "is_published":         True,
+        "strategy_id":             strategy_id,
+        "strategy_version_id":     strategy_version_id,
+        "result_id":               result_id,
+        "strategy_name":           body.strategy_name,
+        "version_label":           resolved_version_label,
+        "filter_mode":             body.filter_mode,
+        "is_published":            True,
         "promoted_filter_is_best": is_best,
-        "result":               {k: result_row[k] for k in result_row},
+        "reused_existing_version": reused_existing_version,
+        "result":                  {k: result_row[k] for k in result_row},
     }

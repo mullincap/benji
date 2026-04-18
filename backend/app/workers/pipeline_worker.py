@@ -9,13 +9,19 @@ Celery task that orchestrates the full audit pipeline chain:
 import json
 import logging
 import re
-import subprocess
 from pathlib import Path
 
 from celery import Celery
 
 from app.core.config import settings
 from app.db import get_worker_conn
+from app.services.audit.pipeline_runner import (
+    JobCancelled,
+    build_cli_args,
+    build_pipeline_env,
+    prestage_parquet,
+    run_audit_subprocess,
+)
 from app.services.job_store import get_job, update_job
 
 _worker_log = logging.getLogger("pipeline_worker")
@@ -28,12 +34,6 @@ celery_app.conf.update(
     accept_content=["json"],
     task_track_started=True,
 )
-
-# ---------------------------------------------------------------------------
-# Python binary — must have pandas, pyarrow, scipy etc (miniforge base, not the FastAPI venv)
-# Configured via PIPELINE_PYTHON in .env
-# ---------------------------------------------------------------------------
-_PIPELINE_PYTHON = settings.PIPELINE_PYTHON
 
 # ---------------------------------------------------------------------------
 # Metric parsing
@@ -52,6 +52,7 @@ _CANON_RE = re.compile(
     r"FA-OOS Sharpe=(?P<fa_oos_sharpe>[+-]?[\d.]+)\s+"
     r"Flat=(?P<flat>\d+)d\s+"
     r"Active=(?P<active>\d+)d"
+    r"(?:\s+Equity-R²=(?P<equity_r2>[+-]?[\d.]+))?"
 )
 
 # Ratio block lines, e.g.:
@@ -59,10 +60,21 @@ _CANON_RE = re.compile(
 #   │  Calmar Ratio:                8.457
 #   │  Omega Ratio:                 1.372
 #   │  Ulcer Index:                23.910  (lower = better)
-_SORTINO_RE = re.compile(r"Sortino Ratio:\s*(?P<v>[+-]?[\d.]+)")
-_CALMAR_RE  = re.compile(r"Calmar Ratio:\s*(?P<v>[+-]?[\d.]+)")
-_OMEGA_RE   = re.compile(r"Omega Ratio:\s*(?P<v>[+-]?[\d.]+)")
-_ULCER_RE   = re.compile(r"Ulcer Index:\s*(?P<v>[+-]?[\d.]+)")
+#   │  Profit Factor:               2.025
+_SORTINO_RE         = re.compile(r"Sortino Ratio:\s*(?P<v>[+-]?[\d.]+)")
+_CALMAR_RE          = re.compile(r"Calmar Ratio:\s*(?P<v>[+-]?[\d.]+)")
+_OMEGA_RE           = re.compile(r"Omega Ratio:\s*(?P<v>[+-]?[\d.]+)")
+_ULCER_RE           = re.compile(r"Ulcer Index:\s*(?P<v>[+-]?[\d.]+)")
+_PROFIT_FACTOR_RE   = re.compile(r"Profit Factor:\s*(?P<v>[+-]?[\d.]+)")
+
+# MONTHLY period-return-stats block, e.g.:
+#   │  Best month:      124.49%   Worst:  -22.15%
+_BEST_MONTH_RE = re.compile(r"Best month:\s*(?P<v>[+-]?[\d.]+)%")
+
+# Scorecard rows (one per metric, best-filter only). Anchored to goal column
+# so we don't match informational/N/A rows with the same metric name.
+_SCORECARD_WIN_RATE_RE  = re.compile(r"^\s*Win Rate\s+>\d+%\s+(?P<v>[+-]?[\d.]+)%", re.MULTILINE)
+_SCORECARD_AVG_DAILY_RE = re.compile(r"^\s*Avg Daily Return %\s+>\d+%\s+(?P<v>[+-]?[\d.]+)%", re.MULTILINE)
 
 # DSR line, e.g.:
 #   DSR (prob Sharpe is genuine):   91.796%
@@ -297,6 +309,8 @@ def _parse_metrics(audit_output_path: Path) -> dict:
         metrics["fa_oos_sharpe"] = float(canon.group("fa_oos_sharpe"))
         metrics["flat_days"]     = int(canon.group("flat"))
         metrics["active_days"]   = int(canon.group("active"))
+        if canon.group("equity_r2") is not None:
+            metrics["equity_r2"] = float(canon.group("equity_r2"))
 
     # ── Ratio block ───────────────────────────────────────────────────────────
     m = _SORTINO_RE.search(text)
@@ -311,6 +325,22 @@ def _parse_metrics(audit_output_path: Path) -> dict:
     m = _ULCER_RE.search(text)
     if m:
         metrics["ulcer_index"] = float(m.group("v"))
+    m = _PROFIT_FACTOR_RE.search(text)
+    if m:
+        metrics["profit_factor"] = float(m.group("v"))
+
+    # ── MONTHLY period stats (best filter) ───────────────────────────────────
+    m = _BEST_MONTH_RE.search(text)
+    if m:
+        metrics["best_month_pct"] = float(m.group("v"))
+
+    # ── Scorecard rows (best filter only) ────────────────────────────────────
+    m = _SCORECARD_WIN_RATE_RE.search(text)
+    if m:
+        metrics["win_rate_daily"] = float(m.group("v"))
+    m = _SCORECARD_AVG_DAILY_RE.search(text)
+    if m:
+        metrics["avg_daily_ret_pct"] = float(m.group("v"))
 
     # ── DSR ───────────────────────────────────────────────────────────────────
     m = _DSR_RE.search(text)
@@ -560,57 +590,6 @@ def _parse_metrics(audit_output_path: Path) -> dict:
     return metrics
 
 
-def _build_cli_args(params: dict) -> list[str]:
-    """Map job params → overlap_analysis.py CLI flags.
-
-    Only flags that overlap_analysis.py actually accepts go here.
-    audit.py-only params (leverage, stop_raw_pct, min_listing_age, etc.)
-    are passed via env vars in pipeline_env and do not appear on the CLI.
-    """
-    flag_map = {
-        "leaderboard_index":        "--leaderboard-index",
-        "min_mcap":                 "--min-mcap",
-        "max_mcap":                 "--max-mcap",
-        "sort_by":                  "--sort-by",
-        "mode":                     "--mode",
-        "sample_interval":          "--sample-interval",
-        "freq_width":               "--freq-width",
-        "freq_cutoff":              "--freq-cutoff",
-        "deployment_start_hour":    "--deployment-start-hour",
-        "index_lookback":           "--index-lookback",
-        "sort_lookback":            "--sort-lookback",
-        "deployment_runtime_hours": "--deployment-runtime-hours",
-        "capital_mode":             "--capital-mode",
-        "fixed_notional_cap":       "--fixed-notional-cap",
-        "overlap_source":           "--source",
-    }
-    bool_flags = {
-        "end_cross_midnight": "--end-cross-midnight",
-        "drop_unverified":    "--drop-unverified",
-        "quick":              "--quick",
-    }
-
-    # --audit chains into rebuild_portfolio_matrix.py and audit.py automatically.
-    # --audit-source controls the price data source for rebuild_portfolio_matrix.
-    audit_source = params.get("price_source", "parquet")
-    args: list[str] = ["--audit", "--audit-source", audit_source]
-
-    for param, flag in flag_map.items():
-        value = params.get(param)
-        if value is not None:
-            args += [flag, str(value)]
-
-    for param, flag in bool_flags.items():
-        if params.get(param):
-            args.append(flag)
-
-    return args
-
-
-class JobCancelled(Exception):
-    pass
-
-
 def _is_cancelled(job_id: str) -> bool:
     job = get_job(job_id)
     if not job:
@@ -633,256 +612,19 @@ def run_pipeline(self, job_id: str, params: dict) -> dict:
     job_dir.mkdir(parents=True, exist_ok=True)
     audit_output_path = job_dir / "audit_output.txt"
 
-    # Env vars passed to subprocesses so pipeline scripts pick up correct paths.
-    # Every JobRequest param is forwarded as SNAKE_UPPER_CASE so audit.py can
-    # read it via os.environ.get("PARAM_NAME", default).
-    import os
-
-    def _boolenv(v: bool) -> str:
-        return "1" if v else "0"
-
-    pipeline_env = {
-        **os.environ,
-        # Ensure pipeline python's directory is on PATH so subprocess "python3" resolves correctly
-        "PATH": str(Path(_PIPELINE_PYTHON).parent) + ":" + os.environ.get("PATH", ""),
-        # Force Python to flush stdout/stderr line-by-line instead of 4KB
-        # block buffering. Without this, log.info() calls emitted by the
-        # pipeline script accumulate in a buffer and only reach our stdout
-        # pipe once the buffer fills or the process exits — which makes the
-        # simulator's "LIVE OUTPUT" pane appear stuck during long quiet
-        # phases (e.g. big DB queries).
-        "PYTHONUNBUFFERED": "1",
-        # Infrastructure paths
-        "BASE_DATA_DIR":       str(settings.BASE_DATA_DIR),
-        "PARQUET_PATH":        settings.PARQUET_PATH,
-        "MARKETCAP_DIR":       settings.MARKETCAP_DIR,
-        # Blank LOCAL_MATRIX_CSV tells audit.py to rebuild the matrix fresh
-        "LOCAL_MATRIX_CSV":    "",
-
-        # ── Basic ─────────────────────────────────────────────────────────────
-        "LEADERBOARD_INDEX":          str(params.get("leaderboard_index", 100)),
-        "SORT_BY":                    str(params.get("sort_by", "price")),
-        "MODE":                       str(params.get("mode", "snapshot")),
-        "FREQ_WIDTH":                 str(params.get("freq_width", 20)),
-        "FREQ_CUTOFF":                str(params.get("freq_cutoff", 20)),
-        "SAMPLE_INTERVAL":            str(params.get("sample_interval", 5)),
-        "DEPLOYMENT_START_HOUR":      str(params.get("deployment_start_hour", 6)),
-        "INDEX_LOOKBACK":             str(params.get("index_lookback", 6)),
-        "SORT_LOOKBACK":              str(params.get("sort_lookback", "6")),
-        "DEPLOYMENT_RUNTIME_HOURS":   str(params.get("deployment_runtime_hours", "daily")),
-        "END_CROSS_MIDNIGHT":         _boolenv(params.get("end_cross_midnight", True)),
-        "STARTING_CAPITAL":           str(params.get("starting_capital", 100000.0)),
-        "CAPITAL_MODE":               str(params.get("capital_mode", "fixed")),
-        "FIXED_NOTIONAL_CAP":         str(params.get("fixed_notional_cap", "internal")),
-        "PIVOT_LEVERAGE":             str(params.get("pivot_leverage", 4.0)),
-        "MIN_MCAP":                   str(params.get("min_mcap", 0.0)),
-        "MAX_MCAP":                   str(params.get("max_mcap", 0.0)),
-        "MIN_LISTING_AGE":            str(params.get("min_listing_age", 0)),
-        "MAX_PORT":                   "" if params.get("max_port") is None else str(params.get("max_port")),
-        "DROP_UNVERIFIED":            _boolenv(params.get("drop_unverified", False)),
-        "LEVERAGE":                   str(params.get("leverage", 4.0)),
-        "STOP_RAW_PCT":               str(params.get("stop_raw_pct", -6.0)),
-        "PRICE_SOURCE":               str(params.get("price_source", "parquet")),
-        "MCAP_SOURCE":                str(params.get("mcap_source", "parquet")),
-        "SAVE_CHARTS":                _boolenv(params.get("save_charts", True)),
-        "TRIAL_PURCHASES":            _boolenv(params.get("trial_purchases", False)),
-        "QUICK":                      _boolenv(params.get("quick", False)),
-        "TAKER_FEE_PCT":              str(params.get("taker_fee_pct", 0.0008)),
-        "FUNDING_RATE_DAILY_PCT":     str(params.get("funding_rate_daily_pct", 0.0002)),
-
-        # CANDIDATE_CONFIGS execution params
-        "EARLY_KILL_X":               str(params.get("early_kill_x", 5)),
-        "EARLY_KILL_Y":               str(params.get("early_kill_y", -999.0)),
-        "EARLY_INSTILL_Y":            str(params.get("early_instill_y", -999.0)),
-        "L_BASE":                     str(params.get("l_base", 0.0)),
-        "L_HIGH":                     str(params.get("l_high", 1.0)),
-        "PORT_TSL":                   str(params.get("port_tsl", 0.99)),
-        "PORT_SL":                    str(params.get("port_sl", -0.99)),
-        "EARLY_FILL_Y":               str(params.get("early_fill_y", 0.99)),
-        "EARLY_FILL_X":               str(params.get("early_fill_x", 5)),
-
-        # ── Filters ───────────────────────────────────────────────────────────
-        "ENABLE_TAIL_GUARDRAIL":      _boolenv(params.get("enable_tail_guardrail", True)),
-        "ENABLE_DISPERSION_FILTER":   _boolenv(params.get("enable_dispersion_filter", True)),
-        "ENABLE_TAIL_PLUS_DISP":      _boolenv(params.get("enable_tail_plus_disp", True)),
-        "ENABLE_VOL_FILTER":          _boolenv(params.get("enable_vol_filter", True)),
-        "ENABLE_TAIL_DISP_VOL":       _boolenv(params.get("enable_tail_disp_vol", False)),
-        "ENABLE_TAIL_OR_VOL":         _boolenv(params.get("enable_tail_or_vol", False)),
-        "ENABLE_TAIL_AND_VOL":        _boolenv(params.get("enable_tail_and_vol", False)),
-        "ENABLE_BLOFIN_FILTER":       _boolenv(params.get("enable_blofin_filter", False)),
-        "ENABLE_BTC_MA_FILTER":       _boolenv(params.get("enable_btc_ma_filter", False)),
-        "ENABLE_IC_DIAGNOSTIC":       _boolenv(params.get("enable_ic_diagnostic", False)),
-        "ENABLE_IC_FILTER":           _boolenv(params.get("enable_ic_filter", False)),
-        "RUN_FILTER_NONE":            _boolenv(params.get("run_filter_none", True)),
-        "RUN_FILTER_TAIL":            _boolenv(params.get("run_filter_tail", False)),
-        "RUN_FILTER_DISPERSION":      _boolenv(params.get("run_filter_dispersion", False)),
-        "RUN_FILTER_TAIL_DISP":       _boolenv(params.get("run_filter_tail_disp", False)),
-        "RUN_FILTER_VOL":             _boolenv(params.get("run_filter_vol", False)),
-        "RUN_FILTER_TAIL_DISP_VOL":   _boolenv(params.get("run_filter_tail_disp_vol", False)),
-        "RUN_FILTER_TAIL_OR_VOL":     _boolenv(params.get("run_filter_tail_or_vol", False)),
-        "RUN_FILTER_TAIL_AND_VOL":    _boolenv(params.get("run_filter_tail_and_vol", False)),
-        "RUN_FILTER_TAIL_BLOFIN":     _boolenv(params.get("run_filter_tail_blofin", False)),
-        "RUN_FILTER_CALENDAR":        _boolenv(params.get("run_filter_calendar", False)),
-
-        # ── Advanced — Strategy tuning ────────────────────────────────────────
-        "DISPERSION_THRESHOLD":         str(params.get("dispersion_threshold", 0.66)),
-        "DISPERSION_BASELINE_WIN":      str(params.get("dispersion_baseline_win", 33)),
-        "DISPERSION_DYNAMIC_UNIVERSE":  _boolenv(params.get("dispersion_dynamic_universe", True)),
-        "DISPERSION_N":                 str(params.get("dispersion_n", 40)),
-        "VOL_LOOKBACK":                 str(params.get("vol_lookback", 10)),
-        "VOL_PERCENTILE":               str(params.get("vol_percentile", 0.25)),
-        "VOL_BASELINE_WIN":             str(params.get("vol_baseline_win", 90)),
-        "TAIL_DROP_PCT":                str(params.get("tail_drop_pct", 0.04)),
-        "TAIL_VOL_MULT":                str(params.get("tail_vol_mult", 1.4)),
-        "IC_SIGNAL":                    str(params.get("ic_signal", "mom1d")),
-        "IC_WINDOW":                    str(params.get("ic_window", 30)),
-        "IC_THRESHOLD":                 str(params.get("ic_threshold", 0.02)),
-        "BTC_MA_DAYS":                  str(params.get("btc_ma_days", 20)),
-        "BLOFIN_MIN_SYMBOLS":           str(params.get("blofin_min_symbols", 1)),
-        "LEADERBOARD_TOP_N":            str(params.get("leaderboard_top_n", 333)),
-        "TRAIN_TEST_SPLIT":             str(params.get("train_test_split", 0.60)),
-        "N_TRIALS":                     str(params.get("n_trials", 3)),
-
-        # ── Advanced — Leverage scaling ───────────────────────────────────────
-        "ENABLE_PERF_LEV_SCALING":    _boolenv(params.get("enable_perf_lev_scaling", False)),
-        "PERF_LEV_WINDOW":            str(params.get("perf_lev_window", 10)),
-        "PERF_LEV_SORTINO_TARGET":    str(params.get("perf_lev_sortino_target", 3.0)),
-        "PERF_LEV_MAX_BOOST":         str(params.get("perf_lev_max_boost", 1.5)),
-        "ENABLE_VOL_LEV_SCALING":     _boolenv(params.get("enable_vol_lev_scaling", False)),
-        "VOL_LEV_WINDOW":             str(params.get("vol_lev_window", 30)),
-        "VOL_LEV_TARGET_VOL":         str(params.get("vol_lev_target_vol", 0.02)),
-        "VOL_LEV_MAX_BOOST":          str(params.get("vol_lev_max_boost", 2.0)),
-        "VOL_LEV_DD_THRESHOLD":       str(params.get("vol_lev_dd_threshold", -0.06)),
-        "LEV_QUANTIZATION_MODE":      str(params.get("lev_quantization_mode", "off")),
-        "LEV_QUANTIZATION_STEP":      str(params.get("lev_quantization_step", 0.1)),
-        "ENABLE_CONTRA_LEV_SCALING":  _boolenv(params.get("enable_contra_lev_scaling", False)),
-        "CONTRA_LEV_WINDOW":          str(params.get("contra_lev_window", 30)),
-        "CONTRA_LEV_MAX_BOOST":       str(params.get("contra_lev_max_boost", 2.0)),
-        "CONTRA_LEV_DD_THRESHOLD":    str(params.get("contra_lev_dd_threshold", -0.15)),
-
-        # ── Advanced — Risk overlays ──────────────────────────────────────────
-        "ENABLE_PPH":                       _boolenv(params.get("enable_pph", False)),
-        "PPH_FREQUENCY":                    str(params.get("pph_frequency", "weekly")),
-        "PPH_THRESHOLD":                    str(params.get("pph_threshold", 0.20)),
-        "PPH_HARVEST_FRAC":                 str(params.get("pph_harvest_frac", 0.50)),
-        "PPH_SWEEP_ENABLED":                _boolenv(params.get("pph_sweep_enabled", False)),
-        "ENABLE_RATCHET":                   _boolenv(params.get("enable_ratchet", False)),
-        "RATCHET_FREQUENCY":                str(params.get("ratchet_frequency", "weekly")),
-        "RATCHET_TRIGGER":                  str(params.get("ratchet_trigger", 0.20)),
-        "RATCHET_LOCK_PCT":                 str(params.get("ratchet_lock_pct", 0.15)),
-        "RATCHET_RISK_OFF_LEV_SCALE":       str(params.get("ratchet_risk_off_lev_scale", 0.0)),
-        "RATCHET_SWEEP_ENABLED":            _boolenv(params.get("ratchet_sweep_enabled", False)),
-        "ENABLE_ADAPTIVE_RATCHET":          _boolenv(params.get("enable_adaptive_ratchet", False)),
-        "ADAPTIVE_RATCHET_FREQUENCY":       str(params.get("adaptive_ratchet_frequency", "weekly")),
-        "ADAPTIVE_RATCHET_VOL_WINDOW":      str(params.get("adaptive_ratchet_vol_window", 20)),
-        "ADAPTIVE_RATCHET_VOL_LOW":         str(params.get("adaptive_ratchet_vol_low", 0.03)),
-        "ADAPTIVE_RATCHET_VOL_HIGH":        str(params.get("adaptive_ratchet_vol_high", 0.07)),
-        "ADAPTIVE_RATCHET_RISK_OFF_SCALE":  str(params.get("adaptive_ratchet_risk_off_scale", 0.0)),
-        "ADAPTIVE_RATCHET_FLOOR_DECAY":     str(params.get("adaptive_ratchet_floor_decay", 0.995)),
-        "ADAPTIVE_RATCHET_SWEEP_ENABLED":   _boolenv(params.get("adaptive_ratchet_sweep_enabled", False)),
-
-        # ── Advanced — Sweeps, cubes, robustness ─────────────────────────────
-        "ENABLE_SWEEP_L_HIGH":          _boolenv(params.get("enable_sweep_l_high", False)),
-        "ENABLE_SWEEP_TAIL_GUARDRAIL":  _boolenv(params.get("enable_sweep_tail_guardrail", False)),
-        "ENABLE_SWEEP_TRAIL_WIDE":      _boolenv(params.get("enable_sweep_trail_wide", False)),
-        "ENABLE_SWEEP_TRAIL_NARROW":    _boolenv(params.get("enable_sweep_trail_narrow", False)),
-        "ENABLE_PARAM_SURFACES":        _boolenv(params.get("enable_param_surfaces", False)),
-        "ENABLE_STABILITY_CUBE":        _boolenv(params.get("enable_stability_cube", False)),
-        "ENABLE_RISK_THROTTLE_CUBE":    _boolenv(params.get("enable_risk_throttle_cube", False)),
-        "ENABLE_EXIT_CUBE":             _boolenv(params.get("enable_exit_cube", False)),
-        "ENABLE_NOISE_STABILITY":       _boolenv(params.get("enable_noise_stability", False)),
-        "ENABLE_SLIPPAGE_SWEEP":        _boolenv(params.get("enable_slippage_sweep", False)),
-        "ENABLE_EQUITY_ENSEMBLE":       _boolenv(params.get("enable_equity_ensemble", False)),
-        "ENABLE_PARAM_JITTER":          _boolenv(params.get("enable_param_jitter", False)),
-        "ENABLE_RETURN_CONCENTRATION":  _boolenv(params.get("enable_return_concentration", False)),
-        "ENABLE_SHARPE_RIDGE_MAP":      _boolenv(params.get("enable_sharpe_ridge_map", False)),
-        "ENABLE_SHARPE_PLATEAU":        _boolenv(params.get("enable_sharpe_plateau", False)),
-        "ENABLE_TOP_N_REMOVAL":         _boolenv(params.get("enable_top_n_removal", False)),
-        "ENABLE_LUCKY_STREAK":          _boolenv(params.get("enable_lucky_streak", False)),
-        "ENABLE_PERIODIC_BREAKDOWN":    _boolenv(params.get("enable_periodic_breakdown", False)),
-        "ENABLE_WEEKLY_MILESTONES":     _boolenv(params.get("enable_weekly_milestones", False)),
-        "ENABLE_MONTHLY_MILESTONES":    _boolenv(params.get("enable_monthly_milestones", False)),
-        "ENABLE_DSR_MTL":               _boolenv(params.get("enable_dsr_mtl", False)),
-        "ENABLE_SHOCK_INJECTION":       _boolenv(params.get("enable_shock_injection", False)),
-        "ENABLE_RUIN_PROBABILITY":      _boolenv(params.get("enable_ruin_probability", False)),
-        "ENABLE_MCAP_DIAGNOSTIC":       _boolenv(params.get("enable_mcap_diagnostic", False)),
-        "ENABLE_CAPACITY_CURVE":        _boolenv(params.get("enable_capacity_curve", False)),
-        "ENABLE_REGIME_ROBUSTNESS":     _boolenv(params.get("enable_regime_robustness", False)),
-        "ENABLE_MIN_CUM_RETURN":        _boolenv(params.get("enable_min_cum_return", False)),
-
-        # ── Expert ────────────────────────────────────────────────────────────
-        "ANNUALIZATION_FACTOR":  str(params.get("annualization_factor", 365)),
-        "BAR_MINUTES":           str(params.get("bar_minutes", 5)),
-        "SAVE_DAILY_FILES":      _boolenv(params.get("save_daily_files", False)),
-        "BUILD_MASTER_FILE":     _boolenv(params.get("build_master_file", True)),
-    }
+    pipeline_env = build_pipeline_env(params)
 
     # ------------------------------------------------------------------
     # Stage 0 (DB mode only): refresh leaderboard parquets from DB
     # ------------------------------------------------------------------
-    if params.get("price_source") == "db":
-        import glob as _glob
-        import pyarrow.parquet as _pq
-        import sys as _sys
-        _sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
-        from pipeline.db.connection import get_conn as _get_conn
-
-        base_dir = pipeline_env.get("BASE_DATA_DIR", "/mnt/quant-data")
-        indexer_script = pipeline_dir / "indexer" / "build_intraday_leaderboard.py"
-
-        # Check if parquets are already up to date with the DB.
-        # Compare both start AND end dates — a parquet that only covers
-        # the last 14 days is stale even if its end date matches.
-        _conn = _get_conn()
-        _cur = _conn.cursor()
-        _cur.execute("SELECT MIN(timestamp_utc)::date, MAX(timestamp_utc)::date FROM market.leaderboards")
-        db_first, db_last = _cur.fetchone()
-        _cur.close()
-        _conn.close()
-
-        parquet_stale = False
-        for metric in ("price", "open_interest", "volume"):
-            pq_path = Path(base_dir) / "leaderboards" / metric / f"intraday_pct_leaderboard_{metric}_top333_anchor0000_ALL.parquet"
-            if not pq_path.exists():
-                parquet_stale = True
-                break
-            try:
-                pf = _pq.ParquetFile(str(pq_path))
-                first_rg = pf.read_row_group(0, columns=["timestamp_utc"])
-                last_rg = pf.read_row_group(pf.metadata.num_row_groups - 1, columns=["timestamp_utc"])
-                pq_first = first_rg.to_pandas()["timestamp_utc"].min().date()
-                pq_last = last_rg.to_pandas()["timestamp_utc"].max().date()
-                if pq_last < db_last or pq_first > db_first:
-                    parquet_stale = True
-                    break
-            except Exception:
-                parquet_stale = True
-                break
-
-        if parquet_stale:
-            update_job(job_id, status="running", stage="leaderboard_refresh", progress=2)
-            # Delete ALL parquets + filtered caches so the rebuild starts
-            # from scratch across the full DB date range, not just the
-            # delta since the last parquet end date.
-            for stale in _glob.glob(f"{base_dir}/leaderboard_*_filtered_*"):
-                os.remove(stale)
-            db_first_str = db_first.strftime("%Y-%m-%d")
-            for metric in ("price", "open_interest", "volume"):
-                lb_dir = Path(base_dir) / "leaderboards" / metric
-                for old_pq in _glob.glob(str(lb_dir / "intraday_pct_leaderboard_*_ALL.parquet")):
-                    os.remove(old_pq)
-                lb_cmd = [
-                    _PIPELINE_PYTHON, str(indexer_script),
-                    "--source", "db", "--metric", metric, "--force",
-                    "--start", db_first_str,
-                ]
-                subprocess.run(lb_cmd, cwd=str(pipeline_dir), env=pipeline_env,
-                               capture_output=True, timeout=14400)  # 4h — full rebuild is ~3h
-        else:
-            # Parquets are current — still need to clear filtered caches
-            # in case the filter params changed since last run.
-            for stale in _glob.glob(f"{base_dir}/leaderboard_*_filtered_*"):
-                os.remove(stale)
+    prestage_parquet(
+        params,
+        pipeline_env=pipeline_env,
+        pipeline_dir=pipeline_dir,
+        on_rebuild_start=lambda: update_job(
+            job_id, status="running", stage="leaderboard_refresh", progress=2,
+        ),
+    )
 
     # ------------------------------------------------------------------
     # Stage 1: overlap_analysis.py --audit
@@ -890,43 +632,26 @@ def run_pipeline(self, job_id: str, params: dict) -> dict:
     update_job(job_id, status="running", stage="overlap", progress=5)
 
     overlap_script = pipeline_dir / "overlap_analysis.py"
-    cmd = [_PIPELINE_PYTHON, str(overlap_script)] + _build_cli_args(params)
+    cmd = [settings.PIPELINE_PYTHON, str(overlap_script)] + build_cli_args(params)
+
+    # Pulse progress slowly while the pipeline runs (cap at 75).
+    progress = [5]
+
+    def _bump_progress(_line: bytes) -> None:
+        if progress[0] < 75:
+            progress[0] += 1
+            if progress[0] % 5 == 0:
+                update_job(job_id, progress=progress[0])
 
     try:
-        with audit_output_path.open("wb") as out_fh:
-            proc = subprocess.Popen(
-                cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                cwd=str(pipeline_dir),
-                env=pipeline_env,
-            )
-
-            # Stream output line-by-line to audit_output.txt in real time
-            progress = 5
-            for line in proc.stdout:  # type: ignore[union-attr]
-                if _is_cancelled(job_id):
-                    proc.terminate()
-                    try:
-                        proc.wait(timeout=5)
-                    except Exception:
-                        proc.kill()
-                    raise JobCancelled("Cancelled by user.")
-                out_fh.write(line)
-                out_fh.flush()
-                # Pulse progress slowly while the pipeline runs (cap at 75)
-                if progress < 75:
-                    progress += 1
-                    if progress % 5 == 0:
-                        update_job(job_id, progress=progress)
-
-            proc.wait()
-
-        if proc.returncode != 0:
-            raise RuntimeError(
-                f"overlap_analysis.py exited with code {proc.returncode}. "
-                f"See audit_output.txt for details."
-            )
+        run_audit_subprocess(
+            cmd=cmd,
+            output_path=audit_output_path,
+            cwd=pipeline_dir,
+            env=pipeline_env,
+            on_line=_bump_progress,
+            cancelled=lambda: _is_cancelled(job_id),
+        )
     except JobCancelled as exc:
         update_job(job_id, status="cancelled", stage="done", error=str(exc))
         return {}
@@ -971,6 +696,65 @@ def run_pipeline(self, job_id: str, params: dict) -> dict:
     return results
 
 
+def _persist_audit_job_row_at_cursor(
+    cur,
+    job_id: str,
+    params: dict,
+    metrics: dict,
+    *,
+    strategy_version_id: str | None = None,
+) -> bool:
+    """Issue the audit.jobs INSERT/UPSERT against an external cursor.
+
+    Returns True if the row was written; False if required data (fees_table
+    date range) is missing — in which case the caller should NOT commit on
+    our behalf. Caller owns the enclosing transaction and must commit.
+
+    strategy_version_id defaults to NULL (user-driven audits; promote fills
+    it later). The nightly CLI passes the version it's refreshing so the
+    audit.jobs row is linked from birth.
+    """
+    fees_table = metrics.get("fees_table") or []
+    if not fees_table:
+        _worker_log.warning(
+            "audit.jobs insert skipped for %s: metrics.fees_table empty "
+            "(cannot derive date_from/date_to)", job_id,
+        )
+        return False
+    try:
+        date_from = fees_table[0].get("date")
+        date_to   = fees_table[-1].get("date")
+    except (AttributeError, IndexError, TypeError):
+        _worker_log.warning(
+            "audit.jobs insert skipped for %s: fees_table entries lack a date key",
+            job_id,
+        )
+        return False
+    if not date_from or not date_to:
+        _worker_log.warning(
+            "audit.jobs insert skipped for %s: date_from=%r date_to=%r",
+            job_id, date_from, date_to,
+        )
+        return False
+
+    cur.execute(
+        """
+        INSERT INTO audit.jobs
+            (job_id, strategy_version_id, status,
+             completed_at, date_from, date_to, config_overrides)
+        VALUES (%s, %s, 'complete', NOW(), %s, %s, %s::jsonb)
+        ON CONFLICT (job_id) DO UPDATE SET
+            status           = 'complete',
+            completed_at     = EXCLUDED.completed_at,
+            date_from        = EXCLUDED.date_from,
+            date_to          = EXCLUDED.date_to,
+            config_overrides = EXCLUDED.config_overrides
+        """,
+        (job_id, strategy_version_id, date_from, date_to, json.dumps(params)),
+    )
+    return True
+
+
 def _persist_audit_job_row(job_id: str, params: dict, metrics: dict) -> None:
     """
     INSERT (or re-assert) the audit.jobs row at finalize. strategy_version_id
@@ -981,50 +765,16 @@ def _persist_audit_job_row(job_id: str, params: dict, metrics: dict) -> None:
     `date` key). If fees_table is empty or missing both dates, we skip the
     insert — date_from/date_to are NOT NULL in the schema and we refuse to
     fabricate values.
-    """
-    fees_table = metrics.get("fees_table") or []
-    if not fees_table:
-        _worker_log.warning(
-            "audit.jobs insert skipped for %s: metrics.fees_table empty "
-            "(cannot derive date_from/date_to)", job_id,
-        )
-        return
-    try:
-        date_from = fees_table[0].get("date")
-        date_to   = fees_table[-1].get("date")
-    except (AttributeError, IndexError, TypeError):
-        _worker_log.warning(
-            "audit.jobs insert skipped for %s: fees_table entries lack a date key",
-            job_id,
-        )
-        return
-    if not date_from or not date_to:
-        _worker_log.warning(
-            "audit.jobs insert skipped for %s: date_from=%r date_to=%r",
-            job_id, date_from, date_to,
-        )
-        return
 
+    Thin wrapper over `_persist_audit_job_row_at_cursor` that owns its own
+    connection + commit. Used by the worker's best-effort finalize hook.
+    """
     try:
         conn = get_worker_conn()
         try:
             with conn.cursor() as cur:
-                cur.execute(
-                    """
-                    INSERT INTO audit.jobs
-                        (job_id, strategy_version_id, status,
-                         completed_at, date_from, date_to, config_overrides)
-                    VALUES (%s, NULL, 'complete', NOW(), %s, %s, %s::jsonb)
-                    ON CONFLICT (job_id) DO UPDATE SET
-                        status           = 'complete',
-                        completed_at     = EXCLUDED.completed_at,
-                        date_from        = EXCLUDED.date_from,
-                        date_to          = EXCLUDED.date_to,
-                        config_overrides = EXCLUDED.config_overrides
-                    """,
-                    (job_id, date_from, date_to, json.dumps(params)),
-                )
-            conn.commit()
+                if _persist_audit_job_row_at_cursor(cur, job_id, params, metrics):
+                    conn.commit()
         finally:
             conn.close()
     except Exception as e:

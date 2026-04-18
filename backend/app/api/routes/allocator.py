@@ -500,40 +500,58 @@ def get_strategies(
 
     version_ids = [s["strategy_version_id"] for s in strategies]
 
-    # Fetch latest audit results per version
+    # Fetch audit metrics from the denormalized current_metrics JSONB. This
+    # is refreshed nightly by app.cli.refresh_strategy_metrics and on every
+    # promote via POST /api/simulator/audits/{job_id}/promote.
+    # Source of truth for the metric values remains audit.results (append-only);
+    # this is a read-cache to avoid the audit.results JOIN on every card render.
     metrics_by_version: dict[str, dict] = {}
+    metrics_meta_by_version: dict[str, dict] = {}
     if version_ids:
         cur.execute("""
-            SELECT DISTINCT ON (j.strategy_version_id)
-                j.strategy_version_id,
-                r.sharpe, r.sortino, r.max_dd_pct, r.cagr_pct,
-                r.total_return_pct, r.profit_factor,
-                r.win_rate_daily, r.active_days,
-                r.avg_daily_ret_pct, r.best_month_pct, r.worst_month_pct,
-                r.equity_r2,
-                r.starting_capital, r.ending_capital,
-                r.scorecard_score, r.grade
-            FROM audit.results r
-            JOIN audit.jobs j ON r.job_id = j.job_id
-            WHERE j.strategy_version_id = ANY(%s::uuid[])
-              AND j.status = 'complete'
-            ORDER BY j.strategy_version_id, j.completed_at DESC NULLS LAST
+            SELECT sv.strategy_version_id,
+                   (sv.current_metrics->>'sharpe')::numeric            AS sharpe,
+                   (sv.current_metrics->>'sortino')::numeric           AS sortino,
+                   (sv.current_metrics->>'max_dd_pct')::numeric        AS max_dd_pct,
+                   (sv.current_metrics->>'cagr_pct')::numeric          AS cagr_pct,
+                   (sv.current_metrics->>'total_return_pct')::numeric  AS total_return_pct,
+                   (sv.current_metrics->>'profit_factor')::numeric     AS profit_factor,
+                   (sv.current_metrics->>'win_rate_daily')::numeric    AS win_rate_daily,
+                   (sv.current_metrics->>'active_days')::integer       AS active_days,
+                   (sv.current_metrics->>'avg_daily_ret_pct')::numeric AS avg_daily_ret_pct,
+                   (sv.current_metrics->>'best_month_pct')::numeric    AS best_month_pct,
+                   (sv.current_metrics->>'worst_month_pct')::numeric   AS worst_month_pct,
+                   (sv.current_metrics->>'equity_r2')::numeric         AS equity_r2,
+                   (sv.current_metrics->>'starting_capital')::numeric  AS starting_capital,
+                   (sv.current_metrics->>'ending_capital')::numeric    AS ending_capital,
+                   (sv.current_metrics->>'scorecard_score')::numeric   AS scorecard_score,
+                    sv.current_metrics->>'grade'                       AS grade,
+                    sv.metrics_updated_at,
+                    sv.metrics_data_through
+            FROM audit.strategy_versions sv
+            WHERE sv.strategy_version_id = ANY(%s::uuid[])
+              AND sv.current_metrics IS NOT NULL
         """, (version_ids,))
         for row in cur.fetchall():
-            metrics_by_version[str(row["strategy_version_id"])] = {
-                "sharpe": _decimal_or_none(row["sharpe"]),
-                "sortino": _decimal_or_none(row["sortino"]),
-                "max_dd_pct": _decimal_or_none(row["max_dd_pct"]),
-                "cagr_pct": _decimal_or_none(row["cagr_pct"]),
-                "total_return_pct": _decimal_or_none(row["total_return_pct"]),
-                "profit_factor": _decimal_or_none(row["profit_factor"]),
-                "win_rate_daily": _decimal_or_none(row["win_rate_daily"]),
-                "active_days": row["active_days"],
+            svid = str(row["strategy_version_id"])
+            metrics_by_version[svid] = {
+                "sharpe":            _decimal_or_none(row["sharpe"]),
+                "sortino":           _decimal_or_none(row["sortino"]),
+                "max_dd_pct":        _decimal_or_none(row["max_dd_pct"]),
+                "cagr_pct":          _decimal_or_none(row["cagr_pct"]),
+                "total_return_pct":  _decimal_or_none(row["total_return_pct"]),
+                "profit_factor":     _decimal_or_none(row["profit_factor"]),
+                "win_rate_daily":    _decimal_or_none(row["win_rate_daily"]),
+                "active_days":       row["active_days"],
                 "avg_daily_ret_pct": _decimal_or_none(row["avg_daily_ret_pct"]),
-                "best_month_pct": _decimal_or_none(row["best_month_pct"]),
-                "worst_month_pct": _decimal_or_none(row["worst_month_pct"]),
-                "scorecard_score": _decimal_or_none(row["scorecard_score"]),
-                "grade": row["grade"],
+                "best_month_pct":    _decimal_or_none(row["best_month_pct"]),
+                "worst_month_pct":   _decimal_or_none(row["worst_month_pct"]),
+                "scorecard_score":   _decimal_or_none(row["scorecard_score"]),
+                "grade":             row["grade"],
+            }
+            metrics_meta_by_version[svid] = {
+                "metrics_updated_at":   row["metrics_updated_at"].isoformat() if row["metrics_updated_at"] else None,
+                "metrics_data_through": row["metrics_data_through"].isoformat() if row["metrics_data_through"] else None,
             }
 
     # Fetch allocation counts and deployed capital per strategy version
@@ -558,6 +576,7 @@ def get_strategies(
     for s in strategies:
         vid = str(s["strategy_version_id"])
         metrics = metrics_by_version.get(vid, {})
+        meta = metrics_meta_by_version.get(vid, {"metrics_updated_at": None, "metrics_data_through": None})
         cap_info = capacity_by_version.get(vid, {"allocators": 0, "deployed_usd": 0})
         result.append({
             "strategy_id": s["strategy_id"],
@@ -570,6 +589,8 @@ def get_strategies(
             "version_label": s["version_label"],
             "is_published": bool(s["is_published"]),
             "metrics": metrics,
+            "metrics_updated_at":   meta["metrics_updated_at"],
+            "metrics_data_through": meta["metrics_data_through"],
             "capacity": {
                 "allocators": cap_info["allocators"],
                 "deployed_usd": cap_info["deployed_usd"],
