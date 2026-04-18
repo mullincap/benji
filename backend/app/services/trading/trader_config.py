@@ -115,15 +115,29 @@ class TraderConfig:
 
         # Aliases grounded in observed prod configs — see investigation
         # output in the PR description for the raw config dumps.
+        raw_tsl = float(_pick(
+            "port_tsl_pct", ["port_tsl_pct", "port_tsl"], defaults.port_tsl_pct,
+        ))
+        # Audit framework stores port_tsl as a positive magnitude (see
+        # pipeline/audit.py CUBE_VALUES_PORT_TSL and the `-abs(port_tsl)`
+        # negation at comparison time, audit.py:8387). Live trader expects
+        # signed negative. Normalize unconditionally at this boundary so
+        # both sides keep their own convention.
+        port_tsl_pct = -abs(raw_tsl)
+        if raw_tsl > 0:
+            log.info(
+                "TraderConfig: port_tsl_pct normalized %s -> %s (audit convention "
+                "is positive magnitude; trader expects signed negative)",
+                raw_tsl, port_tsl_pct,
+            )
+
         return cls(
             l_high=float(_pick("l_high", ["l_high"], defaults.l_high)),
             kill_y=float(_pick("kill_y", ["kill_y", "early_kill_y"], defaults.kill_y)),
             port_sl_pct=float(_pick(
                 "port_sl_pct", ["port_sl_pct", "port_sl"], defaults.port_sl_pct,
             )),
-            port_tsl_pct=float(_pick(
-                "port_tsl_pct", ["port_tsl_pct", "port_tsl"], defaults.port_tsl_pct,
-            )),
+            port_tsl_pct=port_tsl_pct,
             early_fill_y=float(_pick(
                 "early_fill_y", ["early_fill_y"], defaults.early_fill_y,
             )),
