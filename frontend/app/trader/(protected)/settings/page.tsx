@@ -111,8 +111,13 @@ type RowSpec = {
 
 const PERMISSION_ROWS: RowSpec[] = [
   { key: "read",          label: "Read account info",     binance: "required", blofin: "required" },
-  { key: "spot_trade",    label: "Spot & margin trading", binance: "required", blofin: "inferred" },
-  { key: "futures_trade", label: "Futures trading",       binance: "allowed",  blofin: "inferred" },
+  // Our BloFin parser encodes readOnly=0 as spot_trade=true + futures_trade=true.
+  // By policy we require trading on BloFin, so render these as ACTIVE when the
+  // backend confirms trade capability.
+  { key: "spot_trade",    label: "Spot & margin trading", binance: "required", blofin: "required" },
+  { key: "futures_trade", label: "Futures trading",       binance: "allowed",  blofin: "required" },
+  // Withdrawals stays inferred — this is the field BloFin genuinely can't
+  // distinguish. Parser returns null; render amber "UNCLEAR — TRUST SETUP".
   { key: "withdrawals",   label: "Enable withdrawals",    binance: "rejected", blofin: "inferred" },
 ];
 
