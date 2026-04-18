@@ -7,12 +7,16 @@ fetch_permissions() dispatches to the right client based on the exchange name
 and decrypts credentials from the exchange_connections row. validate_permissions()
 enforces the read-only MVP policy.
 
-Amendments per spec:
-  • PermissionSet fields are `bool | None` — None means "could not confirm".
-  • BloFin first-call logs the raw response at WARN with a greppable marker so
-    we can capture the schema from prod logs; parser attempts multiple shapes.
-  • validate_permissions() rejects if ANY trade/withdrawal perm is True OR
-    cannot be confirmed (None). Rejection message names the specific field(s).
+Policy (2026-04-18 reversal): keys must be trade-capable because the allocator
+executes strategies. Withdrawals remain the security boundary.
+
+  • Binance: requires read + spot/margin trading, rejects withdrawals.
+  • BloFin:  requires trade-capable (readOnly=0). Cannot distinguish TRADE from
+             TRANSFER via query-apikey — we accept and rely on UI guidance.
+
+PermissionSet fields are `bool | None`; None means "could not confirm". BloFin's
+query-apikey logs its raw response at WARN on first call with the marker
+`BLOFIN_APIKEY_SCHEMA_CAPTURE` for schema debugging.
 """
 
 from __future__ import annotations
@@ -205,50 +209,56 @@ def fetch_permissions(
 
 # ─── Validator ────────────────────────────────────────────────────────────────
 
-def validate_permissions(perms: PermissionSet) -> tuple[bool, str | None]:
+def validate_permissions(
+    exchange: str, perms: PermissionSet,
+) -> tuple[bool, str | None]:
     """
-    Enforce read-only MVP policy. Returns (is_valid, rejection_reason).
+    Validate that an exchange key has the permissions required to execute
+    strategies (trade-capable, no withdrawals).
 
-    Rejects if:
-      • read is not True
-      • any of {withdrawals, spot_trade, futures_trade} is True
-      • any of {withdrawals, spot_trade, futures_trade} is None (cannot confirm)
-
-    Rejection messages name the specific field(s) that failed so the user knows
-    what to disable on the key.
+    Binance: requires read + spot/margin trading, rejects withdrawals.
+    BloFin:  requires trade-capable (readOnly=0). BloFin's query-apikey does
+             not break out TRADE vs TRANSFER — we accept any non-read-only key
+             and steer users via UI guidance to enable only Trade.
     """
-    if perms.read is not True:
-        return False, "Key does not have read permission."
+    exchange = (exchange or "").lower()
 
-    # Classify each trade/withdraw field: 'enabled', 'unknown', or 'disabled'.
-    enabled: list[str] = []
-    unknown: list[str] = []
-    for label, value in (
-        ("withdrawal", perms.withdrawals),
-        ("spot/margin trading", perms.spot_trade),
-        ("futures trading", perms.futures_trade),
-    ):
-        if value is True:
-            enabled.append(label)
-        elif value is None:
-            unknown.append(label)
-
-    if enabled:
-        if len(enabled) == 1:
+    if exchange == "binance":
+        if perms.read is not True:
             return False, (
-                f"Key has {enabled[0]} permissions enabled. "
-                "Create a new API key with only 'Read' permission."
+                "Key is missing read permission. Enable 'Enable Reading' in your "
+                "Binance API key settings."
             )
-        joined = " and ".join([", ".join(enabled[:-1]), enabled[-1]]) if len(enabled) > 2 else " and ".join(enabled)
-        return False, (
-            f"Key has {joined} permissions enabled. "
-            "Create a new API key with only 'Read' permission."
-        )
+        if perms.spot_trade is not True:
+            return False, (
+                "Key is missing margin trading permission. Enable 'Enable Spot & "
+                "Margin Trading' in your Binance API key settings — required to "
+                "execute strategies."
+            )
+        if perms.withdrawals is True:
+            return False, (
+                "Withdrawals must be disabled. Create a new Binance API key "
+                "without 'Enable Withdrawals' checked."
+            )
+        return True, None
 
-    if unknown:
-        # Amendment 1: ambiguous BloFin responses → reject. Don't silently admit.
-        return False, (
-            "Cannot confirm read-only status for BloFin key. Please contact support."
-        )
+    if exchange == "blofin":
+        # BloFin's query-apikey exposes only a single `readOnly` int. Our parser
+        # maps readOnly=1 → spot/futures/withdrawals all False, readOnly=0 →
+        # spot/futures True + withdrawals None (cannot distinguish).
+        if perms.read is not True:
+            return False, (
+                "Cannot confirm read access on BloFin key — please contact support."
+            )
+        if perms.spot_trade is None or perms.futures_trade is None:
+            return False, (
+                "Cannot confirm trade permission on BloFin key — please contact support."
+            )
+        if perms.spot_trade is False and perms.futures_trade is False:
+            return False, (
+                "Key is read-only. Create a new BloFin API key with 'Trade' "
+                "permission enabled — required to execute strategies."
+            )
+        return True, None
 
-    return True, None
+    return False, f"Unsupported exchange: {exchange}"

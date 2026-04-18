@@ -720,8 +720,8 @@ def store_exchange_keys(
         )
         raise HTTPException(status_code=502, detail=f"Exchange returned an error: {e}")
 
-    # ── Step 5: enforce read-only policy ─────────────────────────────────
-    is_valid, reason = validate_permissions(perms)
+    # ── Step 5: enforce trade-capable + no-withdrawals policy ───────────
+    is_valid, reason = validate_permissions(exchange, perms)
     if not is_valid:
         _update_connection_status(
             cur, connection_id,

@@ -91,43 +91,59 @@ const inlineErrorStyle: React.CSSProperties = {
 
 // ─── Permissions step (live data from backend) ───────────────────────────────
 
-type PermRow = {
+// Policy: keys must be trade-capable (they execute strategies) but cannot withdraw.
+//   required:  read; spot_trade is required on Binance
+//   allowed:   spot_trade (BloFin), futures_trade
+//   rejected:  withdrawals
+// Mirrors backend validate_permissions() in permissions.py.
+
+type PermRowSpec = {
   key: keyof ExchangePermissions;
   label: string;
-  required: boolean;
+  /** What this field means under the new policy. */
+  role: "required" | "allowed" | "rejected";
 };
 
-const PERMISSION_ROWS: PermRow[] = [
-  { key: "read",          label: "Read account info",     required: true  },
-  { key: "spot_trade",    label: "Spot & margin trading", required: false },
-  { key: "futures_trade", label: "Futures trading",       required: false },
-  { key: "withdrawals",   label: "Enable withdrawals",    required: false },
-];
-
-function permissionsAreValid(p: ExchangePermissions | null): boolean {
-  if (!p) return false;
-  return p.read === true
-    && p.spot_trade === false
-    && p.futures_trade === false
-    && p.withdrawals === false;
+function rowSpecsForExchange(exchange: string): PermRowSpec[] {
+  const spotRole: "required" | "allowed" =
+    exchange === "binance" ? "required" : "allowed";
+  return [
+    { key: "read",          label: "Read account info",     role: "required" },
+    { key: "spot_trade",    label: "Spot & margin trading", role: spotRole   },
+    { key: "futures_trade", label: "Futures trading",       role: "allowed"  },
+    { key: "withdrawals",   label: "Withdrawals",           role: "rejected" },
+  ];
 }
 
-function PermissionsStep({ permissions }: { permissions: ExchangePermissions | null }) {
+function permissionsAreValid(exchange: string, p: ExchangePermissions | null): boolean {
+  if (!p) return false;
+  if (p.read !== true) return false;
+  if (p.withdrawals === true) return false;
+  if (exchange === "binance" && p.spot_trade !== true) return false;
+  if (exchange === "blofin") {
+    // BloFin readOnly=1 → both trade fields false; readOnly=0 → both true.
+    if (p.spot_trade === null || p.futures_trade === null) return false;
+    if (p.spot_trade === false && p.futures_trade === false) return false;
+  }
+  return true;
+}
+
+function PermissionsStep({
+  exchange, permissions,
+}: {
+  exchange: string;
+  permissions: ExchangePermissions | null;
+}) {
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 5, marginBottom: 14 }}>
-      {PERMISSION_ROWS.map(row => {
+      {rowSpecsForExchange(exchange).map(row => {
         const value = permissions?.[row.key];
-        // Render classes:
-        //   required + value===true  → green "REQUIRED"
-        //   required + value!==true  → red "MISSING" (shouldn't happen; backend rejects)
-        //   optional + value===false → neutral "DISABLED"
-        //   optional + value===true  → red "ENABLED — REJECTED" (shouldn't happen)
-        //   any + value===null       → amber "UNKNOWN"
+        // Resolve pill based on role + value.
         let pillColor: string, pillBg: string, pillBorder: string, pillText: string;
-        if (row.required) {
+        if (row.role === "required") {
           if (value === true) {
             pillColor = "var(--green)"; pillBg = "var(--green-dim)"; pillBorder = "var(--green-mid)";
-            pillText = "REQUIRED";
+            pillText = "ENABLED";
           } else if (value === false) {
             pillColor = "var(--red)"; pillBg = "var(--red-dim)"; pillBorder = "var(--red)";
             pillText = "MISSING";
@@ -135,20 +151,37 @@ function PermissionsStep({ permissions }: { permissions: ExchangePermissions | n
             pillColor = "var(--amber)"; pillBg = "var(--amber-dim)"; pillBorder = "var(--amber)";
             pillText = "UNKNOWN";
           }
-        } else {
-          if (value === false) {
-            pillColor = "var(--t2)"; pillBg = "var(--bg2)"; pillBorder = "var(--line)";
-            pillText = "DISABLED";
-          } else if (value === true) {
+        } else if (row.role === "rejected") {
+          if (value === true) {
             pillColor = "var(--red)"; pillBg = "var(--red-dim)"; pillBorder = "var(--red)";
             pillText = "ENABLED — REJECTED";
+          } else if (value === false) {
+            pillColor = "var(--t2)"; pillBg = "var(--bg2)"; pillBorder = "var(--line)";
+            pillText = "DISABLED";
           } else {
+            // e.g. BloFin readOnly=0 leaves withdrawals=null (can't distinguish)
             pillColor = "var(--amber)"; pillBg = "var(--amber-dim)"; pillBorder = "var(--amber)";
-            pillText = "UNKNOWN";
+            pillText = "NOT VERIFIED";
+          }
+        } else {
+          // allowed
+          if (value === true) {
+            pillColor = "var(--green)"; pillBg = "var(--green-dim)"; pillBorder = "var(--green-mid)";
+            pillText = "ENABLED";
+          } else if (value === false) {
+            pillColor = "var(--t2)"; pillBg = "var(--bg2)"; pillBorder = "var(--line)";
+            pillText = "DISABLED";
+          } else {
+            pillColor = "var(--t2)"; pillBg = "var(--bg2)"; pillBorder = "var(--line)";
+            pillText = "NOT SET";
           }
         }
-        const rowBg = row.required && value === true ? "var(--green-dim)" : "var(--bg2)";
-        const rowBorder = row.required && value === true ? "var(--green-mid)" : "var(--line)";
+        const isGoodState =
+          (row.role === "required" && value === true)
+          || (row.role === "rejected" && value === false)
+          || (row.role === "allowed" && value === true);
+        const rowBg = isGoodState ? "var(--green-dim)" : "var(--bg2)";
+        const rowBorder = isGoodState ? "var(--green-mid)" : "var(--line)";
         const dotColor = value === true ? pillColor : "var(--line)";
         return (
           <div key={row.key} style={{
@@ -158,7 +191,7 @@ function PermissionsStep({ permissions }: { permissions: ExchangePermissions | n
           }}>
             <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
               <div style={{ width: 5, height: 5, borderRadius: "50%", background: dotColor }} />
-              <span style={{ fontSize: 10, color: row.required ? "var(--t1)" : "var(--t2)" }}>{row.label}</span>
+              <span style={{ fontSize: 10, color: row.role === "required" ? "var(--t1)" : "var(--t2)" }}>{row.label}</span>
             </div>
             <span style={{
               fontSize: 9, fontWeight: 700, letterSpacing: "0.12em",
@@ -280,6 +313,35 @@ function LinkWizard({ onComplete, onCancel }: { onComplete: (connectionId: strin
             </select>
             {step1Errors.exchange && <div style={inlineErrorStyle}>{step1Errors.exchange}</div>}
           </div>
+
+          {/* Exchange-specific guidance */}
+          {exchange === "binance" && (
+            <div style={{
+              fontSize: 10, color: "var(--t2)", lineHeight: 1.6,
+              background: "var(--bg2)", border: "1px solid var(--line)",
+              borderRadius: 3, padding: "10px 12px", marginBottom: 12,
+            }}>
+              <div style={{ fontSize: 9, fontWeight: 700, color: "var(--t3)", letterSpacing: "0.12em", textTransform: "uppercase", marginBottom: 6 }}>
+                Create a Binance API key with:
+              </div>
+              <div>&middot; <span style={{ color: "var(--t1)" }}>Enable Reading</span></div>
+              <div>&middot; <span style={{ color: "var(--t1)" }}>Enable Spot &amp; Margin Trading</span></div>
+              <div>&middot; Do NOT enable <span style={{ color: "var(--red)" }}>Withdrawals</span></div>
+            </div>
+          )}
+          {exchange === "blofin" && (
+            <div style={{
+              fontSize: 10, color: "var(--t2)", lineHeight: 1.6,
+              background: "var(--bg2)", border: "1px solid var(--line)",
+              borderRadius: 3, padding: "10px 12px", marginBottom: 12,
+            }}>
+              <div style={{ fontSize: 9, fontWeight: 700, color: "var(--t3)", letterSpacing: "0.12em", textTransform: "uppercase", marginBottom: 6 }}>
+                Create a BloFin API key with:
+              </div>
+              <div>&middot; <span style={{ color: "var(--t1)" }}>Read + Trade</span> permissions</div>
+              <div>&middot; Do NOT enable <span style={{ color: "var(--red)" }}>Transfer</span> or <span style={{ color: "var(--red)" }}>Withdraw</span></div>
+            </div>
+          )}
 
           {/* Label */}
           <div style={{ marginBottom: 10 }}>
@@ -435,14 +497,17 @@ function LinkWizard({ onComplete, onCancel }: { onComplete: (connectionId: strin
 
       {step === 3 && (
         <div>
-          <PermissionsStep permissions={verify.kind === "ok" ? verify.result.permissions : null} />
+          <PermissionsStep
+            exchange={verify.kind === "ok" ? verify.result.exchange : (exchange || "")}
+            permissions={verify.kind === "ok" ? verify.result.permissions : null}
+          />
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
             <button onClick={() => setStep(2)}
               onMouseEnter={e => { e.currentTarget.style.color = "var(--t0)"; }}
               onMouseLeave={e => { e.currentTarget.style.color = "var(--t2)"; }}
               style={textBtnStyle}>{"\u2190"} Back</button>
             {(() => {
-              const valid = verify.kind === "ok" && permissionsAreValid(verify.result.permissions);
+              const valid = verify.kind === "ok" && permissionsAreValid(verify.result.exchange, verify.result.permissions);
               return valid
                 ? <button onClick={() => setStep(4)} style={primaryBtnStyle}>PERMISSIONS OK &rarr;</button>
                 : <button disabled style={disabledBtnStyle}>UNEXPECTED PERMISSIONS — CONTACT SUPPORT</button>;
@@ -458,7 +523,7 @@ function LinkWizard({ onComplete, onCancel }: { onComplete: (connectionId: strin
             <div style={{ fontSize: 12, fontWeight: 700, color: "var(--t0)", marginBottom: 6 }}>
               {verify.result.exchange} connected
             </div>
-            <div style={{ fontSize: 10, color: "var(--t2)" }}>Read-only access verified.</div>
+            <div style={{ fontSize: 10, color: "var(--t2)" }}>Trading enabled. Withdrawals disabled.</div>
           </div>
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
             <button onClick={() => setStep(3)}

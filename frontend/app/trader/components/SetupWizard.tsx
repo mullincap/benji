@@ -23,13 +23,13 @@ const EXCHANGE_KEY_STEPS: Record<string, string[]> = {
   Binance: [
     "Log into Binance \u2192 profile icon \u2192 API Management",
     "Click Create API \u2192 label \u2192 verify",
-    "Enable Read Info only \u2014 disable trading and withdrawals",
+    "Enable Reading + Spot & Margin Trading \u2014 do NOT enable Withdrawals",
     "Copy API Key and Secret Key and paste below",
   ],
   BloFin: [
     "Log into BloFin \u2192 profile icon \u2192 API",
     "Click Create API Key \u2192 set passphrase",
-    "Enable READ only \u2014 disable TRADE and TRANSFER",
+    "Enable READ + TRADE \u2014 do NOT enable TRANSFER or Withdraw",
     "Copy API Key, Secret Key, and your passphrase below",
   ],
 };

@@ -109,7 +109,7 @@ def _validate_pending(conn, cur, row: dict[str, Any]) -> str:
         conn.commit()
         return f"errored: {e}"
 
-    is_valid, reason = validate_permissions(perms)
+    is_valid, reason = validate_permissions(exchange, perms)
     if not is_valid:
         cur.execute(
             """
