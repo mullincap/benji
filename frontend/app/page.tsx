@@ -3,6 +3,8 @@
 import { useEffect, useRef, useState } from 'react';
 import Link from 'next/link';
 
+const API_BASE = process.env.NEXT_PUBLIC_API_BASE || '';
+
 // ── Neural network canvas animation ─────────────────────────────────────────
 function NeuralCanvas() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -126,16 +128,32 @@ export default function LandingPage() {
   const [wlMsgColor, setWlMsgColor] = useState('var(--t3)');
   const [wlSubmitted, setWlSubmitted] = useState(false);
 
-  function handleWL() {
+  async function handleWL() {
     if (!wlEmail || !wlEmail.includes('@')) {
       setWlMsg('Please enter a valid email address.');
       setWlMsgColor('var(--t1)');
       return;
     }
-    setWlMsg("✓ You're on the list. We'll be in touch.");
-    setWlMsgColor('var(--green)');
-    setWlEmail('');
-    setWlSubmitted(true);
+    try {
+      const res = await fetch(API_BASE + '/api/waitlist', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email: wlEmail }),
+      });
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        setWlMsg(body.detail || 'Could not submit. Please try again.');
+        setWlMsgColor('var(--t1)');
+        return;
+      }
+      setWlMsg("✓ You're on the list. We'll be in touch.");
+      setWlMsgColor('var(--green)');
+      setWlEmail('');
+      setWlSubmitted(true);
+    } catch {
+      setWlMsg('Network error. Please try again.');
+      setWlMsgColor('var(--t1)');
+    }
   }
 
   return (
