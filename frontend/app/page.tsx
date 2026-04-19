@@ -705,7 +705,7 @@ export default function LandingPage() {
         <div style={{ fontSize: 9, letterSpacing: '0.18em', textTransform: 'uppercase', color: 'var(--t3)', fontWeight: 700, marginBottom: '2rem', display: 'flex', alignItems: 'center', gap: 12, justifyContent: 'center' }}>
           Early access
         </div>
-        <h2 style={{ fontSize: 'clamp(28px, 4vw, 54px)', fontWeight: 700, lineHeight: 1.05, letterSpacing: -1, color: 'var(--t0)', maxWidth: 600, marginBottom: '1.25rem' }}>
+        <h2 style={{ fontSize: 'clamp(28px, 4vw, 54px)', fontWeight: 700, lineHeight: 1.05, letterSpacing: -1, color: 'var(--t0)', maxWidth: 760, marginBottom: '1.25rem' }}>
           Audit your risk.<br />Compound your profits.
         </h2>
         <p style={{ fontSize: 12, color: 'var(--t1)', maxWidth: 380, lineHeight: 1.9, marginBottom: '3rem' }}>
