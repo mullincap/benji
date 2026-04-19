@@ -4,6 +4,37 @@ Items surfaced during normal work that aren't in scope for the current track but
 
 ---
 
+## active_filter string-namespace inconsistency (pre-Item 4 scope check)
+
+**Discovered:** 2026-04-19 during Item 5 IDENTITY_FIELDS convention sweep.
+
+**Mechanism:**
+- `audit.strategies.filter_mode` for alpha v1 = `"A - Tail Guardrail"` (human label; visible in `refresh_metrics.log` as `filter_mode='A - Tail Guardrail'`).
+- Host master trader `/root/benji/trader-blofin.py` module constant `ACTIVE_FILTER = "Tail Guardrail"` — this is the string written into `user_mgmt.daily_signals.filter` at 06:00 UTC each day.
+- `backend/app/services/trading/trader_config.py` default `active_filter = "Tail Guardrail"`.
+- Alpha v1 `strategy_version.config` JSONB has **no** `active_filter` / `filter_mode` key → factory `_pick` falls through to default `"Tail Guardrail"` (with a WARN log).
+- `backend/app/cli/trader_blofin.py:584` matches `daily_signals` rows by case-insensitive equality on `filter`.
+
+**Why it works today:** the JSONB key absence is accidental alignment — factory default happens to equal the string written into `daily_signals`.
+
+**Latent failure:** Track 1's promote path (`simulator.py`) now persists `active_filter` into `strategy_version.config` on future promotions. If the value written is the label form `"A - Tail Guardrail"` (whatever the strategy row's `filter_mode` is), the factory will resolve that label, the executor will query `daily_signals` by `"A - Tail Guardrail"`, find zero matches against `"Tail Guardrail"` rows, and silently trade zero symbols. Case-insensitive equality does not bridge the gap (`"a - tail guardrail" != "tail guardrail"`).
+
+**Pre-Item 4 scope check:**
+During Item 4 investigation (`run_audit(params) → dict` refactor), explicitly confirm whether the refactor touches any code path that persists `active_filter` into `strategy_version.config`.
+- If **yes**: resolve this issue before shipping Item 4 (likely: normalize at the promote-path write site, so stored form matches `daily_signals.filter` form, or make `trader_blofin.py` tolerant by normalizing at the factory).
+- If **no**: leaves the issue deferred for its own session.
+
+**Durable fix options (for the standalone session):**
+- Option A: canonicalize at the write site in `simulator.py` promote — write only the form that matches `daily_signals.filter`.
+- Option B: normalize at the read site in `trader_config.from_strategy_version` — map label → canonical form via a dict lookup, similar to the `port_tsl` boundary normalization pattern.
+- Option C: pick one namespace (label vs canonical) and migrate both sides to it.
+
+**Blast radius if not fixed:** silent zero-trade days for any newly-promoted allocation using a strategy whose `filter_mode` is a label not identical to what the host trader writes into `daily_signals`. No active blocker today because alpha v1's config has the key absent; exposure begins on the next Simulator-UI promotion.
+
+**Tracking:** keep on open work list, revisit during Item 4 investigation or as its own session.
+
+---
+
 ## Environment drift: BASE_DATA_DIR inconsistency between services
 
 **Discovered:** 2026-04-18 during Track 1 Part 10 smoke test.
