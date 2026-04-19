@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Callable, Optional
 
 from app.core.config import settings
+from app.services.audit.metrics_parser import parse_metrics
 
 _PIPELINE_PYTHON = settings.PIPELINE_PYTHON
 
@@ -407,3 +408,55 @@ def run_audit_subprocess(
             f"overlap_analysis.py exited with code {proc.returncode}. "
             f"See audit_output.txt for details."
         )
+
+
+# ---------------------------------------------------------------------------
+# Full audit: prestage + subprocess + scrape → metrics dict
+# ---------------------------------------------------------------------------
+
+def run_audit(
+    params: dict,
+    *,
+    output_path: Path,
+    progress_cb: Optional[Callable[[bytes], None]] = None,
+    cancellation_cb: Optional[Callable[[], bool]] = None,
+    on_rebuild_start: Optional[Callable[[], None]] = None,
+) -> dict:
+    """Run the full audit path: prestage parquets + overlap_analysis.py subprocess + scrape.
+
+    One-stop entry point for both the Simulator Celery task and the nightly
+    refresh CLI. Preserves audit_output.txt on disk at the caller-owned
+    output_path (audit trail / debugging).
+
+    Returns the same metrics dict shape as the pre-refactor _parse_metrics.
+
+    Callbacks (all optional):
+      progress_cb       — called with each raw stdout bytes line from subprocess
+      cancellation_cb   — polled before each line; True → terminate + JobCancelled
+      on_rebuild_start  — invoked once if prestage determines parquets are stale
+                          and begins the ~3h rebuild
+
+    Caller owns output_path's parent directory.
+    """
+    pipeline_env = build_pipeline_env(params)
+    pipeline_dir = Path(settings.PIPELINE_DIR)
+    overlap_script = pipeline_dir / "overlap_analysis.py"
+    cmd = [_PIPELINE_PYTHON, str(overlap_script)] + build_cli_args(params)
+
+    prestage_parquet(
+        params,
+        pipeline_env=pipeline_env,
+        pipeline_dir=pipeline_dir,
+        on_rebuild_start=on_rebuild_start,
+    )
+
+    run_audit_subprocess(
+        cmd=cmd,
+        output_path=output_path,
+        cwd=pipeline_dir,
+        env=pipeline_env,
+        on_line=progress_cb,
+        cancelled=cancellation_cb,
+    )
+
+    return parse_metrics(output_path)

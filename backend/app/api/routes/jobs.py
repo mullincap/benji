@@ -14,7 +14,8 @@ from app.services.job_store import (
     create_job, delete_job, get_job, list_jobs, update_job,
     list_folders, create_folder, rename_folder, delete_folder,
 )
-from app.workers.pipeline_worker import _parse_metrics, run_pipeline
+from app.services.audit.metrics_parser import parse_metrics
+from app.workers.pipeline_worker import run_pipeline
 
 router = APIRouter(prefix="/api/jobs", tags=["jobs"])
 
@@ -43,7 +44,7 @@ def _refresh_results_if_needed(job: dict[str, Any]) -> dict[str, Any]:
     if not output_path.exists():
         return job
 
-    parsed_metrics = _parse_metrics(output_path)
+    parsed_metrics = parse_metrics(output_path)
     if not parsed_metrics:
         return job
 

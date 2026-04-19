@@ -2,8 +2,8 @@
 
 For each (is_active=TRUE, is_published=TRUE) strategy_version:
   1. Load config from audit.strategy_versions, strategy.filter_mode from audit.strategies
-  2. Run the audit pipeline (prestage_parquet + run_audit_subprocess)
-  3. Parse metrics from audit_output.txt (same _parse_metrics as pipeline_worker)
+  2. Run the audit pipeline (run_audit handles prestage + subprocess + parse)
+  3. Metrics are returned from run_audit (same shape as the pre-refactor _parse_metrics)
   4. Insert a fresh audit.jobs + audit.results row (audit trail preserved)
   5. Update strategy_version.current_metrics JSONB with the picked-filter payload
 
@@ -27,20 +27,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from app.core.config import settings
 from app.db import get_worker_conn
 from app.services.audit.current_metrics import build_current_metrics
-from app.services.audit.pipeline_runner import (
-    build_cli_args,
-    build_pipeline_env,
-    prestage_parquet,
-    run_audit_subprocess,
-)
-# Reuse the existing worker's parser + job-row upsert — don't duplicate logic.
-from app.workers.pipeline_worker import (
-    _parse_metrics,
-    _persist_audit_job_row_at_cursor,
-)
+from app.services.audit.pipeline_runner import run_audit
+# Reuse the existing worker's job-row upsert — don't duplicate logic.
+from app.workers.pipeline_worker import _persist_audit_job_row_at_cursor
 # _build_result_row + column maps live in the promote route.
 from app.api.routes.simulator import _build_result_row
 
@@ -97,28 +88,13 @@ def _run_audit_for_version(sv: dict[str, Any]) -> tuple[dict, Path, str]:
 
     log.info(f"  [{short_id}] job_id={job_id}  output={audit_output_path}")
 
-    pipeline_env = build_pipeline_env(params)
-    pipeline_dir = Path(settings.PIPELINE_DIR)
-    overlap_script = pipeline_dir / "overlap_analysis.py"
-    cmd = [settings.PIPELINE_PYTHON, str(overlap_script)] + build_cli_args(params)
-
-    prestage_parquet(
+    metrics = run_audit(
         params,
-        pipeline_env=pipeline_env,
-        pipeline_dir=pipeline_dir,
-        on_rebuild_start=lambda: log.info(f"  [{short_id}] leaderboard parquets stale; rebuilding"),
-    )
-
-    run_audit_subprocess(
-        cmd=cmd,
         output_path=audit_output_path,
-        cwd=pipeline_dir,
-        env=pipeline_env,
-        on_line=None,       # no progress reporting for nightly
-        cancelled=None,     # runs to completion
+        on_rebuild_start=lambda: log.info(
+            f"  [{short_id}] leaderboard parquets stale; rebuilding"
+        ),
     )
-
-    metrics = _parse_metrics(audit_output_path)
     return metrics, audit_output_path, job_id
 
 
