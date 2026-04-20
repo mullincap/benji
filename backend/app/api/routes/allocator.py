@@ -172,8 +172,8 @@ def _fetch_live_blofin(
 # ── Binance live fetch ───────────────────────────────────────────────────────
 
 def _get_binance_btc_price() -> float:
-    """Unsigned BTC/USDT spot ticker — used only for the margin fallback path.
-    No caching; called at most once per sync cycle and only when futures returns empty."""
+    """Unsigned BTC/USDT spot ticker — used by the margin fallback for
+    BTC-denominated equity conversion. No caching; called once per sync cycle."""
     resp = http_requests.get(
         "https://api.binance.com/api/v3/ticker/price",
         params={"symbol": "BTCUSDT"},
@@ -181,6 +181,25 @@ def _get_binance_btc_price() -> float:
     )
     resp.raise_for_status()
     return float(resp.json()["price"])
+
+
+def _get_binance_spot_price(symbol: str) -> float | None:
+    """Unsigned spot ticker for arbitrary symbol (e.g. 'BTCUSDT').
+
+    Used to enrich cross-margin position rows with live mark_price. Returns
+    None on failure — caller falls back to 0.0 with a log warning rather
+    than crashing the snapshot cycle.
+    """
+    try:
+        resp = http_requests.get(
+            "https://api.binance.com/api/v3/ticker/price",
+            params={"symbol": symbol},
+            timeout=5,
+        )
+        resp.raise_for_status()
+        return float(resp.json()["price"])
+    except Exception:
+        return None
 
 
 def _fetch_live_binance(*, api_key: str, api_secret: str) -> dict:
@@ -267,12 +286,47 @@ def _fetch_live_binance(*, api_key: str, api_secret: str) -> dict:
         )
 
     btc_price = _get_binance_btc_price()
+
+    # Synthesize per-asset positions from userAssets where netAsset != 0.
+    # Cross-margin doesn't have a positions endpoint, so "position" = any
+    # non-stablecoin asset with a non-zero net (long = owned, short = borrowed).
+    # Enrich each with live spot price via /api/v3/ticker/price.
+    STABLECOINS = {"USDT", "USDC", "BUSD", "DAI", "TUSD", "FDUSD"}
+    positions = []
+    for item in margin.get("userAssets", []) or []:
+        asset = item.get("asset")
+        if not asset or asset in STABLECOINS:
+            continue
+        try:
+            net = float(item.get("netAsset", 0) or 0)
+        except (TypeError, ValueError):
+            continue
+        if net == 0:
+            continue
+        symbol = f"{asset}USDT"
+        mark = _get_binance_spot_price(symbol)
+        if mark is None:
+            # Leave mark_price=0.0 with a log so UI can show "—" rather than
+            # crashing the entire snapshot. UPL also uncomputable without mark.
+            log.warning(f"Binance margin: no spot price for {symbol}, leaving mark_price=0")
+            mark = 0.0
+        positions.append({
+            "symbol":         symbol,
+            "side":           "long" if net > 0 else "short",
+            "size":           abs(net),
+            "entry_price":    0.0,           # cross-margin: no stored entry price
+            "mark_price":     mark,
+            "unrealized_pnl": 0.0,           # requires entry_price — defer until writer persists it
+            "leverage":       0,             # cross-margin: per-account, not per-symbol
+            "margin_mode":    "cross",
+        })
+
     return {
         "total_equity": _safe_decimal(net_btc * btc_price),
         "available": _safe_decimal(net_btc * btc_price),  # net-of-liabilities
         "used_margin": _safe_decimal(liability_btc * btc_price),
         "unrealized_pnl": _safe_decimal(0),  # not separately exposed on margin
-        "positions": [],                      # no per-position detail on margin
+        "positions": positions,
     }
 
 
