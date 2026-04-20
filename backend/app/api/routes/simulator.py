@@ -250,6 +250,12 @@ def promote_audit(
     # ── Persist the user's filter selection into the config JSONB so
     #    executor paths that read sv.config->>'active_filter' find it
     #    without falling back to the factory default.
+    #
+    #    Stored as user-facing label form (e.g. "A - Tail Guardrail").
+    #    Downstream consumers must normalize via TraderConfig._pick —
+    #    the factory strips the "^[A-Z] - " prefix to get the canonical
+    #    identifier matched against daily_signals.filter_name /
+    #    live_deploys_signal.csv.
     config_to_persist = dict(job_json.get("params") or {})
     config_to_persist["active_filter"] = body.filter_mode
     new_hash = hash_config(config_to_persist)

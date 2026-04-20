@@ -11,9 +11,31 @@ the live script, one of them has drifted from the audit-matched baseline.
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass
 
 log = logging.getLogger(__name__)
+
+
+_FILTER_LABEL_PREFIX_RE = re.compile(r"^[A-Z] - ")
+
+
+def _canonicalize_filter_name(raw: str) -> str:
+    """Strip the 'X - ' UI label prefix if present; return canonical identifier.
+
+    Upstream (Simulator promote at api/routes/simulator.py:254) persists the
+    user-facing label form (e.g. "A - Tail Guardrail") into
+    strategy_version.config["active_filter"]. Live-trading paths compare
+    against canonical identifiers in daily_signals.filter_name /
+    live_deploys_signal.csv (e.g. "Tail Guardrail").
+
+    Matches a strict `^[A-Z] - ` prefix — single uppercase letter, space,
+    dash, space. No match → returned unchanged (defensive pass-through).
+
+    If future filter labels deviate from the 'X - Name' single-letter
+    convention (e.g. 'AA - Extended', 'Alpha1 - Multi'), revisit this regex.
+    """
+    return _FILTER_LABEL_PREFIX_RE.sub("", raw.strip(), count=1)
 
 
 @dataclass(frozen=True)
@@ -126,6 +148,26 @@ class TraderConfig:
                 raw_tsl, port_tsl_pct,
             )
 
+        active_filter_raw = str(_pick(
+            "active_filter",
+            ["active_filter", "filter_mode"],
+            defaults.active_filter,
+        ))
+        # Strip UI label prefix ("A - Tail Guardrail" → "Tail Guardrail") so
+        # trader_blofin.get_today_symbols can match against canonical
+        # daily_signals.filter_name / live_deploys_signal.csv values.
+        # Simulator promote persists the label form intentionally (UI
+        # readability); normalization is the factory's job. Same pattern as
+        # port_tsl_pct's magnitude-vs-signed normalization above.
+        active_filter = _canonicalize_filter_name(active_filter_raw)
+        if active_filter != active_filter_raw:
+            log.info(
+                "TraderConfig: active_filter normalized %r -> %r "
+                "(stripping UI label prefix; canonical form matches "
+                "daily_signals.filter_name / live_deploys_signal.csv)",
+                active_filter_raw, active_filter,
+            )
+
         return cls(
             l_high=float(_pick("l_high", ["l_high"], defaults.l_high)),
             kill_y=float(_pick("kill_y", ["kill_y", "early_kill_y"], defaults.kill_y)),
@@ -136,11 +178,7 @@ class TraderConfig:
             early_fill_y=float(_pick(
                 "early_fill_y", ["early_fill_y"], defaults.early_fill_y,
             )),
-            active_filter=str(_pick(
-                "active_filter",
-                ["active_filter", "filter_mode"],
-                defaults.active_filter,
-            )),
+            active_filter=active_filter,
             capital_mode="fixed_usd",
             capital_value=capital_usd,
             # All other fields intentionally use master defaults — they're
