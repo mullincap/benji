@@ -78,51 +78,89 @@ Commit: `f9491a1` (2 files: `trader_config.py`, `simulator.py`). Handoff additio
 
 ---
 
-## Why Item 9 deferred to Session D
+## Why Item 9 deferred — investigation complete, defer to Session E or later
 
-Three converging reasons:
+Session C included an Item 9 investigation pass after the initial defer decision was revisited. The investigation confirmed the defer is correct, and produced the authoritative scope + decision-points list for the next architectural ratification session. Full findings:
 
-**1. HARD prerequisite blocked.** Item 10's handoff mandated exercising 3 uncovered integration paths before Binance code ships; Item 6 added a 4th (Phase 4 vol_boost read). The gate requires a real BloFin allocation activating with `conviction_passed=TRUE` and signals present. Session C preflight: zero active BloFin allocations, signals for 2026-04-20 not yet written (05:58 UTC master signal cron hasn't fired at close-out time 05:06 UTC), conviction state unknown.
+### Investigation summary (Session C, ~05:15 UTC)
 
-**2. Item 9 itself is unscoped.** Investigation pass hasn't been done. Binance API surface differs from BloFin in non-trivial ways: different position-sizing, different margin model, different order placement semantics. Starting unscoped at hour-5+ of a session is a setup for time-pressured risk.
+**Critical finding: `backend/app/services/exchanges/binance.py` is READ-ONLY by design.** From its own docstring:
+> "Minimal read-only Binance REST client for account introspection. Scope: permissions probe + spot balance + optional futures balance. **No trade endpoints.** HMAC-SHA256 signing via stdlib to avoid adding a dependency."
 
-**3. Live-money safety guardrail.** The kickoff explicitly ordered: "Item 9 activates a never-traded live-money path and should not ship under time pressure. Forced completion at cost of live-money safety is not [success]." Session C has already shipped two live-path fixes clean; adding a never-traded exchange path under time pressure breaks the guardrail.
+`BinanceClient` has: `get_permissions()`, `get_spot_account()`, `get_futures_account()`, `get_margin_account()`. **Zero trade endpoints.** `BlofinREST` at `trader_blofin.py:606-727` has the full trade surface (`set_leverage`, `place_order` with inline SL, `close_position`, `get_fills_history`, etc.).
+
+### Exchange gates inventoried across the codebase
+
+| Site | Behavior |
+|---|---|
+| `allocator.py:815` | `SUPPORTED_EXCHANGES = {"binance", "blofin"}` — API accepts both for credential onboarding |
+| `spawn_traders.py:53` | `SUPPORTED_EXCHANGES = {"blofin"}` — SQL filters Binance out of eligible allocations |
+| `spawn_traders.py:107` | Query filter via `ec.exchange = ANY(%s)` |
+| `trader_blofin.py:3323` | `if creds.exchange != "blofin": phase="skipped"; return` — second gate |
+| `trader_blofin.py:3338` | Hardcoded `api = BlofinREST(...)` — no dispatch |
+| `permissions.py:162,177,226,245` | Exchange-specific READ validation branches (exist, read-only) |
+| `allocator.py:319/341, 757/759, 881` | Exchange-specific credential onboarding branches (exist) |
+
+**Read-side is already exchange-agnostic. Write-side is BloFin-only at every layer.**
+
+### $20 Binance allocation — current code paths
+
+- **Today (both gates in place):** `spawn_traders` SQL filter excludes it → never reaches trader. Dormant. Safe.
+- **If only spawn_traders filter lifted:** subprocess launches → hits `:3323` skip check → `phase="skipped"` → exits cleanly. Trades zero.
+- **If both gates lifted, no other changes:** `BlofinREST` gets instantiated with Binance credentials → first `api.get_balance()` call hits `openapi.blofin.com` with Binance keys → non-deterministic failure (401 or silent wrong-account data). **Unsafe.**
+
+### Scope estimate for Item 9 implementation: **12–20h**
+
+1. Extend `BinanceClient` with trade endpoints (~3–5h): `set_leverage`, `set_marginType`, `place_order` (MARKET + STOP_MARKET), `get_positions` via `/fapi/v2/positionRisk`, close-position synthesis via reduce-only, fills history, exchange info for tick/step/min_notional.
+2. Abstraction/dispatch in trader (~2–4h): adapter pattern ratification + implementation.
+3. Symbol + metadata translation (~2–3h): `BTC-USDT` ↔ `BTCUSDT`, per-exchange contract-size caching.
+4. Margin mode semantics (~1–2h): BloFin per-order vs Binance per-symbol one-time setup.
+5. Stop-loss/TSL synthesis (~2h): BloFin inline vs Binance separate STOP_MARKET with rollback semantics on entry-fail.
+6. Gate lifts + credential dispatch (~30m — trivial, last).
+7. Testing (~2–4h): testnet harness OR minimum-size real trades, 4 dry-run scenarios on Binance path.
+8. Plus the Items-10+6 BloFin 4-path integration gate exercise (separate, prereq-blocked today).
+
+### Gate recommendation — DEFER (accepted)
+
+`$19.29` balance caps **position-sizing** blast radius; does NOT cap **code-surface** blast radius. Bugs in `place_order`, `close_position`, or `set_marginType` can create orphaned Binance positions, corrupt connection-level margin state for future allocations, or leak funding/liquidation risk past the $19.29 cap once leverage applies.
+
+All three defer criteria met: scope >>2h; multiple unratified architectural decisions; 4-path prereq gate still blocked.
 
 ---
 
-## Session D kickoff — priority + contingent flow
+## Session D kickoff — architectural ratification (NOT implementation)
 
-### Priority order (clean-state, conviction-passing)
+Session D is a **scope-and-decisions session**, not a code session. Code ships in Session E or later after decisions are locked. This mirrors the Item 10 Session A/B split where investigation + decision-pre-commits came before implementation.
 
-1. **Item 9 investigation pass.** Scope the Binance executor diff against the BloFin baseline:
-   - What's the API surface differential? (margin mode, position sizing, order placement)
-   - What does `spawn_traders.py:53`'s `SUPPORTED_EXCHANGES={"blofin"}` gate need to become? (add `"binance"` — but what other sites need lifting?)
-   - What's the credential-type check at `trader_blofin.py:3203` — refactor to dispatch by exchange rather than hardcoded BloFin skip?
-   - Is `enter_positions` BloFin-specific, or does it have an exchange-agnostic surface?
-   - Does the containerized trader need a Binance REST client analog to `BlofinREST`?
+### Six decisions to ratify in Session D
 
-2. **4-path integration gate** — BEFORE Item 9 code ships. Exercise against a real BloFin allocation with today's signals (conviction passing). Cover:
-   - Path 1: `connection_id` threading through `run_session_for_allocation` → `_run_fresh_session_for_allocation` → `_account_advisory_lock` (Item 10)
-   - Path 2: `TRADER_LOCK_TEST_SLEEP_S` activation inside the live CLI flow (Item 10)
-   - Path 3: Phase 5 integration with surrounding CLI phases (Item 10)
-   - Path 4: Phase 4's `vol_boost` read + `l_high × vol_boost = eff_lev` log format (Item 6)
+1. **Adapter pattern** — choose one: (a) `ExchangeAdapter` ABC with `BlofinAdapter`, `BinanceAdapter` concretes; (b) sibling `trader_binance.py` module + shared core helpers; (c) inline branching at each `creds.exchange` site. Recommend (a) but ratify explicitly with interface signature (what methods + return shapes).
 
-3. **Item 9 implementation** — scoped diff, dry-run scenarios on Binance path, live-money gate via scratch user pattern (per Item 10 Session B spec), deploy gate (zero active Binance allocations during deploy window, spawn_traders gate lift, credential encryption round-trip on Binance connections).
+2. **Binance trade-endpoint scope + signing** — enumerate the endpoints to add to `BinanceClient`, decide on signing helpers (currently pure stdlib HMAC-SHA256 — stays that way, or switch to `python-binance` SDK?). Decide error-code mapping strategy for Binance-specific trade-time codes (-1013, -2019, -4164, etc.).
 
-### If conviction fails tonight (continued block)
+3. **Stop-loss synthesis semantics** — BloFin places SL inline in entry `place_order` body (atomic). Binance requires separate STOP_MARKET order. Decide rollback semantics when entry fills but SL placement fails (close entry immediately? mark position risky? retry?). Decide ordering: entry-then-SL, or reserve-SL-then-entry.
 
-If the 2026-04-20 06:00 UTC session produces `conviction_passed=FALSE` across Tail Guardrail rows (as happened on the 3 days preceding Session C):
+4. **Margin mode lifecycle** — per-spawn warming (set_marginType once per symbol during spawn_traders) vs per-session (each `_run_fresh_session_for_allocation` sets margin mode on its symbols). Affects idempotency and blast radius if a symbol's margin mode gets corrupted.
 
-- **The 4-path integration gate remains blocked.** Real signals exist but no live allocation activation occurs (signal present → conviction gate filter → Phase 5 never reached).
-- **Session D options:**
-  - (a) **Defer Item 9 again** until a conviction-passing window opens. Treat Item 9 as a parked item; pick up other work.
-  - (b) **Scratch-allocation harness** on BloFin: create a scratch allocation under J's BloFin connection, force-bypass conviction via env-var scaffolding (would require new scaffolding code — parallels `TRADER_LOCK_TEST_SLEEP_S`), exercise the 4 paths synthetically. Higher setup cost, validates without real conviction.
-  - (c) **Partial Item 9 progress** — ship the investigation doc + scope estimate + stub code (gates still in place), defer live-money activation to a later session.
-- **Recommended**: (a) unless a conviction-passing window is likely within days. The 3-day conviction-failure streak preceding Session C suggests a multi-day gap is possible. If Item 9 blocks for >1 week, revisit option (b) or (c).
+5. **Symbol / metadata translation ownership** — where does `BTC-USDT` ↔ `BTCUSDT` mapping live: config constants, adapter-owned helper, per-call translation? Where does contract metadata (tick/step/min_notional) get cached: adapter instance attribute, Redis, in-memory module dict?
 
-Other Session D work that doesn't depend on conviction state:
-- Small polish from [open_work_list.md](open_work_list.md): "Last refreshed N ago" on Allocator cards; $25K slider clamp; Avg lev column.
-- Deferred work items in [deferred_work.md](deferred_work.md): CAPITAL_MODE cleanup (safe any time, zero risk), strategy taxonomy decision (batch rename), BASE_DATA_DIR env drift.
+6. **Testnet vs real-money minimum-trade verification** — Binance testnet exists but has quirks (different recv_window behavior, limited symbol availability, stale price feeds). Real-money with minimum-size positions on Binance mainnet is safer for correctness but risks small losses during iteration. Decide strategy before any Binance code deploys.
+
+### Other Session D work that doesn't depend on Item 9
+
+- The 4-path BloFin integration gate — executable on any day BloFin conviction passes. Treat it as independent work: create scratch BloFin allocation under j@mullincap.com's BloFin connection, exercise the 4 paths on that day's 06:00 UTC session, soft-close allocation afterward. Small-session work (~1-2h).
+- Small polish from [open_work_list.md](open_work_list.md): "Last refreshed N ago" label; $25K slider clamp; Avg lev column.
+- Deferred items from [deferred_work.md](deferred_work.md): CAPITAL_MODE cleanup (zero-risk cosmetic), strategy taxonomy batch rename, BASE_DATA_DIR env drift.
+
+### Expected Session D output
+
+- Written ratification of decisions 1-6 above (e.g., updated `docs/open_work_list.md` with a dedicated Item 9 scope block + decision hashes)
+- NO code changes to `trader_blofin.py` or `binance.py`. Maybe a spec doc. Code ships in Session E.
+- Optionally, the 4-path BloFin gate exercise if conviction permits (independent of Item 9 decisions).
+
+### If tonight's 2026-04-20 06:00 UTC session has conviction pass on BloFin
+
+The master BloFin trader at 06:00 UTC runs independently of Item 9. If conviction passes on its ACTIVE_FILTER row, the 4-path gate exercise becomes available for Session D. Check `daily_signals.conviction_passed` post-06:00 UTC.
 
 ---
 
@@ -133,7 +171,7 @@ Other Session D work that doesn't depend on conviction state:
 - ✅ Item 4 (audit refactor) — shipped `1199708`
 - ✅ Item 10 (per-allocation capital sizing) — shipped `5a7bdc7`
 - ✅ Item 6 (VOL boost publication) — shipped `f26d460`
-- Item 9 (Binance executor) — deferred to Session D, 4-path integration gate HARD prerequisite
+- Item 9 (Binance executor) — **investigation COMPLETE (Session C); 12-20h implementation + 6 architectural decisions unratified. Session D = ratification-only; code ships Session E or later.** 4-path BloFin integration gate remains HARD prerequisite and can be exercised independently whenever BloFin conviction passes.
 
 **Operationally gated:**
 - Retire `blofin_logger.py` cron after multi-tenant stable ≥ 7 days
