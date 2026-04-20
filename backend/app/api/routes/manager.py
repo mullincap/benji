@@ -955,6 +955,13 @@ def execution_summary(
                 ar.exit_reason       AS ar_exit_reason,
                 ar.effective_leverage,
                 ar.capital_deployed_usd,
+                ar.fill_rate         AS ar_fill_rate,
+                ar.avg_entry_slip_bps,
+                ar.avg_exit_slip_bps,
+                ar.retries_used,
+                ar.signal_count      AS ar_signal_count,
+                ar.conviction_roi_x,
+                ar.alerts_fired,
                 ps.symbols,
                 ps.entered,
                 ps.bars_count,
@@ -1015,26 +1022,38 @@ def execution_summary(
             sym_stops_arr = r["sym_stops"] or []
             symbols_arr = r["symbols"] or []
 
+            # signal_count: prefer the writer-persisted value (captures pre-
+            # filter survivors correctly); fall back to portfolio_sessions.symbols
+            # length for legacy rows written before the writer extension.
+            ar_sig = r["ar_signal_count"]
+            signal_count = (
+                int(ar_sig) if ar_sig is not None
+                else (len(symbols_arr) if symbols_arr else None)
+            )
+            # conviction_roi_x is now persisted; use it when available.
+            roi_x = _dec(r["conviction_roi_x"])
+            alerts_list = r["alerts_fired"] or []
+
             daily.append({
                 "date": r["session_date"].isoformat(),
                 "allocation_id": str(r["allocation_id"]),
                 "exchange": r["exchange"],
                 "strategy_label": r["strategy_display_name"] or r["strategy_name"],
                 "capital_usd": _dec(r["capital_usd"]),
-                # Derivable from portfolio_sessions
-                "signal_count": len(symbols_arr) if symbols_arr else None,
+                "signal_count": signal_count,
                 "conviction": {
                     "passed": conviction_passed,
-                    "return_pct": None,   # roi_x not persisted for allocations yet
+                    "return_pct": roi_x,
                 },
                 "filled": filled,
-                # Pending writer extension (Session E+)
-                "retried":          None,
-                "fill_rate":        None,
-                "entry_slip_bps":   None,
-                "exit_slip_bps":    None,
-                "alerts":           None,
-                # Sourced
+                # Persisted by the writer extension (commit adding fill_rate
+                # et al. to allocation_returns). Null for pre-writer rows.
+                "retried":          int(r["retries_used"]) if r["retries_used"] is not None else None,
+                "fill_rate":        _dec(r["ar_fill_rate"]),
+                "entry_slip_bps":   _dec(r["avg_entry_slip_bps"]),
+                "exit_slip_bps":    _dec(r["avg_exit_slip_bps"]),
+                "alerts":           len(alerts_list) if alerts_list else None,
+                # Sourced from portfolio_sessions / ar.*
                 "est_return_pct":             est_return_pct,
                 "actual_return_pct":          net_ret,
                 "pnl_gap_pct_from_gross":     pnl_gap_pct_from_gross,

@@ -2048,7 +2048,10 @@ def _run_monitoring_loop(today, today_date, api: ExchangeAdapter, inst_ids,
                          allocation_id: str | None = None,
                          config: "TraderConfig | None" = None,
                          session_id: str | None = None,
-                         capital_deployed_usd: float = 0.0):
+                         capital_deployed_usd: float = 0.0,
+                         fill_report: dict | None = None,
+                         conviction_roi_x: float | None = None,
+                         signal_count: int | None = None):
     """
     Intraday monitoring loop (bars 7-216).
 
@@ -2312,6 +2315,9 @@ def _run_monitoring_loop(today, today_date, api: ExchangeAdapter, inst_ids,
                         f"performance_daily: {e}"
                     )
             # Mirror of log_daily_return — applies same fee + funding drag internally.
+            # Pass execution-quality telemetry so the writer persists fill_rate,
+            # slip_bps, retries, signal_count, conviction roi_x. positions at this
+            # point have both entry_slippage_bps + exit_slippage_bps reconciled.
             _log_allocation_return(
                 allocation_id, today,
                 net_return_pct=net_pct,
@@ -2320,6 +2326,10 @@ def _run_monitoring_loop(today, today_date, api: ExchangeAdapter, inst_ids,
                 capital_deployed_usd=float(capital_deployed_usd),
                 config=cfg,
                 equity_usd=post_exit_equity_usd,
+                signal_count=signal_count,
+                conviction_roi_x=conviction_roi_x,
+                fill_report=fill_report,
+                positions=positions,
             )
     else:
         log.warning(f"{log_prefix}Return not logged (NaN -- price unavailable at close)")
@@ -2756,6 +2766,11 @@ def _log_allocation_return(
     equity_usd: float | None = None,      # post-session balance (None for pre-
                                           # trade terminal exits; used for the
                                           # performance_daily chart write)
+    signal_count: int | None = None,      # count of symbols after Decision-C1 pre-filter
+    conviction_roi_x: float | None = None, # roi_x value compared against kill_y at gate
+    fill_report: dict | None = None,      # from enter_positions; derives fill_rate + retries
+    positions: list[dict] | None = None,  # post-reconcile positions; derives avg slip bps
+    alerts_fired: list[str] | None = None, # list of alert strings fired during session (TBD)
 ) -> None:
     """Mirror of log_daily_return for user allocations — applies the same fee +
     funding drag internally so net P&L accounting stays identical across master
@@ -2784,6 +2799,34 @@ def _log_allocation_return(
         funding_drag = config.funding_rate_daily_pct * effective_leverage
         net_return_pct = net_return_pct - (fee_drag + funding_drag) * 100
 
+    # ── Derive execution-quality telemetry from in-memory session state ──
+    # None-safe: any missing source → None → NULL in DB. Pre-trade terminal
+    # exits pass fill_report=None and positions=None.
+    fill_rate: float | None = None
+    retries_used: int | None = None
+    if fill_report and isinstance(fill_report.get("fills"), dict):
+        fr = fill_report["fills"].get("fill_rate_pct")
+        fill_rate = float(fr) if fr is not None else None
+        # Count symbols that had at least one retry_round > 0 (matches
+        # master's filled_via_retry semantic). fill_report.fills.symbols[]
+        # is the per-symbol status list from enter_positions.
+        syms = fill_report["fills"].get("symbols") or []
+        retries_used = sum(
+            1 for s in syms if (s.get("retry_rounds") or 0) > 0
+        )
+
+    def _mean_slip(positions_list: list[dict] | None, key: str) -> float | None:
+        if not positions_list:
+            return None
+        vals = [
+            float(p[key]) for p in positions_list
+            if p.get(key) is not None
+        ]
+        return (sum(vals) / len(vals)) if vals else None
+
+    avg_entry_slip_bps = _mean_slip(positions, "entry_slippage_bps")
+    avg_exit_slip_bps  = _mean_slip(positions, "exit_slippage_bps")
+
     conn = _trader_db_connect()
     try:
         with conn.cursor() as cur:
@@ -2792,18 +2835,30 @@ def _log_allocation_return(
                 INSERT INTO user_mgmt.allocation_returns
                     (allocation_id, session_date, net_return_pct,
                      gross_return_pct, exit_reason, effective_leverage,
-                     capital_deployed_usd)
-                VALUES (%s::uuid, %s, %s, %s, %s, %s, %s)
+                     capital_deployed_usd,
+                     fill_rate, avg_entry_slip_bps, avg_exit_slip_bps,
+                     retries_used, signal_count, conviction_roi_x, alerts_fired)
+                VALUES (%s::uuid, %s, %s, %s, %s, %s, %s,
+                        %s, %s, %s, %s, %s, %s, %s)
                 ON CONFLICT (allocation_id, session_date) DO UPDATE SET
                     net_return_pct       = EXCLUDED.net_return_pct,
                     gross_return_pct     = EXCLUDED.gross_return_pct,
                     exit_reason          = EXCLUDED.exit_reason,
                     effective_leverage   = EXCLUDED.effective_leverage,
                     capital_deployed_usd = EXCLUDED.capital_deployed_usd,
+                    fill_rate            = COALESCE(EXCLUDED.fill_rate, allocation_returns.fill_rate),
+                    avg_entry_slip_bps   = COALESCE(EXCLUDED.avg_entry_slip_bps, allocation_returns.avg_entry_slip_bps),
+                    avg_exit_slip_bps    = COALESCE(EXCLUDED.avg_exit_slip_bps, allocation_returns.avg_exit_slip_bps),
+                    retries_used         = COALESCE(EXCLUDED.retries_used, allocation_returns.retries_used),
+                    signal_count         = COALESCE(EXCLUDED.signal_count, allocation_returns.signal_count),
+                    conviction_roi_x     = COALESCE(EXCLUDED.conviction_roi_x, allocation_returns.conviction_roi_x),
+                    alerts_fired         = COALESCE(EXCLUDED.alerts_fired, allocation_returns.alerts_fired),
                     logged_at            = NOW()
                 """,
                 (allocation_id, session_date, net_return_pct, gross_pct,
-                 exit_reason, effective_leverage, capital_deployed_usd),
+                 exit_reason, effective_leverage, capital_deployed_usd,
+                 fill_rate, avg_entry_slip_bps, avg_exit_slip_bps,
+                 retries_used, signal_count, conviction_roi_x, alerts_fired),
             )
         conn.commit()
     except Exception as e:
@@ -2929,6 +2984,7 @@ def _run_fresh_session_for_allocation(
             exit_reason="filtered",
             effective_leverage=0.0, capital_deployed_usd=0.0,
             config=config,
+            signal_count=0,
         )
         return
 
@@ -2965,6 +3021,7 @@ def _run_fresh_session_for_allocation(
             exit_reason="filtered",
             effective_leverage=0.0, capital_deployed_usd=0.0,
             config=config,
+            signal_count=0,
         )
         return
 
@@ -3008,6 +3065,7 @@ def _run_fresh_session_for_allocation(
             exit_reason="errored",
             effective_leverage=0.0, capital_deployed_usd=0.0,
             config=config,
+            signal_count=len(inst_ids),
         )
         return
 
@@ -3038,6 +3096,8 @@ def _run_fresh_session_for_allocation(
             exit_reason="missed_window",
             effective_leverage=0.0, capital_deployed_usd=0.0,
             config=config,
+            signal_count=len(inst_ids),
+            conviction_roi_x=float(roi_x),
         )
         return
 
@@ -3058,6 +3118,8 @@ def _run_fresh_session_for_allocation(
             exit_reason="no_entry_conviction",
             effective_leverage=0.0, capital_deployed_usd=0.0,
             config=config,
+            signal_count=len(inst_ids),
+            conviction_roi_x=float(roi_x),
         )
         return
 
@@ -3094,6 +3156,8 @@ def _run_fresh_session_for_allocation(
                 exit_reason="stale_close_failed",
                 effective_leverage=0.0, capital_deployed_usd=0.0,
                 config=config,
+                signal_count=len(inst_ids),
+                conviction_roi_x=float(roi_x),
             )
             return
         log.info(f"Allocation {allocation_id}: stale positions closed")
@@ -3168,6 +3232,9 @@ def _run_fresh_session_for_allocation(
             exit_reason="entry_failed",
             effective_leverage=float(eff_lev), capital_deployed_usd=0.0,
             config=config,
+            signal_count=len(inst_ids),
+            conviction_roi_x=float(roi_x),
+            fill_report=fill_report,
         )
         return
 
@@ -3217,6 +3284,12 @@ def _run_fresh_session_for_allocation(
         config=config,
         session_id=session_id,
         capital_deployed_usd=capital_deployed_usd,
+        # Execution-quality telemetry forwarded into _log_allocation_return
+        # at the post-close write site. None-safe for pre-trade exits (not
+        # reached here — those terminal paths return before this call).
+        fill_report=fill_report,
+        conviction_roi_x=float(roi_x),
+        signal_count=len(inst_ids),
     )
 
 
