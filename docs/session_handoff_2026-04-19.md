@@ -125,14 +125,17 @@ All Item 10 symbols import cleanly from the redeployed image; signature includes
 
 #### NOT validated by this session's harness — Item 9 pre-deploy gate
 
-Three integration paths untouched by the Path 1 harness:
-1. **`connection_id` threading** through `run_session_for_allocation` → `_run_fresh_session_for_allocation` → `_account_advisory_lock` (real-CLI call sequence, not harness-synthesized).
-2. **`TRADER_LOCK_TEST_SLEEP_S` activation** inside the live CLI flow (the env-var scaffolding lives inside Phase 5 after the lock is acquired; harness tests the lock directly, never reaching Phase 5 via CLI).
-3. **Phase 5 integration** with surrounding CLI phases — signal load, conviction check, credential load, monitoring loop handoff.
+> **Expanded 2026-04-20 (Session C, Item 6):** gate now covers FOUR integration paths, not three. Path 4 added below.
 
-These three gaps can only be closed when a real BloFin allocation activates with today's signals present AND conviction passing. Today's preflight showed `conviction_passed=false` on the last 3 days of `daily_signals`, so no real-signal exercise was available during this session.
+Four integration paths untouched by commit-time verification:
+1. **`connection_id` threading** through `run_session_for_allocation` → `_run_fresh_session_for_allocation` → `_account_advisory_lock` (real-CLI call sequence, not harness-synthesized). [Item 10]
+2. **`TRADER_LOCK_TEST_SLEEP_S` activation** inside the live CLI flow (the env-var scaffolding lives inside Phase 5 after the lock is acquired; harness tests the lock directly, never reaching Phase 5 via CLI). [Item 10]
+3. **Phase 5 integration** with surrounding CLI phases — signal load, conviction check, credential load, monitoring loop handoff. [Item 10]
+4. **Phase 4 `vol_boost` read + log format** — caller-side read of `strategy_version.current_metrics["vol_boost"]` threading through `_run_fresh_session_for_allocation`'s new `vol_boost: float` param, producing the `l_high × vol_boost = eff_lev` log line. Item 6 validated the refresh-side (vol_boost written to current_metrics for all three alpha strategies); the read-side was smoke-tested via signature introspection only, not exercised end-to-end because today's preflight had no active BloFin allocations and signals aren't written until 05:58 UTC. [Item 6]
 
-**Gate to enforce when Item 9 ships:** before any live BloFin allocation deploys under Item 9, exercise Item 10 end-to-end with real signals, specifically covering the three gaps above. Document results in that session's handoff. This is a HARD prerequisite, not a suggestion.
+These four gaps close only when a real BloFin allocation activates with today's signals present AND conviction passing. Today's preflight showed `conviction_passed=false` on the last 3 days of `daily_signals` (and no active BloFin allocations), so no real-signal exercise was available during Sessions B or C.
+
+**Gate to enforce when Item 9 ships:** before any live BloFin allocation deploys under Item 9, exercise Items 10 + 6 end-to-end with real signals, specifically covering the four gaps above. Document results in that session's handoff. This is a HARD prerequisite, not a suggestion.
 
 ---
 
@@ -216,9 +219,54 @@ Setup per scenario: insert allocation for scratch user w/ specific `capital_usd`
 
 Prerequisite: today's `user_mgmt.daily_signals` must have rows with `filter="Tail Guardrail"` matching alpha v1, else session exits at Phase 2. The master trader at 06:00 UTC writes these; scenarios work after that tick.
 
-### Item 6 — unchanged
+### Item 6 — SHIPPED 2026-04-20 (Session C)
 
-VOL boost publication, per original Session B plan. Decisions 6.1–6.4 remain locked.
+Status: **COMPLETE, verified across all three active alpha strategies.**
+
+Commit: `f26d460` (4 files: new `backend/app/services/audit/vol_boost.py`; modified `backend/app/cli/trader_blofin.py`, `backend/app/cli/refresh_strategy_metrics.py`, `backend/app/services/trading/trader_config.py`).
+
+**Decisions (ratified at Session C investigation):**
+- 6.1 revised: (b) **new `compute_strategy_vol_boost(rets)` sibling** in a new service module `app/services/audit/vol_boost.py`, not same-file as legacy `compute_vol_boost`. Math identical; constants duplicated for independence; legacy CSV-reader untouched (dies with CAPITAL_MODE cleanup).
+- 6.3 revised: **JSONB**, not dedicated column. `current_metrics["vol_boost"]` is a first-class key; `metrics_updated_at` doubles as companion timestamp. No migration required.
+- 6.new: **Accept NULL-after-promote lag.** Phase 4 defaults to `boost=1.0` on NULL (matches host "returns log missing → 1.0" fallback); clears on next 01:30 UTC tick. Explicit code comment documents this.
+- 6.new-2: **Picked-filter returns.** Use `fees_tables_by_filter[strategy.filter_mode]` (not best_filter's table) to compute vol_boost, so the boost matches the simulated returns the metrics record publishes.
+
+**Components:**
+- `compute_strategy_vol_boost(rets: list[float]) -> float`: service fn with host-parity constants; 4-stage clip; trailing-window vol/sharpe, full-history DD.
+- `refresh_strategy_metrics.refresh_one`: extracts picked-filter's `fees_table`, converts `ret_net` (pct) to decimals, computes boost, merges into `current_metrics["vol_boost"]` before UPDATE. Logs `vol_boost={x} (from N daily returns)`.
+- `_fetch_strategy_version`: SELECT extended to include `current_metrics`.
+- `run_session_for_allocation`: reads `current_metrics.get("vol_boost") or 1.0`, threads as new `vol_boost: float` param to `_run_fresh_session_for_allocation`.
+- `_run_fresh_session_for_allocation` Phase 4: `eff_lev = round(l_high * vol_boost, 4)`; logs `l_high × vol_boost = eff_lev`.
+- `TraderConfig.vol_boost_enabled` field deleted (was dead — factory hardcoded False).
+
+**Verification (pre-push, via docker cp + docker exec against running celery container):**
+
+| Strategy | l_high | vol_boost | eff_lev |
+|---|---|---|---|
+| Med lev (strategy_id=2, 6b6168b0) | 1.5 | 1.4768 | 2.2152 |
+| Low lev (strategy_id=3, 3100d339) | 1.0 | 1.4768 | 1.4768 |
+| High lev (strategy_id=4, 987312fd) | 2.0 | 1.4767 | 2.9534 |
+
+All three refreshed clean: 431 daily returns sampled, sharpe=3.5064 unchanged, data_through=2026-04-19 unchanged, metrics_updated_at bumped. Post-deploy smoke (fresh image) imports cleanly from both celery and backend containers.
+
+#### Saturation observation — worth preserving
+
+Today's three-strategy vol_boost (1.4767–1.4768) is **leverage-invariant** — effectively identical across Low/Med/High lev despite their different l_high values. This is NOT a bug:
+
+- **vc stage** (`target_vol / realized_vol`) saturates at `MAX_BOOST=2.0` because trailing 30d realized_vol is small (many flat/no-entry days → ret_net=0 dominates the window). vc saturation is leverage-invariant: even at 2× higher leverage, realized_vol doesn't recover enough to un-saturate vc.
+- **sc stage** (`sharpe_ref / rolling_sharpe`) is mathematically leverage-invariant — mean_ret and realized_vol both scale with leverage, so rolling_sharpe cancels out.
+- **dg stage** is structurally 1.0 (VOL_LEV_DD_SCALE inactive).
+- Net: boost ≈ 2.0 × (3.3 / rolling_sharpe) ≈ 1.477, same math for all three.
+
+**Under today's low-vol conditions, eff_lev differentiation lives entirely in `l_high`; vol_boost is a common multiplier.** If future market conditions push realized_vol above ~0.01 (target_vol/2), vc will un-saturate and the three strategies will show different vol_boost values. Preserve this finding so future readers don't flag near-identical boost values as a bug.
+
+**Not validated — folds into Item 9's pre-deploy gate as Path 4 (see section above).**
+
+### Item 6 — original decisions (historical; shipped this session)
+
+> Preserved for reference. Decisions 6.1 and 6.3 were revised at Session C investigation; see the SHIPPED section above.
+
+Original Session B plan:
 - 6.1 VOL formula: port `compute_vol_boost` verbatim from trader-blofin.py, change data source to strategy-level simulated returns.
 - 6.2 VOL cadence: nightly at 01:30, same job as metrics refresh.
 - 6.3 VOL storage: column on `strategy_versions` + companion timestamp.
@@ -268,6 +316,8 @@ Commits on `main`:
 - `a2fc343` — deferred_work.md: CAPITAL_MODE/CAPITAL_VALUE cleanup entry + strategy taxonomy entry
 - `95f4a2c` — Allocator strategy display_name rename feature (backend endpoint + frontend modal)
 - `5a7bdc7` — **Item 10: per-allocation capital sizing** (`backend/app/cli/trader_blofin.py`)
+- `4b80b7f` — deferred_work.md: strategy_id=1/v1.0 refresh exclusion note (Session C housekeeping)
+- `f26d460` — **Item 6: strategy-level vol_boost publication + per-allocation read** (new `vol_boost.py` service module + 3 modified files)
 
 Baselines preserved locally at `/tmp/benji_baselines/`:
 - `path_a_audit_output.txt`, `path_a_reparsed.json` (Path A, 30 keys)

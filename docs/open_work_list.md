@@ -5,13 +5,14 @@
 - ✅ Item 5: Audit convention sweep (scope: `IDENTITY_FIELDS`) — SHIPPED in `9b14233` (docs-only, zero convention mismatches)
 - ✅ Item 4: `audit.py` refactor to `run_audit(params) → dict` — SHIPPED in `1199708`
 - ✅ Item 10: Per-allocation capital sizing — SHIPPED in `5a7bdc7`
-- Item 6: VOL boost publication
+- ✅ Item 6: VOL boost publication — SHIPPED in `f26d460`
 - Item 9: Binance margin executor
-  - **HARD PREREQUISITE before any live BloFin allocation deploys under Item 9:** exercise Item 10 end-to-end with real signals. The harness that validated Item 10 at commit time (test_1 lock mutex, test_2 lock blocking, test_3 context manager, test_4 sizing) did NOT cover three integration gaps:
-    - `connection_id` threading through `run_session_for_allocation` → `_run_fresh_session_for_allocation` → `_account_advisory_lock`
-    - `TRADER_LOCK_TEST_SLEEP_S` env-var scaffolding activation inside the live CLI flow
-    - Phase 5's integration with the surrounding CLI phases (signal load, conviction check, credential load, monitoring loop handoff)
-  - These gaps only resolve when a real BloFin allocation activates with signals present AND conviction passing. Item 9 is the session where that window opens. Before Item 9's live-money deploy, reproduce this harness-plus-end-to-end check; document results in that session's handoff.
+  - **HARD PREREQUISITE before any live BloFin allocation deploys under Item 9:** exercise Items 10 + 6 end-to-end with real signals. The harness that validated Item 10 at commit time + the refresh-side verification that validated Item 6 did NOT cover FOUR integration gaps:
+    - `connection_id` threading through `run_session_for_allocation` → `_run_fresh_session_for_allocation` → `_account_advisory_lock` (Item 10)
+    - `TRADER_LOCK_TEST_SLEEP_S` env-var scaffolding activation inside the live CLI flow (Item 10)
+    - Phase 5's integration with the surrounding CLI phases: signal load, conviction check, credential load, monitoring loop handoff (Item 10)
+    - Phase 4's `vol_boost` read + `l_high × vol_boost = eff_lev` log format: the caller-side read of `strategy_version.current_metrics["vol_boost"]` threading through `_run_fresh_session_for_allocation`'s new `vol_boost: float` param (Item 6)
+  - These gaps only resolve when a real BloFin allocation activates with signals present AND conviction passing. Item 9 is the session where that window opens. Before Item 9's live-money deploy, reproduce the harness-plus-end-to-end check covering all four paths; document results in that session's handoff.
 
 ## Operationally gated
 
