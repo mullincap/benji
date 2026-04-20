@@ -1,4 +1,8 @@
-# Session Handoff — 2026-04-19 (end of Track 3 Session A)
+# Session Handoff — 2026-04-19 (end of Track 3 Session A + Item 10)
+
+## Session update
+
+Session extended past original Session A scope. Items 5, 4, AND 10 shipped. Item 10's investigation and implementation were completed in the same session after Session B decisions were pre-committed. Remaining Track 3 work: Item 6 (VOL boost), Item 9 (Binance margin executor, with Item 10 end-to-end gate as hard prerequisite).
 
 ## Tomorrow's first action
 
@@ -58,18 +62,92 @@ Accepted behavior differences (called out at draft time, approved):
 - `stage="overlap" progress=90` + `stage="parsing" progress=95` bumps removed; parse is sub-second so UX flashes were invisible anyway.
 - `_is_cancelled` check between parse and `results={}` dropped — cancellation during sub-second parse window now completes as normal.
 
+### Item 10 — Per-allocation capital sizing
+
+Status: **COMPLETE at the code level, partially validated (see gaps below). Hard integration gate to clear before Item 9 activates live BloFin deploys.**
+
+Commit: `5a7bdc7` (single file: `backend/app/cli/trader_blofin.py`, +123 / -10 LOC).
+
+Components added:
+- `_account_lock_key(connection_id) -> int`: SHA-256 of UUID → signed int64 for `pg_advisory_lock` keys.
+- `_account_advisory_lock(connection_id)`: session-level lock context manager. Acquired via `pg_advisory_lock`, released via `pg_advisory_unlock`, auto-released on subprocess death via DB session drop.
+- `_compute_allocation_capital(allocation_id, requested, balance) -> tuple[float, str | None]`: pure helper returning `(usdt_for_allocation, warning_msg_or_None)`. Caller owns `log.warning()` — helper returns the message string for unit testability.
+- `_run_fresh_session_for_allocation`: new `connection_id: str` parameter; Phase 5 rewritten to wrap balance-read + sizing + enter_positions inside the advisory lock; sizing routed through `_compute_allocation_capital`.
+- `TRADER_LOCK_TEST_SLEEP_S` env-var scaffolding: dry-run-only, holds the lock for a specified duration after balance read. For operator concurrency tests. **Do NOT `export` in shell** — prefix only to the leading process; subprocesses must not inherit.
+- `run_session_for_allocation` call site passes `connection_id=str(alloc["connection_id"])` through.
+
+Decisions (Session B pre-commits, ratified this session):
+- **10.1 (α)**: `allocations.capital_usd` stays NOT NULL at schema; no NULL fallback branch in code.
+- **10.2**: if `capital_usd > available_balance`, size down to available balance + emit WARN, continue (not abort).
+- **10.3 (b)**: PostgreSQL advisory lock on `connection_id` serializes critical section. Earlier allocation (spawn_traders' `created_at ASC`) acquires first; later allocation blocks until release, then reads post-deploy balance and sizes down as needed.
+- **10.4**: `capital_usd` mutable — fresh read each session via existing `_fetch_allocation` call in `run_session_for_allocation`.
+
+Legacy untouched:
+- Master `run_session()` legacy path in the containerized copy.
+- Module constants `CAPITAL_MODE="pct_balance"` / `CAPITAL_VALUE=1.0` (now dead in per-allocation path; cleanup filed in `deferred_work.md`).
+- Host master `/root/benji/trader-blofin.py` (guardrail honored).
+
+#### Verification — Path 1 harness (pre-commit, on deployed image equivalent)
+
+Harness at `/tmp/item10_verify.py` (not committed; ephemeral). SHA-256 bit-identity verified between local working copy and container-staged copy before harness run (local = `d0aaf495640bf9f7fc3031b8e8199857d688017b034808dedf3a2975e3a45e3e` = container).
+
+Verbatim harness output:
+
+```
+[2026-04-20 03:04:34,562] INFO [1] B denied while A holds lock (expected).
+[2026-04-20 03:04:34,564] INFO [1] B acquired after A released (expected). PASS.
+[2026-04-20 03:04:36,584] INFO [2] A held lock 2.002s; B waited 1.817s; B acquired 0.3ms after A released.
+[2026-04-20 03:04:36,584] INFO [2] Blocking acquire works; first-come-wins verified. PASS.
+[2026-04-20 03:04:36,624] INFO [3] Inside context: external try_advisory_lock denied (expected).
+[2026-04-20 03:04:36,646] INFO [3] After context exit: lock released (expected). PASS.
+[2026-04-20 03:04:36,646] INFO [4.1] $1 < $3951 -> usdt=$1, no warn. PASS.
+[2026-04-20 03:04:36,646] INFO [4.3] $5000 > $3951 -> usdt=$3951, warn emitted. PASS.
+[2026-04-20 03:04:36,646] INFO [4.edge] $3951 == $3951 -> usdt=$3951, no warn. PASS.
+[2026-04-20 03:04:36,646] INFO ====== ALL PASSED ======
+```
+
+Test coverage map:
+- `test_1_lock_mutex` — `pg_try_advisory_lock` denies while A holds lock; succeeds after A releases. ✅
+- `test_2_lock_blocking` — A holds 2.0s; B's blocking acquire waited 1.817s, acquired 0.3ms after release. First-come-wins + prompt wake verified. ✅
+- `test_3_context_manager` — `_account_advisory_lock` round-trip: inside-context external try denied; post-exit external try succeeds. ✅
+- `test_4_sizing` — real `_compute_allocation_capital` against three cases: under (no warn), over (warn emitted with correct text), equal (no warn, takes `requested` branch). ✅
+
+#### Post-deploy smoke (on rebuilt image)
+
+```
+imports: OK
+_run_fresh_session_for_allocation params: ['allocation_id', 'config', 'api', 'connection_id', 'dry_run']
+sizing smoke: usdt=3.0 warn-starts='Allocation post-deploy-smoke: requested '
+lock key stable: -4881515115874462459
+```
+
+All Item 10 symbols import cleanly from the redeployed image; signature includes the new `connection_id` parameter in the expected position; sizing helper produces expected `(usdt, warning)` tuple; lock-key helper deterministic on deployed code.
+
+#### NOT validated by this session's harness — Item 9 pre-deploy gate
+
+Three integration paths untouched by the Path 1 harness:
+1. **`connection_id` threading** through `run_session_for_allocation` → `_run_fresh_session_for_allocation` → `_account_advisory_lock` (real-CLI call sequence, not harness-synthesized).
+2. **`TRADER_LOCK_TEST_SLEEP_S` activation** inside the live CLI flow (the env-var scaffolding lives inside Phase 5 after the lock is acquired; harness tests the lock directly, never reaching Phase 5 via CLI).
+3. **Phase 5 integration** with surrounding CLI phases — signal load, conviction check, credential load, monitoring loop handoff.
+
+These three gaps can only be closed when a real BloFin allocation activates with today's signals present AND conviction passing. Today's preflight showed `conviction_passed=false` on the last 3 days of `daily_signals`, so no real-signal exercise was available during this session.
+
+**Gate to enforce when Item 9 ships:** before any live BloFin allocation deploys under Item 9, exercise Item 10 end-to-end with real signals, specifically covering the three gaps above. Document results in that session's handoff. This is a HARD prerequisite, not a suggestion.
+
 ---
 
 ## Track 3 Session B — scope + pre-committed decisions
 
-### Session B items
+### Session B items (remaining)
 
-- **Item 10** — Per-allocation capital sizing (deferred from Session A after investigation surfaced decision-drift flags).
+- ~~**Item 10**~~ — SHIPPED this session (`5a7bdc7`). See "Item 10 — Per-allocation capital sizing" section above for full validation status + Item 9 pre-deploy gate.
 - **Item 6** — VOL boost publication (original Session B item, unchanged).
 
-Investigation on Item 10 is complete. Start Session B with the decisions below already committed; no re-investigation needed.
+Item 10's historical investigation notes + decisions are preserved below for reference; they're no longer action items.
 
-### Item 10 — decisions pre-committed for Session B
+### Item 10 — decisions pre-committed (historical; shipped this session)
+
+> Preserved for reference. Decisions were ratified and implemented in commit `5a7bdc7`.
 
 **Decision 10.1 revision**: schema **Option α** locked.
 - `user_mgmt.allocations.capital_usd numeric(18,2) NOT NULL` stays as-is.
@@ -80,7 +158,7 @@ Investigation on Item 10 is complete. Start Session B with the decisions below a
 - Reject (a) "accept the race" on live-money grounds.
 - Reject (c) "serial spawn" — throws away parallelism unnecessarily.
 
-**Scenario teardown protocol**: dedicated scratch user with a known `user_id`. Allocations inserted for scenario testing, soft-closed via `status='closed'` afterward. No DELETE — preserves no-data-deletion guardrail, re-runnable.
+**Scenario teardown protocol** (originally planned; superseded by Path 1 harness): dedicated scratch user with a known `user_id`. Allocations inserted for scenario testing, soft-closed via `status='closed'` afterward. No DELETE — preserves no-data-deletion guardrail, re-runnable. Not executed because preflight surfaced two blockers: (a) today's `daily_signals` not yet written (master signal runs at 05:58 UTC), (b) last 3 days' `conviction_passed=false` on Tail Guardrail filter. Path 1 harness (DB-level lock primitives + real sizing helper) substituted; integration gaps deferred to Item 9's pre-deploy gate.
 
 ### Item 10 — known code sites (from Session A investigation)
 
@@ -148,13 +226,17 @@ VOL boost publication, per original Session B plan. Decisions 6.1–6.4 remain l
 
 ---
 
-## Production state at end of Session A
+## Production state at end of session
 
-- Active published strategy versions: `alpha_tail_guardrail_low_risk v1` (strategy_version_id `6b6168b0-b6df-4cd4-8621-c29a9beb1dc4`).
-- Active allocations: 0.
-- Connection state (unchanged): j@mullincap.com BloFin CONNECTED (~$4,274); Binance CONNECTED (~$19).
-- Deploy state: commit `1199708` on `main`, deployed via `./redeploy.sh` at ~23:51 UTC 2026-04-19.
+- Active published strategy versions: 3 alpha variants (all renamed to the "lev" axis mid-session):
+  - `alpha_tail_guardrail_low_risk` slug / display "Alpha Tail Guardrail - Med lev" (strategy_id=2, strategy_version_id `6b6168b0-b6df-4cd4-8621-c29a9beb1dc4`)
+  - `alpha_tail_guardrail_low_lev` slug / display "Alpha Tail Guardrail - Low lev" (strategy_id=3)
+  - `alpha_tail_guardrail_high_lev` slug / display "Alpha Tail Guardrail - High lev" (strategy_id=4)
+- Active allocations: 1. allocation_id `686077fc-82a4-45e4-872f-47f7ad328780`, capital_usd=$20, exchange=**binance**, user=j@mullincap.com. Dormant under current code (no Binance executor; spawn_traders `SUPPORTED_EXCHANGES={"blofin"}`). Item 9's eventual activation triggers the Item 10 pre-deploy gate above.
+- Connection balances (as of ~02:25 UTC): BloFin $3,951.03 available; Binance $19.29 available.
+- Deploy state: commit `5a7bdc7` on `main`, deployed via `./redeploy.sh` at ~03:10 UTC 2026-04-20.
 - Services: backend/celery/redis/frontend/nginx all healthy post-redeploy.
+- 01:30 UTC nightly cron on 2026-04-20 cleared GREEN (3/3 ok, 0 fail) — independent production validation of Item 4 on the deployed code.
 
 ## Cron state (unchanged from 2026-04-18)
 
@@ -182,6 +264,10 @@ VOL boost publication, per original Session B plan. Decisions 6.1–6.4 remain l
 Commits on `main`:
 - `9b14233` — Item 5 docs (`docs/deferred_work.md`)
 - `1199708` — Item 4 refactor (5 files: metrics_parser, pipeline_runner, pipeline_worker, refresh_strategy_metrics, jobs)
+- `fe53619` — Session A handoff (this file, initial)
+- `a2fc343` — deferred_work.md: CAPITAL_MODE/CAPITAL_VALUE cleanup entry + strategy taxonomy entry
+- `95f4a2c` — Allocator strategy display_name rename feature (backend endpoint + frontend modal)
+- `5a7bdc7` — **Item 10: per-allocation capital sizing** (`backend/app/cli/trader_blofin.py`)
 
 Baselines preserved locally at `/tmp/benji_baselines/`:
 - `path_a_audit_output.txt`, `path_a_reparsed.json` (Path A, 30 keys)
