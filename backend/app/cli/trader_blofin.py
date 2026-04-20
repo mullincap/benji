@@ -40,6 +40,8 @@ Cron (invoked by run_daily.sh at 05:58 UTC after daily_signal.py):
 """
 
 import os, sys, json, math, time, logging, datetime, argparse, csv, requests
+import hashlib
+from contextlib import contextmanager
 from urllib.parse import urlencode
 import numpy as np
 import pandas as pd
@@ -2616,6 +2618,82 @@ def _release_allocation_lock(allocation_id: str) -> None:
         conn.close()
 
 
+def _account_lock_key(connection_id: str) -> int:
+    """Stable bigint key from a connection UUID for pg_advisory_lock.
+
+    PostgreSQL advisory locks take int8 (bigint) keys. Hash the UUID string
+    with SHA-256 and take the first 8 bytes as a signed integer (matches
+    int8 range). Deterministic: same UUID -> same key across processes.
+    """
+    h = hashlib.sha256(str(connection_id).encode()).digest()
+    return int.from_bytes(h[:8], byteorder="big", signed=True)
+
+
+@contextmanager
+def _account_advisory_lock(connection_id: str):
+    """Session-level advisory lock keyed on exchange connection UUID.
+
+    Serializes the balance-read + enter-positions critical section across
+    concurrent per-allocation subprocesses that share the same exchange
+    account. Enforces first-come-wins at execution time: spawn_traders
+    orders subprocess spawn by created_at ASC; whichever reaches this lock
+    first wins it, and later subprocesses block until the earlier one
+    releases (i.e. finishes entering positions).
+
+    Lock is session-scoped, not transaction-scoped, so it persists across
+    the commit implicit in pg_advisory_lock. Released on context exit via
+    pg_advisory_unlock. If the subprocess dies mid-lock (SIGKILL/OOM), the
+    DB session drops and the lock auto-releases — no stuck-lock scenario.
+    """
+    key = _account_lock_key(connection_id)
+    conn = _trader_db_connect()
+    acquired = False
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT pg_advisory_lock(%s)", (key,))
+        conn.commit()
+        acquired = True
+        yield
+    finally:
+        if acquired:
+            try:
+                with conn.cursor() as cur:
+                    cur.execute("SELECT pg_advisory_unlock(%s)", (key,))
+                conn.commit()
+            except Exception as e:
+                log.warning(f"  advisory_unlock failed for {connection_id}: {e}")
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
+def _compute_allocation_capital(
+    allocation_id: str, requested: float, balance: float,
+) -> tuple[float, str | None]:
+    """Size per-allocation capital against available account balance.
+
+    Returns (usdt_for_allocation, warning_message_or_None). Caller owns
+    logging — helper returns the warning string so tests can assert
+    on it directly without installing a logging capture.
+
+    Decision 10.1 (Session B pre-commit): capital_usd is NOT NULL at schema
+    level; `requested` is always a real number, no NULL fallback needed.
+    Decision 10.2: if requested > balance, size down to balance with
+    warning and continue (not abort).
+    """
+    if requested > balance:
+        msg = (
+            f"Allocation {allocation_id}: requested capital "
+            f"${requested:,.2f} exceeds available balance "
+            f"${balance:,.2f} — sizing down to ${balance:,.2f}. "
+            "Likely cause: another allocation has already deployed capital "
+            "against this account."
+        )
+        return balance, msg
+    return requested, None
+
+
 def _fetch_allocation(allocation_id: str) -> dict:
     """Load allocation row as a dict. Raises ValueError if not found."""
     conn = _trader_db_connect()
@@ -2803,6 +2881,7 @@ def _run_fresh_session_for_allocation(
     allocation_id: str,
     config: TraderConfig,
     api: BlofinREST,
+    connection_id: str,
     dry_run: bool = False,
 ) -> None:
     """Entry + monitoring-loop-handoff for one user allocation.
@@ -2973,19 +3052,49 @@ def _run_fresh_session_for_allocation(
     eff_lev = float(config.l_high)
     lev_int = max(1, int(math.ceil(eff_lev)))
 
-    # ── Phase 5: balance + enter positions ────────────────────────────────
-    balance = get_account_balance_usdt(api)
-    log.info(f"Allocation {allocation_id}: USDT available=${balance:,.2f}")
-
-    # Master's enter_positions applies the 90% buffer internally
-    # (MARGIN_BUFFER = 0.10) and refuses to trade if balance < $10.
+    # ── Phase 5: balance + enter positions (advisory-lock serialized) ────
+    # Lock prevents two allocations on the same exchange account from
+    # racing the balance read -> over-committing capital. See
+    # _account_advisory_lock for lifecycle details.
     entry_prices = bar6_prices
     entry_1x = roi_x
     peak = 0.0
 
-    positions, fill_report = enter_positions(
-        api, inst_ids, entry_prices, eff_lev, balance, dry_run
-    )
+    with _account_advisory_lock(connection_id):
+        account_balance = get_account_balance_usdt(api)
+        log.info(
+            f"Allocation {allocation_id}: USDT available=${account_balance:,.2f}"
+        )
+
+        # Test scaffolding — exercise the lock under concurrency in dry-run.
+        # Set TRADER_LOCK_TEST_SLEEP_S to a positive float to hold the lock
+        # for that many seconds after the balance read. No-op when unset or
+        # when not in dry-run. Intended for operator scenarios only.
+        _test_sleep = os.environ.get("TRADER_LOCK_TEST_SLEEP_S")
+        if dry_run and _test_sleep:
+            try:
+                _t = float(_test_sleep)
+                if _t > 0:
+                    log.info(f"  [dry-run lock-test] sleeping {_t}s while holding lock")
+                    time.sleep(_t)
+            except ValueError:
+                pass
+
+        # Per-allocation sizing. _compute_allocation_capital encapsulates the
+        # size-down-with-warning conditional so the unit is testable without
+        # a logging capture. Caller owns the log.warning() call.
+        requested = float(config.capital_value)
+        usdt_for_allocation, warn_msg = _compute_allocation_capital(
+            allocation_id, requested, account_balance,
+        )
+        if warn_msg:
+            log.warning(warn_msg)
+
+        # enter_positions's existing 10% MARGIN_BUFFER is applied inside,
+        # on top of usdt_for_allocation. No other sizing logic here.
+        positions, fill_report = enter_positions(
+            api, inst_ids, entry_prices, eff_lev, usdt_for_allocation, dry_run,
+        )
 
     if not positions:
         log.error(f"Allocation {allocation_id}: enter_positions returned no fills")
@@ -3261,7 +3370,11 @@ def run_session_for_allocation(allocation_id: str, dry_run: bool = False) -> Non
             return
 
         # 7. Fresh session — entry + monitoring + close.
-        _run_fresh_session_for_allocation(allocation_id, config, api, dry_run=dry_run)
+        _run_fresh_session_for_allocation(
+            allocation_id, config, api,
+            connection_id=str(alloc["connection_id"]),
+            dry_run=dry_run,
+        )
 
     finally:
         _release_allocation_lock(allocation_id)
