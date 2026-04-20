@@ -89,6 +89,18 @@ Pick one axis — risk-level, leverage, or a compound key — and migrate all th
 
 ---
 
+## ~~active_filter string-namespace inconsistency~~ — RESOLVED 2026-04-20
+
+**Resolved in commit `f9491a1` (Session C).** Adopted Option B from the durable-fix list below: read-site normalization at the `TraderConfig.from_strategy_version` factory boundary, matching the port_tsl pattern. New `_canonicalize_filter_name()` helper strips a strict `^[A-Z] - ` prefix so live-trading callers always see the canonical identifier, regardless of whether Simulator promote persisted the UI label form ("A - Tail Guardrail") or the canonical form ("Tail Guardrail") or left the key absent. Simulator write site unchanged — continues storing label form intentionally for UI semantics; comment at [simulator.py:254](../backend/app/api/routes/simulator.py#L254) expanded to document the normalize-downstream contract.
+
+Verified against the two broken prod rows (Low lev, High lev) and strategy 2 (key absent, regression check): all three resolve to `'Tail Guardrail'` post-fix. No migration / hash churn required.
+
+Scoped to live-trading paths only. Nightly refresh + Item 6 vol_boost use `audit.strategies.filter_mode` directly via SQL and are unaffected.
+
+Original investigation preserved below for reference.
+
+---
+
 ## active_filter string-namespace inconsistency (pre-Item 4 scope check)
 
 **Discovered:** 2026-04-19 during Item 5 IDENTITY_FIELDS convention sweep.

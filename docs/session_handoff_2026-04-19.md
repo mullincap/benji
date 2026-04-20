@@ -272,6 +272,37 @@ Original Session B plan:
 - 6.3 VOL storage: column on `strategy_versions` + companion timestamp.
 - 6.4 VOL read timing: session entry, fixed for session.
 
+### active_filter normalization — SHIPPED 2026-04-20 (Session C)
+
+Status: **COMPLETE, verified against two broken prod rows + factory-default regression check.**
+
+Commit: `f9491a1` (2 files: `backend/app/services/trading/trader_config.py`, `backend/app/api/routes/simulator.py`).
+
+**Bug closed:** Simulator promote persisted UI label form `"A - Tail Guardrail"` into `strategy_version.config.active_filter`, while the live trader compared against `live_deploys_signal.csv / daily_signals.filter_name` canonical form `"Tail Guardrail"`. Case-insensitive equality didn't bridge the gap — any allocation against a strategy with the label-form persisted would have silently traded zero symbols. 2 of 3 published strategies (Low lev + High lev) had the broken form stored; only strategy 2 (Med lev) worked, by accident, because its config.active_filter key was absent and the factory default happened to be the canonical form.
+
+**Decisions ratified at Session C investigation:**
+- **A (normalization location):** (B) read-site at `TraderConfig.from_strategy_version` factory boundary. Matches the `port_tsl_pct` normalize-at-boundary pattern. Simulator write site continues to store label form intentionally for UI semantics.
+- **B (canonical form):** identifier form `"Tail Guardrail"` (matches CSV / daily_signals). Label form is UI-surface only.
+- **C (migration):** none required. Read-side normalization handles existing rows transparently; no schema / config_hash churn.
+
+**Components:**
+- `_canonicalize_filter_name(raw: str) -> str` in `trader_config.py`: strips strict `^[A-Z] - ` prefix via `_FILTER_LABEL_PREFIX_RE`. Docstring notes future-label revisit if single-letter convention ever changes.
+- `TraderConfig.from_strategy_version` factory: extracts `active_filter_raw` from the JSONB, normalizes, logs INFO when normalization changes anything (parallel to `port_tsl`'s sign-flip log).
+- `simulator.py:254` — unchanged behavior; comment expanded to document normalize-downstream contract.
+
+**Verification (pre-push, in celery container):**
+- 3-case smoke harness via stubbed `strategy_version.config`:
+  - Label `"A - Tail Guardrail"` → `'Tail Guardrail'` + INFO normalization log ✅
+  - Canonical `"Tail Guardrail"` → `'Tail Guardrail'` no log ✅
+  - Key absent → `'Tail Guardrail'` factory-default WARN ✅
+- Live DB verification — 2 broken prod rows resolve to canonical via `TraderConfig.from_strategy_version`:
+  - `alpha_tail_guardrail_low_lev`: stored `'A - Tail Guardrail'` → resolves `'Tail Guardrail'` ✅
+  - `alpha_tail_guardrail_high_lev`: stored `'A - Tail Guardrail'` → resolves `'Tail Guardrail'` ✅
+- Regression check: `alpha_tail_guardrail_low_risk` (key absent) still resolves to `'Tail Guardrail'` via factory default ✅
+- Post-deploy: `_assert_master_matches_live()` clean in both backend and celery; `simulator` module imports clean.
+
+**Scope:** scoped to live-trading paths only. Nightly refresh + Item 6 vol_boost both use `audit.strategies.filter_mode` directly via SQL, never reading `config.active_filter` — unaffected.
+
 ---
 
 ## Production state at end of session
@@ -318,6 +349,8 @@ Commits on `main`:
 - `5a7bdc7` — **Item 10: per-allocation capital sizing** (`backend/app/cli/trader_blofin.py`)
 - `4b80b7f` — deferred_work.md: strategy_id=1/v1.0 refresh exclusion note (Session C housekeeping)
 - `f26d460` — **Item 6: strategy-level vol_boost publication + per-allocation read** (new `vol_boost.py` service module + 3 modified files)
+- `78869f5` — docs(handoff): mark Item 6 shipped + expand Item 9 gate to 4 paths
+- `f9491a1` — **active_filter normalization: TraderConfig factory-boundary canonicalization** (closes latent silent-zero-trade bug on Low lev / High lev)
 
 Baselines preserved locally at `/tmp/benji_baselines/`:
 - `path_a_audit_output.txt`, `path_a_reparsed.json` (Path A, 30 keys)
