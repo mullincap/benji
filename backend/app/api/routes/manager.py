@@ -381,24 +381,38 @@ def _fetch_portfolio_context(cur) -> dict[str, Any]:
         })
 
     # ── Intraday equity curve (today, 15-min intervals) ────────────────
+    # DISTINCT ON (allocation_id, bucket) + ORDER BY snapshot_at DESC →
+    # take the LATEST snapshot per allocation within each 15-min bucket.
+    # Then SUM across allocations in Python. This replaces a previous AVG()
+    # that incorrectly collapsed multi-allocation equity into a mean
+    # (e.g., BloFin $3,950 + Binance $19 → $1,985 instead of $3,969).
+    #
+    # DISTINCT ON vs MAX: end-of-bucket semantic (what a user expects from
+    # an intraday chart) rather than high-water-mark bias inside the bucket.
     cur.execute("""
-        SELECT
+        SELECT DISTINCT ON (a.allocation_id, bucket)
             date_trunc('hour', es.snapshot_at) +
               INTERVAL '15 min' * FLOOR(EXTRACT(MINUTE FROM es.snapshot_at) / 15)
               AS bucket,
-            AVG(es.total_equity_usd) AS equity_usd
+            a.allocation_id,
+            es.total_equity_usd AS equity_usd
         FROM user_mgmt.exchange_snapshots es
         JOIN user_mgmt.allocations a ON a.connection_id = es.connection_id
         WHERE a.allocation_id = ANY(%s::uuid[])
           AND es.fetch_ok = TRUE
           AND es.snapshot_at >= CURRENT_DATE
-        GROUP BY bucket
-        ORDER BY bucket
+        ORDER BY a.allocation_id, bucket, es.snapshot_at DESC
     """, (all_alloc_ids,))
-    intraday_rows = cur.fetchall()
+
+    from collections import defaultdict
+    bucketed: dict = defaultdict(float)
+    for r in cur.fetchall():
+        if r["equity_usd"] is None:
+            continue
+        bucketed[r["bucket"]] += float(r["equity_usd"])
     intraday_equity = [
-        {"time": r["bucket"].isoformat(), "equity_usd": float(r["equity_usd"])}
-        for r in intraday_rows if r["equity_usd"] is not None
+        {"time": b.isoformat(), "equity_usd": v}
+        for b, v in sorted(bucketed.items())
     ]
 
     # USD P&L is the actual dollar profit over the window. Given the period
