@@ -78,6 +78,29 @@ Retire the host cron `0 6 * * *` at `/root/benji/trader-blofin.py` (master BloFi
 
 - BASE_DATA_DIR drift between backend and celery services (see `docs/deferred_work.md`)
 
+## Multi-tenant assumption audit — 2026-04-20
+
+Swept `backend/app/api/routes/` + `backend/app/cli/` + `backend/app/services/`
+for patterns that silently assume a single allocation:
+
+- `fetchone()` / `.first()` / `LIMIT 1`: 50+ hits, all classified (a) —
+  legitimately single-row. Auth lookups, specific-ID PK fetches, scalar
+  counts, LATERAL latest-snapshot patterns. Zero bugs.
+- `AVG()` in SQL: 4 hits in `indexer.py` (strategy-level backtest aggregations
+  across symbols — correct semantic) + 1 comment reference in `manager.py`.
+  Zero new bugs.
+- `WHERE status = 'active'` queries: all aggregate-aware (no `LIMIT 1` applied
+  to multi-row result sets). Correct.
+
+**Previously-known multi-allocation latent bugs** (all fixed today):
+- manager intraday AVG-not-SUM → commit `578072c`
+- portfolios fetchone() collapse → commit `d6acfae`
+
+Audit conclusion: no further code changes needed for multi-allocation
+correctness in the API layer. Future additions should default to
+allocation-id projection in SELECT + optional filter param, following the
+pattern established in execution-summary (`fd9fad3`) and portfolios (`d6acfae`).
+
 ## Future (larger scope, not scheduled)
 
 - Generic strategy executor dispatch (today's `trader-blofin.py` hardcodes Overlap logic)
