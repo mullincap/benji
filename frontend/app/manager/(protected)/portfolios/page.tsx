@@ -13,6 +13,7 @@
 
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
+import { AllocationFilter } from "../_components/AllocationFilter";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE || "";
 const FONT_MONO = "var(--font-space-mono), Space Mono, monospace";
@@ -49,48 +50,12 @@ interface PortfoliosResponse {
   portfolios: PortfolioSummary[];
 }
 
-// ─── Allocation filter (single-select for v1) ──────────────────────────────
-// TODO(session-e+): lift to shared component if Overview adopts the same
-// pattern. See the same TODO in execution/page.tsx.
-//
-// NOTE: no "Include master history" toggle here — master portfolio history
-// lives in NDJSON files not surfaced by this endpoint. See Session F+ queue
-// in docs/open_work_list.md for the NDJSON-overlay follow-up that parallels
-// Execution tab's toggle.
-
-function AllocationFilter({
-  value,
-  onChange,
-  options,
-}: {
-  value: "all" | string;
-  onChange: (next: "all" | string) => void;
-  options: AvailableAlloc[];
-}) {
-  return (
-    <select
-      value={value}
-      onChange={(e) => onChange(e.target.value as "all" | string)}
-      style={{
-        background: "var(--bg2)",
-        border: "1px solid var(--line)",
-        borderRadius: 4,
-        color: "var(--t1)",
-        fontFamily: FONT_MONO,
-        fontSize: 10,
-        padding: "5px 10px",
-        cursor: "pointer",
-      }}
-    >
-      <option value="all">All allocations</option>
-      {options.map((a) => (
-        <option key={a.allocation_id} value={a.allocation_id}>
-          {a.exchange} · {a.strategy_label}
-        </option>
-      ))}
-    </select>
-  );
-}
+// AllocationFilter previously defined inline here; lifted to
+// ../_components/AllocationFilter.tsx. Portfolios doesn't pass
+// includeMaster/onIncludeMasterChange — master portfolio history lives in
+// NDJSON files not surfaced by this endpoint (see Session F+ queue in
+// docs/open_work_list.md). The shared component renders the toggle only
+// when those props are provided.
 
 const thStyle: React.CSSProperties = {
   fontSize: 9,
@@ -255,7 +220,7 @@ export default function PortfoliosListPage() {
         {/* Allocation filter (tab-local state per commit fd9fad3 pattern) */}
         <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
           <AllocationFilter
-            value={allocFilter}
+            selected={allocFilter}
             onChange={setAllocFilter}
             options={response.available_allocations}
           />

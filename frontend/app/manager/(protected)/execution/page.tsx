@@ -14,6 +14,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import SessionLogs from "./SessionLogs";
+import { AllocationFilter } from "../_components/AllocationFilter";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE || "";
 
@@ -460,104 +461,8 @@ function convictionBadge(
   );
 }
 
-// ─── Allocation filter (single-select for v1) ──────────────────────────────
-// TODO: lift to page-level or URL query param if Overview / Portfolios adopt
-// the same control. Multi-select is a follow-up if users ask.
-
-function AllocationFilter({
-  value,
-  onChange,
-  options,
-}: {
-  value: "all" | string;
-  onChange: (next: "all" | string) => void;
-  options: AvailableAlloc[];
-}) {
-  return (
-    <select
-      value={value}
-      onChange={(e) => onChange(e.target.value as "all" | string)}
-      style={{
-        background: "var(--bg2)",
-        border: "1px solid var(--line)",
-        borderRadius: 4,
-        color: "var(--t1)",
-        fontFamily: FONT_MONO,
-        fontSize: 10,
-        padding: "5px 10px",
-        cursor: "pointer",
-      }}
-    >
-      <option value="all">All allocations</option>
-      {options.map((a) => (
-        <option key={a.allocation_id} value={a.allocation_id}>
-          {a.exchange} · {a.strategy_label}
-        </option>
-      ))}
-    </select>
-  );
-}
-
-// ─── Master-history toggle (temporary) ─────────────────────────────────────
-// REMOVE after master cron retirement per docs/open_work_list.md Phase 2 gate
-// (earliest 2026-04-28).
-
-function IncludeMasterToggle({
-  on,
-  onChange,
-}: {
-  on: boolean;
-  onChange: (next: boolean) => void;
-}) {
-  return (
-    <button
-      type="button"
-      onClick={() => onChange(!on)}
-      style={{
-        display: "inline-flex",
-        alignItems: "center",
-        gap: 8,
-        background: "transparent",
-        border: "1px solid var(--line)",
-        borderRadius: 4,
-        padding: "4px 10px",
-        fontFamily: FONT_MONO,
-        fontSize: 9,
-        fontWeight: 700,
-        letterSpacing: "0.12em",
-        textTransform: "uppercase",
-        color: on ? "var(--t0)" : "var(--t2)",
-        cursor: "pointer",
-      }}
-    >
-      <span
-        style={{
-          width: 22,
-          height: 12,
-          borderRadius: 6,
-          background: on ? "var(--green)" : "var(--bg4)",
-          position: "relative",
-          display: "inline-block",
-          transition: "background 0.15s ease",
-        }}
-      >
-        <span
-          style={{
-            width: 8,
-            height: 8,
-            borderRadius: "50%",
-            background: on ? "var(--bg0)" : "var(--t2)",
-            position: "absolute",
-            top: 2,
-            left: on ? 12 : 2,
-            transition: "left 0.15s ease",
-          }}
-        />
-      </span>
-      Include master history
-    </button>
-  );
-}
+// AllocationFilter + IncludeMasterToggle previously defined inline here;
+// lifted to ../_components/AllocationFilter.tsx in a parallel refactor.
 
 // ─── Empty-state banner ────────────────────────────────────────────────────
 
@@ -735,14 +640,13 @@ export default function ExecutionPage() {
       }}
     >
       {/* Row 0: filter + master toggle (controls row) */}
-      <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-        <AllocationFilter
-          value={allocFilter}
-          onChange={setAllocFilter}
-          options={summary.available_allocations}
-        />
-        <IncludeMasterToggle on={includeMaster} onChange={setIncludeMaster} />
-      </div>
+      <AllocationFilter
+        selected={allocFilter}
+        onChange={setAllocFilter}
+        options={summary.available_allocations}
+        includeMaster={includeMaster}
+        onIncludeMasterChange={setIncludeMaster}
+      />
 
       {/* Row 0b: banner (Condition A / B / none) */}
       {bannerText && <TabBanner text={bannerText} />}
