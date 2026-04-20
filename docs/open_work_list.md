@@ -36,7 +36,38 @@
 - Retire `blofin_logger.py` cron after multi-tenant executor stable ≥ 7 days (starts counting from `spawn_traders` first cron tick)
 - Resolve plaintext BloFin row under `admin@mullincap.com` (Option A delete, after Binance executor confirms live)
 
-### Master-cron removal — PHASE 2 operational task
+### Master-cron removal — **COMPLETED 2026-04-20** (early, collision-driven)
+
+> **COMPLETED 2026-04-20** — master cron retired early due to same-account
+> collision risk with user BloFin allocation (`f87fe130-a90c-4e60-908a-14f4065b415c`).
+> Both used the same API key (`116a…3734`, len 32) against the same BloFin
+> sub-account; at tomorrow's 06:05 UTC spawn, running both would cause
+> order/margin collisions in a single wallet.
+>
+> **Retirement actions taken 2026-04-20 ~18:17 UTC**:
+> - Crontab lines for `trader-blofin.py` (06:00 UTC) and `blofin_logger.py`
+>   (*/5) commented with `# DISABLED 2026-04-20` prefix
+> - Host files archived to `/root/benji-archive-20260420/`:
+>   - `trader-blofin.py`
+>   - `blofin_executor.log`
+>   - `blofin_executor_state.json`
+>   - `blofin_returns_log.csv`
+>   - `blofin_execution_reports/` directory
+> - Originals at `/root/benji/trader-blofin.py` etc. left in place as
+>   second rollback layer
+> - Crontab backup at `/root/crontab_backup_20260420_181714.bak`
+>
+> **7-day stability gate is N/A** for master retirement — retirement was
+> collision-driven, not gate-driven. The separate 7-day gate for
+> `trader_blofin_fallback.py` deletion (code rollback safety net, commit
+> `592206a`) is UNCHANGED and remains in effect until 2026-04-28.
+>
+> **Rollback procedure if needed**: `ssh mcap 'crontab /root/crontab_backup_20260420_181714.bak'` and master resumes its 06:00 UTC cron the following day.
+>
+> The historical Phase-2 gate plan below is preserved for reference but no
+> longer active.
+
+### Master-cron removal — PHASE 2 operational task (superseded by completion above)
 
 Retire the host cron `0 6 * * *` at `/root/benji/trader-blofin.py` (master BloFin account, ~$3,951) only after the multi-tenant path has proven out. **Earliest possible retirement date: 2026-04-28** (assuming first activation 2026-04-21 fires clean and every day after).
 
