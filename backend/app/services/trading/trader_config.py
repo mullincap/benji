@@ -59,11 +59,6 @@ class TraderConfig:
     # ── Price source ───────────────────────────────────────────────────────
     price_source: str = "blofin"        # 'blofin' | 'binance'
 
-    # ── VOL boost (deferred) ───────────────────────────────────────────────
-    # User allocations always run at l_high (no boost). Master account
-    # keeps its blofin_returns_log.csv-driven boost via the legacy script.
-    vol_boost_enabled: bool = False
-
     # ─────────────────────────────────────────────────────────────────────────
     # Factories
     # ─────────────────────────────────────────────────────────────────────────
@@ -148,7 +143,6 @@ class TraderConfig:
             )),
             capital_mode="fixed_usd",
             capital_value=capital_usd,
-            vol_boost_enabled=False,
             # All other fields intentionally use master defaults — they're
             # exchange mechanics and session timing, not strategy parameters.
         )

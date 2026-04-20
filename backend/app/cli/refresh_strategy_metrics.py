@@ -30,6 +30,7 @@ from typing import Any
 from app.db import get_worker_conn
 from app.services.audit.current_metrics import build_current_metrics
 from app.services.audit.pipeline_runner import run_audit
+from app.services.audit.vol_boost import compute_strategy_vol_boost
 # Reuse the existing worker's job-row upsert — don't duplicate logic.
 from app.workers.pipeline_worker import _persist_audit_job_row_at_cursor
 # _build_result_row + column maps live in the promote route.
@@ -143,10 +144,33 @@ def refresh_one(sv: dict[str, Any], *, dry_run: bool = False) -> dict[str, Any]:
     # and the denormalized current_metrics JSONB. audit.jobs/results stay
     # append-only; current_metrics is a read-cache for the allocator card.
     params_for_audit = dict(sv["config"] or {})
-    fees_table = metrics.get("fees_table") or []
+
+    # Prefer the picked-filter's fees_table (= strategy.filter_mode) so
+    # vol_boost is computed from the same simulated returns we publish
+    # metrics for. Falls back to metrics["fees_table"] (best_filter's) if
+    # absent — a no-op for current production where best_filter ==
+    # filter_mode for all three alpha strategies.
+    fees_tables_by_filter = metrics.get("fees_tables_by_filter") or {}
+    fees_table = fees_tables_by_filter.get(picked_filter_name) or (
+        metrics.get("fees_table") or []
+    )
     data_through = None
     if fees_table and fees_table[-1].get("date"):
         data_through = fees_table[-1]["date"]
+
+    # ret_net is in percent (e.g. 25.11 = 25.11%); the sibling expects
+    # decimals. Flat-day handling is documented in the function's
+    # docstring — flats ARE included as 0.0.
+    daily_rets = [
+        float(f["ret_net"]) / 100.0
+        for f in fees_table
+        if f.get("ret_net") is not None
+    ]
+    vol_boost = compute_strategy_vol_boost(daily_rets)
+    log.info(
+        f"  [{short_id}] vol_boost={vol_boost:.4f} "
+        f"(from {len(daily_rets)} daily returns)"
+    )
 
     conn = get_worker_conn()
     try:
@@ -176,6 +200,7 @@ def refresh_one(sv: dict[str, Any], *, dry_run: bool = False) -> dict[str, Any]:
             result_id = str(cur.fetchone()[0])
 
             current_metrics = build_current_metrics(result_row)
+            current_metrics["vol_boost"] = round(vol_boost, 4)
             cur.execute(
                 """
                 UPDATE audit.strategy_versions

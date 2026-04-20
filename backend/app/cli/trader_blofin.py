@@ -2719,13 +2719,14 @@ def _fetch_allocation(allocation_id: str) -> dict:
 
 
 def _fetch_strategy_version(strategy_version_id: str) -> dict:
-    """Load strategy_version row (for config JSONB + identity)."""
+    """Load strategy_version row (config JSONB + identity + live vol_boost)."""
     conn = _trader_db_connect()
     try:
         with conn.cursor() as cur:
             cur.execute(
                 """
-                SELECT strategy_version_id, version_label, config, is_active
+                SELECT strategy_version_id, version_label, config, is_active,
+                       current_metrics
                 FROM audit.strategy_versions
                 WHERE strategy_version_id = %s::uuid
                 """,
@@ -2736,7 +2737,8 @@ def _fetch_strategy_version(strategy_version_id: str) -> dict:
         conn.close()
     if row is None:
         raise ValueError(f"No strategy_version: {strategy_version_id}")
-    cols = ["strategy_version_id", "version_label", "config", "is_active"]
+    cols = ["strategy_version_id", "version_label", "config", "is_active",
+            "current_metrics"]
     return dict(zip(cols, row))
 
 
@@ -2882,6 +2884,7 @@ def _run_fresh_session_for_allocation(
     config: TraderConfig,
     api: BlofinREST,
     connection_id: str,
+    vol_boost: float,
     dry_run: bool = False,
 ) -> None:
     """Entry + monitoring-loop-handoff for one user allocation.
@@ -3047,10 +3050,18 @@ def _run_fresh_session_for_allocation(
             return
         log.info(f"Allocation {allocation_id}: stale positions closed")
 
-    # ── Phase 4: compute leverage (no VOL boost this release) ────────────
-    # Open work list: VOL boost from strategy_version.vol_boost_config.
-    eff_lev = float(config.l_high)
+    # ── Phase 4: compute leverage (vol_boost from nightly refresh) ───────
+    # vol_boost is read once at session entry by the caller and passed in
+    # as a fixed-for-session value. Caller defaults to 1.0 when
+    # strategy_version.current_metrics.vol_boost is NULL, matching the host
+    # trader fallback when blofin_returns_log.csv is missing. NULL state
+    # clears on the next 01:30 UTC nightly tick.
+    eff_lev = round(float(config.l_high) * vol_boost, 4)
     lev_int = max(1, int(math.ceil(eff_lev)))
+    log.info(
+        f"Allocation {allocation_id}: l_high={config.l_high} × "
+        f"vol_boost={vol_boost:.4f} = eff_lev={eff_lev:.4f}x"
+    )
 
     # ── Phase 5: balance + enter positions (advisory-lock serialized) ────
     # Lock prevents two allocations on the same exchange account from
@@ -3370,9 +3381,15 @@ def run_session_for_allocation(allocation_id: str, dry_run: bool = False) -> Non
             return
 
         # 7. Fresh session — entry + monitoring + close.
+        # vol_boost read once here, fixed for session (decision 6.4).
+        # NULL → 1.0: matches host's "returns log missing → boost=1.0"
+        # fallback; clears on next 01:30 UTC nightly refresh tick.
+        cm = strategy_version.get("current_metrics") or {}
+        vol_boost = float(cm.get("vol_boost") or 1.0)
         _run_fresh_session_for_allocation(
             allocation_id, config, api,
             connection_id=str(alloc["connection_id"]),
+            vol_boost=vol_boost,
             dry_run=dry_run,
         )
 
