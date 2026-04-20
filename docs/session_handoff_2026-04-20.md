@@ -233,3 +233,113 @@ The master BloFin trader at 06:00 UTC runs independently of Item 9. If convictio
 - `d75b6a7` — handoff update: active_filter resolution + deferred_work cross-reference
 
 Five commits on `main`. All pushed to origin; code commits deployed via redeploy; docs commits in working copy only (mcap behind by one docs commit at `f9491a1` — cosmetic).
+
+---
+
+# SESSION D — Binance Margin Executor Shipped
+
+Session D executed on the same date (2026-04-20) after the Session C close-out above. The defer-to-Session-E recommendation from Session C's Item 9 investigation was **overridden by the user** with explicit acknowledgment of scope (12–20h estimated) and risk (6 unratified architectural decisions, state-coupling past the $20 cap, no prior Binance trade-endpoint code). The user opted to ship implementation in a single session.
+
+## Goal → outcome
+
+- **Goal**: ship a Binance executor using **cross margin** (not futures, explicitly chosen), activate live at the 06:05 UTC spawn window, unblock the dormant `$20` Binance allocation (`686077fc-…`).
+- **Outcome**: code shipped as commit `592206a` on `main`, deployed to mcap at approximately 07:53 UTC 2026-04-20. Both BloFin + Binance subprocesses will spawn at **2026-04-21 06:05 UTC** (today's 06:05 UTC window fired during the deploy itself with the old filter, as designed).
+
+## Six decisions ratified
+
+| # | Topic | Choice |
+|---|---|---|
+| 0 | Margin mode | **Cross margin** (isolated explicitly rejected — simpler on a $20 account, 3x BTCUSDT tier) |
+| A | Adapter pattern | **`ExchangeAdapter` ABC with concrete adapters** (`BloFinAdapter`, `BinanceMarginAdapter`); single dispatch point at `trader_blofin.py:3312` |
+| B | Entry mechanic | **B3**: `MARGIN_BUY` (auto-borrow USDT) primary → on `-3006` (USDT borrow limit), fallback to `create_margin_loan(asset="USDT", amount=shortfall×1.005)` + `NO_SIDE_EFFECT BUY` |
+| C | Symbol universe | **C1**: strict pre-filter at session start against `client.get_margin_all_pairs()` (30-min TTL cache); size across survivors; terminal `phase=filtered` if zero remain |
+| D | Leverage semantics | **D3**: `set_leverage` becomes a no-op verification — calls `get_max_margin_loan(asset="USDT")`, returns `success=True iff requested ≤ (collateral + max_borrow_usdt) / collateral`. Error code `INSUFFICIENT_BORROW_LIMIT` if not achievable. |
+| #2 | Post-borrow failure | **(ii)**: immediate `repay_margin_loan(asset="USDT")` on order failure after loan succeeded. Keeps interest exposure at zero on failed entries. |
+
+## Four mid-session corrections
+
+Applied after first-draft review flagged gaps:
+
+1. **Sync confirmed**: 56 functions in `trader_blofin.py`, zero `async def` / `await` / `asyncio` / `AsyncClient`. Sync ABC + python-binance sync `Client` locked in.
+2. **`get_recent_fills` signature**: gained `since_ms: int | None = None` and `inst_ids: list[str] | None = None`. Without explicit `inst_ids`, just-closed positions vanish from reconciliation — caller-responsibility documented in the Binance adapter's docstring.
+3. **`FillInfo` shape**: added `order_id: str` and `size: float`. Exit reconciliation without `order_id` is ambiguous when multiple reduce orders are in flight or a partial fill splits into records.
+4. **`native_sl_supported` as class attribute** (not `@property`): checkable without instantiation, zero method-call overhead in the hot path at [trader_blofin.py:1199](backend/app/cli/trader_blofin.py#L1199). BloFin=`True`, Binance=`False`. Binance adapter's `place_entry_order` also runtime-asserts (raises `NotImplementedError`) if a non-`None` `sl_trigger_price` arrives — belt + suspenders.
+
+## Code shipped
+
+Commit `592206a`, 7 files, +5041 / −273:
+
+| File | Status | Purpose |
+|---|---|---|
+| `backend/app/services/exchanges/adapter.py` | NEW | `ExchangeAdapter` ABC + 5 frozen dataclasses (`BalanceInfo`, `InstrumentInfo`, `PositionInfo`, `OrderResult`, `FillInfo`) + `adapter_for(creds)` lazy-import dispatch |
+| `backend/app/services/exchanges/blofin_adapter.py` | NEW | Thin 1:1 wrapper over unchanged `BlofinREST`; field-fallback chains copied verbatim from existing call sites with `file:line` attribution |
+| `backend/app/services/exchanges/binance_margin_adapter.py` | NEW | `python-binance` cross-margin client: MARGIN_BUY primary, `-3006` USDT-borrow fallback, AUTO_REPAY exits, `quoteOrderQty` dust cleanup, 30-min TTL cache of margin-pair universe |
+| `backend/app/cli/trader_blofin.py` | MODIFIED | 526 lines churned. `build_api()` returns `BloFinAdapter`; 4 helpers thinned to adapter delegation; 5 `get_actual_positions` callers adapted to `list[PositionInfo]`; `_place_order_chunked` reads `OrderResult.error_code` (102015 retry stays in trader, not adapter); `reconcile_fill_prices` + `reconcile_exit_prices` consume dataclasses; `close_all_positions` primary + reduce-only fallback; Decision C1 pre-filter inserted; SL gate requires `EXCHANGE_SL_ENABLED AND api.native_sl_supported`; dispatch at `:3312`; `run_session` deprecation warning |
+| `backend/app/cli/spawn_traders.py` | MODIFIED | `SUPPORTED_EXCHANGES = {"blofin", "binance"}` |
+| `backend/requirements.txt` | MODIFIED | `+python-binance==1.0.36` + 12 pinned transitives (aiohttp, dateparser, pycryptodome, yarl, etc.) |
+| `backend/app/cli/trader_blofin_fallback.py` | NEW | Verbatim snapshot of pre-refactor HEAD (3479 lines); NOT imported; rollback safety net retirement-gated per `open_work_list.md` |
+
+**Zero strategy/orchestration logic changed.** Sizing math, chunking, retries, stale-sweep, conviction, `vol_boost`, `port_sl` / `port_tsl`, advisory locks, `runtime_state` writes — all preserved in-place. Only field-fallback chains and exchange-specific wire calls moved into adapters.
+
+## Audit results summary
+
+**Pre-deploy validation** (all green):
+- Celery `inspect active`: 1 node online, queue empty — safe to `--force-recreate`.
+- Pre-deploy trader subprocess check (host + container): zero processes — no orphan sessions.
+- Container rebuild: all 5 containers recreated + healthy.
+- `pip install` inside container: `python-binance==1.0.36` + 12 transitives installed at exact expected pins; no conflicts.
+- Post-deploy import smoke in backend container: all 3 adapter modules load; class attributes reflect design (`BloFinAdapter.native_sl_supported=True`, `BinanceMarginAdapter.native_sl_supported=False`); `spawn_traders.SUPPORTED_EXCHANGES={'binance', 'blofin'}`.
+
+**SL-path audit** (client-side SL for Binance):
+- `_run_monitoring_loop` at `trader_blofin.py:2042` already takes `api: ExchangeAdapter`.
+- SL trigger sites at `:2150` (per-symbol), `:2221` (portfolio hard stop), `:2231` (trailing stop).
+- Zero direct `api.*` calls inside the monitoring loop; all API access routes through already-audited helpers (`get_mark_prices`, `close_all_positions`, `reconcile_exit_prices`, `get_account_balance_usdt`) — each has `api: ExchangeAdapter` signature.
+- All adapter-method calls inside the monitoring path are on the ABC surface (`get_price`, `get_positions`, `close_position`, `place_reduce_order`, `get_recent_fills`, `get_balance`). Zero `BlofinREST`-only method leaks.
+- Return-shape handling uses `@dataclass(frozen=True)` attributes everywhere — no residual `resp["data"]` / `resp.get("code")` on adapter returns.
+
+**None-safety audit** (concern: `PositionInfo.average_price` can be `None` from Binance fill-indexing lag):
+- SL computation uses `entry_prices` dict (kline-history-anchored `dict[str, float]`), **not** `p.average_price` from the adapter. `p.average_price` only feeds `reconcile_fill_prices`, which writes exit-slippage telemetry and has its own None guards at every division site.
+- All three SL arithmetic sites have explicit falsy / positive-number guards before division. Reviewed at `:2147-2149` (per-symbol: `if not ref or not price: continue`) and `:2177-2178` (portfolio: `iid in current and entry_prices.get(iid, 0) > 0`).
+- Binance fill-indexing lag is a **diagnostic quality** concern (slippage telemetry blank for affected symbols) — not an SL enforcement concern.
+- **Verdict: SL path is None-safe across all three trigger sites.** Activation is go.
+
+## Activation plan — 2026-04-21 06:05 UTC
+
+Tomorrow's first real activation. Expected flow:
+
+1. `spawn_traders.py` (05 6 * * *) queries `user_mgmt.allocations` for active rows on supported exchanges.
+2. Binance `$20` allocation (`686077fc-…`, `status=active`) spawns as subprocess `trader_blofin --allocation-id 686077fc-…`.
+3. If a BloFin allocation also exists under j@mullincap.com's BloFin connection (user plan: create one via allocator UI), spawns in parallel.
+4. Both subprocesses run for up to ~17 hours; parallel-safe via separate credentials, advisory locks, log files, runtime_state rows.
+5. Master BloFin cron (`0 6 * * *`, host) continues running on the separate master account — unchanged.
+
+What to watch on the Binance subprocess's log (`/mnt/quant-data/logs/trader/allocation_686077fc-…_2026-04-21.log`):
+- Pre-filter drop count: `"Allocation {id}: N/M symbols unsupported on binance, dropped: [...]"`.
+- Conviction check and `eff_lev` derivation (Phase 4 `vol_boost` read + `l_high × vol_boost = eff_lev` log format).
+- `set_leverage` verification outcome per symbol: success or `INSUFFICIENT_BORROW_LIMIT`.
+- `MARGIN_BUY` outcomes: success (common) or `-3006` → manual-borrow fallback path.
+- Entry fill reconciliation may show null `fill_entry_price` on Binance due to `get_margin_trades` indexing lag — expected, not a bug.
+
+## Known non-blocking follow-ups
+
+Carried forward to the Session E (or later) open-work-list:
+
+1. **Binance margin PnL display blank**: `exchange_snapshots.positions.mark_price = 0.0` for Binance margin positions → allocator card's PnL% will be blank until `_fetch_live_binance` is enhanced to pull live marks for margin positions. Trading works; display doesn't.
+2. **Symbol coverage gap on Binance margin**: Tail Guardrail's filter may return long-tail alts that are BloFin perps but not `isMarginTradingAllowed=true` on Binance spot. Observable post-activation via pre-filter drop-count log lines.
+3. **Borrow interest accrual accounting**: ~0.14% per 14h session on cross-margin borrowed USDT. Will manifest as PnL divergence vs. BloFin on identical signals. Needs explicit accounting in return-reporting if allocations scale up.
+4. **Fallback retirement**: `backend/app/cli/trader_blofin_fallback.py` stays in-tree ≥ 7 days of successful multi-tenant operation, then cleanup. Retirement gate shared with `blofin_logger.py` + master cron in `open_work_list.md`.
+5. **Doc rot**: stale comment at `trader_blofin.py:2317` (`"Then reconcile against BloFin fill history."` — reconcile is now exchange-agnostic). `get_mark_prices` docstring at `:784-801` describes a BloFin-or-Binance-Futures world but PRICE_SOURCE="blofin" now silently means "adapter-native price" which is exchange-dependent. Update after first activation confirms behavior.
+6. **Master-cron retirement (Phase 2 operational task)**: gated on 7 consecutive days of multi-tenant stability per `docs/open_work_list.md`. Earliest possible date: 2026-04-28.
+
+## Session D commits
+
+- `592206a` — **feat(trader): Binance cross-margin executor via ExchangeAdapter** — the refactor itself. Deployed via `./redeploy.sh` on mcap at ~07:53 UTC 2026-04-20.
+- (This close-out commit) — `docs(session-d): close-out — operational gate, fallback header, session summary`.
+
+## Production state at Session D close
+
+- **Commit on `main`**: `592206a` (deployed) + docs close-out commit (no deploy needed).
+- **Containers**: all 5 healthy post-redeploy.
+- **Active allocations**: 1 (`$20` Binance, dormant until 2026-04-21 06:05 UTC when the new gate allows spawn). User plan: add BloFin allocation before tomorrow's window.
+- **Connection balances** at audit time: BloFin master `$3,951.03`, Binance user `$19.29`.
+- **Next critical timestamp**: 2026-04-21 06:05 UTC — first activation window for the new code.

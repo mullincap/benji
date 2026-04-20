@@ -1,6 +1,22 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
+FROZEN SNAPSHOT of trader_blofin.py at commit 3129d71 (pre-Session-D refactor).
+
+This file is NOT imported by any runtime path. It exists as a rollback
+safety net while the multi-tenant + Binance margin refactor (commit 592206a)
+is operationally validated.
+
+Retirement gate: 7 consecutive days of clean multi-tenant operation per
+docs/open_work_list.md "Operationally gated" section. Earliest possible
+deletion: 2026-04-28.
+
+DO NOT EDIT. DO NOT IMPORT. DELETE after gate passes.
+"""
+
+# Original pre-refactor module docstring preserved below for historical
+# reference. The fallback header above is the authoritative module docstring.
+"""
 backend/app/cli/trader_blofin.py
 ================================
 Containerized copy of /root/benji/trader-blofin.py. Part 1 of the multi-tenant

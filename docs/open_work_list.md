@@ -36,6 +36,38 @@
 - Retire `blofin_logger.py` cron after multi-tenant executor stable ≥ 7 days (starts counting from `spawn_traders` first cron tick)
 - Resolve plaintext BloFin row under `admin@mullincap.com` (Option A delete, after Binance executor confirms live)
 
+### Master-cron removal — PHASE 2 operational task
+
+Retire the host cron `0 6 * * *` at `/root/benji/trader-blofin.py` (master BloFin account, ~$3,951) only after the multi-tenant path has proven out. **Earliest possible retirement date: 2026-04-28** (assuming first activation 2026-04-21 fires clean and every day after).
+
+**Gate: 7 consecutive days of multi-tenant operation with ALL of the following**
+
+- Both allocations spawn at 06:05 UTC (no missing subprocesses vs. eligible-allocations query)
+- Zero crashes in `_run_fresh_session_for_allocation` across either exchange
+- `runtime_state.phase` transitions complete cleanly (`active → monitoring → closed/errored`) on every session — no stuck-active overnight, no missing phase field
+- Entry + exit reconciliation populates `fill_entry_price` / `fill_exit_price` on the BloFin allocation (can be blank on Binance due to `get_margin_trades` indexing lag — known follow-up)
+- No advisory-lock timeout or collision events in `allocation_*.log` files (`_account_advisory_lock` sits on the connection_id keyspace; contention would show as wait-time or timeout)
+- `port_sl` / `port_tsl` trigger correctly if any session hits a threshold (harder to verify: absence of error, not presence of event — document intent to verify on any day either threshold actually fires)
+
+**Counter reset condition**: any crash, missed spawn, unrecovered error state, or unexplained phase stall resets the 7-day counter to zero. Counter restarts only after the underlying cause is identified + fixed.
+
+**Decision fork at gate-pass**
+
+- **A) Consolidate** — transfer $3,951 master BloFin → j@mullincap.com's BloFin connection → allocate fully via UI → retire `/root/benji/trader-blofin.py` cron + `blofin_logger.py` cron. All capital flows under the multi-tenant model. Clean mental model going forward.
+- **B) Keep master running** — preserve master's `execution_report` telemetry stream OR preserve the account-separation (master vs. user) for any compliance/operational reason. Document the rationale in that session's handoff.
+
+**Pre-retirement checklist (when executing fork A)**
+
+1. Decide: transfer master $3,951 to user's BloFin connection, OR leave the account dormant (no strategy running, balance preserved).
+2. Back up `/root/benji/*.state` files + last 30 days of `/mnt/quant-data/logs/trader/cron.log` for audit continuity.
+3. Confirm allocation-path telemetry (`portfolio_sessions` + `allocation_returns` + `runtime_state`) covers what master's `execution_report` does — spot-check one master run vs one allocation run side-by-side.
+4. Remove two cron lines via `crontab -e`:
+    - `0 6 * * * ... /root/benji/trader-blofin.py ...` (master trader)
+    - `*/5 * * * * ... /root/benji/pipeline/allocator/blofin_logger.py ...` (legacy logger — retirement-gated on the same 7-day criterion)
+5. Verify host has no leftover references in other scripts (grep `trader-blofin.py` across `/root/benji/`) before finalizing.
+6. **Verify `_LIVE_BASELINE` still matches master's constants.** `backend/app/services/trading/trader_config.py:195-234` inlines master's module constants (lines 55-159 of `/root/benji/trader-blofin.py`) as a value-copy reference for the `master_defaults()` self-check. If master's constants have changed between Session D (2026-04-20) and retirement day, `_LIVE_BASELINE` drifts silently and the self-check passes against stale values. Cheap insurance: diff `_LIVE_BASELINE` against the current host file right before cron removal; reconcile any drift into `trader_config.py` as a separate commit, or update the source-of-truth reference to `TraderConfig.master_defaults()` directly.
+7. **Decide fate of `/root/benji/live_deploys_signal.csv` write path.** `daily_signal.py` writes this file into `/root/benji/` (host), and the containerized trader reads it via a mounted path. If Fork A and you delete `/root/benji/trader-blofin.py` + master artifacts, the signal file must continue existing at this path or the container loses its signal source. Two paths: (a) keep `/root/benji/` as a signal-only directory (delete master trader + artifacts but retain the dir + `daily_signal.py` + `live_deploys_signal.csv`), or (b) relocate `daily_signal.py` output to `/mnt/quant-data/signals/` (or similar) and update the container mount + reader. Option (a) is minimal-change; (b) is cleaner long-term. Decide at retirement day; document the choice in that session's handoff.
+
 ## Small polish (any time)
 
 - Frontend "Last refreshed N ago" label on Allocator cards (Track 1 exposes `metrics_updated_at` in API)
