@@ -1,0 +1,419 @@
+"""
+backend/app/services/exchanges/blofin_adapter.py
+=================================================
+BloFin concrete adapter for the ExchangeAdapter ABC.
+
+Wraps the existing BlofinREST client at backend/app/cli/trader_blofin.py
+without modifying it. Normalizes response shapes to the dataclasses defined
+in adapter.py. Field-fallback chains are copied verbatim from the live
+trader call sites -- this class is a 1:1 translation layer, not a rewrite.
+"""
+
+from __future__ import annotations
+
+import logging
+from typing import TYPE_CHECKING
+
+from app.services.exchanges.adapter import (
+    BalanceInfo,
+    ExchangeAdapter,
+    FillInfo,
+    InstrumentInfo,
+    OrderResult,
+    PositionInfo,
+)
+
+if TYPE_CHECKING:
+    from app.cli.trader_blofin import BlofinREST
+
+log = logging.getLogger("blofin_adapter")
+
+
+# BloFin-internal constants; mirror the module constants in trader_blofin.py
+# for today's strategy (isolated margin, net position side).
+_MARGIN_MODE  = "isolated"
+_POSITION_SIDE = "net"
+
+
+class BloFinAdapter(ExchangeAdapter):
+    exchange_name       = "blofin"
+    native_sl_supported = True
+
+    def __init__(self, api_key: str, api_secret: str, passphrase: str | None):
+        if not passphrase:
+            raise ValueError("BloFin requires a passphrase")
+        # Lazy import avoids a circular dependency with the cli module and
+        # keeps import-time cost off the critical path for non-BloFin subprocesses.
+        from app.cli.trader_blofin import BlofinREST
+        self._rest: BlofinREST = BlofinREST(
+            api_key=api_key,
+            api_secret=api_secret,
+            passphrase=passphrase,
+            demo=False,
+        )
+
+    # -- Account -------------------------------------------------------
+
+    def get_balance(self) -> BalanceInfo:
+        """Extract USDT availableEquity + totalEquity from BloFin balance.
+
+        Field-fallback chain copied from
+        trader_blofin.py:get_account_balance_usdt (lines 738-778).
+        """
+        resp = self._rest.get_balance()
+        data = resp.get("data") or {}
+
+        available = 0.0
+        total     = 0.0
+
+        # Structure 1: {data: {totalEquity, details:[{availableEquity, currency}]}}
+        if isinstance(data, dict):
+            total_raw = data.get("totalEquity") or data.get("totalEq") or 0
+            try:
+                total = float(total_raw) if total_raw else 0.0
+            except (TypeError, ValueError):
+                total = 0.0
+
+            for item in (data.get("details") or []):
+                ccy = (item.get("currency") or item.get("ccy") or "").upper()
+                if ccy == "USDT":
+                    val = (item.get("availableEquity")
+                           or item.get("available")
+                           or item.get("availBal") or 0)
+                    try:
+                        available = float(val)
+                    except (TypeError, ValueError):
+                        available = 0.0
+                    break
+
+        # Structure 2: {data: [{currency, available}]}  (SDK wrapper format)
+        elif isinstance(data, list):
+            for item in data:
+                ccy = (item.get("currency") or item.get("ccy") or "").upper()
+                if ccy == "USDT":
+                    val = (item.get("availableEquity")
+                           or item.get("available")
+                           or item.get("availBal") or 0)
+                    try:
+                        available = float(val)
+                    except (TypeError, ValueError):
+                        available = 0.0
+                    break
+
+        # Preserve legacy fallback: if available not found but total is, use total.
+        if available <= 0 and total > 0:
+            log.warning(
+                f"availableEquity not found -- using totalEquity ${total:,.2f}"
+            )
+            available = total
+
+        return BalanceInfo(
+            available_usdt=available,
+            total_usdt=total if total > 0 else available,
+        )
+
+    # -- Market metadata -----------------------------------------------
+
+    def supports_symbol(self, inst_id: str) -> bool:
+        """BloFin lists a wide perp universe; return True and let the trader's
+        per-symbol error handling surface any inactive symbols. Matches
+        existing behavior (no pre-filter today)."""
+        return True
+
+    def get_instrument_info(self, inst_id: str) -> InstrumentInfo:
+        """Copied from trader_blofin.py:get_instrument_info (lines 848-869)."""
+        try:
+            resp = self._rest.get_instruments(inst_id=inst_id, inst_type="SWAP")
+            data = resp.get("data") or []
+            if data:
+                row = data[0]
+                return InstrumentInfo(
+                    inst_id=inst_id,
+                    contract_value=_safe_float(row.get("contractValue"), 1.0),
+                    min_size=_safe_float(row.get("minSize"), 1.0),
+                    lot_size=_safe_float(row.get("lotSize"), 1.0),
+                    max_market_size=_safe_float(row.get("maxMarketSize"), None),
+                    state=row.get("state", "live"),
+                )
+        except Exception as e:
+            log.warning(f"Instrument info failed for {inst_id}: {e}")
+        return InstrumentInfo(
+            inst_id=inst_id,
+            contract_value=1.0,
+            min_size=1.0,
+            lot_size=1.0,
+            max_market_size=None,
+            state="live",
+        )
+
+    def get_price(self, inst_id: str) -> float | None:
+        """Single-symbol price via BloFin tickers.
+
+        Field-fallback chain copied from trader_blofin.py:_get_prices_blofin
+        (lines 828-846). Caller iterates for multi-symbol.
+        """
+        try:
+            resp = self._rest.get_tickers(inst_id=inst_id)
+            data = resp.get("data") or []
+            if data:
+                price = float(data[0].get("last") or data[0].get("markPrice") or 0)
+                return price if price > 0 else None
+        except Exception as e:
+            log.warning(f"  {inst_id}: BloFin price fetch error: {e}")
+        return None
+
+    # -- Position state ------------------------------------------------
+
+    def get_positions(
+        self, inst_ids: list[str] | None = None,
+    ) -> list[PositionInfo]:
+        """Copied from trader_blofin.py:get_actual_positions (lines 934-956)
+        and reconcile_entry_prices (lines 1478-1527). Unified: always returns
+        both contracts and average_price when available.
+        """
+        results: list[PositionInfo] = []
+        inst_id_set = set(inst_ids) if inst_ids else None
+        try:
+            resp = self._rest.get_positions()
+        except Exception as e:
+            log.warning(f"Could not fetch BloFin positions: {e}")
+            return results
+
+        for pos in (resp.get("data") or []):
+            iid = pos.get("instId", "")
+            if not iid:
+                continue
+            if inst_id_set is not None and iid not in inst_id_set:
+                continue
+
+            # Size: field-fallback from get_actual_positions
+            size_raw = pos.get("positions", 0) or pos.get("pos", 0) or 0
+            try:
+                contracts = float(size_raw)
+            except (TypeError, ValueError):
+                contracts = 0.0
+            if contracts <= 0:
+                continue
+
+            # Average fill price: field-fallback from reconcile_entry_prices
+            avg_raw = (pos.get("averagePrice")
+                       or pos.get("avgPx")
+                       or pos.get("averagePx"))
+            try:
+                avg = float(avg_raw) if avg_raw not in (None, "", "0") else None
+            except (TypeError, ValueError):
+                avg = None
+
+            results.append(PositionInfo(
+                inst_id=iid, contracts=contracts, average_price=avg,
+            ))
+
+        return results
+
+    # -- Trading -------------------------------------------------------
+
+    def set_leverage(self, inst_id: str, leverage: int) -> OrderResult:
+        """POST /account/set-leverage. Matches trader_blofin.py:1218."""
+        try:
+            resp = self._rest.set_leverage(
+                inst_id=inst_id, leverage=int(leverage), margin_mode=_MARGIN_MODE,
+            )
+            code = str(resp.get("code", ""))
+            msg  = resp.get("msg", "") or ""
+            return OrderResult(
+                success=(code in ("0", "")),
+                order_id="",
+                error_code=code,
+                error_msg=msg,
+            )
+        except Exception as e:
+            return OrderResult(
+                success=False, order_id="",
+                error_code="exception", error_msg=str(e),
+            )
+
+    def place_entry_order(
+        self, inst_id: str, size: float,
+        sl_trigger_price: float | None = None,
+    ) -> OrderResult:
+        """MARKET BUY with optional inline sl_trigger_price. Matches the
+        call at trader_blofin.py:_place_order_chunked (line 1434)."""
+        sl_str = f"{sl_trigger_price:.8g}" if sl_trigger_price is not None else None
+        return self._submit_order(
+            inst_id=inst_id, side="buy", size=size,
+            reduce_only=False, sl_trigger_price=sl_str,
+        )
+
+    def place_reduce_order(self, inst_id: str, size: float) -> OrderResult:
+        """MARKET SELL reduce_only=true. Matches fallback at
+        trader_blofin.py:1664."""
+        return self._submit_order(
+            inst_id=inst_id, side="sell", size=size,
+            reduce_only=True, sl_trigger_price=None,
+        )
+
+    def close_position(self, inst_id: str) -> OrderResult:
+        """Native /trade/close-position. Matches trader_blofin.py:1650."""
+        try:
+            resp = self._rest.close_position(
+                inst_id=inst_id,
+                margin_mode=_MARGIN_MODE,
+                position_side=_POSITION_SIDE,
+            )
+            code = str(resp.get("code", ""))
+            data = resp.get("data") or [{}]
+            order_id = (data[0].get("orderId", "")
+                        if isinstance(data, list) and data else "")
+            return OrderResult(
+                success=(code == "0"),
+                order_id=str(order_id),
+                error_code=code,
+                error_msg=resp.get("msg", "") or "",
+            )
+        except Exception as e:
+            return OrderResult(
+                success=False, order_id="",
+                error_code="exception", error_msg=str(e),
+            )
+
+    # -- Reconciliation ------------------------------------------------
+
+    def get_recent_fills(
+        self,
+        since_ms: int | None = None,
+        inst_ids: list[str] | None = None,
+    ) -> list[FillInfo]:
+        """BloFin: /trade/fills-history with /trade/fills fallback (already
+        built into BlofinREST.get_fills_history). Adapter post-filters by
+        since_ms and inst_ids client-side; the underlying endpoint does not
+        support begin/instId query params in the existing BlofinREST wrapper.
+
+        Field-fallback chain copied from trader_blofin.py:reconcile_exit_prices
+        (lines 1551-1575).
+        """
+        results: list[FillInfo] = []
+        inst_id_set = set(inst_ids) if inst_ids else None
+        try:
+            resp = self._rest.get_fills_history(inst_type="SWAP")
+        except Exception as e:
+            log.warning(f"BloFin fills history fetch failed: {e}")
+            return results
+
+        for row in (resp.get("data") or []):
+            iid = row.get("instId", "")
+            if not iid:
+                continue
+            if inst_id_set is not None and iid not in inst_id_set:
+                continue
+
+            side = (row.get("side") or "").lower()
+            if side not in ("buy", "sell"):
+                continue
+
+            price_raw = (row.get("fillPrice")
+                         or row.get("price")
+                         or row.get("fillPx"))
+            try:
+                price = float(price_raw) if price_raw not in (None, "") else None
+            except (TypeError, ValueError):
+                price = None
+            if price is None:
+                continue
+
+            size_raw = (row.get("fillSize")
+                        or row.get("size")
+                        or row.get("fillSz")
+                        or row.get("sz") or 0)
+            try:
+                size = float(size_raw)
+            except (TypeError, ValueError):
+                size = 0.0
+
+            ts_raw = row.get("ts") or row.get("fillTime") or row.get("cTime") or 0
+            try:
+                ts_ms = int(ts_raw)
+            except (TypeError, ValueError):
+                ts_ms = 0
+
+            if since_ms is not None and ts_ms < since_ms:
+                continue
+
+            order_id = str(row.get("orderId") or row.get("ordId") or "")
+
+            results.append(FillInfo(
+                inst_id=iid, order_id=order_id, side=side,
+                price=price, size=size, ts_ms=ts_ms,
+            ))
+
+        return results
+
+    # -- Internals -----------------------------------------------------
+
+    def _submit_order(
+        self, inst_id: str, side: str, size: float,
+        reduce_only: bool, sl_trigger_price: str | None,
+    ) -> OrderResult:
+        """Single place_order call with normalized error extraction.
+
+        Preserves the 102015 (exceeds maxMarketSize) nested-code semantic
+        that trader_blofin.py:_place_order_chunked (line 1450) reads from
+        data[0].code -- callers of the adapter will see error_code="102015"
+        for that case regardless of whether BloFin surfaces it at the
+        top-level or nested in data[0].
+        """
+        try:
+            resp = self._rest.place_order(
+                inst_id=inst_id,
+                margin_mode=_MARGIN_MODE,
+                position_side=_POSITION_SIDE,
+                side=side,
+                order_type="market",
+                size=str(size),
+                reduce_only=reduce_only,
+                sl_trigger_price=sl_trigger_price,
+            )
+        except Exception as e:
+            return OrderResult(
+                success=False, order_id="",
+                error_code="exception", error_msg=str(e),
+            )
+
+        top_code = str(resp.get("code", ""))
+        data     = resp.get("data") or [{}]
+        inner    = data[0] if (isinstance(data, list) and data) else {}
+        inner_code = str(inner.get("code", ""))
+        inner_msg  = inner.get("msg", "") or ""
+
+        # Surface 102015 regardless of where BloFin placed it.
+        if top_code == "102015" or inner_code == "102015":
+            return OrderResult(
+                success=False, order_id="",
+                error_code="102015",
+                error_msg=inner_msg or resp.get("msg", "") or "",
+            )
+
+        if top_code not in ("0", ""):
+            return OrderResult(
+                success=False, order_id="",
+                error_code=top_code,
+                error_msg=(resp.get("msg", "") or "")
+                          + (f" | {inner_msg}" if inner_msg else ""),
+            )
+
+        order_id = str(inner.get("orderId", "unknown")) if inner else "unknown"
+        return OrderResult(
+            success=True, order_id=order_id,
+            error_code="0", error_msg="",
+        )
+
+
+# -- Helpers -------------------------------------------------------------
+
+def _safe_float(val, default):
+    """Copied from trader_blofin.py -- defensive float parse with default."""
+    try:
+        if val in (None, ""):
+            return default
+        return float(val)
+    except (TypeError, ValueError):
+        return default

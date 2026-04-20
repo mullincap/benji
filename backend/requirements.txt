@@ -47,3 +47,19 @@ wcwidth==0.6.0
 websockets==16.0
 bcrypt==4.3.0
 cryptography==44.0.3
+# Binance margin adapter (app/services/exchanges/binance_margin_adapter.py) —
+# Session D Binance executor. Pinned at today's resolved versions to keep
+# rebuilds reproducible; matches the repo's "pin everything" convention.
+python-binance==1.0.36
+aiohappyeyeballs==2.6.1
+aiohttp==3.13.5
+aiosignal==1.4.0
+attrs==26.1.0
+dateparser==1.4.0
+frozenlist==1.8.0
+multidict==6.7.1
+propcache==0.4.1
+pycryptodome==3.23.0
+pytz==2026.1.post1
+regex==2026.4.4
+yarl==1.23.0

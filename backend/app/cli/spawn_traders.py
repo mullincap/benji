@@ -47,10 +47,10 @@ from psycopg2.extras import RealDictCursor
 
 LOG_DIR = Path("/mnt/quant-data/logs/trader")
 
-# Trader executor only supports BloFin in this release. Binance allocations
-# are skipped (the per-allocation BlofinREST path doesn't have a Binance
-# equivalent yet — open work list).
-SUPPORTED_EXCHANGES = {"blofin"}
+# Trader executor dispatches per-exchange via ExchangeAdapter at
+# trader_blofin.py:3312. Both BloFin (perps) and Binance (cross-margin) are
+# supported. Adding a new exchange = new adapter + add slug here.
+SUPPORTED_EXCHANGES = {"blofin", "binance"}
 
 # Phases that mean "this allocation already finished its session for `date`".
 # Subprocess for an already-finished allocation would just hit the orchestrator's

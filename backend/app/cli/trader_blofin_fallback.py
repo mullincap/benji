@@ -60,19 +60,6 @@ from app.services.trading.credential_loader import (
     CredentialDecryptError,
 )
 
-# Exchange-agnostic trade surface. `adapter_for(creds)` dispatches to
-# BloFinAdapter or BinanceMarginAdapter based on creds.exchange. Per-allocation
-# path uses adapter_for(); legacy master path via build_api() returns a
-# BloFinAdapter directly so helper functions see the same ABC surface on
-# both paths.
-from app.services.exchanges.adapter import (
-    ExchangeAdapter,
-    InstrumentInfo,
-    PositionInfo,
-    adapter_for,
-)
-from app.services.exchanges.blofin_adapter import BloFinAdapter
-
 # ==========================================================================
 # CONFIGURATION
 # ==========================================================================
@@ -740,31 +727,57 @@ class BlofinREST:
         return resp
 
 
-def build_api() -> BloFinAdapter:
-    """Return a BloFinAdapter wrapping BlofinREST with module-level master
-    credentials. Used by the legacy run_session master path + --close-all CLI.
-    Per-allocation path uses adapter_for(creds) at dispatch instead.
-    """
-    return BloFinAdapter(
-        api_key=API_KEY,
-        api_secret=API_SECRET,
-        passphrase=PASSPHRASE,
+def build_api() -> BlofinREST:
+    return BlofinREST(
+        api_key    = API_KEY,
+        api_secret = API_SECRET,
+        passphrase = PASSPHRASE,
+        demo       = DEMO_MODE,
     )
 
-def get_account_balance_usdt(api: ExchangeAdapter) -> float:
-    """Return USDT available balance on the exchange.
-
-    Thin wrapper preserving the operator-visible log line. Field-fallback
-    logic lives in each concrete adapter's get_balance().
+def get_account_balance_usdt(api: BlofinREST) -> float:
     """
-    balance = api.get_balance()
-    if balance.available_usdt > 0:
-        log.info(f"USDT available equity: ${balance.available_usdt:,.2f}")
-    else:
-        log.warning("USDT balance is zero or not found -- returning 0")
-    return balance.available_usdt
+    Confirmed field structure from working mtrader2.py:
+      resp.data.totalEquity       (top-level)
+      resp.data.details[0].availableEquity  (per-currency)
+    Falls back through multiple field names for robustness.
+    """
+    resp = api.get_balance()
+    data = resp.get("data") or {}
 
-def get_mark_prices(api: ExchangeAdapter, inst_ids: list) -> dict:
+    # Structure 1: {data: {totalEquity, details:[{availableEquity, currency}]}}
+    if isinstance(data, dict):
+        details = data.get("details") or []
+        for item in details:
+            ccy = item.get("currency", "") or item.get("ccy", "")
+            if ccy.upper() == "USDT":
+                val = (item.get("availableEquity")
+                       or item.get("available")
+                       or item.get("availBal") or 0)
+                avail = float(val)
+                if avail > 0:
+                    log.info(f"USDT available equity: ${avail:,.2f}")
+                    return avail
+        # fallback: totalEquity if no detail found
+        total = data.get("totalEquity") or data.get("totalEq") or 0
+        if total:
+            log.warning(f"availableEquity not found -- using totalEquity ${float(total):,.2f}")
+            return float(total)
+
+    # Structure 2: {data: [{currency, available}]}  (SDK wrapper format)
+    if isinstance(data, list):
+        for item in data:
+            ccy = item.get("currency", "") or item.get("ccy", "")
+            if ccy.upper() == "USDT":
+                val = (item.get("availableEquity")
+                       or item.get("available")
+                       or item.get("availBal") or 0)
+                return float(val)
+
+    log.warning("USDT balance not found in any known response structure -- returning 0")
+    return 0.0
+
+def get_mark_prices(api: BlofinREST, inst_ids: list) -> dict:
     """
     Fetch prices for monitoring (conviction check, stops, fills).
 
@@ -812,29 +825,48 @@ def _get_prices_binance(inst_ids: list) -> dict:
     return prices
 
 
-def _get_prices_blofin(api: ExchangeAdapter, inst_ids: list) -> dict:
-    """Fetch last prices from the exchange via the adapter.
-
-    Name retained for call-site stability; now exchange-agnostic. Field-fallback
-    + zero-price-exclusion logic lives in each adapter's get_price().
-    """
-    log.info(f"getting prices from {api.exchange_name}")
+def _get_prices_blofin(api: BlofinREST, inst_ids: list) -> dict:
+    """Fetch last prices from BloFin tickers."""
+    print("getting prices from blofin")
     prices = {}
     for inst_id in inst_ids:
-        price = api.get_price(inst_id)
-        if price is None:
-            log.warning(f"  {inst_id}: no price from {api.exchange_name} -- excluded")
-        else:
-            prices[inst_id] = price
+        try:
+            resp = api.get_tickers(inst_id=inst_id)
+            data = resp.get("data") or []
+            if data:
+                price = float(data[0].get("last") or data[0].get("markPrice") or 0)
+                if price > 0:
+                    prices[inst_id] = price
+                else:
+                    log.warning(f"  {inst_id}: BloFin price=0 -- possible delisting, excluded")
+            else:
+                log.warning(f"  {inst_id}: no BloFin price data -- excluded")
+        except Exception as e:
+            log.warning(f"  {inst_id}: BloFin price fetch error: {e} -- excluded")
     return prices
 
-def get_instrument_info(api: ExchangeAdapter, inst_id: str) -> InstrumentInfo:
-    """Fetch instrument constraints from the exchange via the adapter.
-
-    Returns the InstrumentInfo dataclass directly (previously returned a dict).
-    Field-fallback and _safe_float defaults live in each adapter.
+def get_instrument_info(api: BlofinREST, inst_id: str) -> dict:
     """
-    return api.get_instrument_info(inst_id)
+    Fetch instrument constraints from BloFin.
+    Returns dict with: contractValue, minSize, lotSize, maxMarketSize, state.
+    Confirmed fields from working mtrader2.py.
+    """
+    try:
+        resp = api.get_instruments(inst_id=inst_id, inst_type="SWAP")
+        data = resp.get("data") or []
+        if data:
+            row = data[0]
+            return {
+                "contractValue": _safe_float(row.get("contractValue"), 1.0),
+                "minSize":       _safe_float(row.get("minSize"),       1.0),
+                "lotSize":       _safe_float(row.get("lotSize"),       1.0),
+                "maxMarketSize": _safe_float(row.get("maxMarketSize"), None),
+                "state":         row.get("state", "live"),
+            }
+    except Exception as e:
+        log.warning(f"Instrument info failed for {inst_id}: {e}")
+    return {"contractValue": 1.0, "minSize": 1.0, "lotSize": 1.0,
+            "maxMarketSize": None, "state": "live"}
 
 def _get_prices_at_timestamp(inst_ids: list,
                               target_dt: datetime.datetime) -> dict:
@@ -899,24 +931,29 @@ def _round_to_lot(value: float, lot_size: float) -> float:
     inv = 1.0 / lot_size
     return int(value * inv) / inv
 
-def get_actual_positions(
-    api: ExchangeAdapter, inst_ids: list,
-) -> list[PositionInfo]:
-    """Fetch actual open positions from the exchange via the adapter.
-
-    Returns list[PositionInfo] (previously returned {inst_id: contracts} dict).
-    Used for pre-entry stale-position detection and state reconciliation.
-    Empty list = no positions found. If inst_ids is empty, all open positions
-    are returned (no filtering).
-
-    Field-fallback (positions vs pos) and size>0 filter live in each adapter.
-    Bulk-call semantics preserved; BloFinAdapter passes the adapter-side filter
-    as None when inst_ids is empty.
+def get_actual_positions(api: BlofinREST, inst_ids: list) -> dict:
     """
-    positions = api.get_positions(inst_ids if inst_ids else None)
-    for p in positions:
-        log.info(f"  Position: {p.inst_id} = {p.contracts} contracts")
-    return positions
+    Fetch actual open positions from BloFin for the given instruments.
+    Returns {inst_id: contracts} for any position with size > 0.
+    Uses a single bulk call (no instId filter) to avoid triggering BloFin's
+    rate-limit firewall with rapid per-symbol requests.
+    If inst_ids is empty, returns ALL open positions (no filtering).
+    """
+    actual = {}
+    inst_id_set = set(inst_ids)
+    try:
+        resp = api.get_positions()   # fetch ALL positions in one call
+        for pos in (resp.get("data") or []):
+            iid = pos.get("instId", "")
+            if inst_id_set and iid not in inst_id_set:
+                continue
+            size = float(pos.get("positions", 0) or pos.get("pos", 0) or 0)
+            if size > 0:
+                actual[iid] = size
+                log.info(f"  BloFin position: {iid} = {size} contracts")
+    except Exception as e:
+        log.warning(f"Could not fetch actual positions from BloFin: {e}")
+    return actual
 
 
 # ==========================================================================
@@ -1036,7 +1073,7 @@ def equal_weight_return(current: dict, ref: dict) -> float:
 # ORDER EXECUTION
 # ==========================================================================
 
-def enter_positions(api: ExchangeAdapter, inst_ids, entry_prices,
+def enter_positions(api: BlofinREST, inst_ids, entry_prices,
                     eff_lev, balance, dry_run) -> tuple:
     """
     Equal-weight market buy. No BloFin TPSL orders -- stops managed at portfolio
@@ -1123,11 +1160,11 @@ def enter_positions(api: ExchangeAdapter, inst_ids, entry_prices,
 
         # Fetch instrument constraints (confirmed from mtrader2.py)
         info    = get_instrument_info(api, inst_id)
-        ctval   = info.contract_value
-        lot     = info.lot_size
-        min_sz  = info.min_size
-        max_mkt = info.max_market_size
-        state   = info.state
+        ctval   = info["contractValue"]
+        lot     = info["lotSize"]
+        min_sz  = info["minSize"]
+        max_mkt = info["maxMarketSize"]
+        state   = info["state"]
         symbol_status[inst_id]["ctval"] = ctval
 
         # Skip suspended/delisted instruments
@@ -1176,30 +1213,31 @@ def enter_positions(api: ExchangeAdapter, inst_ids, entry_prices,
             filled_first_pass += 1
             continue
 
-        # Set leverage (integer, hard-fail -- wrong leverage = wrong risk exposure).
-        # Adapter handles margin_mode internally (BloFin: per-symbol POST;
-        # Binance margin: verification via get_max_margin_loan).
-        lev_result = api.set_leverage(inst_id=inst_id, leverage=lev_int)
-        if not lev_result.success:
-            log.error(
-                f"  {inst_id}: set_leverage rejected (code={lev_result.error_code} "
-                f"msg={lev_result.error_msg}) -- skipping to avoid wrong leverage exposure"
-            )
-            symbol_status[inst_id]["skipped_reason"] = (
-                f"set_leverage_rejected_{lev_result.error_code}"
-            )
+        # Set leverage (integer, hard-fail -- wrong leverage = wrong risk exposure)
+        try:
+            lev_resp = api.set_leverage(inst_id=inst_id, leverage=lev_int, margin_mode=MARGIN_MODE)
+            lev_code = str(lev_resp.get("code", ""))
+            if lev_code not in ("0", ""):
+                log.error(
+                    f"  {inst_id}: set_leverage rejected (code={lev_code} "
+                    f"msg={lev_resp.get('msg','')}) -- skipping to avoid "
+                    f"wrong leverage exposure"
+                )
+                symbol_status[inst_id]["skipped_reason"] = (
+                    f"set_leverage_rejected_{lev_code}"
+                )
+                continue
+        except Exception as le:
+            log.error(f"  {inst_id}: set_leverage exception: {le} -- skipping")
+            symbol_status[inst_id]["skipped_reason"] = "set_leverage_exception"
             continue
 
         # Place order(s), chunking if maxMarketSize is set.
-        # Optionally attach an exchange-native stop-loss at entry. Only on
-        # adapters where the exchange supports atomic-with-entry SL (BloFin
-        # yes; Binance margin no — client-side SL runs via the port_sl /
-        # port_tsl monitoring loop on those paths). Belt+suspenders: adapter
-        # also raises NotImplementedError if a non-None SL arrives.
+        # Optionally attach an exchange-native stop-loss at entry.
         sl_trigger = None
-        if EXCHANGE_SL_ENABLED and api.native_sl_supported:
-            sl_trigger = price * (1 + EXCHANGE_SL_PCT)
-            log.info(f"  {inst_id}: exchange SL set at ${sl_trigger:,.4f} "
+        if EXCHANGE_SL_ENABLED:
+            sl_trigger = f"{price * (1 + EXCHANGE_SL_PCT):.8g}"
+            log.info(f"  {inst_id}: exchange SL set at ${float(sl_trigger):,.4f} "
                      f"({EXCHANGE_SL_PCT*100:.1f}% from entry)")
 
         ok, order_id = _place_order_chunked(
@@ -1258,8 +1296,8 @@ def enter_positions(api: ExchangeAdapter, inst_ids, entry_prices,
                 continue
 
             sl_trigger = None
-            if EXCHANGE_SL_ENABLED and api.native_sl_supported:
-                sl_trigger = price * (1 + EXCHANGE_SL_PCT)
+            if EXCHANGE_SL_ENABLED:
+                sl_trigger = f"{price * (1 + EXCHANGE_SL_PCT):.8g}"
 
             filled_total = 0.0
             round_order_ids = []
@@ -1362,24 +1400,16 @@ def enter_positions(api: ExchangeAdapter, inst_ids, entry_prices,
 
     return list(opened_by_sym.values()), fill_report
 
-def _place_order_chunked(trading_api: ExchangeAdapter, inst_id: str,
-                          total_contracts: float, lot: float, min_sz: float,
-                          max_mkt_sz,
-                          sl_trigger_price: float | None = None) -> tuple:
+def _place_order_chunked(trading_api, inst_id: str, total_contracts: float,
+                          lot: float, min_sz: float, max_mkt_sz,
+                          sl_trigger_price: str = None) -> tuple:
     """
     Place one or more market buy orders to fill total_contracts,
     respecting maxMarketSize by splitting into chunks.
-    If sl_trigger_price is set AND the adapter supports native SL, attaches
-    an exchange-native stop-loss to the first chunk only. On adapters without
-    native SL (e.g., Binance margin), SL is monitored client-side by the
-    port_sl / port_tsl loop instead; callers should pass sl_trigger_price=None
-    for those paths.
+    If sl_trigger_price is set, attaches an exchange-native stop-loss to the
+    first chunk only (BloFin attaches SL to the position, not per-chunk).
     Returns (success: bool, last_order_id: str).
-
-    Retry-on-102015 (exceeds maxMarketSize) lives HERE, not in the adapter.
-    Adapter surfaces error_code="102015"; trader reduces chunk cap by 20%
-    and retries. Keeps retry responsibility single-source so we don't get
-    multiplicative retry-on-retry under cascading failures.
+    Confirmed pattern from mtrader2.py.
     """
     chunk_cap  = float(max_mkt_sz) if max_mkt_sz else float("inf")
     remaining  = float(total_contracts)
@@ -1396,17 +1426,29 @@ def _place_order_chunked(trading_api: ExchangeAdapter, inst_id: str,
         if chunk_num > 1:
             log.info(f"  {inst_id}: chunk {chunk_num} -- placing {chunk}ct (remaining {remaining}ct)")
 
-        # Attach SL only on the first chunk AND only on exchanges with native
-        # SL support; subsequent chunks are additions to the same position
-        # and the SL is already set at the exchange level.
-        sl_price = sl_trigger_price if (chunk_num == 1 and trading_api.native_sl_supported) else None
+        # Attach SL only on the first chunk; subsequent chunks are additions
+        # to the same position and the SL is already set at the exchange level.
+        sl_price = sl_trigger_price if chunk_num == 1 else None
 
-        result = trading_api.place_entry_order(
-            inst_id=inst_id, size=chunk, sl_trigger_price=sl_price,
-        )
+        try:
+            resp = trading_api.place_order(
+                inst_id=inst_id, margin_mode=MARGIN_MODE, position_side=POSITION_SIDE,
+                side="buy", order_type="market", size=str(chunk),
+                sl_trigger_price=sl_price,
+            )
+        except Exception as e:
+            log.error(f"  {inst_id}: place_order exception: {e}")
+            return False, "exception"
 
-        # 102015 (exceeds maxMarketSize) — reduce chunk cap by 20% and retry.
-        if result.error_code == "102015":
+        data = resp.get("data") or [{}]
+        code = str(resp.get("code", ""))
+
+        # Check for nested error code 102015 (exceeds maxMarketSize)
+        inner_code = ""
+        if isinstance(data, list) and data:
+            inner_code = str(data[0].get("code", ""))
+        if inner_code == "102015" or code == "102015":
+            # Reduce chunk cap by 20% and retry
             new_cap = _round_to_lot(max(min_sz, chunk_cap * 0.8), lot)
             if new_cap >= chunk_cap or new_cap < min_sz:
                 log.error(f"  {inst_id}: cannot reduce chunk further (cap={chunk_cap})")
@@ -1415,17 +1457,16 @@ def _place_order_chunked(trading_api: ExchangeAdapter, inst_id: str,
             chunk_cap = new_cap
             continue
 
-        if not result.success:
-            if result.error_code == "exception":
-                log.error(f"  {inst_id}: place_entry_order exception: {result.error_msg}")
-                return False, "exception"
-            log.error(
-                f"  {inst_id}: order error code={result.error_code} "
-                f"msg={result.error_msg}"
-            )
-            return False, f"error_{result.error_code}"
+        if code not in ("0", ""):
+            msg = resp.get("msg", "")
+            inner_msg = ""
+            if isinstance(data, list) and data:
+                inner_msg = data[0].get("msg", "")
+            log.error(f"  {inst_id}: order error code={code} msg={msg}"
+                      + (f" | detail={inner_msg}" if inner_msg and inner_msg != msg else ""))
+            return False, f"error_{code}"
 
-        last_id   = result.order_id or "unknown"
+        last_id   = data[0].get("orderId", "unknown") if isinstance(data, list) and data else "unknown"
         remaining = _round_to_lot(remaining - chunk, lot)
 
     if remaining > min_sz / 2.0:
@@ -1434,7 +1475,7 @@ def _place_order_chunked(trading_api: ExchangeAdapter, inst_id: str,
     return True, last_id
 
 
-def reconcile_fill_prices(api: ExchangeAdapter, positions: list) -> list:
+def reconcile_fill_prices(api: BlofinREST, positions: list) -> list:
     """
     Fetch actual average-fill prices from BloFin positions and attach to
     each position dict. Computes slippage in basis points vs est_entry_price.
@@ -1444,24 +1485,26 @@ def reconcile_fill_prices(api: ExchangeAdapter, positions: list) -> list:
     """
     if not positions:
         return positions
-
-    inst_ids = [p["inst_id"] for p in positions]
-    adapter_positions = api.get_positions(inst_ids)
-    by_inst = {
-        p.inst_id: p.average_price
-        for p in adapter_positions
-        if p.average_price is not None
-    }
-
-    if not by_inst and adapter_positions == []:
-        # Distinguish "exchange returned no data" from "positions found but no
-        # average_price available on them"; the former is a fetch failure, the
-        # latter is data-shape.
-        log.warning("Could not fetch positions for fill reconciliation")
+    try:
+        resp = api.get_positions()
+    except Exception as e:
+        log.warning(f"Could not fetch positions for fill reconciliation: {e}")
         for pos in positions:
             pos.setdefault("fill_entry_price", None)
             pos.setdefault("entry_slippage_bps", None)
         return positions
+
+    by_inst = {}
+    for row in (resp.get("data") or []):
+        iid = row.get("instId", "")
+        avg = (row.get("averagePrice")
+               or row.get("avgPx")
+               or row.get("averagePx"))
+        if iid and avg not in (None, "", "0"):
+            try:
+                by_inst[iid] = float(avg)
+            except (TypeError, ValueError):
+                pass
 
     summary = []
     for pos in positions:
@@ -1471,7 +1514,7 @@ def reconcile_fill_prices(api: ExchangeAdapter, positions: list) -> list:
         if fill is None or not est or est <= 0:
             pos["fill_entry_price"]   = None
             pos["entry_slippage_bps"] = None
-            log.warning(f"  {iid}: entry fill price not found on {api.exchange_name} -- leaving null")
+            log.warning(f"  {iid}: entry fill price not found on BloFin -- leaving null")
             continue
         pos["fill_entry_price"]   = round(fill, 6)
         slip_bps                  = (fill / est - 1.0) * 10000
@@ -1484,42 +1527,52 @@ def reconcile_fill_prices(api: ExchangeAdapter, positions: list) -> list:
     return positions
 
 
-def reconcile_exit_prices(api: ExchangeAdapter, positions: list,
+def reconcile_exit_prices(api: BlofinREST, positions: list,
                           est_exit_prices: dict) -> list:
     """
-    Fetch actual exit fill prices from the exchange's fill history and attach
+    Fetch actual exit fill prices from BloFin trade-fills history and attach
     to each position dict. Computes exit slippage in basis points vs the
     monitoring loop's last price snapshot for that symbol.
 
     Matches by inst_id + side=sell, picking the most recent matching fill.
     Negative exit_slippage_bps is favorable (sold higher than estimated).
-
-    NOTE: just-closed positions aren't in api.get_positions() anymore, so we
-    MUST pass inst_ids explicitly — caller-responsibility clause in
-    BinanceMarginAdapter.get_recent_fills docstring. BloFin adapter post-filters
-    client-side; same semantic either way.
     """
     if not positions:
         return positions
-
-    inst_ids = [p["inst_id"] for p in positions]
-    fills = api.get_recent_fills(inst_ids=inst_ids)
-
-    if not fills:
-        log.warning(f"Could not fetch fills history for exit reconciliation on {api.exchange_name}")
+    try:
+        resp = api.get_fills_history()
+    except Exception as e:
+        log.warning(f"Could not fetch fills history for exit reconciliation: {e}")
         for pos in positions:
             pos.setdefault("fill_exit_price", None)
             pos.setdefault("exit_slippage_bps", None)
         return positions
 
-    # Group latest sell fills per inst_id.
+    # Group latest sell fills per instId. Fill rows may include fields named
+    # fillPrice/price/fillPx, side = "buy"/"sell", ts = epoch ms.
     fills_by_inst = {}
-    for f in fills:
-        if f.side != "sell":
+    for row in (resp.get("data") or []):
+        iid  = row.get("instId", "")
+        side = (row.get("side") or "").lower()
+        if not iid or side != "sell":
             continue
-        cur = fills_by_inst.get(f.inst_id)
-        if cur is None or f.ts_ms > cur[0]:
-            fills_by_inst[f.inst_id] = (f.ts_ms, f.price)
+        price_raw = (row.get("fillPrice")
+                     or row.get("price")
+                     or row.get("fillPx"))
+        try:
+            price = float(price_raw) if price_raw not in (None, "") else None
+        except (TypeError, ValueError):
+            price = None
+        if price is None:
+            continue
+        ts_raw = row.get("ts") or row.get("fillTime") or row.get("cTime") or 0
+        try:
+            ts = int(ts_raw)
+        except (TypeError, ValueError):
+            ts = 0
+        cur = fills_by_inst.get(iid)
+        if cur is None or ts > cur[0]:
+            fills_by_inst[iid] = (ts, price)
 
     summary = []
     for pos in positions:
@@ -1530,7 +1583,7 @@ def reconcile_exit_prices(api: ExchangeAdapter, positions: list,
         if fill is None or not est or est <= 0:
             pos["fill_exit_price"]   = None
             pos["exit_slippage_bps"] = None
-            log.warning(f"  {iid}: exit fill price not found on {api.exchange_name} -- leaving null")
+            log.warning(f"  {iid}: exit fill price not found in BloFin fills history -- leaving null")
             continue
         pos["fill_exit_price"]   = round(fill, 6)
         slip_bps                 = (fill / est - 1.0) * 10000
@@ -1543,7 +1596,7 @@ def reconcile_exit_prices(api: ExchangeAdapter, positions: list,
     return positions
 
 
-def close_all_positions(api: ExchangeAdapter, positions, reason, dry_run) -> list:
+def close_all_positions(api: BlofinREST, positions, reason, dry_run) -> list:
     """
     Close all tracked positions with position reconciliation.
 
@@ -1560,8 +1613,7 @@ def close_all_positions(api: ExchangeAdapter, positions, reason, dry_run) -> lis
 
     # Reconcile with actual BloFin positions
     if not dry_run:
-        actual_list = get_actual_positions(api, inst_ids)
-        actual = {p.inst_id: p.contracts for p in actual_list}
+        actual = get_actual_positions(api, inst_ids)
         reconciled = []
         for pos in positions:
             iid = pos["inst_id"]
@@ -1592,28 +1644,31 @@ def close_all_positions(api: ExchangeAdapter, positions, reason, dry_run) -> lis
             continue
 
         try:
-            # Primary: native close endpoint (BloFin /trade/close-position;
-            # Binance margin: MARKET SELL of free balance with AUTO_REPAY).
-            # More reliable than reduce-only for BloFin; adapter handles
-            # margin_mode/position_side internally.
-            result = api.close_position(inst_id)
-            if result.success:
-                log.info(f"  ✅ {inst_id}  closed via {api.exchange_name} close-position")
+            # Use the dedicated close-position endpoint (confirmed from mtrader2.py)
+            # This is more reliable than a reduce-only market sell and handles
+            # marginMode/positionSide automatically from the open position.
+            resp = api.close_position(
+                inst_id=inst_id,
+                margin_mode=pos.get("marginMode", MARGIN_MODE),
+                position_side=pos.get("positionSide", POSITION_SIDE),
+            )
+            code = str(resp.get("code", ""))
+            if code == "0":
+                log.info(f"  ✅ {inst_id}  closed via close-position endpoint")
             else:
                 # Fallback: reduce-only market sell
                 log.warning(
-                    f"  {inst_id}: close-position returned code={result.error_code} "
-                    f"msg={result.error_msg} -- falling back to reduce-only market sell"
+                    f"  {inst_id}: close-position returned code={code} "
+                    f"-- falling back to reduce-only market sell"
                 )
-                result2 = api.place_reduce_order(inst_id, contracts)
-                if result2.success:
-                    log.info(f"  ✅ {inst_id}  fallback orderId={result2.order_id}")
-                else:
-                    log.error(
-                        f"  ❌ {inst_id}: reduce-only fallback also failed "
-                        f"code={result2.error_code} msg={result2.error_msg}"
-                    )
-                    failed.append(pos)
+                resp2 = api.place_order(
+                    inst_id=inst_id, margin_mode=MARGIN_MODE,
+                    position_side=POSITION_SIDE,
+                    side="sell", order_type="market",
+                    size=str(contracts), reduce_only=True,
+                )
+                data2 = resp2.get("data") or [{}]
+                log.info(f"  ✅ {inst_id}  fallback orderId={data2[0].get('orderId','?')}")
         except Exception as e:
             log.error(f"  ❌ {inst_id}: {e} -- position may still be open!")
             failed.append(pos)
@@ -1632,14 +1687,6 @@ def close_all_positions(api: ExchangeAdapter, positions, reason, dry_run) -> lis
 # ==========================================================================
 
 def run_session(dry_run: bool = False, resume: bool = False):
-    # DEPRECATED: the containerized master run_session is legacy. Production
-    # invocation is always per-allocation via --allocation-id; host master
-    # runs a separate file at /root/benji/trader-blofin.py. Path kept functional
-    # for --close-all and manual debugging, but no cron hits this.
-    log.warning(
-        "run_session is the deprecated master path in the container. "
-        "Production uses --allocation-id; host cron uses /root/benji/trader-blofin.py."
-    )
     # Credential guard: fail loudly before any trade-path HTTP call. Matches
     # the logical position of the original module-level guard in the host
     # script — just moved into this function so that import-only entry
@@ -1886,16 +1933,15 @@ def run_session(dry_run: bool = False, resume: bool = False):
     log.info("Checking for existing open positions on BloFin ...")
     existing = get_actual_positions(api, inst_ids)
     if existing:
-        existing_ids = [p.inst_id for p in existing]
         alert(
             f"{len(existing)} stale position(s) found before entry: "
-            f"{existing_ids}. Closing them now before entering today's session.",
+            f"{list(existing.keys())}. Closing them now before entering today's session.",
             subject="trader-blofin STALE POSITIONS CLOSED"
         )
-        log.warning(f"Stale positions found -- closing before entry: {existing_ids}")
-        stale = [{"inst_id": p.inst_id, "contracts": int(p.contracts),
+        log.warning(f"Stale positions found -- closing before entry: {list(existing.keys())}")
+        stale = [{"inst_id": iid, "contracts": int(sz),
                   "marginMode": MARGIN_MODE, "positionSide": POSITION_SIDE}
-                 for p in existing]
+                 for iid, sz in existing.items()]
         failed_stale = close_all_positions(api, stale, "pre_entry_cleanup", dry_run)
         if failed_stale:
             alert(
@@ -2039,7 +2085,7 @@ def run_session(dry_run: bool = False, resume: bool = False):
     )
 
 
-def _run_monitoring_loop(today, today_date, api: ExchangeAdapter, inst_ids,
+def _run_monitoring_loop(today, today_date, api: BlofinREST, inst_ids,
                          open_prices, entry_prices, entry_1x, eff_lev,
                          peak, positions, dry_run,
                          report_base=None, session_start_utc=None,
@@ -2514,9 +2560,8 @@ def seed_returns_log(filepath: str):
 #   1. _acquire_allocation_lock — atomic CAS on allocations.lock_acquired_at
 #      (24h staleness threshold, same semantic as the filesystem LOCK_FILE)
 #   2. Load allocation row → TraderConfig via strategy_version.config JSONB
-#   3. Decrypt per-user exchange creds via credential_loader
-#   4. Dispatch to the right ExchangeAdapter via adapter_for(creds)
-#      (BloFin perps or Binance cross-margin; see app.services.exchanges.*)
+#   3. Decrypt per-user BloFin creds via credential_loader
+#   4. Build a per-call BlofinREST instance with those creds
 #   5. Branch on runtime_state.phase: resume active / already-finished / fresh
 #   6. Persist runtime_state JSONB (replaces filesystem STATE_FILE) at the
 #      same logical save points as the master script's save_state() calls
@@ -2837,7 +2882,7 @@ def _init_portfolio_session_for_allocation_inline(
 def _run_fresh_session_for_allocation(
     allocation_id: str,
     config: TraderConfig,
-    api: ExchangeAdapter,
+    api: BlofinREST,
     connection_id: str,
     vol_boost: float,
     dry_run: bool = False,
@@ -2875,40 +2920,6 @@ def _run_fresh_session_for_allocation(
         return
 
     inst_ids = [s + config.symbol_suffix for s in symbols]
-
-    # ── Phase 1b: pre-filter against exchange's supported-symbol universe ──
-    # Decision C1 (Session D): strict pre-filter. Some symbols in the daily
-    # signal may not be tradable on the allocation's exchange (notably Binance
-    # margin, which lists a smaller subset than BloFin perps). Drop unsupported
-    # symbols BEFORE sizing so capital-per-symbol isn't diluted across symbols
-    # that would fail at order time.
-    pre_filter_count = len(inst_ids)
-    supported_set = {i for i in inst_ids if api.supports_symbol(i)}
-    dropped = [i for i in inst_ids if i not in supported_set]
-    if dropped:
-        log.warning(
-            f"Allocation {allocation_id}: {len(dropped)}/{pre_filter_count} "
-            f"symbols unsupported on {api.exchange_name}, dropped: {dropped}"
-        )
-    inst_ids = [i for i in inst_ids if i in supported_set]
-    if not inst_ids:
-        log.info(
-            f"Allocation {allocation_id}: A -- Filtered, zero symbols supported "
-            f"on {api.exchange_name} after pre-filter (pre-filter list: {pre_filter_count})"
-        )
-        _mark_runtime_state(allocation_id, {
-            "phase": "filtered",
-            "positions": [],
-            "pre_filter_dropped": dropped,
-        })
-        _log_allocation_return(
-            allocation_id, today,
-            net_return_pct=0.0,
-            exit_reason="filtered",
-            effective_leverage=0.0, capital_deployed_usd=0.0,
-            config=config,
-        )
-        return
 
     # ── Phase 2: sleep to conviction bar, then fetch 06:00 + 06:35 prices ─
     session_open = datetime.datetime.combine(
@@ -3010,15 +3021,14 @@ def _run_fresh_session_for_allocation(
     # user's BloFin account is touched.
     existing = get_actual_positions(api, inst_ids)
     if existing:
-        existing_ids = [p.inst_id for p in existing]
         log.warning(
             f"Allocation {allocation_id}: {len(existing)} stale position(s) "
-            f"found before entry: {existing_ids}. Closing them first."
+            f"found before entry: {list(existing.keys())}. Closing them first."
         )
-        stale = [{"inst_id": p.inst_id, "contracts": int(p.contracts),
+        stale = [{"inst_id": iid, "contracts": int(sz),
                   "marginMode": config.margin_mode,
                   "positionSide": config.position_side}
-                 for p in existing]
+                 for iid, sz in existing.items()]
         failed_stale = close_all_positions(api, stale, "pre_entry_cleanup", dry_run)
         if failed_stale:
             log.error(
@@ -3310,10 +3320,10 @@ def run_session_for_allocation(allocation_id: str, dry_run: bool = False) -> Non
             )
             return
 
-        if creds.exchange not in ("blofin", "binance"):
+        if creds.exchange != "blofin":
             log.warning(
                 f"Allocation {allocation_id} uses {creds.exchange!r} — only "
-                "blofin + binance are supported in this release. Skipping."
+                "blofin is supported in this release. Skipping."
             )
             _mark_runtime_state(
                 allocation_id,
@@ -3322,12 +3332,15 @@ def run_session_for_allocation(allocation_id: str, dry_run: bool = False) -> Non
             )
             return
 
-        # 5. Dispatch to the right adapter. adapter_for reads creds.exchange
-        # and returns BloFinAdapter or BinanceMarginAdapter. Each allocation
-        # gets its own adapter instance scoped to its own credentials — no
-        # cross-allocation state leakage. Legacy run_session path uses
-        # build_api() instead (module-level master credentials).
-        api = adapter_for(creds)
+        # 5. Build a per-allocation BlofinREST instance with the decrypted keys.
+        # Note: NOT build_api() — that reads module-level creds for the master
+        # account. Each allocation gets its own instance with its own keys.
+        api = BlofinREST(
+            api_key=creds.api_key,
+            api_secret=creds.api_secret,
+            passphrase=creds.passphrase,
+            demo=False,
+        )
 
         # 6. Resume vs fresh branch on runtime_state.
         state = alloc.get("runtime_state") or {}
@@ -3425,11 +3438,10 @@ if __name__ == "__main__":
         if not actual:
             log.info("No open positions found.")
             sys.exit(0)
-        actual_ids = [p.inst_id for p in actual]
-        log.info(f"Found {len(actual)} open position(s): {actual_ids}")
-        positions = [{"inst_id": p.inst_id, "contracts": int(p.contracts),
+        log.info(f"Found {len(actual)} open position(s): {list(actual.keys())}")
+        positions = [{"inst_id": iid, "contracts": int(sz),
                       "marginMode": MARGIN_MODE, "positionSide": POSITION_SIDE}
-                     for p in actual]
+                     for iid, sz in actual.items()]
         failed = close_all_positions(api, positions, "manual_close_all", dry_run=False)
         if failed:
             log.error(f"Failed to close: {[p['inst_id'] for p in failed]}")
