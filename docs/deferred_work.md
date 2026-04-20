@@ -4,6 +4,30 @@ Items surfaced during normal work that aren't in scope for the current track but
 
 ---
 
+## Note: strategy_id=1 / v1.0 excluded from nightly refresh — intentional
+
+**Surfaced:** 2026-04-20 during Item 6 investigation (Session C).
+
+`audit.strategy_versions` has four `is_active=TRUE` rows. Nightly `refresh_strategy_metrics` picks up only three — the three published alpha variants. The fourth row is:
+
+```
+strategy_version_id = d023dc1e-d48a-46f1-ba7b-6c21a11b01a5
+strategy_id         = 1
+version_label       = v1.0
+is_active           = t
+metrics_updated_at  = NULL
+```
+
+Parent strategy is `audit.strategies strategy_id=1 name="overlap_tail_disp" display_name="Overlap — Tail + Dispersion" is_published=FALSE` — the legacy pre-alpha Overlap strategy.
+
+Eligibility filter at `refresh_strategy_metrics.py:63–64` is `sv.is_active AND s.is_published`. The strategy-level `is_published=FALSE` gates this version out. `is_active` on the version row just marks it as the current version of the (unpublished) strategy, not "ready-for-refresh." Two-level published-ness (strategy row + version row) is intentional.
+
+**Why it's worth a note:** future investigation querying `WHERE is_active=TRUE` alone will see 4 rows and wonder about the missing metrics. This entry pre-empts the mystery.
+
+**No action required.** Remove this note if/when Overlap is unpublished outright or the strategy is re-published and starts refreshing.
+
+---
+
 ## Dead-code cleanup: CAPITAL_MODE / CAPITAL_VALUE in containerized trader
 
 **Surfaced:** 2026-04-19 during Item 10 scope review.
