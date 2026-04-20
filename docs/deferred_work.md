@@ -4,6 +4,39 @@ Items surfaced during normal work that aren't in scope for the current track but
 
 ---
 
+## Dead-code cleanup: CAPITAL_MODE / CAPITAL_VALUE in containerized trader
+
+**Surfaced:** 2026-04-19 during Item 10 scope review.
+
+**Problem:**
+`backend/app/cli/trader_blofin.py` lines 126–127 still define:
+```python
+CAPITAL_MODE  = "pct_balance"
+CAPITAL_VALUE = 1.0
+```
+These are consumed inside `enter_positions` (line 1093) as:
+```python
+usdt_total = (balance * CAPITAL_VALUE if CAPITAL_MODE == "pct_balance"
+              else min(CAPITAL_VALUE, balance))
+```
+
+After Item 10, the per-allocation path passes pre-sized `usdt_for_allocation` as the `balance` param. `CAPITAL_VALUE=1.0` makes the multiplication a no-op; the `else` branch is never exercised (since `CAPITAL_MODE` is hardcoded `"pct_balance"`). The constants exist now only because the legacy `run_session` master path (line 1994) still passes full balance and relies on the same code.
+
+Since the containerized `run_session` is unused in production (spawn_traders always passes `--allocation-id`, routing to `_run_fresh_session_for_allocation` instead), the legacy `run_session` itself is also dead in this containerized copy.
+
+**Cleanup scope:**
+- Remove `CAPITAL_MODE`, `CAPITAL_VALUE` module constants.
+- Simplify `enter_positions` to `usdt_total = balance` (param renamed `capital_budget` for semantic clarity).
+- Decide whether to also remove the legacy `run_session` function itself from the containerized copy. Host master `/root/benji/trader-blofin.py` is a separate file and untouched.
+
+**Risk:** zero — the dead paths don't execute in production. Cleanup is cosmetic + semantic-clarity.
+
+**Gate:** any time after Item 10 lands. Do not bundle into Item 10 to keep that diff tight on the live-money change.
+
+**Tracking:** carry on open work list, address when next touching trader_blofin.py.
+
+---
+
 ## Strategy taxonomy decision + batch rename
 
 **Surfaced:** 2026-04-19 when considering a one-off rename of `alpha_tail_guardrail_low_risk` display_name to `... - Med risk`.
