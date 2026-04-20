@@ -171,6 +171,8 @@ function LiveMode({ instanceId }: { instanceId: string }) {
   const [confirmRemoveTrader, setConfirmRemoveTrader] = useState(false);
   const [livePositions, setLivePositions] = useState<Position[]>(inst.positions);
   const [positionsLoading, setPositionsLoading] = useState(false);
+  const [snapshotAt, setSnapshotAt] = useState<string | null>(null);
+  const [syncedAgo, setSyncedAgo] = useState<string>("never synced");
   const [positionsOpen, setPositionsOpen] = useState(true);
   const [settingsOpen, setSettingsOpen] = useState(true);
   const [editing, setEditing] = useState(false);
@@ -190,6 +192,7 @@ function LiveMode({ instanceId }: { instanceId: string }) {
         const result = await allocatorApi.getPositions(instanceId);
         if (!cancelled) {
           setLivePositions(result.positions.map(mapApiPosition));
+          setSnapshotAt(result.snapshot_at);
         }
       } catch {
         // Fall back to context positions
@@ -201,6 +204,26 @@ function LiveMode({ instanceId }: { instanceId: string }) {
     fetchPositions();
     return () => { cancelled = true; };
   }, [instanceId, inst.positions]);
+
+  // Re-compute the "synced Xs ago" display every 5s from the snapshot_at
+  // timestamp returned by getPositions. Pure UI tick — does not re-fetch.
+  useEffect(() => {
+    function compute() {
+      if (!snapshotAt) { setSyncedAgo("never synced"); return; }
+      const ts = new Date(snapshotAt).getTime();
+      if (Number.isNaN(ts)) { setSyncedAgo("never synced"); return; }
+      const secondsAgo = Math.max(0, Math.floor((Date.now() - ts) / 1000));
+      let text: string;
+      if (secondsAgo < 60)        text = `${secondsAgo}s ago`;
+      else if (secondsAgo < 3600) text = `${Math.floor(secondsAgo / 60)}m ago`;
+      else if (secondsAgo < 86400) text = `${Math.floor(secondsAgo / 3600)}h ago`;
+      else                         text = `${Math.floor(secondsAgo / 86400)}d ago`;
+      setSyncedAgo(`synced ${text}`);
+    }
+    compute();
+    const id = setInterval(compute, 5000);
+    return () => clearInterval(id);
+  }, [snapshotAt]);
 
   return (
     <div style={{ background: "var(--bg0)", padding: "28px", minHeight: "100%" }}>
@@ -225,7 +248,7 @@ function LiveMode({ instanceId }: { instanceId: string }) {
                   <span style={{ position: "absolute", inset: 0, borderRadius: "50%", background: "var(--green)", opacity: 0.3, animation: "pulse-dot 1.2s ease-in-out infinite" }} />
                   <span style={{ position: "absolute", inset: 0, borderRadius: "50%", background: "var(--green)" }} />
                 </span>
-                <span style={{ fontSize: 10, color: "var(--t2)" }}>live &middot; synced 8s ago</span>
+                <span style={{ fontSize: 10, color: "var(--t2)" }}>live &middot; {syncedAgo}</span>
               </div>
             )}
           </div>
@@ -284,7 +307,7 @@ function LiveMode({ instanceId }: { instanceId: string }) {
         </div>
 
         {/* Performance chart */}
-        <PerformanceChart allocation={inst.allocation ?? 0} ytdReturn={STRATEGY_CATALOG[inst.strategyType]?.ytd ?? 0} />
+        <PerformanceChart instanceId={instanceId} />
 
         {/* Positions table — collapsible */}
         <div style={{ background: "var(--bg1)", border: "1px solid var(--line)", borderRadius: 6, overflow: "hidden", marginBottom: 20 }}>

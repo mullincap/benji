@@ -1,12 +1,13 @@
 "use client";
 
-import { useState, useRef, useCallback } from "react";
+import { useState, useRef, useEffect } from "react";
 import {
   Chart as ChartJS,
   CategoryScale, LinearScale, PointElement, LineElement, BarElement,
   Filler, Tooltip,
 } from "chart.js";
 import { Line, Bar } from "react-chartjs-2";
+import { allocatorApi, ApiBalanceHistory, parseApiError } from "./api";
 
 ChartJS.register(CategoryScale, LinearScale, PointElement, LineElement, BarElement, Filler, Tooltip);
 
@@ -15,48 +16,32 @@ ChartJS.register(CategoryScale, LinearScale, PointElement, LineElement, BarEleme
 type TimeRange = "1D" | "1W" | "1M" | "ALL";
 
 interface PerformanceChartProps {
-  allocation: number;
-  ytdReturn: number;
+  instanceId: string;
   title?: string;
 }
 
-// ─── Mock data generator ─────────────────────────────────────────────────────
+interface ChartData {
+  equity: number[];
+  pnl: number[];
+  labels: string[];
+}
 
-function generateData(range: TimeRange, allocation: number, ytdReturn: number) {
-  const counts: Record<TimeRange, number> = { "1D": 24, "1W": 7, "1M": 30, "ALL": 102 };
-  const n = counts[range];
+// ─── Transform API response → chart data shape ──────────────────────────────
 
-  // Scale drift to match YTD return over the ALL range
-  const totalDrift = ytdReturn / 100;
-  const scaledDrift = range === "ALL" ? totalDrift / n : totalDrift / 102;
-  const volatility = range === "1D" ? 0.002 : 0.008;
-
-  // Seeded-ish deterministic data so bars don't re-randomize on every render
-  // ~70% positive, 30% negative P&L bars
-  const equity: number[] = [allocation];
-  for (let i = 1; i < n; i++) {
-    const seed = Math.sin(i * 9301 + n * 4973) * 10000;
-    const rand = seed - Math.floor(seed); // 0-1 deterministic
-    // 30% chance of negative: rand < 0.3 produces a negative day
-    const direction = rand < 0.3 ? -1 : 1;
-    const magnitude = (0.3 + rand * 0.7) * volatility * allocation;
-    const change = direction * magnitude + scaledDrift * equity[i - 1];
-    equity.push(Math.round(equity[i - 1] + change));
-  }
-
-  const pnl = equity.map((v, i) => i === 0 ? 0 : v - equity[i - 1]);
-
-  // Labels
-  const now = new Date(2025, 3, 5);
+function transformHistory(history: ApiBalanceHistory[]): ChartData {
+  const equity: number[] = [];
+  const pnl: number[] = [];
   const labels: string[] = [];
-  if (range === "1D") {
-    for (let i = 0; i < n; i++) labels.push(`${String(i).padStart(2, "0")}:00`);
-  } else {
-    for (let i = n - 1; i >= 0; i--) {
-      const d = new Date(now);
-      d.setDate(d.getDate() - i);
-      labels.push(d.toLocaleDateString("en-US", { month: "short", day: "numeric" }));
-    }
+
+  for (let i = 0; i < history.length; i++) {
+    const row = history[i];
+    equity.push(row.equity_usd);
+    // Per-day P&L = equity change since previous row.
+    // First row's P&L is unknown (no prior equity reference) → use 0 as the
+    // visual baseline rather than a fake value; tooltip will show the raw row.
+    pnl.push(i === 0 ? 0 : row.equity_usd - history[i - 1].equity_usd);
+    const d = new Date(row.date);
+    labels.push(d.toLocaleDateString("en-US", { month: "short", day: "numeric" }));
   }
 
   return { equity, pnl, labels };
@@ -77,34 +62,153 @@ function getCssVar(name: string): string {
   return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
 }
 
+// ─── Empty / loading / error states ─────────────────────────────────────────
+
+function StateMessage({ main, sub }: { main: string; sub?: string }) {
+  return (
+    <div style={{
+      height: 260,
+      display: "flex", flexDirection: "column",
+      alignItems: "center", justifyContent: "center",
+      gap: 4,
+    }}>
+      <div style={{ fontSize: 10, color: "var(--t2)", fontWeight: 400 }}>{main}</div>
+      {sub && <div style={{ fontSize: 9, color: "var(--t3)" }}>{sub}</div>}
+    </div>
+  );
+}
+
 // ─── Component ───────────────────────────────────────────────────────────────
 
-export default function PerformanceChart({ allocation, ytdReturn, title = "PERFORMANCE" }: PerformanceChartProps) {
+export default function PerformanceChart({ instanceId, title = "PERFORMANCE" }: PerformanceChartProps) {
   const [range, setRange] = useState<TimeRange>("1M");
+  const [data, setData] = useState<ChartData | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
   const { hoverIdx, setHoverIdx, tooltipPos, setTooltipPos } = useSharedHover();
   const containerRef = useRef<HTMLDivElement>(null);
 
-  const data = generateData(range, allocation, ytdReturn);
+  // Fetch history whenever the instance or range changes.
+  useEffect(() => {
+    let cancelled = false;
+    async function fetchHistory() {
+      setLoading(true);
+      setError(null);
+      try {
+        const result = await allocatorApi.getBalanceHistory(instanceId, range);
+        if (cancelled) return;
+        setData(transformHistory(result.history));
+      } catch (err) {
+        if (cancelled) return;
+        const { detail } = parseApiError(err);
+        setError(detail || "Unable to load history");
+        setData(null);
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    }
+    fetchHistory();
+    return () => { cancelled = true; };
+  }, [instanceId, range]);
 
   // Resolve CSS vars for Chart.js (needs actual hex values)
   const green = getCssVar("--green") || "#00c896";
   const red = getCssVar("--red") || "#ff4d4d";
   const t2 = getCssVar("--t2") || "#5a5754";
   const t3 = getCssVar("--t3") || "#bbbbbb";
-  const line = getCssVar("--line") || "#242428";
 
   const ranges: TimeRange[] = ["1D", "1W", "1M", "ALL"];
+
+  // Header (always rendered — tabs remain visible across loading/empty/error).
+  const header = (
+    <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10 }}>
+      <span style={{ fontSize: 9, color: "var(--t3)", fontWeight: 700, letterSpacing: "0.08em", textTransform: "uppercase" }}>
+        {title}
+      </span>
+      <div style={{ display: "flex", border: "1px solid var(--line)", borderRadius: 4, overflow: "hidden" }}>
+        {ranges.map(r => (
+          <button
+            key={r}
+            onClick={() => setRange(r)}
+            style={{
+              padding: "3px 8px", fontSize: 9, fontWeight: 700,
+              background: range === r ? "var(--bg4)" : "transparent",
+              color: range === r ? "var(--t0)" : "var(--t3)",
+              border: "none", cursor: "pointer",
+              borderRight: r !== "ALL" ? "1px solid var(--line)" : "none",
+            }}
+          >
+            {r}
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+
+  const wrapperStyle = {
+    background: "var(--bg1)", border: "1px solid var(--line)",
+    borderRadius: 6, padding: "12px 14px", marginBottom: 20,
+    position: "relative" as const,
+  };
+
+  // Loading: show header + skeleton.
+  if (loading && data === null) {
+    return (
+      <div style={wrapperStyle}>
+        {header}
+        <StateMessage main="Loading…" />
+      </div>
+    );
+  }
+
+  // Error: honest error text, no fallback to mock.
+  if (error) {
+    return (
+      <div style={wrapperStyle}>
+        {header}
+        <StateMessage main="Unable to load history" sub={error} />
+      </div>
+    );
+  }
+
+  // Empty: no history rows for this allocation / range yet.
+  if (!data || data.equity.length === 0) {
+    return (
+      <div style={wrapperStyle}>
+        {header}
+        <StateMessage
+          main="No trading history yet"
+          sub="First data point appears after the next session closes (~23:55 UTC)"
+        />
+      </div>
+    );
+  }
+
+  // Single-point: still too sparse to draw a line or meaningful bar chart.
+  // Render the single value as a plain stat with the same empty-state chrome.
+  if (data.equity.length === 1) {
+    return (
+      <div style={wrapperStyle}>
+        {header}
+        <StateMessage
+          main={`$${data.equity[0].toLocaleString()} on ${data.labels[0]}`}
+          sub="Only one data point so far — line chart appears after two closes"
+        />
+      </div>
+    );
+  }
+
+  // ── Full chart rendering (data.equity.length >= 2) ──────────────────────
 
   // How many x-axis labels to show
   const labelCounts: Record<TimeRange, number> = { "1D": 6, "1W": 7, "1M": 6, "ALL": 6 };
   const maxLabels = labelCounts[range];
   const step = Math.max(1, Math.floor(data.labels.length / maxLabels));
-  const xLabels = data.labels.filter((_, i) => i % step === 0 || i === data.labels.length - 1);
   const xLabelIndices = data.labels.map((_, i) => i % step === 0 || i === data.labels.length - 1);
 
   // Shared hover handler
-  const hoverIdxRef = useRef<number | null>(null);
-  const handleHover = useCallback((chart: ChartJS, event: MouseEvent) => {
+  const hoverIdxRef = { current: null as number | null };
+  const handleHover = (chart: ChartJS, event: MouseEvent) => {
     const points = chart.getElementsAtEventForMode(event, "index", { intersect: false }, false);
     if (points.length > 0 && containerRef.current) {
       const idx = points[0].index;
@@ -119,13 +223,13 @@ export default function PerformanceChart({ allocation, ytdReturn, title = "PERFO
       setHoverIdx(null);
       setTooltipPos(null);
     }
-  }, []);
+  };
 
-  const handleLeave = useCallback(() => {
+  const handleLeave = () => {
     hoverIdxRef.current = null;
     setHoverIdx(null);
     setTooltipPos(null);
-  }, []);
+  };
 
   // Equity chart config
   const equityData = {
@@ -175,11 +279,8 @@ export default function PerformanceChart({ allocation, ytdReturn, title = "PERFO
       legend: { display: false },
     },
     onHover: (_event: unknown, _elements: unknown, chart: ChartJS) => {
-      const nativeEvent = (chart.canvas as HTMLCanvasElement).closest("canvas")?.parentElement?.parentElement;
-      if (nativeEvent) {
-        const e = (_event as { native?: MouseEvent })?.native;
-        if (e) handleHover(chart, e);
-      }
+      const e = (_event as { native?: MouseEvent })?.native;
+      if (e) handleHover(chart, e);
     },
   };
 
@@ -217,7 +318,6 @@ export default function PerformanceChart({ allocation, ytdReturn, title = "PERFO
     plugins: {
       tooltip: { enabled: false },
       legend: { display: false },
-      // Zero line drawn via plugin
     },
     onHover: (_event: unknown, _elements: unknown, chart: ChartJS) => {
       const e = (_event as { native?: MouseEvent })?.native;
@@ -236,7 +336,7 @@ export default function PerformanceChart({ allocation, ytdReturn, title = "PERFO
       if (zeroY < chartArea.top || zeroY > chartArea.bottom) return;
       ctx.save();
       ctx.setLineDash([3, 3]);
-      ctx.strokeStyle = t2 + "4D"; // 30% opacity
+      ctx.strokeStyle = t2 + "4D";
       ctx.lineWidth = 1;
       ctx.beginPath();
       ctx.moveTo(chartArea.left, zeroY);
@@ -271,35 +371,9 @@ export default function PerformanceChart({ allocation, ytdReturn, title = "PERFO
     <div
       ref={containerRef}
       onMouseLeave={handleLeave}
-      style={{
-        background: "var(--bg1)", border: "1px solid var(--line)",
-        borderRadius: 6, padding: "12px 14px", marginBottom: 20,
-        position: "relative",
-      }}
+      style={wrapperStyle}
     >
-      {/* Header */}
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10 }}>
-        <span style={{ fontSize: 9, color: "var(--t3)", fontWeight: 700, letterSpacing: "0.08em", textTransform: "uppercase" }}>
-          {title}
-        </span>
-        <div style={{ display: "flex", border: "1px solid var(--line)", borderRadius: 4, overflow: "hidden" }}>
-          {ranges.map(r => (
-            <button
-              key={r}
-              onClick={() => setRange(r)}
-              style={{
-                padding: "3px 8px", fontSize: 9, fontWeight: 700,
-                background: range === r ? "var(--bg4)" : "transparent",
-                color: range === r ? "var(--t0)" : "var(--t3)",
-                border: "none", cursor: "pointer",
-                borderRight: r !== "ALL" ? "1px solid var(--line)" : "none",
-              }}
-            >
-              {r}
-            </button>
-          ))}
-        </div>
-      </div>
+      {header}
 
       {/* Equity curve */}
       <div style={{ height: 180 }}>

@@ -2299,6 +2299,18 @@ def _run_monitoring_loop(today, today_date, api: ExchangeAdapter, inst_ids,
         if allocation_id is None:
             log_daily_return(net_pct, exit_reason, session_date=today, eff_lev=eff_lev)
         else:
+            # Fetch post-exit equity for the performance_daily chart row.
+            # Best-effort: on fetch failure we still record allocation_returns
+            # (primary accounting) but skip the chart row for this session.
+            post_exit_equity_usd = None
+            if not dry_run:
+                try:
+                    post_exit_equity_usd = get_account_balance_usdt(api)
+                except Exception as e:
+                    log.warning(
+                        f"{log_prefix}Could not fetch post-exit equity for "
+                        f"performance_daily: {e}"
+                    )
             # Mirror of log_daily_return — applies same fee + funding drag internally.
             _log_allocation_return(
                 allocation_id, today,
@@ -2307,6 +2319,7 @@ def _run_monitoring_loop(today, today_date, api: ExchangeAdapter, inst_ids,
                 effective_leverage=eff_lev,
                 capital_deployed_usd=float(capital_deployed_usd),
                 config=cfg,
+                equity_usd=post_exit_equity_usd,
             )
     else:
         log.warning(f"{log_prefix}Return not logged (NaN -- price unavailable at close)")
@@ -2740,6 +2753,9 @@ def _log_allocation_return(
     effective_leverage: float,
     capital_deployed_usd: float,
     config: "TraderConfig",
+    equity_usd: float | None = None,      # post-session balance (None for pre-
+                                          # trade terminal exits; used for the
+                                          # performance_daily chart write)
 ) -> None:
     """Mirror of log_daily_return for user allocations — applies the same fee +
     funding drag internally so net P&L accounting stays identical across master
@@ -2753,6 +2769,14 @@ def _log_allocation_return(
     Upsert semantics so --resume or re-runs don't duplicate. Called for every
     terminal outcome — including filtered / conviction-kill paths that deploy
     no capital — so the return history is dense.
+
+    equity_usd: when provided, ALSO writes a row into performance_daily
+    (allocation_id, date, equity_usd, daily_return) for the allocator
+    dashboard's performance chart. Callers at pre-trade terminal states
+    (filtered / no_entry / errored before any position) pass None since no
+    balance fetch was performed; performance_daily gets no row for those days
+    (chart shows a gap). Post-trading close paths pass the post-exit balance
+    from get_account_balance_usdt(api).
     """
     gross_pct = net_return_pct
     if effective_leverage > 0 and exit_reason not in _FLAT_EXIT_REASONS:
@@ -2784,6 +2808,40 @@ def _log_allocation_return(
         conn.commit()
     except Exception as e:
         log.warning(f"  Could not log allocation_returns for {allocation_id}: {e}")
+    finally:
+        conn.close()
+
+    # Performance chart row — separate connection + try/except so a
+    # performance_daily failure cannot corrupt the allocation_returns write.
+    # Only writes when a post-session equity balance was captured; pre-trade
+    # terminal exits (filtered / no_entry / etc.) pass equity_usd=None and
+    # skip this path, leaving the chart with a gap for non-trading days.
+    if equity_usd is None:
+        return
+
+    # TODO(session-e+): compute drawdown as rolling peak-to-trough from prior
+    # performance_daily.equity_usd rows for this allocation_id, computed at
+    # write time. NULL = 'not yet computed', NOT 'drawdown is zero'.
+    conn = _trader_db_connect()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO user_mgmt.performance_daily
+                    (allocation_id, date, equity_usd, daily_return, drawdown)
+                VALUES (%s::uuid, %s, %s, %s, NULL)
+                ON CONFLICT (allocation_id, date) DO UPDATE SET
+                    equity_usd   = EXCLUDED.equity_usd,
+                    daily_return = EXCLUDED.daily_return,
+                    updated_at   = NOW()
+                """,
+                # session_date is a UTC date string (matches utc_today()) —
+                # matches system convention, avoids TZ drift for non-UTC operators.
+                (allocation_id, session_date, equity_usd, net_return_pct),
+            )
+        conn.commit()
+    except Exception as e:
+        log.warning(f"  Could not log performance_daily for {allocation_id}: {e}")
     finally:
         conn.close()
 

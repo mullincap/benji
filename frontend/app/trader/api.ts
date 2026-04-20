@@ -278,9 +278,9 @@ export const allocatorApi = {
     apiFetch<{ closed: boolean }>(`/api/allocator/allocations/${allocationId}`, { method: "DELETE" }),
 
   // Trader data (per allocation)
-  getBalanceHistory: (allocationId: string) =>
+  getBalanceHistory: (allocationId: string, range?: "1D" | "1W" | "1M" | "ALL") =>
     apiFetch<{ allocation_id: string; history: ApiBalanceHistory[] }>(
-      `/api/allocator/trader/${allocationId}/balance-history`,
+      `/api/allocator/trader/${allocationId}/balance-history${range ? `?range=${range}` : ""}`,
     ),
 
   getPnl: (allocationId: string) =>

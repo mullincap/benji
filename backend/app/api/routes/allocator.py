@@ -1182,8 +1182,20 @@ def delete_allocation(allocation_id: str, user_id: str = Depends(get_current_use
 # ── Trader data (per-allocation) ───────────────────────────────────────────
 
 @router.get("/trader/{allocation_id}/balance-history")
-def trader_balance_history(allocation_id: str, user_id: str = Depends(get_current_user), cur=Depends(get_cursor)) -> dict[str, Any]:
-    """Return daily equity curve for an allocation. Verifies ownership."""
+def trader_balance_history(
+    allocation_id: str,
+    range: str | None = None,
+    user_id: str = Depends(get_current_user),
+    cur=Depends(get_cursor),
+) -> dict[str, Any]:
+    """Return daily equity curve for an allocation. Verifies ownership.
+
+    Optional `range` query param filters server-side. Allowed values:
+      - "1D"  → today only (1 row max; daily table → sparse)
+      - "1W"  → last 7 days
+      - "1M"  → last 30 days
+      - "ALL" / None / unknown → full history (no filter)
+    """
     cur.execute("SELECT user_id FROM user_mgmt.allocations WHERE allocation_id = %s::uuid", (allocation_id,))
     row = cur.fetchone()
     if not row:
@@ -1191,12 +1203,24 @@ def trader_balance_history(allocation_id: str, user_id: str = Depends(get_curren
     if str(row["user_id"]) != user_id:
         raise HTTPException(status_code=403, detail="Not your allocation")
 
-    cur.execute("""
-        SELECT date, equity_usd, daily_return, drawdown
-        FROM user_mgmt.performance_daily
-        WHERE allocation_id = %s::uuid
-        ORDER BY date
-    """, (allocation_id,))
+    range_days = {"1D": 1, "1W": 7, "1M": 30}.get((range or "").upper())
+    if range_days is not None:
+        from datetime import date as _date, timedelta as _timedelta
+        since_date = _date.today() - _timedelta(days=range_days - 1)
+        cur.execute("""
+            SELECT date, equity_usd, daily_return, drawdown
+            FROM user_mgmt.performance_daily
+            WHERE allocation_id = %s::uuid
+              AND date >= %s
+            ORDER BY date
+        """, (allocation_id, since_date))
+    else:
+        cur.execute("""
+            SELECT date, equity_usd, daily_return, drawdown
+            FROM user_mgmt.performance_daily
+            WHERE allocation_id = %s::uuid
+            ORDER BY date
+        """, (allocation_id,))
     rows = cur.fetchall()
 
     return {
@@ -1206,7 +1230,7 @@ def trader_balance_history(allocation_id: str, user_id: str = Depends(get_curren
                 "date": r["date"].isoformat(),
                 "equity_usd": float(r["equity_usd"] or 0),
                 "daily_return": float(r["daily_return"] or 0),
-                "drawdown": float(r["drawdown"] or 0),
+                "drawdown": float(r["drawdown"] or 0) if r["drawdown"] is not None else None,
             }
             for r in rows
         ],

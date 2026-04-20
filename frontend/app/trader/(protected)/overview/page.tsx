@@ -4,7 +4,11 @@ import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { useTrader, Position, Exchange, StrategyInstance, StrategyType, STRATEGY_CATALOG, fmt, GHOST_CURVE, RISK_COLOR, RISK_DIM, StrategyCatalogEntry } from "../../context";
 import EquityCurveSvg from "../../equity-curve";
-import PerformanceChart from "../../performance-chart";
+// COMBINED performance chart removed — was rendering mock data via
+// generateData(). A real aggregate-across-allocations endpoint does not
+// exist yet; per-allocation charts on the trader detail page use real
+// performance_daily data. Restore this import + add an aggregation
+// endpoint (sum equity_usd across active allocations per date) when ready.
 import TraderCard from "../../components/TraderCard";
 import {
   Chart as ChartJS,
@@ -60,10 +64,10 @@ function DashboardContent({ equity, dailyPnl, allTimePnl, sharpe, allocated, act
         <MetricCard label="ACTIVE TRADERS" value={String(activeCount)} />
       </div>
 
-      {/* Combined performance chart — live data only */}
-      {!showCurve && allocated > 0 && (
-        <PerformanceChart allocation={allocated} ytdReturn={28} title="COMBINED PERFORMANCE" />
-      )}
+      {/* Combined performance chart intentionally omitted — see import-line
+          comment above. MetricCards (total equity, all-time P&L, daily P&L,
+          sharpe, active traders) provide the summary-level figures; the
+          per-allocation time series lives on each trader's detail page. */}
 
       {/* Capital deployed bar */}
       <div style={{
