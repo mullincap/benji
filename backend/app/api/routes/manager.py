@@ -856,6 +856,234 @@ def list_execution_reports() -> dict[str, Any]:
     return {"reports": reports, "source_dir": str(reports_dir)}
 
 
+# ── Multi-tenant execution summary (allocation_returns + portfolio_sessions) ──
+
+@router.get("/execution-summary")
+def execution_summary(
+    allocation_ids: str | None = None,
+    range: str | None = None,
+    cur=Depends(get_cursor),
+) -> dict[str, Any]:
+    """Per-(allocation, day) execution summary for the Manager Execution tab.
+
+    Reads allocation_returns LEFT JOIN portfolio_sessions (on allocation_id +
+    session_date = signal_date) LEFT JOIN allocations (for exchange / strategy
+    labels). Unifies what Session D shipped into `allocation_returns` with the
+    session-level telemetry in `portfolio_sessions`.
+
+    Several execution-quality fields (fill_rate, entry/exit_slip_bps, retries,
+    signal_count, alerts) are not yet persisted for allocations — those are
+    returned as null today. A Session E+ writer extension will populate them;
+    response shape is stable across that change.
+
+    Query params:
+      allocation_ids: comma-separated UUIDs. Default = all active allocations.
+      range:         "1W" | "1M" | "ALL". Default = ALL.
+
+    Response:
+      {
+        "available_allocations": [{allocation_id, exchange, strategy_label, capital_usd}],
+        "kpis": {avg_fill_rate, avg_entry_slip_bps, avg_exit_slip_bps,
+                 avg_pnl_gap, retries_needed, sessions_traded, sessions_total},
+        "daily": [{date, allocation_id, exchange, strategy_label, capital_usd,
+                   signal_count, conviction{passed,return_pct}, filled, retried,
+                   fill_rate, entry_slip_bps, exit_slip_bps,
+                   est_return_pct, actual_return_pct, pnl_gap_pct_from_gross,
+                   leverage_applied, bars_count, sym_stops_count,
+                   peak_portfolio_return, max_dd_from_peak, exit_reason, alerts}, ...]
+      }
+
+    KPI aggregation: capital-weighted average for the *_slip / fill_rate / pnl_gap
+    fields (weight = capital_deployed_usd). Count fields are plain sums.
+    """
+    # ── 1. Resolve the active-allocation universe (for filter + default set) ──
+    cur.execute("""
+        SELECT
+            a.allocation_id, a.capital_usd,
+            s.display_name AS strategy_display_name, s.name AS strategy_name,
+            ec.exchange
+        FROM user_mgmt.allocations a
+        JOIN audit.strategy_versions sv ON sv.strategy_version_id = a.strategy_version_id
+        JOIN audit.strategies s ON s.strategy_id = sv.strategy_id
+        JOIN user_mgmt.exchange_connections ec ON ec.connection_id = a.connection_id
+        WHERE a.status = 'active'
+        ORDER BY a.created_at
+    """)
+    active_rows = cur.fetchall()
+
+    available_allocations = [
+        {
+            "allocation_id": str(r["allocation_id"]),
+            "exchange": r["exchange"],
+            "strategy_label": r["strategy_display_name"] or r["strategy_name"],
+            "capital_usd": _dec(r["capital_usd"]),
+        }
+        for r in active_rows
+    ]
+    all_active_ids = [r["allocation_id"] for r in active_rows]
+
+    # ── 2. Filter to user-selected allocation_ids if provided ─────────────────
+    if allocation_ids:
+        requested = {u.strip() for u in allocation_ids.split(",") if u.strip()}
+        scope_ids = [aid for aid in all_active_ids if str(aid) in requested]
+    else:
+        scope_ids = list(all_active_ids)
+
+    # ── 3. Date range ─────────────────────────────────────────────────────────
+    range_days = {"1W": 7, "1M": 30}.get((range or "").upper())
+    since_date = None
+    if range_days is not None:
+        since_date = datetime.date.today() - datetime.timedelta(days=range_days - 1)
+
+    # ── 4. Pull daily rows ────────────────────────────────────────────────────
+    # Even when scope_ids is empty (user filter matched no active allocations)
+    # we still return the shape; the frontend renders the empty state.
+    daily: list[dict[str, Any]] = []
+    if scope_ids:
+        params: list[Any] = [scope_ids]
+        date_clause = ""
+        if since_date is not None:
+            date_clause = " AND ar.session_date >= %s"
+            params.append(since_date)
+
+        cur.execute(f"""
+            SELECT
+                ar.allocation_id,
+                ar.session_date,
+                ar.net_return_pct,
+                ar.gross_return_pct,
+                ar.exit_reason       AS ar_exit_reason,
+                ar.effective_leverage,
+                ar.capital_deployed_usd,
+                ps.symbols,
+                ps.entered,
+                ps.bars_count,
+                ps.final_portfolio_return,
+                ps.peak_portfolio_return,
+                ps.max_dd_from_peak,
+                ps.sym_stops,
+                ps.lev_int,
+                ec.exchange,
+                s.display_name       AS strategy_display_name,
+                s.name               AS strategy_name,
+                a.capital_usd
+            FROM user_mgmt.allocation_returns ar
+            LEFT JOIN user_mgmt.portfolio_sessions ps
+                   ON ps.allocation_id = ar.allocation_id
+                  AND ps.signal_date   = ar.session_date
+            JOIN user_mgmt.allocations a ON a.allocation_id = ar.allocation_id
+            JOIN audit.strategy_versions sv ON sv.strategy_version_id = a.strategy_version_id
+            JOIN audit.strategies s ON s.strategy_id = sv.strategy_id
+            JOIN user_mgmt.exchange_connections ec ON ec.connection_id = a.connection_id
+            WHERE ar.allocation_id = ANY(%s::uuid[])
+                  {date_clause}
+            ORDER BY ar.session_date DESC, ar.allocation_id ASC
+        """, tuple(params))
+
+        for r in cur.fetchall():
+            # Conviction derivation: exit_reason NOT IN _FLAT_EXIT_REASONS
+            # is a proxy for "conviction passed + entered". portfolio_sessions
+            # `entered` array confirms whether positions actually opened.
+            er = r["ar_exit_reason"]
+            entered_arr = r["entered"] or []
+            filled = len(entered_arr) > 0
+            conviction_passed = er not in (
+                "filtered", "no_entry_conviction", "missed_window",
+                "stale_close_failed", "no_entry", "errored", "entry_failed",
+            )
+
+            # Leveraged estimated return proxy: final_portfolio_return is 1x,
+            # so scale by lev_int × 100 to get pre-fee leveraged %.
+            fpr = _dec(r["final_portfolio_return"])
+            lev_int = int(r["lev_int"]) if r["lev_int"] is not None else None
+            est_return_pct = (
+                fpr * lev_int * 100 if fpr is not None and lev_int is not None else None
+            )
+
+            net_ret = _dec(r["net_return_pct"])
+            gross_ret = _dec(r["gross_return_pct"])
+            # Gross-to-net drag: fee + funding subtracted inside
+            # _log_allocation_return. Not the same semantic as master's
+            # pnl_vs_est_pct (which compared ideal-fill est vs realized),
+            # but the best proxy until the writer extension lands.
+            pnl_gap_pct_from_gross = (
+                gross_ret - net_ret
+                if gross_ret is not None and net_ret is not None
+                else None
+            )
+
+            sym_stops_arr = r["sym_stops"] or []
+            symbols_arr = r["symbols"] or []
+
+            daily.append({
+                "date": r["session_date"].isoformat(),
+                "allocation_id": str(r["allocation_id"]),
+                "exchange": r["exchange"],
+                "strategy_label": r["strategy_display_name"] or r["strategy_name"],
+                "capital_usd": _dec(r["capital_usd"]),
+                # Derivable from portfolio_sessions
+                "signal_count": len(symbols_arr) if symbols_arr else None,
+                "conviction": {
+                    "passed": conviction_passed,
+                    "return_pct": None,   # roi_x not persisted for allocations yet
+                },
+                "filled": filled,
+                # Pending writer extension (Session E+)
+                "retried":          None,
+                "fill_rate":        None,
+                "entry_slip_bps":   None,
+                "exit_slip_bps":    None,
+                "alerts":           None,
+                # Sourced
+                "est_return_pct":             est_return_pct,
+                "actual_return_pct":          net_ret,
+                "pnl_gap_pct_from_gross":     pnl_gap_pct_from_gross,
+                "leverage_applied":           _dec(r["effective_leverage"]),
+                "bars_count":                 r["bars_count"],
+                "sym_stops_count":            len(sym_stops_arr),
+                "peak_portfolio_return":      _dec(r["peak_portfolio_return"]),
+                "max_dd_from_peak":           _dec(r["max_dd_from_peak"]),
+                "capital_deployed_usd":       _dec(r["capital_deployed_usd"]),
+                "exit_reason":                er,
+            })
+
+    # ── 5. KPIs — capital-weighted where averaged, plain sum/count where counted ─
+    # Weighting rationale: averaging fill_rate / slippage across allocations of
+    # wildly different capital gives a small allocation equal voice to a large
+    # one, which isn't what a portfolio manager wants. capital_deployed_usd is
+    # the natural weight — small-allocation noise shouldn't dominate.
+    def _weighted_avg(field: str) -> float | None:
+        num = 0.0
+        den = 0.0
+        for d in daily:
+            v = d.get(field)
+            w = d.get("capital_deployed_usd") or 0.0
+            if v is not None and w > 0:
+                num += float(v) * float(w)
+                den += float(w)
+        return (num / den) if den > 0 else None
+
+    retries_needed = sum(d["retried"] or 0 for d in daily)
+    sessions_traded = sum(1 for d in daily if d["filled"])
+    sessions_total = len(daily)
+
+    kpis = {
+        "avg_fill_rate":      _weighted_avg("fill_rate"),
+        "avg_entry_slip_bps": _weighted_avg("entry_slip_bps"),
+        "avg_exit_slip_bps":  _weighted_avg("exit_slip_bps"),
+        "avg_pnl_gap":        _weighted_avg("pnl_gap_pct_from_gross"),
+        "retries_needed":     retries_needed,
+        "sessions_traded":    sessions_traded,
+        "sessions_total":     sessions_total,
+    }
+
+    return {
+        "available_allocations": available_allocations,
+        "kpis":                  kpis,
+        "daily":                 daily,
+    }
+
+
 # ── Portfolio time series (SQL-backed) ──────────────────────────────────────
 # The Manager UI reads exclusively from user_mgmt.portfolio_sessions +
 # user_mgmt.portfolio_bars, which the trader writes live every 5 minutes.

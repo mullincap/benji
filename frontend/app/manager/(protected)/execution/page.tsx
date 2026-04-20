@@ -103,6 +103,60 @@ interface ExecutionReport {
   alerts_fired?: number;
 }
 
+// ─── Multi-tenant summary types (new endpoint) ──────────────────────────────
+// Fed by GET /api/manager/execution-summary (reads allocation_returns joined
+// with portfolio_sessions). Execution-quality fields (fill_rate, slip_bps,
+// retried, alerts) are null today — writer extension tracked for Session E+.
+
+interface AvailableAlloc {
+  allocation_id: string;
+  exchange: string;
+  strategy_label: string;
+  capital_usd: number | null;
+}
+
+interface SummaryKpis {
+  avg_fill_rate:      number | null;
+  avg_entry_slip_bps: number | null;
+  avg_exit_slip_bps:  number | null;
+  avg_pnl_gap:        number | null;
+  retries_needed:     number;
+  sessions_traded:    number;
+  sessions_total:     number;
+}
+
+interface SummaryDaily {
+  date: string;
+  allocation_id: string;
+  exchange: string;
+  strategy_label: string;
+  capital_usd: number | null;
+  signal_count: number | null;
+  conviction: { passed: boolean; return_pct: number | null } | null;
+  filled: boolean;
+  retried: number | null;
+  fill_rate: number | null;
+  entry_slip_bps: number | null;
+  exit_slip_bps: number | null;
+  est_return_pct: number | null;
+  actual_return_pct: number | null;
+  pnl_gap_pct_from_gross: number | null;
+  leverage_applied: number | null;
+  bars_count: number | null;
+  sym_stops_count: number | null;
+  peak_portfolio_return: number | null;
+  max_dd_from_peak: number | null;
+  capital_deployed_usd: number | null;
+  exit_reason: string | null;
+  alerts: number | null;
+}
+
+interface ExecutionSummary {
+  available_allocations: AvailableAlloc[];
+  kpis:                  SummaryKpis;
+  daily:                 SummaryDaily[];
+}
+
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
 const FLAT_REASONS = new Set(["filtered", "no_entry_conviction", "missed_window"]);
@@ -406,13 +460,136 @@ function convictionBadge(
   );
 }
 
+// ─── Allocation filter (single-select for v1) ──────────────────────────────
+// TODO: lift to page-level or URL query param if Overview / Portfolios adopt
+// the same control. Multi-select is a follow-up if users ask.
+
+function AllocationFilter({
+  value,
+  onChange,
+  options,
+}: {
+  value: "all" | string;
+  onChange: (next: "all" | string) => void;
+  options: AvailableAlloc[];
+}) {
+  return (
+    <select
+      value={value}
+      onChange={(e) => onChange(e.target.value as "all" | string)}
+      style={{
+        background: "var(--bg2)",
+        border: "1px solid var(--line)",
+        borderRadius: 4,
+        color: "var(--t1)",
+        fontFamily: FONT_MONO,
+        fontSize: 10,
+        padding: "5px 10px",
+        cursor: "pointer",
+      }}
+    >
+      <option value="all">All allocations</option>
+      {options.map((a) => (
+        <option key={a.allocation_id} value={a.allocation_id}>
+          {a.exchange} · {a.strategy_label}
+        </option>
+      ))}
+    </select>
+  );
+}
+
+// ─── Master-history toggle (temporary) ─────────────────────────────────────
+// REMOVE after master cron retirement per docs/open_work_list.md Phase 2 gate
+// (earliest 2026-04-28).
+
+function IncludeMasterToggle({
+  on,
+  onChange,
+}: {
+  on: boolean;
+  onChange: (next: boolean) => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={() => onChange(!on)}
+      style={{
+        display: "inline-flex",
+        alignItems: "center",
+        gap: 8,
+        background: "transparent",
+        border: "1px solid var(--line)",
+        borderRadius: 4,
+        padding: "4px 10px",
+        fontFamily: FONT_MONO,
+        fontSize: 9,
+        fontWeight: 700,
+        letterSpacing: "0.12em",
+        textTransform: "uppercase",
+        color: on ? "var(--t0)" : "var(--t2)",
+        cursor: "pointer",
+      }}
+    >
+      <span
+        style={{
+          width: 22,
+          height: 12,
+          borderRadius: 6,
+          background: on ? "var(--green)" : "var(--bg4)",
+          position: "relative",
+          display: "inline-block",
+          transition: "background 0.15s ease",
+        }}
+      >
+        <span
+          style={{
+            width: 8,
+            height: 8,
+            borderRadius: "50%",
+            background: on ? "var(--bg0)" : "var(--t2)",
+            position: "absolute",
+            top: 2,
+            left: on ? 12 : 2,
+            transition: "left 0.15s ease",
+          }}
+        />
+      </span>
+      Include master history
+    </button>
+  );
+}
+
+// ─── Empty-state banner ────────────────────────────────────────────────────
+
+function TabBanner({ text }: { text: string }) {
+  return (
+    <div
+      style={{
+        background: "var(--bg2)",
+        border: "1px solid var(--line)",
+        borderLeft: "3px solid var(--green)",
+        borderRadius: 4,
+        padding: "10px 14px",
+        fontSize: 10,
+        color: "var(--t1)",
+        fontFamily: FONT_MONO,
+      }}
+    >
+      {text}
+    </div>
+  );
+}
+
 // ─── Page ───────────────────────────────────────────────────────────────────
 
 export default function ExecutionPage() {
   const [reports, setReports] = useState<ExecutionReport[] | null>(null);
+  const [summary, setSummary] = useState<ExecutionSummary | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [windowPreset, setWindowPreset] = useState<WindowPreset>(DEFAULT_WINDOW);
+  const [allocFilter, setAllocFilter] = useState<"all" | string>("all");
+  const [includeMaster, setIncludeMaster] = useState(false);
   // null → SessionLogs shows the most recent session. Any row click sets this
   // to the clicked row's date so the log viewer correlates with the table.
   const [selectedLogDate, setSelectedLogDate] = useState<string | null>(null);
@@ -424,22 +601,40 @@ export default function ExecutionPage() {
     setActiveSection((cur) => (cur === name ? null : name));
   }, []);
 
-  const load = useCallback(() => {
-    fetch(`${API_BASE}/api/manager/execution-reports`, {
-      credentials: "include",
-    })
+  // Master-history fetch: only active when "Include master history" is ON.
+  // Legacy /api/manager/execution-reports path — retire once master cron
+  // is retired per docs/open_work_list.md Phase 2 gate.
+  useEffect(() => {
+    if (!includeMaster) { setReports(null); return; }
+    let cancelled = false;
+    fetch(`${API_BASE}/api/manager/execution-reports`, { credentials: "include" })
       .then((r) => {
         if (r.status === 401) throw new Error("Session expired");
         if (!r.ok) throw new Error(`HTTP ${r.status}`);
         return r.json();
       })
-      .then((d) => setReports(d.reports || []))
-      .catch((e) => setError(e.message));
-  }, []);
+      .then((d) => { if (!cancelled) setReports(d.reports || []); })
+      .catch((e) => { if (!cancelled) setError(e.message); });
+    return () => { cancelled = true; };
+  }, [includeMaster]);
 
+  // Multi-tenant summary fetch: drives KPIs + daily table + filter dropdown.
+  // Re-runs when allocation filter or window preset changes.
   useEffect(() => {
-    load();
-  }, [load]);
+    let cancelled = false;
+    const params = new URLSearchParams();
+    params.set("range", windowPreset.label);
+    if (allocFilter !== "all") params.set("allocation_ids", allocFilter);
+    fetch(`${API_BASE}/api/manager/execution-summary?${params}`, { credentials: "include" })
+      .then((r) => {
+        if (r.status === 401) throw new Error("Session expired");
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        return r.json();
+      })
+      .then((d: ExecutionSummary) => { if (!cancelled) setSummary(d); })
+      .catch((e) => { if (!cancelled) setError(e.message); });
+    return () => { cancelled = true; };
+  }, [allocFilter, windowPreset]);
 
   const toggle = useCallback((date: string) => {
     setExpanded((prev) => {
@@ -452,62 +647,18 @@ export default function ExecutionPage() {
     setSelectedLogDate(date);
   }, []);
 
-  // Aggregate KPIs across all reports
-  const kpis = useMemo(() => {
-    if (!reports) {
-      return {
-        avgFillRate: null as number | null,
-        avgEntrySlip: null as number | null,
-        avgExitSlip: null as number | null,
-        avgPnlGap: null as number | null,
-        totalRetries: 0,
-        traded: 0,
-        total: 0,
-      };
-    }
-    const fillRates: number[] = [];
-    const entrySlips: number[] = [];
-    const exitSlips: number[] = [];
-    const pnlGaps: number[] = [];
-    let totalRetries = 0;
-    let traded = 0;
-
-    for (const r of reports) {
-      if (r.fills) {
-        fillRates.push(r.fills.fill_rate_pct);
-        if (
-          r.fills.avg_entry_slippage_bps !== null &&
-          r.fills.avg_entry_slippage_bps !== undefined
-        )
-          entrySlips.push(r.fills.avg_entry_slippage_bps);
-        totalRetries += r.fills.filled_via_retry || 0;
-        traded += 1;
-      }
-      if (r.exit) {
-        if (
-          r.exit.avg_exit_slippage_bps !== null &&
-          r.exit.avg_exit_slippage_bps !== undefined
-        )
-          exitSlips.push(r.exit.avg_exit_slippage_bps);
-        if (
-          r.exit.pnl_vs_est_pct !== null &&
-          r.exit.pnl_vs_est_pct !== undefined
-        )
-          pnlGaps.push(r.exit.pnl_vs_est_pct);
-      }
-    }
-    const avg = (xs: number[]) =>
-      xs.length === 0 ? null : xs.reduce((a, b) => a + b, 0) / xs.length;
-    return {
-      avgFillRate: avg(fillRates),
-      avgEntrySlip: avg(entrySlips),
-      avgExitSlip: avg(exitSlips),
-      avgPnlGap: avg(pnlGaps),
-      totalRetries,
-      traded,
-      total: reports.length,
-    };
-  }, [reports]);
+  // KPIs now come from the backend summary (capital-weighted when multiple
+  // allocations in scope). Execution-quality fields are null until the
+  // telemetry writer extension ships (Session E+).
+  const kpis = summary?.kpis ?? {
+    avg_fill_rate:      null,
+    avg_entry_slip_bps: null,
+    avg_exit_slip_bps:  null,
+    avg_pnl_gap:        null,
+    retries_needed:     0,
+    sessions_traded:    0,
+    sessions_total:     0,
+  };
 
   if (error) {
     return (
@@ -517,21 +668,60 @@ export default function ExecutionPage() {
     );
   }
 
-  if (!reports) {
+  if (!summary) {
     return (
       <div style={{ padding: 28, fontSize: 11, color: "var(--t2)" }}>
-        Loading execution reports…
+        Loading execution summary…
       </div>
     );
   }
 
-  // Apply window filter for the table only — KPIs above are universal.
+  // Master-history rows filtered by window (same semantic the legacy page had).
   const visibleReports = (() => {
+    if (!reports) return [];
     if (windowPreset.days === null) return reports;
     const cutoff = new Date(Date.now() - windowPreset.days * 86400000);
     const cutoffStr = cutoff.toISOString().slice(0, 10);
     return reports.filter((r) => r.date >= cutoffStr);
   })();
+
+  // Banner logic — two distinct empty-state conditions.
+  // Condition A: zero sessions ever (no data yet — first session pending)
+  // Condition B: sessions exist but execution-quality metrics are universally null
+  //              (telemetry writer hasn't shipped yet).
+  let bannerText: string | null = null;
+  if (summary.daily.length === 0) {
+    bannerText =
+      "Execution telemetry begins with the first session close (~23:55 UTC 2026-04-21).";
+  } else if (summary.daily.every((d) => d.fill_rate === null)) {
+    bannerText =
+      "Execution-quality metrics (fill rate, slippage, retries) populate once the per-allocation telemetry writer ships. Tracked for Session E/F.";
+  }
+
+  // When a single allocation is selected, hide the ALLOCATION column in the
+  // table — it would be redundant. Hide master rows too since they're not
+  // scoped to a specific allocation.
+  const showAllocCol = allocFilter === "all";
+  const showMasterRows = includeMaster && allocFilter === "all";
+
+  // Unified row list: allocation rows from summary.daily, master rows from
+  // visibleReports. Sorted by date DESC (summary.daily already is); master
+  // rows merge by date order.
+  type CombinedRow =
+    | { kind: "alloc"; date: string; data: SummaryDaily }
+    | { kind: "master"; date: string; data: ExecutionReport };
+
+  const combinedRows: CombinedRow[] = [
+    ...summary.daily.map(
+      (d) => ({ kind: "alloc" as const, date: d.date, data: d }),
+    ),
+    ...(showMasterRows
+      ? visibleReports.map(
+          (r) => ({ kind: "master" as const, date: r.date, data: r }),
+        )
+      : []),
+  ];
+  combinedRows.sort((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : 0));
 
   return (
     <div
@@ -544,36 +734,49 @@ export default function ExecutionPage() {
         overflow: "auto",
       }}
     >
-      {/* Row 1: KPI cards */}
+      {/* Row 0: filter + master toggle (controls row) */}
+      <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+        <AllocationFilter
+          value={allocFilter}
+          onChange={setAllocFilter}
+          options={summary.available_allocations}
+        />
+        <IncludeMasterToggle on={includeMaster} onChange={setIncludeMaster} />
+      </div>
+
+      {/* Row 0b: banner (Condition A / B / none) */}
+      {bannerText && <TabBanner text={bannerText} />}
+
+      {/* Row 1: KPI cards — static titles, values from summary.kpis */}
       <div style={{ display: "flex", gap: 10 }}>
         <KpiCard
           label="Avg Fill Rate"
-          value={kpis.avgFillRate === null ? "—" : `${kpis.avgFillRate.toFixed(1)}%`}
-          color="var(--green)"
+          value={kpis.avg_fill_rate === null ? "—" : `${kpis.avg_fill_rate.toFixed(1)}%`}
+          color={kpis.avg_fill_rate === null ? "var(--t2)" : "var(--green)"}
         />
         <KpiCard
           label="Avg Entry Slip"
-          value={fmtBps(kpis.avgEntrySlip)}
-          color={entrySlipColor(kpis.avgEntrySlip)}
+          value={fmtBps(kpis.avg_entry_slip_bps)}
+          color={entrySlipColor(kpis.avg_entry_slip_bps)}
         />
         <KpiCard
           label="Avg Exit Slip"
-          value={fmtBps(kpis.avgExitSlip)}
-          color={exitSlipColor(kpis.avgExitSlip)}
+          value={fmtBps(kpis.avg_exit_slip_bps)}
+          color={exitSlipColor(kpis.avg_exit_slip_bps)}
         />
         <KpiCard
           label="Avg PnL Gap"
-          value={fmtPct(kpis.avgPnlGap)}
-          color={pnlGapColor(kpis.avgPnlGap)}
+          value={fmtPct(kpis.avg_pnl_gap)}
+          color={pnlGapColor(kpis.avg_pnl_gap)}
         />
         <KpiCard
           label="Retries Needed"
-          value={`${kpis.totalRetries}`}
-          color={kpis.totalRetries > 0 ? "var(--amber)" : "var(--t0)"}
+          value={`${kpis.retries_needed}`}
+          color={kpis.retries_needed > 0 ? "var(--amber)" : "var(--t0)"}
         />
         <KpiCard
           label="Sessions Traded"
-          value={`${kpis.traded} / ${kpis.total}`}
+          value={`${kpis.sessions_traded} / ${kpis.sessions_total}`}
         />
       </div>
 
@@ -623,7 +826,7 @@ export default function ExecutionPage() {
               {activeSection === "table" ? "▾" : "▸"}
             </span>
             <span>Daily Execution Summary</span>
-            {windowPreset.days !== null && activeSection === "table" && (
+            {activeSection === "table" && (
               <span
                 style={{
                   color: "var(--t2)",
@@ -631,10 +834,10 @@ export default function ExecutionPage() {
                   letterSpacing: "0.06em",
                 }}
               >
-                · {visibleReports.length} of {reports.length}
+                · {combinedRows.length} row{combinedRows.length === 1 ? "" : "s"}
               </span>
             )}
-            {activeSection !== "table" && reports.length > 0 && (
+            {activeSection !== "table" && combinedRows.length > 0 && (
               <span
                 style={{
                   color: "var(--t2)",
@@ -642,7 +845,7 @@ export default function ExecutionPage() {
                   letterSpacing: "0.06em",
                 }}
               >
-                · {reports.length} sessions
+                · {combinedRows.length} sessions
               </span>
             )}
           </button>
@@ -660,14 +863,11 @@ export default function ExecutionPage() {
           flex: 1,
           minHeight: 0,
         }}>
-        {reports.length === 0 ? (
+        {combinedRows.length === 0 ? (
           <div style={{ fontSize: 11, color: "var(--t3)" }}>
-            No execution reports yet. The first session report will appear
-            here after the trader runs.
-          </div>
-        ) : visibleReports.length === 0 ? (
-          <div style={{ fontSize: 11, color: "var(--t3)" }}>
-            No reports in the selected window.
+            {summary.daily.length === 0
+              ? "No sessions in the selected range for this allocation."
+              : "No reports in the selected window."}
           </div>
         ) : (
           <table
@@ -682,6 +882,7 @@ export default function ExecutionPage() {
                 {[
                   "",
                   "Date",
+                  ...(showAllocCol ? ["Allocation"] : []),
                   "Signal",
                   "Conviction",
                   "Filled",
@@ -703,14 +904,23 @@ export default function ExecutionPage() {
               </tr>
             </thead>
             <tbody>
-              {visibleReports.map((r) => (
-                <DayRow
-                  key={r.date}
-                  report={r}
-                  expanded={expanded.has(r.date)}
-                  onToggle={() => toggle(r.date)}
-                />
-              ))}
+              {combinedRows.map((row, idx) =>
+                row.kind === "alloc" ? (
+                  <AllocationDayRow
+                    key={`alloc-${row.data.allocation_id}-${row.date}-${idx}`}
+                    row={row.data}
+                    showAllocCol={showAllocCol}
+                  />
+                ) : (
+                  <DayRow
+                    key={`master-${row.date}-${idx}`}
+                    report={row.data}
+                    expanded={expanded.has(row.date)}
+                    onToggle={() => toggle(row.date)}
+                    showAllocCol={showAllocCol}
+                  />
+                ),
+              )}
             </tbody>
           </table>
         )}
@@ -718,15 +928,158 @@ export default function ExecutionPage() {
         )}
       </div>
 
-      {/* Row 3: Collapsible session log viewer — correlated with the
-          selected row in the table above. Mutually exclusive with the
-          table section; opening one closes the other. */}
-      <SessionLogs
-        selectedDate={selectedLogDate}
-        expanded={activeSection === "logs"}
-        onToggle={() => toggleSection("logs")}
-      />
+      {/* Row 3: Session logs. Multi-tenant mode shows an informational panel
+          (per-allocation logs deferred to the telemetry writer extension);
+          master rows continue to show the existing SessionLogs component
+          when "Include master history" is on. */}
+      <div
+        style={{
+          background: "var(--bg2)",
+          border: "1px solid var(--line)",
+          borderRadius: 5,
+          overflow: "hidden",
+          flex: activeSection === "logs" ? 1 : "0 0 auto",
+          minHeight: 0,
+          display: "flex",
+          flexDirection: "column",
+        }}
+      >
+        <button
+          type="button"
+          onClick={() => toggleSection("logs")}
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 10,
+            background: "transparent",
+            border: "none",
+            padding: "12px 16px",
+            cursor: "pointer",
+            fontFamily: FONT_MONO,
+            color: "var(--t3)",
+            fontSize: 9,
+            fontWeight: 700,
+            letterSpacing: "0.12em",
+            textTransform: "uppercase",
+          }}
+        >
+          <span style={{ color: "var(--t2)", width: 14 }}>
+            {activeSection === "logs" ? "▾" : "▸"}
+          </span>
+          <span>Session Logs</span>
+        </button>
+        {activeSection === "logs" && (
+          showMasterRows && selectedLogDate ? (
+            // Master-row selected — existing SessionLogs component.
+            <SessionLogs
+              selectedDate={selectedLogDate}
+              expanded
+              onToggle={() => toggleSection("logs")}
+            />
+          ) : (
+            // Multi-tenant rows OR no master row selected — info panel.
+            <div style={{ padding: "0 16px 18px", fontSize: 10, color: "var(--t2)", lineHeight: 1.6 }}>
+              Per-allocation session logs will be available once the execution
+              telemetry writer ships (tracked for Session E/F). Master session
+              logs remain accessible via the &quot;Include master history&quot;
+              toggle above — expand a master row to view them here.
+            </div>
+          )
+        )}
+      </div>
     </div>
+  );
+}
+
+// ─── Allocation day row (multi-tenant) ─────────────────────────────────────
+// Renders one row in the daily summary table for an allocation_returns entry.
+// Execution-quality columns (fill rate, slip, retries, alerts) render "—"
+// until the writer extension populates them. Not expandable — per-symbol
+// detail for allocations is part of the deferred writer extension.
+
+function AllocationDayRow({
+  row,
+  showAllocCol,
+}: {
+  row: SummaryDaily;
+  showAllocCol: boolean;
+}) {
+  const exitReason = row.exit_reason ?? "";
+  const flat = FLAT_REASONS.has(exitReason);
+
+  const allocCell = showAllocCol ? (
+    <td style={{ ...tdStyle, color: "var(--t1)" }}>
+      {row.exchange} · {row.strategy_label}
+    </td>
+  ) : null;
+
+  // Conviction badge synthesis: backend gives us {passed, return_pct};
+  // convictionBadge expects the master-report shape, so adapt.
+  const convBadge = row.conviction ? (
+    <Badge
+      label={`${row.conviction.passed ? "PASS" : "FAIL"}${
+        row.conviction.return_pct !== null
+          ? ` ${row.conviction.return_pct.toFixed(2)}%`
+          : ""
+      }`}
+      bg={row.conviction.passed ? "var(--green-dim)" : "var(--red-dim)"}
+      color={row.conviction.passed ? "var(--green)" : "var(--red)"}
+    />
+  ) : (
+    <span style={{ color: "var(--t3)" }}>—</span>
+  );
+
+  if (flat) {
+    return (
+      <tr style={{ opacity: 0.6 }}>
+        <td style={tdStyle}></td>
+        <td style={{ ...tdStyle, color: "var(--t2)" }}>{row.date}</td>
+        {allocCell}
+        <td style={tdStyle}>{row.signal_count ?? "—"}</td>
+        <td style={tdStyle}>{convBadge}</td>
+        <td
+          colSpan={showAllocCol ? 11 : 11}
+          style={{ ...tdStyle, color: "var(--t2)", fontStyle: "italic" }}
+        >
+          {prettyReason(exitReason)}
+        </td>
+      </tr>
+    );
+  }
+
+  return (
+    <tr>
+      <td style={tdStyle}></td>
+      <td style={{ ...tdStyle, color: "var(--t0)" }}>{row.date}</td>
+      {allocCell}
+      <td style={tdStyle}>{row.signal_count ?? "—"}</td>
+      <td style={tdStyle}>{convBadge}</td>
+      <td style={{ ...tdStyle, color: "var(--t1)" }}>
+        {row.filled ? "yes" : "no"}
+      </td>
+      <td style={tdStyle}>{row.retried ?? "—"}</td>
+      <td style={{ ...tdStyle, color: fillRateColor(row.fill_rate) }}>
+        {row.fill_rate === null ? "—" : `${row.fill_rate.toFixed(0)}%`}
+      </td>
+      <td style={{ ...tdStyle, color: entrySlipColor(row.entry_slip_bps) }}>
+        {fmtBps(row.entry_slip_bps)}
+      </td>
+      <td style={{ ...tdStyle, color: exitSlipColor(row.exit_slip_bps) }}>
+        {fmtBps(row.exit_slip_bps)}
+      </td>
+      <td style={tdStyle}>{fmtPct(row.est_return_pct)}</td>
+      <td style={tdStyle}>{fmtPct(row.actual_return_pct)}</td>
+      <td style={{ ...tdStyle, color: pnlGapColor(row.pnl_gap_pct_from_gross) }}>
+        {fmtPct(row.pnl_gap_pct_from_gross)}
+      </td>
+      <td style={tdStyle}>
+        {row.leverage_applied ? `${row.leverage_applied.toFixed(2)}x` : "—"}
+      </td>
+      <td style={{ ...tdStyle, color: "var(--t2)" }}>
+        {prettyReason(exitReason || "—")}
+      </td>
+      <td style={{ ...tdStyle, color: "var(--t2)" }}>{row.alerts ?? "—"}</td>
+    </tr>
   );
 }
 
@@ -736,18 +1089,24 @@ function DayRow({
   report,
   expanded,
   onToggle,
+  showAllocCol,
 }: {
   report: ExecutionReport;
   expanded: boolean;
   onToggle: () => void;
+  showAllocCol: boolean;
 }) {
   const exitReason = report.exit?.reason ?? "";
   const flat = FLAT_REASONS.has(exitReason);
+  const masterLabel = (
+    <span style={{ color: "var(--t3)", fontStyle: "italic" }}>
+      Master (pre-multi-tenant)
+    </span>
+  );
+  const flatColSpan = showAllocCol ? 11 : 11; // allocation col is inserted pre-fill/conviction; fill run starts after conviction
+  const detailColSpan = showAllocCol ? 16 : 15;
 
   if (flat) {
-    // Flat rows aren't expandable (no fill/monitoring data), but clicking
-    // still points the SessionLogs viewer at this day's logs — handy for
-    // understanding why a filter blocked the session.
     return (
       <tr
         onClick={onToggle}
@@ -755,10 +1114,11 @@ function DayRow({
       >
         <td style={tdStyle}></td>
         <td style={{ ...tdStyle, color: "var(--t2)" }}>{report.date}</td>
+        {showAllocCol && <td style={tdStyle}>{masterLabel}</td>}
         <td style={tdStyle}>{report.signal?.count ?? 0}</td>
         <td style={tdStyle}>{convictionBadge(report.conviction, exitReason)}</td>
         <td
-          colSpan={11}
+          colSpan={flatColSpan}
           style={{
             ...tdStyle,
             color: "var(--t2)",
@@ -794,6 +1154,7 @@ function DayRow({
           {expanded ? "▾" : "▸"}
         </td>
         <td style={{ ...tdStyle, color: "var(--t0)" }}>{report.date}</td>
+        {showAllocCol && <td style={tdStyle}>{masterLabel}</td>}
         <td style={tdStyle}>{report.signal?.count ?? 0}</td>
         <td style={tdStyle}>{convictionBadge(report.conviction, exitReason)}</td>
         <td
@@ -862,7 +1223,7 @@ function DayRow({
       </tr>
       {expanded && (
         <tr style={{ background: "var(--bg1)" }}>
-          <td colSpan={15} style={{ padding: "10px 12px 18px 32px" }}>
+          <td colSpan={detailColSpan} style={{ padding: "10px 12px 18px 32px" }}>
             <SymbolDetails report={report} />
           </td>
         </tr>
