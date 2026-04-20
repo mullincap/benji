@@ -343,3 +343,99 @@ Carried forward to the Session E (or later) open-work-list:
 - **Active allocations**: 1 (`$20` Binance, dormant until 2026-04-21 06:05 UTC when the new gate allows spawn). User plan: add BloFin allocation before tomorrow's window.
 - **Connection balances** at audit time: BloFin master `$3,951.03`, Binance user `$19.29`.
 - **Next critical timestamp**: 2026-04-21 06:05 UTC — first activation window for the new code.
+
+---
+
+# SESSION E — Multi-tenant dashboards, telemetry writer, cron retirement, DB reset
+
+Session E executed same date (2026-04-20) after Session D's close. Scope grew substantially as live-state inspection surfaced a series of multi-tenant latent bugs that compounded when the dormant Binance allocation got company (a new BloFin allocation created during the day) and when an out-of-band capital transfer between exchanges happened mid-session.
+
+## Commits shipped (in order)
+
+1. **`91af1f5`** — `fix(allocator): wire real data into performance chart; populate performance_daily on session close`. Replaced the `PerformanceChart` component's `generateData()` mock with real `/api/allocator/trader/{id}/balance-history` fetch. Added `_log_allocation_return`'s `performance_daily` writer (table existed, had zero INSERTers across codebase). Dynamic "synced Xs ago" from `snapshot_at`. Overview page's combined chart removed pending aggregation endpoint.
+
+2. **`578072c`** — `fix(manager): aggregate intraday equity across allocations correctly`. Manager intraday equity was computing `AVG(total_equity_usd)` across `(allocation × snapshot_at)` rows. Pre-existing latent bug; manifested once the user had 2 allocations on 2 connections. Replaced with `DISTINCT ON (allocation, bucket) ORDER BY snapshot_at DESC` + Python SUM-per-bucket. Also surfaced Fix #3 (Daily Signal UNKNOWN) investigation: signals keyed under legacy v1.0 strategy_version_id; active allocations reference alpha Med/High lev ids → intersection empty. Scoped for a separate commit.
+
+3. **`fd9fad3`** — `feat(manager): multi-allocation execution summary with filter + deferred telemetry writer`. Execution tab rewrite with Option (d) Hybrid: ship allocation filter + "Include master history" toggle + banner + new `/api/manager/execution-summary` endpoint tonight, defer telemetry writer extension until after first live activation. Endpoint reads `allocation_returns LEFT JOIN portfolio_sessions` with nulls for un-persisted fields (fill_rate, slip_bps, etc.). Frontend shape stable across future writer extension. Preserved `/execution-reports` for master history during transition.
+
+4. **`d6acfae`** — `fix(manager): portfolios tab multi-allocation support (HIGH-severity fetchone() fix)`. Detail endpoint `/portfolios/{date}` pre-fix used `fetchone()` after `WHERE signal_date = %s` — silently collapsed multi-allocation days. Changed to accept `allocation_id` query param; on ambiguity returns 400 with `{available: [...]}` picker payload. List endpoint projects `allocation_id + exchange + strategy_label`; frontend adds ALLOCATION column + filter + navigation via `?allocation_id=<uuid>`. No master toggle (chose Option C — DB table has 0 master rows; real master history lives in NDJSON files tracked as Session F+ follow-up).
+
+5. **`2a6f6f9`** — `feat(trader): persist execution-quality telemetry in _log_allocation_return`. Sprint Item 2. Writer extension shipped after first-activation-gate was decided unnecessary (telemetry writer is an allocation-close-path addition, low risk). Schema migration on `allocation_returns`: `+fill_rate, avg_entry_slip_bps, avg_exit_slip_bps, retries_used, signal_count, conviction_roi_x, alerts_fired`. `_log_allocation_return` derives from `fill_report` (retries, fill_rate) + `positions[]` (slip bps, post-reconcile) + direct params (signal_count, conviction_roi_x). ON CONFLICT DO UPDATE uses `COALESCE(EXCLUDED.x, existing.x)` so partial writes (pre-trade terminal paths) don't null out fields a later post-close write would populate. All 7 call sites updated to pass `signal_count` / `conviction_roi_x` where the data is in-scope. Manager `/execution-summary` updated to read new columns.
+
+6. **`e1522db`** — `fix(signal): generate daily signal rows per published strategy version`. Sprint Item 4. **Host-side change** to `/root/benji/daily_signal.py` (no repo path). `write_to_db` rewritten: queries `audit.strategy_versions WHERE is_active=TRUE JOIN strategies WHERE is_published=TRUE`, loops one INSERT per version. Each strategy_version gets its own `signal_batch_id` + `daily_signal_items`. Fallback to `secrets.env STRATEGY_VERSION_ID` if query returns nothing (defensive). Backup at `/root/benji/daily_signal.py.bak-20260420-172540`. No redeploy — cron reads the file fresh each run. `docs/host_changes.md` records the edit.
+
+7. **`bd89ac2`** — `fix(snapshots): populate Binance margin mark_price from spot ticker`. Sprint Item 5. Binance margin fallback path in `_fetch_live_binance()` was returning `positions: []` unconditionally (cross-margin has no native positions endpoint). Now synthesizes positions from `margin.userAssets` where `netAsset != 0`, enriches each with `/api/v3/ticker/price` via new `_get_binance_spot_price()` helper. Stablecoins excluded. Futures-path mark_price=0.0 issue NOT fixed in this commit (scoped to margin per spec; futures mark_price needs a parallel fix via `/fapi/v1/ticker/price`).
+
+8. **`e22c2cd`** — `audit(multi-tenant): sweep for single-allocation latent assumptions`. Sprint Item 6. Swept `fetchone()` / `LIMIT 1` / `AVG()` / `status='active'` patterns across `backend/app/api/routes/` + `backend/app/cli/` + `backend/app/services/`. 50+ hits, all classified (a) legitimately single-row (auth lookups, specific-ID PK fetches, scalar counts, LATERAL latest-snapshot). Zero new bugs. Docs-only commit appending audit log to `open_work_list.md`. Previously-known multi-allocation bugs (`578072c`, `d6acfae`) were the only ones.
+
+9. **`a6c666b`** — `refactor(manager): lift AllocationFilter to shared component`. Sprint Item 7. Extracted previously-duplicated AllocationFilter + IncludeMasterToggle to `frontend/app/manager/(protected)/_components/AllocationFilter.tsx`. Execution tab passes `includeMaster + onIncludeMasterChange` (toggle renders); Portfolios tab omits them (toggle hidden). Pure refactor, no behavior change.
+
+10. **`663ffa1`** — `docs(open-work): capital_events follow-up from 2026-04-20 reset`. Session E+ item tracking need for `capital_events` table after today's out-of-band capital transfer. Scope estimate 80-120 LOC. SQL reset pattern documented in the interim.
+
+11. **`efe7112`** — `docs(open-work): master cron retired 2026-04-20 — collision-driven, early`. Retirement driven by same-account collision risk, NOT the 7-day stability gate. `trader_blofin_fallback.py` deletion gate unchanged (separate code-rollback safety net, 2026-04-28).
+
+## Non-commit operational events
+
+### DB reset at 2026-04-20 ~18:01 UTC
+
+User performed out-of-band capital transfer between exchanges (BloFin $3,950 → $2,970, Binance $20 → $999) at ~17:05-17:20 UTC, then updated `allocations.capital_usd` in the UI. Result: stale pre-transfer `exchange_snapshots` rows made manager dashboard compute +5083% (Binance) and -24.80% (BloFin) as today's return because fallback path computed `today_eq / yesterday_eq - 1`.
+
+Reset executed:
+- Backup: `docker exec timescaledb pg_dump -t user_mgmt.exchange_snapshots > /tmp/pre_reset_backup_20260420_180127.sql`, copied to `/root/pre_reset_backup_20260420_180127.sql` on mcap (1.1 MB)
+- DELETE 2549 rows WHERE `snapshot_at < '2026-04-20 17:21:00+00'` for the two allocation connections (strictly post-Binance-receipt cutoff; no in-flight dip artifact)
+- Verified via direct `_fetch_portfolio_context` call: all KPIs to 0.00%, 1-point 30D equity curve, 4-bucket intraday starting at 17:15 UTC bucket
+
+### Master cron retirement at 2026-04-20 ~18:17 UTC
+
+Collision confirmation: master `/mnt/quant-data/credentials/secrets.env`'s `BLOFIN_API_KEY = 116a…3734 (len 32)` vs user connection `5f51a294-…` decrypted = `116a…3734 (len 32)`. **Same API key, same BloFin sub-account.** At tomorrow's 06:05 UTC spawn both processes would trade into the same wallet.
+
+Actions:
+- Two crontab lines commented with `# DISABLED 2026-04-20` prefix via sed + `crontab -` stdin install (master `0 6 * * *` trader + `*/5` blofin_logger)
+- Host files archived to `/root/benji-archive-20260420/` (originals preserved as second rollback)
+- Crontab backup at `/root/crontab_backup_20260420_181714.bak`
+
+Rollback if needed: `ssh mcap 'crontab /root/crontab_backup_20260420_181714.bak'`.
+
+## Key design decisions ratified
+
+- **Option (d) Hybrid** for Execution tab (commit `fd9fad3`): ship filter UI + null-for-unsourced fields first, extend telemetry writer in a subsequent commit (`2a6f6f9`) rather than all at once. Reduced risk during the activation window.
+- **Option (C)** for Portfolios master-history toggle (commit `d6acfae`): drop the toggle entirely rather than point it at an empty DB path. NDJSON overlay flagged as Session F+ follow-up. Avoids user-confusion trap of a toggle-that-does-nothing.
+- **`DISTINCT ON (allocation_id, bucket) ORDER BY snapshot_at DESC`** vs `MAX()` for intraday equity aggregation (commit `578072c`): end-of-bucket semantic chosen over high-water-mark bias.
+- **Option (B) cutoff at `2026-04-20 17:21:00+00`** for DB reset (operational event): strictly after both connections' post-transfer receipts. Cleanest clean-slate semantic, no in-flight dip artifact.
+
+## State at session end (13 total commits on `main`, all deployed except docs)
+
+- Binance allocation `686077fc-82a4-45e4-872f-47f7ad328780` — `active`, `$999`, Alpha Tail Guardrail - **Med lev**
+- BloFin allocation `f87fe130-a90c-4e60-908a-14f4065b415c` — `active`, `$2,970`, Alpha Tail Guardrail - **High lev**
+- Both allocations are **sole operators** of their respective BloFin/Binance accounts (master cron retired; user wallet = sub-account used by allocation subprocess alone)
+- `performance_daily`, `allocation_returns`, `portfolio_sessions`, `portfolio_bars` — all empty for these allocations. First rows land at ~23:55 UTC 2026-04-21 after first session close.
+- Dashboards showing clean 0% baseline; charts start from 17:21 UTC reset point forward
+- Aggregate AUM $3,969 (unchanged by capital transfer + reset)
+
+## Next event
+
+**2026-04-21 06:05 UTC** — first multi-tenant spawn.
+
+Pre-spawn (05:58 UTC) — Item 4 expected to manifest: `daily_signal.py` writes one row per published strategy_version (v1.0 + Med lev + High lev). Manager's Daily Signal status flips from UNKNOWN to real timestamp. Verify query:
+```
+SELECT strategy_version_id, COUNT(*), MAX(computed_at)
+FROM user_mgmt.daily_signals
+WHERE computed_at >= NOW() - INTERVAL '1 day'
+GROUP BY strategy_version_id;
+```
+Expected: 3 rows (v1.0 `d023dc1e`, Med lev `6b6168b0`, High lev `987312fd`).
+
+Spawn (06:05 UTC): `spawn_traders` fires 2 subprocesses (Binance $999 + BloFin $2,970) against same `trader_blofin.py` module with different `adapter_for(creds)` instances.
+
+Session close (~23:55 UTC): first real rows in `performance_daily` (equity + daily_return) + `allocation_returns` (all 14 columns including new telemetry) + `portfolio_sessions` (per-session summary) + `portfolio_bars` (per-5min intraday).
+
+## Session E+ queue (open, priority order)
+
+1. **Capital change tracking** (`capital_events` table or UI reset button) — triggered by today's manual reset experience. SQL workaround documented in `memory/project_capital_reset_pattern.md`. ~80-120 LOC.
+2. **Portfolios NDJSON overlay** — master history visibility for Portfolios tab, parallel to Execution's toggle. ~80-100 LOC backend.
+3. **Fix #3 daily_signal verification** — RESOLVED by commit `e1522db`; verify at 05:58 UTC tomorrow that Manager's Daily Signal status flips from UNKNOWN to real timestamp.
+4. **`_LIVE_BASELINE` drift check** at `trader_config.py:195-234` — stale-comment risk after master retirement; not load-bearing runtime.
+5. **`trader_blofin_fallback.py` deletion** — earliest 2026-04-28 (code rollback safety gate, unchanged).
+6. **Multi-select AllocationFilter** if users request it.
+7. **Lift AllocationFilter STATE to page-level / URL** (currently tab-local in two components — commit `a6c666b` lifted the component, not the state).
+8. **Binance futures mark_price** — `bd89ac2` scoped to margin; futures path still returns `mark_price=0.0`.
