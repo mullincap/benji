@@ -4,6 +4,34 @@ Items surfaced during normal work that aren't in scope for the current track but
 
 ---
 
+## Strategy taxonomy decision + batch rename
+
+**Surfaced:** 2026-04-19 when considering a one-off rename of `alpha_tail_guardrail_low_risk` display_name to `... - Med risk`.
+
+**Problem:**
+Current three published strategies mix two different naming axes:
+- `alpha_tail_guardrail_low_risk` — "Low risk" (risk-level axis)
+- `alpha_tail_guardrail_low_lev` — "Low lev" (leverage axis)
+- `alpha_tail_guardrail_high_lev` — "High lev" (leverage axis)
+
+The axes aren't interchangeable ("low risk" could map to low leverage OR to tight stops OR to short duration, depending on what dimension is being expressed). Users and future strategies will drift further without a canonical taxonomy.
+
+**Decision needed:**
+Pick one axis — risk-level, leverage, or a compound key — and migrate all three to be consistent.
+
+**Open question: slug vs display_name scope.**
+- `display_name` rename is cheap: single UPDATE on `audit.strategies.display_name`, no FK impact. Allocator card label updates immediately, zero code changes.
+- `name` slug rename is expensive:
+  - UNIQUE constraint; touches string-match call sites (logs across `refresh_strategy_metrics`, `spawn_traders`, manager briefings).
+  - Historical handoff docs and commits reference the old slug (e.g. `session_handoff_2026-04-18.md` references `alpha_tail_guardrail_low_risk`); those don't re-resolve automatically.
+  - Baselines on disk (`/tmp/benji_baselines/*`) and prior audit job rows reference by strategy_version_id (UUID, unaffected) but semantic grep for the slug across history would miss after rename.
+
+**Gate:** Not until Track 3 closes. No one-off renames between sessions — batch all three at once after taxonomy is fixed, one commit, one deploy, so the mental model stays coherent.
+
+**Tracking:** carry on open work list, address during Track 3 wrap-up or as a dedicated session.
+
+---
+
 ## active_filter string-namespace inconsistency (pre-Item 4 scope check)
 
 **Discovered:** 2026-04-19 during Item 5 IDENTITY_FIELDS convention sweep.
