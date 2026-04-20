@@ -101,6 +101,33 @@ correctness in the API layer. Future additions should default to
 allocation-id projection in SELECT + optional filter param, following the
 pattern established in execution-summary (`fd9fad3`) and portfolios (`d6acfae`).
 
+## Session E+ follow-up: Capital change tracking
+
+Trigger event: 2026-04-20 ~17:05-17:20 UTC manual capital transfer between
+BloFin ($3,950 → $2,970) and Binance ($20 → $999) that bypassed the
+allocator UI. Stale pre-transfer snapshots in `exchange_snapshots` caused
+Today/WTD/MTD/MaxDD queries to compute nonsense returns (+5083% on Binance,
+-24.80% on BloFin). Resolved via DELETE of pre-17:21:00 UTC rows
+(2549 rows) for the two connections. Backup SQL preserved at
+`/root/pre_reset_backup_20260420_180127.sql` on mcap (1.1 MB).
+
+Need: `capital_events` table with `(allocation_id, event_ts,
+capital_before, capital_after, source='ui'|'external')`. All
+Today/WTD/MTD/MaxDD queries use `max(event_ts, period_start)` as the
+baseline reference to prevent stale-baseline bug recurrence. Either:
+  (a) UI writes `capital_events` whenever `allocations.capital_usd` changes
+  (b) Snapshot cron detects large `total_equity` jumps and auto-writes an
+      inferred capital_event
+  (c) UI exposes an explicit "I made a capital change — reset baseline"
+      button that writes a capital_event without requiring `capital_usd`
+      changes
+
+Scope estimate: ~80-120 LOC (schema + writer + 3-4 query updates in
+`manager.py`). Gated on: not urgent; user can manually reset using the
+2026-04-20 SQL pattern (DELETE `exchange_snapshots` rows with
+`snapshot_at < <transfer completion time>` for affected connections)
+in the interim.
+
 ## Future (larger scope, not scheduled)
 
 - Generic strategy executor dispatch (today's `trader-blofin.py` hardcodes Overlap logic)
