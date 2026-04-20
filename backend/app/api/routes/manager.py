@@ -1105,77 +1105,192 @@ def _fmt_utc(dt: Any) -> str | None:
 
 
 @router.get("/portfolios")
-def list_portfolios(cur=Depends(get_cursor)) -> dict[str, Any]:
+def list_portfolios(
+    allocation_ids: str | None = None,
+    cur=Depends(get_cursor),
+) -> dict[str, Any]:
     """
     Return one summary row per portfolio session, sorted by date descending.
-    Cached summary columns on portfolio_sessions (populated by the trader on
-    each bar append) mean the list endpoint doesn't need to aggregate bars.
-    Response shape matches the legacy NDJSON version so the frontend is
-    unchanged.
+
+    Multi-tenant aware: projects allocation_id + exchange + strategy_label
+    so the frontend can render a per-allocation filter and disambiguate
+    multi-allocation days. Also returns `available_allocations[]` (all active
+    allocations) for the filter dropdown.
+
+    Rows with allocation_id IS NULL (host-master cron entries) are filtered
+    out — master portfolio history lives in NDJSON files at
+    /root/benji/blofin_execution_reports/portfolios/*.ndjson and is not
+    currently merged into this response. See Session F+ follow-up in
+    docs/open_work_list.md for the NDJSON-overlay parallel to Execution tab's
+    "Include master history" toggle.
+
+    Query params:
+      allocation_ids: comma-separated UUIDs. Default = all active allocations.
     """
+    # Resolve active-allocation universe (powers filter dropdown + default scope).
     cur.execute("""
-        SELECT signal_date,
-               status,
-               session_start_utc,
-               exit_time_utc,
-               exit_reason,
-               eff_lev::double precision                         AS eff_lev,
-               lev_int,
-               symbols,
-               entered,
-               bars_count,
-               COALESCE(final_portfolio_return, 0)::double precision AS final_incr,
-               COALESCE(peak_portfolio_return,  0)::double precision AS peak,
-               COALESCE(max_dd_from_peak,       0)::double precision AS max_dd_from_peak,
-               sym_stops
-        FROM user_mgmt.portfolio_sessions
-        ORDER BY signal_date DESC
+        SELECT
+            a.allocation_id, a.capital_usd,
+            s.display_name AS strategy_display_name, s.name AS strategy_name,
+            ec.exchange
+        FROM user_mgmt.allocations a
+        JOIN audit.strategy_versions sv ON sv.strategy_version_id = a.strategy_version_id
+        JOIN audit.strategies s ON s.strategy_id = sv.strategy_id
+        JOIN user_mgmt.exchange_connections ec ON ec.connection_id = a.connection_id
+        WHERE a.status = 'active'
+        ORDER BY a.created_at
     """)
-    rows = cur.fetchall()
-    out: list[dict[str, Any]] = []
-    for r in rows:
-        out.append({
-            "date":              r["signal_date"].isoformat(),
-            "status":            r["status"],
-            "session_start_utc": _fmt_utc(r["session_start_utc"]),
-            "exit_time_utc":     _fmt_utc(r["exit_time_utc"]),
-            "exit_reason":       r["exit_reason"],
-            "eff_lev":           r["eff_lev"],
-            "lev_int":           r["lev_int"],
-            "symbols":           list(r["symbols"] or []),
-            "entered":           list(r["entered"] or []),
-            "bars_count":        r["bars_count"],
-            "final_incr":        r["final_incr"],
-            "peak":              r["peak"],
-            "max_dd_from_peak":  r["max_dd_from_peak"],
-            "sym_stops":         sorted(list(r["sym_stops"] or [])),
-        })
-    return {"portfolios": out}
+    active_rows = cur.fetchall()
+
+    available_allocations = [
+        {
+            "allocation_id": str(r["allocation_id"]),
+            "exchange": r["exchange"],
+            "strategy_label": r["strategy_display_name"] or r["strategy_name"],
+            "capital_usd": _dec(r["capital_usd"]),
+        }
+        for r in active_rows
+    ]
+    all_active_ids = [r["allocation_id"] for r in active_rows]
+
+    if allocation_ids:
+        requested = {u.strip() for u in allocation_ids.split(",") if u.strip()}
+        scope_ids = [aid for aid in all_active_ids if str(aid) in requested]
+    else:
+        scope_ids = list(all_active_ids)
+
+    portfolios: list[dict[str, Any]] = []
+    if scope_ids:
+        cur.execute("""
+            SELECT ps.signal_date,
+                   ps.status,
+                   ps.session_start_utc,
+                   ps.exit_time_utc,
+                   ps.exit_reason,
+                   ps.eff_lev::double precision                         AS eff_lev,
+                   ps.lev_int,
+                   ps.symbols,
+                   ps.entered,
+                   ps.bars_count,
+                   COALESCE(ps.final_portfolio_return, 0)::double precision AS final_incr,
+                   COALESCE(ps.peak_portfolio_return,  0)::double precision AS peak,
+                   COALESCE(ps.max_dd_from_peak,       0)::double precision AS max_dd_from_peak,
+                   ps.sym_stops,
+                   ps.allocation_id,
+                   ec.exchange,
+                   s.display_name AS strategy_display_name,
+                   s.name         AS strategy_name
+            FROM user_mgmt.portfolio_sessions ps
+            JOIN user_mgmt.allocations a ON a.allocation_id = ps.allocation_id
+            JOIN audit.strategy_versions sv ON sv.strategy_version_id = a.strategy_version_id
+            JOIN audit.strategies s ON s.strategy_id = sv.strategy_id
+            JOIN user_mgmt.exchange_connections ec ON ec.connection_id = a.connection_id
+            WHERE ps.allocation_id = ANY(%s::uuid[])
+            ORDER BY ps.signal_date DESC, ps.allocation_id ASC
+        """, (scope_ids,))
+        for r in cur.fetchall():
+            portfolios.append({
+                "date":              r["signal_date"].isoformat(),
+                "allocation_id":     str(r["allocation_id"]),
+                "exchange":          r["exchange"],
+                "strategy_label":    r["strategy_display_name"] or r["strategy_name"],
+                "status":            r["status"],
+                "session_start_utc": _fmt_utc(r["session_start_utc"]),
+                "exit_time_utc":     _fmt_utc(r["exit_time_utc"]),
+                "exit_reason":       r["exit_reason"],
+                "eff_lev":           r["eff_lev"],
+                "lev_int":           r["lev_int"],
+                "symbols":           list(r["symbols"] or []),
+                "entered":           list(r["entered"] or []),
+                "bars_count":        r["bars_count"],
+                "final_incr":        r["final_incr"],
+                "peak":              r["peak"],
+                "max_dd_from_peak":  r["max_dd_from_peak"],
+                "sym_stops":         sorted(list(r["sym_stops"] or [])),
+            })
+
+    return {
+        "available_allocations": available_allocations,
+        "portfolios":            portfolios,
+    }
 
 
 @router.get("/portfolios/{date}")
-def get_portfolio(date: str, cur=Depends(get_cursor)) -> dict[str, Any]:
+def get_portfolio(
+    date: str,
+    allocation_id: str | None = None,
+    cur=Depends(get_cursor),
+) -> dict[str, Any]:
     """
     Return {meta, bars[]} for one session, sorted by bar_number.
     Safe to poll while meta.status == "active"; the trader upserts bars every
     5 minutes.
+
+    HIGH-severity multi-tenant fix: pre-refactor, this endpoint fetchone()'d by
+    signal_date only, silently dropping all but one row on multi-allocation
+    days. Now requires `allocation_id` query param when multiple rows share
+    the date (returns 400 with the available options so the frontend can
+    redirect to the correct URL).
     """
     # Basic guard against path-ish inputs — only YYYY-MM-DD shape allowed.
     if len(date) != 10 or date[4] != "-" or date[7] != "-":
         raise HTTPException(status_code=400, detail="invalid date")
 
+    # Enumerate all sessions on this date (allocation-aware). We surface the
+    # list back to the caller on ambiguity so they can pick one.
     cur.execute("""
-        SELECT portfolio_session_id, signal_date, status,
-               session_start_utc, exit_time_utc, exit_reason,
-               symbols, entered,
-               eff_lev::double precision AS eff_lev,
-               lev_int
-        FROM user_mgmt.portfolio_sessions
-        WHERE signal_date = %s
+        SELECT ps.portfolio_session_id, ps.signal_date, ps.status,
+               ps.session_start_utc, ps.exit_time_utc, ps.exit_reason,
+               ps.symbols, ps.entered,
+               ps.eff_lev::double precision AS eff_lev,
+               ps.lev_int,
+               ps.allocation_id,
+               ec.exchange,
+               s.display_name AS strategy_display_name,
+               s.name         AS strategy_name
+        FROM user_mgmt.portfolio_sessions ps
+        LEFT JOIN user_mgmt.allocations a ON a.allocation_id = ps.allocation_id
+        LEFT JOIN audit.strategy_versions sv ON sv.strategy_version_id = a.strategy_version_id
+        LEFT JOIN audit.strategies s ON s.strategy_id = sv.strategy_id
+        LEFT JOIN user_mgmt.exchange_connections ec ON ec.connection_id = a.connection_id
+        WHERE ps.signal_date = %s
+        ORDER BY ps.allocation_id ASC
     """, (date,))
-    session = cur.fetchone()
-    if session is None:
+    candidates = cur.fetchall()
+
+    if not candidates:
         raise HTTPException(status_code=404, detail="portfolio not found")
+
+    if allocation_id is not None:
+        match = next(
+            (r for r in candidates if str(r["allocation_id"]) == allocation_id),
+            None,
+        )
+        if match is None:
+            raise HTTPException(
+                status_code=404,
+                detail=f"No portfolio session for allocation_id={allocation_id} on {date}",
+            )
+        session = match
+    elif len(candidates) == 1:
+        # Backward compat: exactly one session on this date, no ambiguity.
+        session = candidates[0]
+    else:
+        # Multi-allocation day — caller must specify which one.
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "message": "Multiple allocations have sessions on this date; specify allocation_id query param",
+                "available": [
+                    {
+                        "allocation_id": str(r["allocation_id"]) if r["allocation_id"] else None,
+                        "exchange": r["exchange"],
+                        "strategy_label": r["strategy_display_name"] or r["strategy_name"],
+                    }
+                    for r in candidates
+                ],
+            },
+        )
 
     cur.execute("""
         SELECT bar_number,
@@ -1192,6 +1307,9 @@ def get_portfolio(date: str, cur=Depends(get_cursor)) -> dict[str, Any]:
 
     meta = {
         "date":              session["signal_date"].isoformat(),
+        "allocation_id":     str(session["allocation_id"]) if session["allocation_id"] else None,
+        "exchange":          session["exchange"],
+        "strategy_label":    session["strategy_display_name"] or session["strategy_name"],
         "status":            session["status"],
         "session_start_utc": _fmt_utc(session["session_start_utc"]),
         "exit_time_utc":     _fmt_utc(session["exit_time_utc"]),

@@ -83,3 +83,4 @@ Retire the host cron `0 6 * * *` at `/root/benji/trader-blofin.py` (master BloFi
 - Generic strategy executor dispatch (today's `trader-blofin.py` hardcodes Overlap logic)
 - Manager module product work
 - Publish more strategy variants (operational via Simulator UI, not code)
+- Portfolios master NDJSON overlay — parallel to Execution tab's "Include master history" toggle. Reads `/root/benji/blofin_execution_reports/portfolios/*.ndjson`, aggregates per-session summaries from bar rows, merges into `/api/manager/portfolios` response. Deferred because `portfolio_sessions` table has 0 master rows today (host cron only writes DB on conviction-pass days, which are rare); 3+ years of master portfolio history lives exclusively in NDJSON files not surfaced by this endpoint. Scope: ~80-100 LOC backend (new file-reader + aggregator), frontend toggle component reuse from Execution tab. Session F+.

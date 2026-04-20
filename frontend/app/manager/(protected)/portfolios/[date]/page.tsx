@@ -16,7 +16,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
-import { useParams } from "next/navigation";
+import { useParams, useSearchParams, useRouter } from "next/navigation";
 import {
   Chart as ChartJS,
   CategoryScale,
@@ -63,6 +63,9 @@ function colorFor(inst: string, idx: number): string {
 
 interface PortfolioMeta {
   date: string;
+  allocation_id: string | null;    // null for master rows (pre-multi-tenant)
+  exchange: string | null;
+  strategy_label: string | null;
   status: "active" | "closed";
   session_start_utc: string | null;
   exit_time_utc: string | null;
@@ -71,6 +74,18 @@ interface PortfolioMeta {
   entered: string[];
   eff_lev: number;
   lev_int: number;
+}
+
+// When the backend detects multiple allocations on the requested date and no
+// allocation_id query param was provided, it returns 400 with a picker payload.
+// The detail page renders a chooser so the user can redirect to the correct URL.
+interface AmbiguityDetail {
+  message: string;
+  available: Array<{
+    allocation_id: string | null;
+    exchange: string | null;
+    strategy_label: string | null;
+  }>;
 }
 
 interface PortfolioBar {
@@ -237,10 +252,14 @@ function KpiCard({
 
 export default function PortfolioDetailPage() {
   const params = useParams<{ date: string }>();
+  const searchParams = useSearchParams();
+  const router = useRouter();
   const date = params.date;
+  const allocationId = searchParams.get("allocation_id");
 
   const [data, setData] = useState<PortfolioDetail | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [ambiguity, setAmbiguity] = useState<AmbiguityDetail | null>(null);
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
   const [showAllBars, setShowAllBars] = useState(false);
 
@@ -249,11 +268,23 @@ export default function PortfolioDetailPage() {
 
   const load = useCallback(async () => {
     try {
-      const r = await fetch(`${API_BASE}/api/manager/portfolios/${date}`, {
-        credentials: "include",
-      });
+      const url = allocationId
+        ? `${API_BASE}/api/manager/portfolios/${date}?allocation_id=${allocationId}`
+        : `${API_BASE}/api/manager/portfolios/${date}`;
+      const r = await fetch(url, { credentials: "include" });
       if (r.status === 401) throw new Error("Session expired");
       if (r.status === 404) throw new Error("Portfolio not found for this date");
+      if (r.status === 400) {
+        // Multi-allocation ambiguity — surface the picker instead of an error.
+        const body = await r.json().catch(() => null);
+        const detail = body?.detail;
+        if (detail && typeof detail === "object" && Array.isArray(detail.available)) {
+          setAmbiguity(detail as AmbiguityDetail);
+          setError(null);
+          return;
+        }
+        throw new Error(typeof detail === "string" ? detail : `HTTP 400`);
+      }
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
       const json = (await r.json()) as PortfolioDetail;
       // Capture scroll position before state update so we can restore it.
@@ -262,12 +293,13 @@ export default function PortfolioDetailPage() {
         wasAtBottomRef.current =
           el.scrollHeight - el.scrollTop - el.clientHeight < 24;
       }
+      setAmbiguity(null);
       setData(json);
       setLastUpdated(new Date());
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     }
-  }, [date]);
+  }, [date, allocationId]);
 
   // Initial load + polling for active sessions
   useEffect(() => {
@@ -313,6 +345,56 @@ export default function PortfolioDetailPage() {
     }
     return m;
   }, [data]);
+
+  if (ambiguity) {
+    // Multiple allocations on this date. Render a picker that redirects to
+    // the disambiguated URL. Reached when the user lands on /portfolios/{date}
+    // with no allocation_id query param AND ≥2 sessions exist for that date.
+    return (
+      <div style={{ padding: 28, fontSize: 11, color: "var(--t1)", maxWidth: 520 }}>
+        <div style={{ marginBottom: 12, color: "var(--t0)", fontSize: 13, fontWeight: 700 }}>
+          Multiple allocations for {date}
+        </div>
+        <div style={{ marginBottom: 16, fontSize: 10, color: "var(--t2)", lineHeight: 1.6 }}>
+          {ambiguity.message}
+        </div>
+        <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+          {ambiguity.available.map((opt) => (
+            <button
+              key={opt.allocation_id ?? "master"}
+              type="button"
+              onClick={() => {
+                const suffix = opt.allocation_id
+                  ? `?allocation_id=${opt.allocation_id}`
+                  : "";
+                router.push(`/manager/portfolios/${date}${suffix}`);
+              }}
+              style={{
+                background: "var(--bg2)",
+                border: "1px solid var(--line)",
+                borderRadius: 4,
+                padding: "10px 14px",
+                fontFamily: FONT_MONO,
+                fontSize: 10,
+                color: "var(--t1)",
+                textAlign: "left",
+                cursor: "pointer",
+              }}
+            >
+              {opt.allocation_id
+                ? `${opt.exchange} · ${opt.strategy_label}`
+                : "Master (pre-multi-tenant)"}
+            </button>
+          ))}
+        </div>
+        <div style={{ marginTop: 18 }}>
+          <Link href="/manager/portfolios" style={{ color: "var(--t2)", fontSize: 10 }}>
+            ← BACK TO PORTFOLIOS
+          </Link>
+        </div>
+      </div>
+    );
+  }
 
   if (error) {
     return (

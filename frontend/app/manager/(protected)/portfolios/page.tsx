@@ -11,7 +11,7 @@
  * render with a pulsing green LIVE indicator.
  */
 
-import { useCallback, useEffect, useState } from "react";
+import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE || "";
@@ -19,6 +19,9 @@ const FONT_MONO = "var(--font-space-mono), Space Mono, monospace";
 
 interface PortfolioSummary {
   date: string;
+  allocation_id: string | null;   // null for master rows (pre-multi-tenant host-cron entries)
+  exchange: string | null;
+  strategy_label: string | null;
   status: "active" | "closed";
   session_start_utc: string | null;
   exit_time_utc: string | null;
@@ -32,6 +35,61 @@ interface PortfolioSummary {
   peak: number;
   max_dd_from_peak: number;
   sym_stops: string[];
+}
+
+interface AvailableAlloc {
+  allocation_id: string;
+  exchange: string;
+  strategy_label: string;
+  capital_usd: number | null;
+}
+
+interface PortfoliosResponse {
+  available_allocations: AvailableAlloc[];
+  portfolios: PortfolioSummary[];
+}
+
+// ─── Allocation filter (single-select for v1) ──────────────────────────────
+// TODO(session-e+): lift to shared component if Overview adopts the same
+// pattern. See the same TODO in execution/page.tsx.
+//
+// NOTE: no "Include master history" toggle here — master portfolio history
+// lives in NDJSON files not surfaced by this endpoint. See Session F+ queue
+// in docs/open_work_list.md for the NDJSON-overlay follow-up that parallels
+// Execution tab's toggle.
+
+function AllocationFilter({
+  value,
+  onChange,
+  options,
+}: {
+  value: "all" | string;
+  onChange: (next: "all" | string) => void;
+  options: AvailableAlloc[];
+}) {
+  return (
+    <select
+      value={value}
+      onChange={(e) => onChange(e.target.value as "all" | string)}
+      style={{
+        background: "var(--bg2)",
+        border: "1px solid var(--line)",
+        borderRadius: 4,
+        color: "var(--t1)",
+        fontFamily: FONT_MONO,
+        fontSize: 10,
+        padding: "5px 10px",
+        cursor: "pointer",
+      }}
+    >
+      <option value="all">All allocations</option>
+      {options.map((a) => (
+        <option key={a.allocation_id} value={a.allocation_id}>
+          {a.exchange} · {a.strategy_label}
+        </option>
+      ))}
+    </select>
+  );
 }
 
 const thStyle: React.CSSProperties = {
@@ -130,23 +188,27 @@ function LivePulse() {
 
 export default function PortfoliosListPage() {
   const router = useRouter();
-  const [data, setData] = useState<PortfolioSummary[] | null>(null);
+  const [response, setResponse] = useState<PortfoliosResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [allocFilter, setAllocFilter] = useState<"all" | string>("all");
 
-  const load = useCallback(() => {
-    fetch(`${API_BASE}/api/manager/portfolios`, { credentials: "include" })
+  useEffect(() => {
+    let cancelled = false;
+    const params = new URLSearchParams();
+    if (allocFilter !== "all") params.set("allocation_ids", allocFilter);
+    const qs = params.toString();
+    fetch(`${API_BASE}/api/manager/portfolios${qs ? `?${qs}` : ""}`, {
+      credentials: "include",
+    })
       .then((r) => {
         if (r.status === 401) throw new Error("Session expired");
         if (!r.ok) throw new Error(`HTTP ${r.status}`);
         return r.json();
       })
-      .then((d) => setData(d.portfolios || []))
-      .catch((e) => setError(e.message));
-  }, []);
-
-  useEffect(() => {
-    load();
-  }, [load]);
+      .then((d: PortfoliosResponse) => { if (!cancelled) setResponse(d); })
+      .catch((e) => { if (!cancelled) setError(e.message); });
+    return () => { cancelled = true; };
+  }, [allocFilter]);
 
   if (error) {
     return (
@@ -156,13 +218,18 @@ export default function PortfoliosListPage() {
     );
   }
 
-  if (!data) {
+  if (!response) {
     return (
       <div style={{ padding: 28, fontSize: 11, color: "var(--t2)" }}>
         Loading portfolios…
       </div>
     );
   }
+
+  const data = response.portfolios;
+  // Hide the ALLOCATION column when a single allocation is selected — the
+  // filter already disambiguates so repeating it per row wastes horizontal space.
+  const showAllocCol = allocFilter === "all";
 
   return (
     <>
@@ -185,6 +252,15 @@ export default function PortfoliosListPage() {
           overflow: "auto",
         }}
       >
+        {/* Allocation filter (tab-local state per commit fd9fad3 pattern) */}
+        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+          <AllocationFilter
+            value={allocFilter}
+            onChange={setAllocFilter}
+            options={response.available_allocations}
+          />
+        </div>
+
         <div
           style={{
             background: "var(--bg2)",
@@ -214,6 +290,7 @@ export default function PortfoliosListPage() {
                 <tr>
                   {[
                     "Date",
+                    ...(showAllocCol ? ["Allocation"] : []),
                     "Symbols",
                     "Lev",
                     "Portfolio ROI",
@@ -238,12 +315,14 @@ export default function PortfoliosListPage() {
                   const enteredCt = p.entered.length;
                   const symCt = p.symbols.length;
                   const partial = enteredCt < symCt;
+                  const rowKey = `${p.date}-${p.allocation_id ?? "master"}`;
+                  const detailUrl = p.allocation_id
+                    ? `/manager/portfolios/${p.date}?allocation_id=${p.allocation_id}`
+                    : `/manager/portfolios/${p.date}`;
                   return (
                     <tr
-                      key={p.date}
-                      onClick={() =>
-                        router.push(`/manager/portfolios/${p.date}`)
-                      }
+                      key={rowKey}
+                      onClick={() => router.push(detailUrl)}
                       style={{ cursor: "pointer" }}
                       onMouseEnter={(e) => {
                         e.currentTarget.style.background = "var(--bg3)";
@@ -255,6 +334,17 @@ export default function PortfoliosListPage() {
                       <td style={{ ...tdStyle, color: "var(--t0)" }}>
                         {p.date}
                       </td>
+                      {showAllocCol && (
+                        <td style={{ ...tdStyle, color: "var(--t1)" }}>
+                          {p.allocation_id ? (
+                            <>{p.exchange} · {p.strategy_label}</>
+                          ) : (
+                            <span style={{ color: "var(--t3)", fontStyle: "italic" }}>
+                              Master (pre-multi-tenant)
+                            </span>
+                          )}
+                        </td>
+                      )}
                       <td
                         style={{
                           ...tdStyle,
