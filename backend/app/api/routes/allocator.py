@@ -645,6 +645,82 @@ def unpublish_strategy(strategy_id: int, cur=Depends(get_cursor)) -> dict[str, A
     return _set_strategy_published(strategy_id, False, cur)
 
 
+# ── Strategy rename (admin-only) ───────────────────────────────────────────
+# Updates audit.strategies.display_name only. The slug (name) stays immutable;
+# changing it is a bigger migration (UNIQUE constraint, log/history references).
+# Soft duplicate check (case-insensitive): if another strategy already uses the
+# requested display_name, returns 409. Admin can force via allow_duplicate=True.
+
+class StrategyRenameRequest(BaseModel):
+    display_name: str
+    allow_duplicate: bool = False
+
+
+@router.post(
+    "/strategies/{strategy_id}/rename",
+    dependencies=[Depends(require_admin)],
+)
+def rename_strategy(
+    strategy_id: int,
+    body: StrategyRenameRequest,
+    cur=Depends(get_cursor),
+) -> dict[str, Any]:
+    new_name = body.display_name.strip()
+    if not new_name:
+        raise HTTPException(
+            status_code=400,
+            detail="display_name cannot be empty after trimming whitespace",
+        )
+    if len(new_name) > 200:
+        raise HTTPException(
+            status_code=400,
+            detail="display_name exceeds 200 character limit",
+        )
+
+    if not body.allow_duplicate:
+        cur.execute(
+            """
+            SELECT strategy_id, name, display_name
+            FROM audit.strategies
+            WHERE LOWER(display_name) = LOWER(%s) AND strategy_id <> %s
+            LIMIT 1
+            """,
+            (new_name, strategy_id),
+        )
+        dup = cur.fetchone()
+        if dup is not None:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "error": "display_name_conflict",
+                    "conflict": {
+                        "strategy_id":  dup["strategy_id"],
+                        "name":         dup["name"],
+                        "display_name": dup["display_name"],
+                    },
+                },
+            )
+
+    cur.execute(
+        """
+        UPDATE audit.strategies
+        SET display_name = %s
+        WHERE strategy_id = %s
+        RETURNING strategy_id, name, display_name, is_published
+        """,
+        (new_name, strategy_id),
+    )
+    row = cur.fetchone()
+    if row is None:
+        raise HTTPException(status_code=404, detail="Strategy not found")
+    return {
+        "strategy_id":  row["strategy_id"],
+        "name":         row["name"],
+        "display_name": row["display_name"],
+        "is_published": row["is_published"],
+    }
+
+
 # ── Exchanges ───────────────────────────────────────────────────────────────
 
 def _mask_key(enc_value: str | None) -> str:

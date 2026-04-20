@@ -87,7 +87,6 @@ function AdminToggleButton({
       disabled={busy}
       onClick={e => { e.stopPropagation(); onClick(e); }}
       style={{
-        position: "absolute", top: 8, right: 8,
         background: bg, border: `1px solid ${color}`, color,
         borderRadius: 3, padding: "3px 8px",
         fontSize: 9, fontWeight: 700, letterSpacing: "0.12em",
@@ -95,11 +94,56 @@ function AdminToggleButton({
         fontFamily: "var(--font-space-mono), Space Mono, monospace",
         cursor: busy ? "not-allowed" : "pointer",
         opacity: busy ? 0.5 : 1,
-        zIndex: 2,
       }}
     >
       {isPublished ? "Retire" : "Publish"}
     </button>
+  );
+}
+
+function RenameButton({
+  busy, onClick,
+}: {
+  busy: boolean;
+  onClick: (e: React.MouseEvent) => void;
+}) {
+  return (
+    <button
+      type="button"
+      disabled={busy}
+      onClick={e => { e.stopPropagation(); onClick(e); }}
+      style={{
+        background: "var(--bg3)", border: "1px solid var(--line2)",
+        color: "var(--t1)",
+        borderRadius: 3, padding: "3px 8px",
+        fontSize: 9, fontWeight: 700, letterSpacing: "0.12em",
+        textTransform: "uppercase",
+        fontFamily: "var(--font-space-mono), Space Mono, monospace",
+        cursor: busy ? "not-allowed" : "pointer",
+        opacity: busy ? 0.5 : 1,
+      }}
+    >
+      Rename
+    </button>
+  );
+}
+
+function AdminButtons({
+  isPublished, busy, onRename, onToggle,
+}: {
+  isPublished: boolean;
+  busy: boolean;
+  onRename: (e: React.MouseEvent) => void;
+  onToggle: (e: React.MouseEvent) => void;
+}) {
+  return (
+    <div style={{
+      position: "absolute", top: 8, right: 8,
+      display: "flex", gap: 4, zIndex: 2,
+    }}>
+      <RenameButton busy={busy} onClick={onRename} />
+      <AdminToggleButton isPublished={isPublished} busy={busy} onClick={onToggle} />
+    </div>
   );
 }
 
@@ -199,6 +243,262 @@ function ConfirmRetireModal({
   );
 }
 
+function RenameStrategyModal({
+  strategyId, currentDisplayName, onCancel, onSuccess, refresh,
+}: {
+  strategyId: number;
+  currentDisplayName: string;
+  onCancel: () => void;
+  onSuccess: (newDisplayName: string) => void;
+  refresh: () => void;
+}) {
+  const [value, setValue] = useState(currentDisplayName);
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [conflict, setConflict] = useState<{
+    strategy_id: number;
+    name: string;
+    display_name: string;
+  } | null>(null);
+
+  const trimmed = value.trim();
+  const softLimit = 80;
+  const overSoft = trimmed.length > softLimit;
+  const empty = trimmed.length === 0;
+  const unchanged = trimmed === currentDisplayName.trim();
+  const canSave = !empty && !unchanged && !submitting;
+
+  const submit = async (allowDuplicate: boolean) => {
+    setSubmitting(true);
+    setError(null);
+    try {
+      await allocatorApi.renameStrategy(strategyId, trimmed, allowDuplicate);
+      onSuccess(trimmed);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      const m409 = /^API 409:\s*([\s\S]*)$/.exec(msg);
+      if (m409) {
+        try {
+          const body = JSON.parse(m409[1]);
+          const c = body?.detail?.conflict;
+          if (c && typeof c.strategy_id === "number") {
+            setConflict({
+              strategy_id: c.strategy_id,
+              name: String(c.name ?? ""),
+              display_name: String(c.display_name ?? ""),
+            });
+            setSubmitting(false);
+            return;
+          }
+        } catch { /* fall through to generic error */ }
+      }
+      const status = /^API (\d+):/.exec(msg)?.[1];
+      if (status === "401" || status === "403") {
+        setError("Admin access required.");
+      } else if (status === "404") {
+        setError("Strategy not found — may have been deleted.");
+        refresh();
+      } else if (status === "400") {
+        setError("Invalid name — must be non-empty and ≤ 200 characters.");
+      } else {
+        setError("Something went wrong. Try again or check server logs.");
+        console.error("renameStrategy failed:", err);
+      }
+      setSubmitting(false);
+    }
+  };
+
+  // ── State B: duplicate confirmation ──────────────────────────────────────
+  if (conflict) {
+    return (
+      <div
+        role="dialog"
+        aria-modal="true"
+        onClick={() => { if (!submitting) onCancel(); }}
+        style={{
+          position: "fixed", inset: 0,
+          background: "rgba(0,0,0,0.7)",
+          display: "flex", alignItems: "center", justifyContent: "center",
+          zIndex: 1000,
+        }}
+      >
+        <div
+          onClick={e => e.stopPropagation()}
+          style={{
+            background: "var(--bg2)",
+            border: "1px solid var(--line2)",
+            borderRadius: 6, padding: "20px 24px",
+            width: 520, maxWidth: "92vw",
+            fontFamily: "var(--font-space-mono), Space Mono, monospace",
+          }}
+        >
+          <div style={{
+            fontSize: 9, fontWeight: 700, letterSpacing: "0.12em",
+            color: "var(--amber)", textTransform: "uppercase",
+            marginBottom: 10,
+          }}>
+            Duplicate display name
+          </div>
+          <div style={{ fontSize: 11, color: "var(--t1)", lineHeight: 1.6, marginBottom: 16 }}>
+            <span style={{ color: "var(--t0)" }}>&lsquo;{trimmed}&rsquo;</span>{" "}
+            is already used by strategy_id={conflict.strategy_id}
+            {conflict.name ? ` (slug: ${conflict.name})` : ""}. Rename anyway?
+          </div>
+          <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
+            <button
+              type="button"
+              disabled={submitting}
+              onClick={() => setConflict(null)}
+              style={{
+                background: "transparent",
+                border: "1px solid var(--line2)",
+                borderRadius: 4, padding: "8px 16px",
+                fontSize: 9, fontWeight: 700, letterSpacing: "0.12em",
+                textTransform: "uppercase",
+                color: "var(--t2)",
+                cursor: submitting ? "not-allowed" : "pointer",
+                fontFamily: "var(--font-space-mono), Space Mono, monospace",
+              }}
+            >
+              Back
+            </button>
+            <button
+              type="button"
+              disabled={submitting}
+              onClick={() => submit(true)}
+              style={{
+                background: "var(--amber-dim)",
+                border: "1px solid var(--amber)",
+                borderRadius: 4, padding: "8px 16px",
+                fontSize: 9, fontWeight: 700, letterSpacing: "0.12em",
+                textTransform: "uppercase",
+                color: "var(--amber)",
+                cursor: submitting ? "not-allowed" : "pointer",
+                fontFamily: "var(--font-space-mono), Space Mono, monospace",
+              }}
+            >
+              Rename anyway
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // ── State A: edit ────────────────────────────────────────────────────────
+  return (
+    <div
+      role="dialog"
+      aria-modal="true"
+      onClick={() => { if (!submitting) onCancel(); }}
+      style={{
+        position: "fixed", inset: 0,
+        background: "rgba(0,0,0,0.7)",
+        display: "flex", alignItems: "center", justifyContent: "center",
+        zIndex: 1000,
+      }}
+    >
+      <div
+        onClick={e => e.stopPropagation()}
+        style={{
+          background: "var(--bg2)",
+          border: "1px solid var(--line2)",
+          borderRadius: 6, padding: "20px 24px",
+          width: 520, maxWidth: "92vw",
+          fontFamily: "var(--font-space-mono), Space Mono, monospace",
+        }}
+      >
+        <div style={{
+          fontSize: 9, fontWeight: 700, letterSpacing: "0.12em",
+          color: "var(--t3)", textTransform: "uppercase",
+          marginBottom: 10,
+        }}>
+          Rename strategy
+        </div>
+        <div style={{ fontSize: 10, color: "var(--t2)", marginBottom: 6 }}>
+          Current: <span style={{ color: "var(--t1)" }}>{currentDisplayName}</span>
+        </div>
+        <input
+          type="text"
+          autoFocus
+          value={value}
+          maxLength={200}
+          onChange={e => setValue(e.target.value)}
+          onKeyDown={e => { if (e.key === "Enter" && canSave) submit(false); }}
+          style={{
+            width: "100%",
+            background: "var(--bg3)",
+            border: `1px solid ${overSoft ? "var(--amber)" : "var(--line)"}`,
+            color: "var(--t0)",
+            borderRadius: 4, padding: "8px 10px",
+            fontSize: 11,
+            fontFamily: "var(--font-space-mono), Space Mono, monospace",
+            outline: "none",
+            marginBottom: 4,
+          }}
+        />
+        <div style={{ fontSize: 9, color: overSoft ? "var(--amber)" : "var(--t3)", marginBottom: 14 }}>
+          {trimmed.length}/{softLimit}{overSoft ? " — over soft limit (UI cap), still saves" : ""}
+        </div>
+        {error && (
+          <div style={{ fontSize: 10, color: "var(--red)", marginBottom: 10 }}>
+            {error}
+          </div>
+        )}
+        <div style={{
+          fontSize: 9, color: "var(--t1)", lineHeight: 1.6,
+          background: "var(--amber-dim)", border: "1px solid var(--amber)",
+          borderRadius: 4, padding: "8px 10px", marginBottom: 16,
+          display: "flex", gap: 8, alignItems: "flex-start",
+        }}>
+          <span style={{ color: "var(--amber)", flexShrink: 0, fontWeight: 700 }}>⚠</span>
+          <span>
+            Future Simulator re-promotes referencing the OLD label will create
+            a brand-new strategy rather than matching this one. Use the new
+            label in the Simulator going forward.
+          </span>
+        </div>
+        <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
+          <button
+            type="button"
+            disabled={submitting}
+            onClick={onCancel}
+            style={{
+              background: "transparent",
+              border: "1px solid var(--line2)",
+              borderRadius: 4, padding: "8px 16px",
+              fontSize: 9, fontWeight: 700, letterSpacing: "0.12em",
+              textTransform: "uppercase",
+              color: "var(--t2)",
+              cursor: submitting ? "not-allowed" : "pointer",
+              fontFamily: "var(--font-space-mono), Space Mono, monospace",
+            }}
+          >
+            Cancel
+          </button>
+          <button
+            type="button"
+            disabled={!canSave}
+            onClick={() => submit(false)}
+            style={{
+              background: canSave ? "var(--green-dim)" : "var(--bg3)",
+              border: `1px solid ${canSave ? "var(--green)" : "var(--line)"}`,
+              borderRadius: 4, padding: "8px 16px",
+              fontSize: 9, fontWeight: 700, letterSpacing: "0.12em",
+              textTransform: "uppercase",
+              color: canSave ? "var(--green)" : "var(--t3)",
+              cursor: canSave ? "pointer" : "not-allowed",
+              fontFamily: "var(--font-space-mono), Space Mono, monospace",
+            }}
+          >
+            Save
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export default function StrategiesPage() {
   const router = useRouter();
   const searchParams = useSearchParams();
@@ -213,6 +513,14 @@ export default function StrategiesPage() {
   const [confirmTarget, setConfirmTarget] = useState<
     { strategyId: number; displayName: string } | null
   >(null);
+  const [renameTarget, setRenameTarget] = useState<
+    { strategyId: number; currentDisplayName: string } | null
+  >(null);
+
+  const handleRenameSuccess = useCallback(() => {
+    setRenameTarget(null);
+    refresh();
+  }, [refresh]);
 
   useEffect(() => {
     let cancelled = false;
@@ -418,10 +726,11 @@ export default function StrategiesPage() {
                   onClick={() => router.push(`/trader/strategies/${type}`)}
                 >
                   {hasAdminToggle && (
-                    <AdminToggleButton
+                    <AdminButtons
                       isPublished={effectivePublished}
                       busy={busy}
-                      onClick={onAdminToggle}
+                      onRename={() => setRenameTarget({ strategyId, currentDisplayName: cat.name })}
+                      onToggle={onAdminToggle}
                     />
                   )}
                   {/* Top row */}
@@ -516,10 +825,11 @@ export default function StrategiesPage() {
                 }}
               >
                 {hasAdminToggle && (
-                  <AdminToggleButton
+                  <AdminButtons
                     isPublished={effectivePublished}
                     busy={busy}
-                    onClick={onAdminToggle}
+                    onRename={() => setRenameTarget({ strategyId, currentDisplayName: cat.name })}
+                    onToggle={onAdminToggle}
                   />
                 )}
                 {/* Name + badge */}
@@ -595,6 +905,15 @@ export default function StrategiesPage() {
         </div>
       </div>
 
+      {renameTarget && (
+        <RenameStrategyModal
+          strategyId={renameTarget.strategyId}
+          currentDisplayName={renameTarget.currentDisplayName}
+          onCancel={() => setRenameTarget(null)}
+          onSuccess={handleRenameSuccess}
+          refresh={refresh}
+        />
+      )}
       {confirmTarget && (
         <ConfirmRetireModal
           displayName={confirmTarget.displayName}

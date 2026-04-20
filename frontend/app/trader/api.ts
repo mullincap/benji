@@ -224,6 +224,15 @@ export const allocatorApi = {
       { method: "POST" },
     ),
 
+  renameStrategy: (strategyId: number, displayName: string, allowDuplicate = false) =>
+    apiFetch<{ strategy_id: number; name: string; display_name: string; is_published: boolean }>(
+      `/api/allocator/strategies/${strategyId}/rename`,
+      {
+        method: "POST",
+        body: JSON.stringify({ display_name: displayName, allow_duplicate: allowDuplicate }),
+      },
+    ),
+
   // Exchanges
   getExchanges: () =>
     apiFetch<{ exchanges: ApiExchange[] }>("/api/allocator/exchanges"),
