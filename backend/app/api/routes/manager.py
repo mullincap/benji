@@ -1369,13 +1369,23 @@ _SESSION_HEADER_RE = re.compile(r"^\s*SESSION\s+(\d{4}-\d{2}-\d{2})")
 
 def _resolve_log_path() -> Path:
     """
-    BLOFIN_LOG_FILE env override, else project-root-relative
+    Master log path. BLOFIN_LOG_FILE env override, else project-root-relative
     blofin_executor.log (same project-root resolution as _resolve_reports_dir).
     """
     override = os.environ.get("BLOFIN_LOG_FILE")
     if override:
         return Path(override)
     return Path(__file__).resolve().parents[4] / "blofin_executor.log"
+
+
+def _resolve_allocation_log_path(allocation_id: str, date: str) -> Path:
+    """
+    Per-allocation log path. Each spawn_traders subprocess redirects its
+    stdout/stderr to /mnt/quant-data/logs/trader/allocation_<uuid>_<date>.log
+    — see backend/app/cli/spawn_traders.py. Mount at /mnt/quant-data is
+    shared with the host (docker-compose.yml).
+    """
+    return Path("/mnt/quant-data/logs/trader") / f"allocation_{allocation_id}_{date}.log"
 
 
 def _parse_log_line(raw: str) -> dict[str, str] | None:
@@ -1387,25 +1397,8 @@ def _parse_log_line(raw: str) -> dict[str, str] | None:
 
 
 def _read_trader_log() -> list[dict[str, str]]:
-    """
-    Parse the entire log file, folding continuation lines (tracebacks, etc.)
-    into the previous entry's text. Returns entries in file order.
-    """
-    path = _resolve_log_path()
-    if not path.exists():
-        return []
-    out: list[dict[str, str]] = []
-    with open(path, encoding="utf-8", errors="replace") as f:
-        for raw in f:
-            raw = raw.rstrip("\n")
-            if not raw:
-                continue
-            ent = _parse_log_line(raw)
-            if ent is not None:
-                out.append(ent)
-            elif out:
-                out[-1]["text"] = out[-1]["text"] + "\n" + raw
-    return out
+    """Parse the master log (blofin_executor.log). Delegates to _read_log_file."""
+    return _read_log_file(_resolve_log_path())
 
 
 def _session_window(
@@ -1447,32 +1440,73 @@ def _session_window(
     return date, entries[start_idx:end_idx]
 
 
+def _read_log_file(path: Path) -> list[dict[str, str]]:
+    """Parse one log file, folding continuation lines into the previous entry."""
+    if not path.exists():
+        return []
+    out: list[dict[str, str]] = []
+    with open(path, encoding="utf-8", errors="replace") as f:
+        for raw in f:
+            raw = raw.rstrip("\n")
+            if not raw:
+                continue
+            ent = _parse_log_line(raw)
+            if ent is not None:
+                out.append(ent)
+            elif out:
+                out[-1]["text"] = out[-1]["text"] + "\n" + raw
+    return out
+
+
 @router.get("/execution-logs")
 def execution_logs(
     date: str | None = None,
+    allocation_id: str | None = None,
     since_line: int | None = None,
     limit: int = Query(default=500, ge=1, le=2000),
     cur=Depends(get_cursor),
 ) -> dict[str, Any]:
     """
-    Return trader log lines for one session window.
+    Return trader log lines for one session.
 
-    date:        YYYY-MM-DD; omitted → most recent session.
-    since_line:  return only lines with n > since_line (live-polling cursor).
-                 Omitted → tail the last `limit` lines.
-    limit:       1..2000, default 500.
+    Two modes:
+      (a) Master mode (default, no allocation_id): reads blofin_executor.log —
+          a single continuous append-only file spanning multiple sessions.
+          Uses SESSION header markers to segment into per-day windows.
+      (b) Allocation mode (allocation_id provided): reads the per-allocation
+          per-day file at /mnt/quant-data/logs/trader/allocation_<id>_<date>.log.
+          One file = one session; no header segmentation needed. `date` is
+          REQUIRED in this mode since the filename encodes it.
 
-    Response: {date, total_lines, from_line, lines[], session_active}.
-    session_active is true iff user_mgmt.portfolio_sessions shows status
-    'active' for the session's date (covers the common "is trader still
-    running?" UI-polling question).
+    date:           YYYY-MM-DD. Required in allocation mode; omitted in master
+                    mode → most recent session.
+    allocation_id:  Optional UUID. When provided, switches to allocation mode.
+    since_line:     return only lines with n > since_line (live-polling cursor).
+                    Omitted → tail the last `limit` lines.
+    limit:          1..2000, default 500.
+
+    Response: {date, total_lines, from_line, lines[], session_active,
+               allocation_id}. session_active reads portfolio_sessions; in
+    allocation mode the check is scoped to the allocation_id.
     """
     if date is not None:
         if len(date) != 10 or date[4] != "-" or date[7] != "-":
             raise HTTPException(status_code=400, detail="invalid date")
 
-    entries = _read_trader_log()
-    session_date, window = _session_window(entries, date)
+    if allocation_id is not None:
+        # Allocation mode — one file per (allocation, date).
+        if not date:
+            raise HTTPException(
+                status_code=400,
+                detail="date query param is required when allocation_id is provided",
+            )
+        window = _read_log_file(_resolve_allocation_log_path(allocation_id, date))
+        session_date = date
+    else:
+        # Master mode — single continuous file, segment by SESSION header.
+        entries = _read_trader_log()
+        session_date, window = _session_window(entries, date)
+
     total = len(window)
 
     if since_line is None:
@@ -1491,18 +1525,30 @@ def execution_logs(
 
     session_active = False
     if session_date:
-        cur.execute(
-            """
-            SELECT 1
-            FROM user_mgmt.portfolio_sessions
-            WHERE signal_date = %s AND status = 'active'
-            """,
-            (session_date,),
-        )
+        if allocation_id is not None:
+            cur.execute(
+                """
+                SELECT 1
+                FROM user_mgmt.portfolio_sessions
+                WHERE signal_date = %s AND status = 'active'
+                  AND allocation_id = %s::uuid
+                """,
+                (session_date, allocation_id),
+            )
+        else:
+            cur.execute(
+                """
+                SELECT 1
+                FROM user_mgmt.portfolio_sessions
+                WHERE signal_date = %s AND status = 'active'
+                """,
+                (session_date,),
+            )
         session_active = cur.fetchone() is not None
 
     return {
         "date":           session_date,
+        "allocation_id":  allocation_id,
         "total_lines":    total,
         "from_line":      start,
         "lines":          lines,

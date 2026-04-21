@@ -498,6 +498,10 @@ export default function ExecutionPage() {
   // null → SessionLogs shows the most recent session. Any row click sets this
   // to the clicked row's date so the log viewer correlates with the table.
   const [selectedLogDate, setSelectedLogDate] = useState<string | null>(null);
+  // When an allocation row is clicked, the log viewer reads from the
+  // per-allocation log file. When a master row is clicked (or nothing), this
+  // stays null and the log viewer falls back to the master blofin_executor.log.
+  const [selectedLogAllocationId, setSelectedLogAllocationId] = useState<string | null>(null);
   // Mutually-exclusive section expansion: at most one of the two detail
   // panels (table / logs) is open at a time so each gets full vertical
   // space when active. null = both collapsed.
@@ -548,9 +552,19 @@ export default function ExecutionPage() {
       else next.add(date);
       return next;
     });
-    // Correlate the log viewer with the clicked row.
+    // Correlate the log viewer with the clicked master row.
     setSelectedLogDate(date);
+    setSelectedLogAllocationId(null);  // master row → master log
   }, []);
+
+  // Allocation-row click: scope Session Logs to the per-allocation log file.
+  const selectAllocationLogs = useCallback(
+    (allocationId: string, date: string) => {
+      setSelectedLogDate(date);
+      setSelectedLogAllocationId(allocationId);
+    },
+    [],
+  );
 
   // KPIs now come from the backend summary (capital-weighted when multiple
   // allocations in scope). Execution-quality fields are null until the
@@ -814,6 +828,11 @@ export default function ExecutionPage() {
                     key={`alloc-${row.data.allocation_id}-${row.date}-${idx}`}
                     row={row.data}
                     showAllocCol={showAllocCol}
+                    onSelect={selectAllocationLogs}
+                    selected={
+                      selectedLogAllocationId === row.data.allocation_id &&
+                      selectedLogDate === row.date
+                    }
                   />
                 ) : (
                   <DayRow
@@ -832,10 +851,11 @@ export default function ExecutionPage() {
         )}
       </div>
 
-      {/* Row 3: Session logs. Multi-tenant mode shows an informational panel
-          (per-allocation logs deferred to the telemetry writer extension);
-          master rows continue to show the existing SessionLogs component
-          when "Include master history" is on. */}
+      {/* Row 3: Session logs.
+          - Master row clicked → SessionLogs reads blofin_executor.log (master).
+          - Allocation row clicked → SessionLogs reads per-allocation log file
+            /mnt/quant-data/logs/trader/allocation_<id>_<date>.log.
+          - Nothing selected → hint panel. */}
       <div
         style={{
           background: "var(--bg2)",
@@ -873,20 +893,23 @@ export default function ExecutionPage() {
           <span>Session Logs</span>
         </button>
         {activeSection === "logs" && (
-          showMasterRows && selectedLogDate ? (
-            // Master-row selected — existing SessionLogs component.
+          selectedLogDate ? (
+            // Some row selected — render SessionLogs. allocationId non-null
+            // for allocation rows (reads /mnt/quant-data/logs/trader/alloc_*.log);
+            // null for master rows (reads blofin_executor.log).
             <SessionLogs
               selectedDate={selectedLogDate}
+              allocationId={selectedLogAllocationId}
               expanded
               onToggle={() => toggleSection("logs")}
             />
           ) : (
-            // Multi-tenant rows OR no master row selected — info panel.
+            // No row clicked yet — hint panel.
             <div style={{ padding: "0 16px 18px", fontSize: 10, color: "var(--t2)", lineHeight: 1.6 }}>
-              Per-allocation session logs will be available once the execution
-              telemetry writer ships (tracked for Session E/F). Master session
-              logs remain accessible via the &quot;Include master history&quot;
-              toggle above — expand a master row to view them here.
+              Click a row in the Daily Execution Summary above to view its
+              session logs here. Allocation rows load from the per-allocation
+              log file at <code>/mnt/quant-data/logs/trader/allocation_&lt;id&gt;_&lt;date&gt;.log</code>;
+              master rows load from <code>blofin_executor.log</code>.
             </div>
           )
         )}
@@ -904,12 +927,23 @@ export default function ExecutionPage() {
 function AllocationDayRow({
   row,
   showAllocCol,
+  onSelect,
+  selected,
 }: {
   row: SummaryDaily;
   showAllocCol: boolean;
+  /** Click handler: scopes the Session Logs section to this (allocation, date). */
+  onSelect: (allocationId: string, date: string) => void;
+  /** True when this row is currently feeding the Session Logs viewer. */
+  selected: boolean;
 }) {
   const exitReason = row.exit_reason ?? "";
   const flat = FLAT_REASONS.has(exitReason);
+  const rowClick = () => onSelect(row.allocation_id, row.date);
+  const rowStyle = {
+    cursor: "pointer",
+    background: selected ? "var(--bg3)" : undefined,
+  } as React.CSSProperties;
 
   const allocCell = showAllocCol ? (
     <td style={{ ...tdStyle, color: "var(--t1)" }}>
@@ -935,7 +969,7 @@ function AllocationDayRow({
 
   if (flat) {
     return (
-      <tr style={{ opacity: 0.6 }}>
+      <tr onClick={rowClick} style={{ ...rowStyle, opacity: 0.6 }}>
         <td style={tdStyle}></td>
         <td style={{ ...tdStyle, color: "var(--t2)" }}>{row.date}</td>
         {allocCell}
@@ -952,7 +986,7 @@ function AllocationDayRow({
   }
 
   return (
-    <tr>
+    <tr onClick={rowClick} style={rowStyle}>
       <td style={tdStyle}></td>
       <td style={{ ...tdStyle, color: "var(--t0)" }}>{row.date}</td>
       {allocCell}

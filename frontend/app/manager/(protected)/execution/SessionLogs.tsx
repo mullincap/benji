@@ -104,10 +104,18 @@ function LivePulse() {
 
 export default function SessionLogs({
   selectedDate,
+  allocationId,
   expanded,
   onToggle,
 }: {
   selectedDate: string | null;
+  /**
+   * When provided, fetch per-allocation log file at
+   * /mnt/quant-data/logs/trader/allocation_<allocationId>_<selectedDate>.log.
+   * When null/undefined, fall back to master's continuous blofin_executor.log
+   * (legacy behavior). `selectedDate` is REQUIRED when allocationId is set.
+   */
+  allocationId?: string | null;
   /**
    * Parent controls open/closed so the Execution tab can enforce
    * mutually-exclusive expansion with the Daily Execution Summary.
@@ -140,10 +148,17 @@ export default function SessionLogs({
     try {
       const url = buildLogsUrl({
         date: date ?? undefined,
+        allocation_id: allocationId ?? undefined,
         limit: LOAD_LIMIT,
       });
       const res = await fetch(url, { credentials: "include" });
       if (res.status === 401) throw new Error("Session expired");
+      if (res.status === 400) {
+        // Likely: allocation mode needs both date + allocationId. Surface as
+        // a user-visible message rather than a crash.
+        const body = await res.json().catch(() => ({}));
+        throw new Error(typeof body?.detail === "string" ? body.detail : "HTTP 400");
+      }
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data: LogResponse = await res.json();
       setLines(data.lines);
@@ -162,12 +177,13 @@ export default function SessionLogs({
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [allocationId]);
 
   const pollNew = useCallback(async () => {
     try {
       const url = buildLogsUrl({
         date: sessionDate ?? undefined,
+        allocation_id: allocationId ?? undefined,
         since_line: lastNRef.current,
         limit: LOAD_LIMIT,
       });
@@ -192,7 +208,7 @@ export default function SessionLogs({
     } catch {
       // Swallow transient polling errors silently; the next tick will retry.
     }
-  }, [sessionDate]);
+  }, [sessionDate, allocationId]);
 
   const loadEarlier = useCallback(async () => {
     if (fromLine <= 0 || loadingEarlier) return;
@@ -209,6 +225,7 @@ export default function SessionLogs({
 
       const url = buildLogsUrl({
         date: sessionDate ?? undefined,
+        allocation_id: allocationId ?? undefined,
         since_line: sinceParam,
         limit: LOAD_LIMIT,
       });
@@ -238,7 +255,7 @@ export default function SessionLogs({
     } finally {
       setLoadingEarlier(false);
     }
-  }, [fromLine, sessionDate, loadingEarlier]);
+  }, [fromLine, sessionDate, loadingEarlier, allocationId]);
 
   const handleScroll = () => {
     const el = scrollRef.current;
@@ -247,7 +264,9 @@ export default function SessionLogs({
       el.scrollHeight - el.scrollTop - el.clientHeight <= BOTTOM_THRESHOLD_PX;
   };
 
-  // (Re)fetch when expanded OR when selectedDate changes while expanded.
+  // (Re)fetch when expanded OR when selectedDate / allocationId changes
+  // while expanded. (allocationId is baked into fetchInitial via its deps,
+  // so change reference → new callback → effect re-fires.)
   useEffect(() => {
     if (collapsed) return;
     fetchInitial(selectedDate);
