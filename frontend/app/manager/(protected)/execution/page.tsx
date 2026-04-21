@@ -506,7 +506,7 @@ export default function ExecutionPage() {
   // Mutually-exclusive section expansion: at most one of the two detail
   // panels (table / logs) is open at a time so each gets full vertical
   // space when active. null = both collapsed.
-  const [activeSection, setActiveSection] = useState<"table" | "logs" | null>("table");
+  const [activeSection, setActiveSection] = useState<"table" | "logs" | null>("logs");
   const toggleSection = useCallback((name: "table" | "logs") => {
     setActiveSection((cur) => (cur === name ? null : name));
   }, []);
@@ -707,7 +707,40 @@ export default function ExecutionPage() {
         />
       </div>
 
-      {/* Row 2: Daily summary table (collapsible; mutually exclusive with logs) */}
+      {/* Row 2: Session logs (featured above the summary table — ops visibility
+          while a session is live is more useful than historical rows).
+          - Master row clicked → SessionLogs reads blofin_executor.log (master).
+          - Allocation row clicked → SessionLogs reads per-allocation log file
+            /mnt/quant-data/logs/trader/allocation_<id>_<date>.log.
+          - Filter set to a specific allocation → auto-scope to its latest log.
+          - Otherwise → SessionLogs renders a hint body (via its `hint` prop).
+          SessionLogs owns its header — do NOT wrap it in another titled card
+          here or you'll double up the "Session Logs" label. */}
+      {(() => {
+        const hasManualSelection = selectedLogDate !== null;
+        const filterIsSpecific = allocFilter !== "all";
+        const shouldShowHint = !hasManualSelection && !filterIsSpecific;
+        const effectiveAllocId = shouldShowHint
+          ? null
+          : hasManualSelection
+            ? selectedLogAllocationId
+            : (filterIsSpecific ? allocFilter : null);
+        const effectiveDate = hasManualSelection ? selectedLogDate : null;
+        const hintText = shouldShowHint
+          ? "Click a row in the Daily Execution Summary below to view its session logs here, or pick a specific allocation in the filter dropdown to auto-scope the viewer to that allocation's latest session."
+          : undefined;
+        return (
+          <SessionLogs
+            selectedDate={effectiveDate}
+            allocationId={effectiveAllocId}
+            expanded={activeSection === "logs"}
+            onToggle={() => toggleSection("logs")}
+            hint={hintText}
+          />
+        );
+      })()}
+
+      {/* Row 3: Daily summary table (collapsible; mutually exclusive with logs) */}
       <div
         style={{
           background: "var(--bg2)",
@@ -860,39 +893,6 @@ export default function ExecutionPage() {
         )}
       </div>
 
-      {/* Row 3: Session logs.
-          - Master row clicked → SessionLogs reads blofin_executor.log (master).
-          - Allocation row clicked → SessionLogs reads per-allocation log file
-            /mnt/quant-data/logs/trader/allocation_<id>_<date>.log.
-          - Filter set to a specific allocation → auto-scope to its latest log.
-          - Otherwise → SessionLogs renders a hint body (via its `hint` prop).
-          SessionLogs owns its header — do NOT wrap it in another titled card
-          here or you'll double up the "Session Logs" label. */}
-      {(() => {
-        const hasManualSelection = selectedLogDate !== null;
-        const filterIsSpecific = allocFilter !== "all";
-        const shouldShowHint = !hasManualSelection && !filterIsSpecific;
-        const effectiveAllocId = shouldShowHint
-          ? null
-          : hasManualSelection
-            ? selectedLogAllocationId
-            : (filterIsSpecific ? allocFilter : null);
-        // Null date when auto-scoping — backend resolves to the latest
-        // available log file for the allocation.
-        const effectiveDate = hasManualSelection ? selectedLogDate : null;
-        const hintText = shouldShowHint
-          ? "Click a row in the Daily Execution Summary above to view its session logs here, or pick a specific allocation in the filter dropdown to auto-scope the viewer to that allocation's latest session."
-          : undefined;
-        return (
-          <SessionLogs
-            selectedDate={effectiveDate}
-            allocationId={effectiveAllocId}
-            expanded={activeSection === "logs"}
-            onToggle={() => toggleSection("logs")}
-            hint={hintText}
-          />
-        );
-      })()}
     </div>
   );
 }

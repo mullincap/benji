@@ -827,7 +827,6 @@ def _get_prices_blofin(api: ExchangeAdapter, inst_ids: list) -> dict:
     Name retained for call-site stability; now exchange-agnostic. Field-fallback
     + zero-price-exclusion logic lives in each adapter's get_price().
     """
-    log.info(f"getting prices from {api.exchange_name}")
     prices = {}
     for inst_id in inst_ids:
         price = api.get_price(inst_id)
@@ -2136,6 +2135,39 @@ def _run_monitoring_loop(today, today_date, api: ExchangeAdapter, inst_ids,
 
     log.info(f"{log_prefix}Entering 5-min monitoring loop ...")
 
+    # ── Actual-account ROI baseline ───────────────────────────────────────
+    # Captures total account equity at session start so each bar can log
+    # the real account ROI + session PnL alongside the strategy's 1x
+    # incr / peak values. Fresh sessions pass balance_pre_entry; resumed
+    # sessions read from runtime_state or fall back to the current equity
+    # (approximate baseline) if no prior capture exists.
+    session_start_equity_usdt = balance_pre_entry
+    if allocation_id is not None and session_start_equity_usdt is None:
+        try:
+            _cur_alloc = _fetch_allocation(allocation_id)
+            _cur_state = _cur_alloc.get("runtime_state") or {}
+            if _cur_state.get("session_start_equity_usdt") is not None:
+                session_start_equity_usdt = float(_cur_state["session_start_equity_usdt"])
+        except Exception as _e:
+            log.warning(f"{log_prefix}runtime_state read for equity baseline failed: {_e}")
+    if session_start_equity_usdt is None and allocation_id is not None:
+        try:
+            _bal0 = api.get_balance()
+            session_start_equity_usdt = float(_bal0.total_usdt)
+            log.info(
+                f"{log_prefix}Captured session-start equity baseline: "
+                f"${session_start_equity_usdt:,.2f} "
+                "(resumed session — using current equity)"
+            )
+        except Exception as _e:
+            log.warning(
+                f"{log_prefix}get_balance for ROI baseline failed: {_e} — "
+                "actual-ROI will show 0 until a successful fetch."
+            )
+            session_start_equity_usdt = 0.0
+    if session_start_equity_usdt is None:
+        session_start_equity_usdt = 0.0
+
     while utcnow() < session_close_dt:
         sleep_until_next_bar()
         if utcnow() >= session_close_dt:
@@ -2199,12 +2231,38 @@ def _run_monitoring_loop(today, today_date, api: ExchangeAdapter, inst_ids,
         tsl_dist = incr - peak
         fill_open = utcnow() <= fill_gate_dt
 
+        # Actual account ROI — live fetch per bar, compared against the 1x
+        # strategy return (incr). Leveraged-expected = incr × eff_lev; delta
+        # surfaces fees / slippage drift between strategy assumption and the
+        # real account. Network failures here don't affect SL/TSL decisions.
+        current_equity_usdt = 0.0
+        actual_roi = 0.0
+        session_pnl_usd = 0.0
+        try:
+            _bal = api.get_balance()
+            current_equity_usdt = float(_bal.total_usdt)
+            if session_start_equity_usdt > 0:
+                actual_roi = current_equity_usdt / session_start_equity_usdt - 1.0
+                session_pnl_usd = current_equity_usdt - session_start_equity_usdt
+        except Exception as _e:
+            log.warning(f"{log_prefix}Bar {b:3d}: equity fetch failed: {_e}")
+
+        expected_roi = incr * eff_lev
+        roi_delta    = actual_roi - expected_roi
+
         log.info(
             f"{log_prefix}Bar {b:3d} | incr={incr*100:+.3f}%  peak={peak*100:.3f}%  "
             f"tsl={tsl_dist*100:+.3f}%  sess={session_ret*100:+.3f}%  "
             f"active={len(active_positions)}/{len(positions)}  "
             f"stopped={len(sym_stopped)}  "
             f"fill={'open' if fill_open else 'closed'}"
+        )
+        log.info(
+            f"{log_prefix}         | actual_roi={actual_roi*100:+.3f}%  "
+            f"equity=${current_equity_usdt:,.2f}  "
+            f"pnl=${session_pnl_usd:+,.2f}  "
+            f"expected={expected_roi*100:+.3f}% (incr×lev)  "
+            f"delta={roi_delta*100:+.3f}%"
         )
 
         # Persist this bar's snapshot before the break checks so the bar that
@@ -2273,6 +2331,10 @@ def _run_monitoring_loop(today, today_date, api: ExchangeAdapter, inst_ids,
             "open_prices":  {k: v for k, v in open_prices.items()},
             "entry_prices": {k: v for k, v in entry_prices.items()},
             "positions": active_positions,
+            "session_start_equity_usdt": round(session_start_equity_usdt, 2),
+            "current_equity_usdt": round(current_equity_usdt, 2),
+            "session_pnl_usd": round(session_pnl_usd, 2),
+            "actual_roi": round(actual_roi, 6),
         }
         if allocation_id is None:
             save_state(_state)
@@ -3285,10 +3347,19 @@ def _run_fresh_session_for_allocation(
     # Master's _run_monitoring_loop accepts allocation-mode kwargs (config,
     # session_id, allocation_id, capital_deployed_usd) and branches at the
     # write sites. Per-bar check order + portfolio-return math are shared.
+    # balance_pre_entry forwarded so the monitoring loop has an accurate
+    # session-start equity baseline for actual-ROI logging. Falls through
+    # to a live get_balance fetch if the adapter-side balance field is
+    # unavailable at this point.
+    try:
+        _entry_bal = float(api.get_balance().total_usdt)
+    except Exception:
+        _entry_bal = None
     _run_monitoring_loop(
         today, today_date, api, inst_ids,
         open_prices, entry_prices, entry_1x, eff_lev,
         peak, positions, dry_run,
+        balance_pre_entry=_entry_bal,
         allocation_id=allocation_id,
         config=config,
         session_id=session_id,
@@ -3483,6 +3554,7 @@ def run_session_for_allocation(allocation_id: str, dry_run: bool = False) -> Non
             _entry_prices = {k: float(v) for k, v in state["entry_prices"].items()}
             _inst_ids     = list(state.get("symbols", _open_prices.keys()))
             _today_date   = utcnow().date()
+            _resume_baseline = state.get("session_start_equity_usdt")
             _run_monitoring_loop(
                 today, _today_date, api, _inst_ids,
                 _open_prices, _entry_prices,
@@ -3490,6 +3562,8 @@ def run_session_for_allocation(allocation_id: str, dry_run: bool = False) -> Non
                 float(state.get("effective_leverage", config.l_high)),
                 float(state.get("peak", 0.0)),
                 state["positions"], dry_run,
+                balance_pre_entry=(float(_resume_baseline)
+                                   if _resume_baseline is not None else None),
                 allocation_id=allocation_id,
                 config=config,
                 session_id=state.get("session_id"),
