@@ -207,6 +207,8 @@ export default function LandingPage() {
         .lp-nav-link:hover { color: var(--t0) !important; }
         .lp-nav-cta { transition: border-color 0.3s, color 0.3s; }
         .lp-nav-cta:hover { border-color: var(--green) !important; color: var(--green) !important; }
+        .lp-nav-cta-arrow { display: inline-block; transition: transform 0.3s cubic-bezier(0.16,1,0.3,1); }
+        .lp-nav-cta:hover .lp-nav-cta-arrow { transform: translate(2px, -2px); }
         .lp-btn-primary { transition: opacity 0.2s, transform 0.2s; }
         .lp-btn-primary:hover { opacity: 0.85; transform: translateY(-1px); }
         .lp-btn-ghost { transition: border-color 0.2s, color 0.2s; }
@@ -289,12 +291,14 @@ export default function LandingPage() {
           ))}
         </ul>
         <Link href="/trader/overview" className="lp-nav-cta" style={{
+          display: 'inline-flex', alignItems: 'center', gap: 8,
           padding: '9px 22px', background: 'transparent',
           border: '1px solid var(--line2)', color: 'var(--t1)',
           fontFamily: 'var(--font-space-mono)', fontSize: 11,
           letterSpacing: '0.1em', textTransform: 'uppercase', textDecoration: 'none',
         }}>
           Launch App
+          <span className="lp-nav-cta-arrow" aria-hidden="true">↗</span>
         </Link>
       </nav>
 
@@ -314,7 +318,7 @@ export default function LandingPage() {
             <span className="lp-breathe-fast" style={{
               width: 4, height: 4, borderRadius: '50%', background: 'var(--green)',
             }} />
-            Institutional-grade returns + analytics
+            Institutional grade returns + analytics
           </div>
 
           <h1 className="lp-rise-2" style={{
@@ -328,8 +332,8 @@ export default function LandingPage() {
           <p className="lp-rise-3" style={{
             fontSize: 13, color: 'var(--t1)', maxWidth: 480, lineHeight: 1.9, marginBottom: '3rem',
           }}>
-            Backtest, stress-test, validate, and launch trading strategies with institutional-grade analytics
-            linked directly to your account. Built for fund managers and allocators who demand rigor.
+            Validate and launch trading strategies with institutional-grade analytics linked directly
+            to your account. Built for fund managers and allocators who demand rigor.
           </p>
 
           <div className="lp-rise-4 lp-hero-actions" style={{ display: 'flex', gap: 12, marginBottom: '5rem' }}>
