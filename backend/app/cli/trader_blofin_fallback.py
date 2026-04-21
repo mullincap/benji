@@ -638,7 +638,12 @@ class BlofinREST:
     def _headers(self, path: str, method: str, body: dict = None) -> dict:
         body_str = (json.dumps(body, separators=(",", ":"), ensure_ascii=False)
                     if body and method.upper() != "GET" else "")
-        return _shared_get_headers(method, path, body_str)
+        return _shared_get_headers(
+            method, path, body_str,
+            api_key=self._key,
+            api_secret=self._secret,
+            passphrase=self._passphrase,
+        )
 
     def request(self, method: str, path: str,
                 params: dict = None, body: dict = None) -> dict:
