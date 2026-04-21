@@ -3,7 +3,7 @@
 import { useState, useEffect, useRef } from "react";
 import { useParams, useRouter } from "next/navigation";
 import { useTrader, STRATEGY_CATALOG, StrategyType, Position, fmt, RISK_COLOR, RISK_DIM } from "../../../context";
-import { allocatorApi, ApiPosition } from "../../../api";
+import { allocatorApi, ApiPnl, ApiPosition } from "../../../api";
 import PerformanceChart from "../../../performance-chart";
 import SetupWizard from "../../../components/SetupWizard";
 
@@ -38,13 +38,48 @@ function Toggle({ on, onColor, offColor, onToggle, label }: {
 
 // ─── Metric card ─────────────────────────────────────────────────────────────
 
-function MetricCard({ label, value, color }: { label: string; value: string; color?: string }) {
+function MetricCard({ label, value, color, subtitle, subtitleColor }: {
+  label: string;
+  value: string;
+  color?: string;
+  subtitle?: string;
+  subtitleColor?: string;
+}) {
   return (
     <div style={{ background: "var(--bg2)", border: "1px solid var(--line)", borderRadius: 5, padding: "14px 16px" }}>
       <div style={{ fontSize: 9, color: "var(--t3)", letterSpacing: "0.12em", fontWeight: 700, textTransform: "uppercase", marginBottom: 6 }}>{label}</div>
       <div style={{ fontSize: 18, fontWeight: 700, color: color ?? "var(--t0)" }}>{value}</div>
+      {subtitle && (
+        <div style={{
+          fontSize: 10,
+          marginTop: 4,
+          color: subtitleColor ?? "var(--t2)",
+          fontWeight: 700,
+          letterSpacing: "0.02em",
+        }}>{subtitle}</div>
+      )}
     </div>
   );
+}
+
+// ─── PnL formatting helpers ──────────────────────────────────────────────────
+
+function fmtUsdSigned(n: number): string {
+  const sign = n >= 0 ? "+" : "-";
+  return `${sign}$${fmt(Math.abs(n))}`;
+}
+
+function pnlColor(n: number | null | undefined): string {
+  if (n === null || n === undefined) return "var(--t2)";
+  if (n > 0) return "var(--green)";
+  if (n < 0) return "var(--red)";
+  return "var(--t0)";
+}
+
+function pnlSubtitle(pct: number | null | undefined): string | undefined {
+  if (pct === null || pct === undefined) return undefined;
+  const chevron = pct > 0 ? "▲" : pct < 0 ? "▼" : "●";
+  return `${chevron} ${pct >= 0 ? "+" : ""}${fmt(pct, 2)}%`;
 }
 
 // ─── Mode A: Unlinked setup wizard ───────────────────────────────────────────
@@ -173,6 +208,7 @@ function LiveMode({ instanceId }: { instanceId: string }) {
   const [positionsLoading, setPositionsLoading] = useState(false);
   const [snapshotAt, setSnapshotAt] = useState<string | null>(null);
   const [syncedAgo, setSyncedAgo] = useState<string>("never synced");
+  const [pnl, setPnl] = useState<ApiPnl | null>(null);
   const [positionsOpen, setPositionsOpen] = useState(true);
   const [settingsOpen, setSettingsOpen] = useState(true);
   const [editing, setEditing] = useState(false);
@@ -204,6 +240,24 @@ function LiveMode({ instanceId }: { instanceId: string }) {
     fetchPositions();
     return () => { cancelled = true; };
   }, [instanceId, inst.positions]);
+
+  // Fetch Session + Total PnL from /pnl. Re-polls every 15s so the KPI
+  // cards track the account as the trader loop's bar writes + the
+  // every-5-min exchange_snapshots tick advance the equity number.
+  useEffect(() => {
+    let cancelled = false;
+    async function fetchPnl() {
+      try {
+        const result = await allocatorApi.getPnl(instanceId);
+        if (!cancelled) setPnl(result);
+      } catch {
+        // Silent: keep previous value; next tick will retry.
+      }
+    }
+    fetchPnl();
+    const id = setInterval(fetchPnl, 15000);
+    return () => { cancelled = true; clearInterval(id); };
+  }, [instanceId]);
 
   // Re-compute the "synced Xs ago" display every 5s from the snapshot_at
   // timestamp returned by getPositions. Pure UI tick — does not re-fetch.
@@ -298,12 +352,30 @@ function LiveMode({ instanceId }: { instanceId: string }) {
           </div>
         )}
 
-        {/* Metric cards */}
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr", gap: 10, marginBottom: 20 }}>
-          <MetricCard label="TOTAL ACCOUNT EQUITY" value={`$${fmt(exchanges.find(e => e.name === inst.exchangeName)?.balance ?? 0, 0)}`} />
+        {/* Metric cards — live equity + allocation + open positions + Session/Total P&L.
+            Session + Total cards show USD as the hero number (same styling as Total
+            Account Equity) with ROI% + chevron as the secondary subtitle. */}
+        <div style={{ display: "grid", gridTemplateColumns: "1.1fr 1fr 0.9fr 1.1fr 1.1fr", gap: 10, marginBottom: 20 }}>
+          <MetricCard
+            label="TOTAL ACCOUNT EQUITY"
+            value={`$${fmt(pnl?.equity_usd ?? exchanges.find(e => e.name === inst.exchangeName)?.balance ?? 0, 0)}`}
+          />
           <MetricCard label="ALLOCATION" value={`$${fmt(inst.allocation ?? 0, 0)}`} />
-          <MetricCard label="OPEN POSITIONS" value={positionsLoading ? "..." : String(livePositions.length)} />
-          <MetricCard label="DAILY P&L" value={!inst.dailyPnl ? "\u2014" : `${inst.dailyPnl >= 0 ? "+" : ""}$${fmt(inst.dailyPnl)}`} color={!inst.dailyPnl ? "var(--t2)" : inst.dailyPnl > 0 ? "var(--green)" : "var(--red)"} />
+          <MetricCard label="OPEN POSITIONS" value={positionsLoading && !pnl ? "..." : String(livePositions.length)} />
+          <MetricCard
+            label="SESSION P&L"
+            value={pnl?.session_pnl_usd == null ? "\u2014" : fmtUsdSigned(pnl.session_pnl_usd)}
+            color={pnlColor(pnl?.session_pnl_usd)}
+            subtitle={pnlSubtitle(pnl?.session_return_pct)}
+            subtitleColor={pnlColor(pnl?.session_return_pct)}
+          />
+          <MetricCard
+            label="TOTAL P&L"
+            value={pnl == null ? "\u2014" : fmtUsdSigned(pnl.total_pnl_usd)}
+            color={pnlColor(pnl?.total_pnl_usd)}
+            subtitle={pnlSubtitle(pnl?.total_return_pct)}
+            subtitleColor={pnlColor(pnl?.total_return_pct)}
+          />
         </div>
 
         {/* Performance chart */}

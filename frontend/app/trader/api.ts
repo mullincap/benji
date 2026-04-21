@@ -197,10 +197,11 @@ export interface ApiPnl {
   allocation_id: string;
   capital_usd: number;
   equity_usd: number;
-  all_time_pnl: number;
-  daily_return_pct: number;
-  daily_pnl_usd: number;
-  drawdown: number;
+  session_start_equity_usd: number | null;
+  session_pnl_usd: number | null;
+  session_return_pct: number | null;
+  total_pnl_usd: number;
+  total_return_pct: number;
 }
 
 // ── API calls ───────────────────────────────────────────────────────────────

@@ -1276,84 +1276,80 @@ def trader_balance_history(
         raise HTTPException(status_code=403, detail="Not your allocation")
     connection_id = row["connection_id"]
 
+    # Bucket size tuned per-range so every window yields roughly the same
+    # number of points (~200-300), keeping chart rendering cost bounded
+    # and label density readable. Snapshots are taken every 5 min; the
+    # DISTINCT ON (bucket) query picks the latest snapshot within each
+    # bucket, giving "bucket-close" equity.
+    #
+    #   1D  → 5-min buckets × 24h   = 288 points  (raw resolution)
+    #   1W  → 30-min buckets × 7d   = 336 points
+    #   1M  → 3-hour buckets × 30d  = 240 points
+    #   ALL → 1-day buckets         = N days of history
+    RANGE_SPECS = {
+        "1D":  {"bucket_seconds": 300,    "lookback_interval": "24 hours"},
+        "1W":  {"bucket_seconds": 1800,   "lookback_interval": "7 days"},
+        "1M":  {"bucket_seconds": 10800,  "lookback_interval": "30 days"},
+        "ALL": {"bucket_seconds": 86400,  "lookback_interval": None},
+    }
     range_up = (range or "").upper()
-    if range_up == "1D":
-        # Intraday: every snapshot in last 24h.
-        cur.execute(
-            """
-            SELECT snapshot_at AS ts, total_equity_usd AS equity_usd
-            FROM user_mgmt.exchange_snapshots
-            WHERE connection_id = %s::uuid
-              AND snapshot_at >= NOW() - INTERVAL '24 hours'
-              AND fetch_ok = TRUE
-              AND total_equity_usd IS NOT NULL
-            ORDER BY snapshot_at
-            """,
-            (connection_id,),
-        )
-        rows = cur.fetchall()
-        return {
-            "allocation_id": allocation_id,
-            "range": "1D",
-            "granularity": "intraday",
-            "history": [
-                {
-                    "date": r["ts"].isoformat(),
-                    "equity_usd": float(r["equity_usd"] or 0),
-                    "daily_return": 0.0,
-                    "drawdown": None,
-                }
-                for r in rows
-            ],
-        }
+    spec = RANGE_SPECS.get(range_up, RANGE_SPECS["ALL"])
+    bucket_s = spec["bucket_seconds"]
+    lookback = spec["lookback_interval"]
 
-    # Daily close: DISTINCT ON (day) picks the latest snapshot within each
-    # UTC day, giving a clean one-point-per-day equity curve.
-    range_days = {"1W": 7, "1M": 30}.get(range_up)
-    if range_days is not None:
-        cur.execute(
-            """
-            SELECT DISTINCT ON (day_utc) day_utc::date AS date, equity_usd
+    # floor(epoch / bucket_s) * bucket_s gives the bucket-start timestamp;
+    # parameterized via %(bucket)s (int). Lookback clamps the range, None
+    # returns full history.
+    if lookback:
+        query = """
+            SELECT DISTINCT ON (bucket)
+                   bucket AS ts,
+                   equity_usd
             FROM (
               SELECT snapshot_at,
-                     date_trunc('day', snapshot_at AT TIME ZONE 'UTC') AS day_utc,
+                     to_timestamp(
+                       floor(extract(epoch from snapshot_at) / %(bucket)s) * %(bucket)s
+                     ) AS bucket,
                      total_equity_usd AS equity_usd
               FROM user_mgmt.exchange_snapshots
-              WHERE connection_id = %s::uuid
-                AND snapshot_at >= NOW() - (%s || ' days')::interval
+              WHERE connection_id = %(cid)s::uuid
+                AND snapshot_at >= NOW() - %(lookback)s::interval
                 AND fetch_ok = TRUE
                 AND total_equity_usd IS NOT NULL
             ) t
-            ORDER BY day_utc, snapshot_at DESC
-            """,
-            (connection_id, range_days),
-        )
+            ORDER BY bucket, snapshot_at DESC
+        """
+        params = {"cid": connection_id, "bucket": bucket_s, "lookback": lookback}
     else:
-        cur.execute(
-            """
-            SELECT DISTINCT ON (day_utc) day_utc::date AS date, equity_usd
+        query = """
+            SELECT DISTINCT ON (bucket)
+                   bucket AS ts,
+                   equity_usd
             FROM (
               SELECT snapshot_at,
-                     date_trunc('day', snapshot_at AT TIME ZONE 'UTC') AS day_utc,
+                     to_timestamp(
+                       floor(extract(epoch from snapshot_at) / %(bucket)s) * %(bucket)s
+                     ) AS bucket,
                      total_equity_usd AS equity_usd
               FROM user_mgmt.exchange_snapshots
-              WHERE connection_id = %s::uuid
+              WHERE connection_id = %(cid)s::uuid
                 AND fetch_ok = TRUE
                 AND total_equity_usd IS NOT NULL
             ) t
-            ORDER BY day_utc, snapshot_at DESC
-            """,
-            (connection_id,),
-        )
+            ORDER BY bucket, snapshot_at DESC
+        """
+        params = {"cid": connection_id, "bucket": bucket_s}
+
+    cur.execute(query, params)
     rows = cur.fetchall()
 
     return {
         "allocation_id": allocation_id,
         "range": range_up or "ALL",
-        "granularity": "daily",
+        "bucket_seconds": bucket_s,
         "history": [
             {
-                "date": r["date"].isoformat(),
+                "date": r["ts"].isoformat(),
                 "equity_usd": float(r["equity_usd"] or 0),
                 "daily_return": 0.0,
                 "drawdown": None,
@@ -1365,9 +1361,27 @@ def trader_balance_history(
 
 @router.get("/trader/{allocation_id}/pnl")
 def trader_pnl(allocation_id: str, user_id: str = Depends(get_current_user), cur=Depends(get_cursor)) -> dict[str, Any]:
-    """Return P&L summary for an allocation. Verifies ownership."""
+    """Return live P&L summary for an allocation. Verifies ownership.
+
+    Sources:
+      - equity_usd        : latest row in user_mgmt.exchange_snapshots
+                            for this allocation's connection
+      - session_pnl_usd   : equity_usd - session_start_equity
+      - session_start     : runtime_state.session_start_equity_usdt
+                            (populated by the trader's monitoring loop);
+                            falls back to the latest exchange_snapshot at
+                            or before today's 06:30 UTC if runtime_state
+                            hasn't captured it yet.
+      - total_pnl_usd     : equity_usd - capital_usd (cumulative since
+                            allocation creation)
+
+    Returns None for session_pnl / session_return_pct when no baseline is
+    available (e.g. fresh allocation with no snapshots yet); frontend
+    should render an em-dash in that case.
+    """
     cur.execute("""
-        SELECT capital_usd, user_id FROM user_mgmt.allocations
+        SELECT capital_usd, user_id, connection_id, runtime_state
+        FROM user_mgmt.allocations
         WHERE allocation_id = %s::uuid
     """, (allocation_id,))
     alloc = cur.fetchone()
@@ -1377,37 +1391,68 @@ def trader_pnl(allocation_id: str, user_id: str = Depends(get_current_user), cur
         raise HTTPException(status_code=403, detail="Not your allocation")
 
     capital = float(alloc["capital_usd"] or 0)
+    connection_id = alloc["connection_id"]
+    runtime_state = alloc["runtime_state"] or {}
 
-    # Get latest equity and today's return
+    # Current equity: latest exchange_snapshot for this connection.
     cur.execute("""
-        SELECT date, equity_usd, daily_return, drawdown
-        FROM user_mgmt.performance_daily
-        WHERE allocation_id = %s::uuid
-        ORDER BY date DESC
+        SELECT total_equity_usd
+        FROM user_mgmt.exchange_snapshots
+        WHERE connection_id = %s::uuid
+          AND fetch_ok = TRUE
+          AND total_equity_usd IS NOT NULL
+        ORDER BY snapshot_at DESC
         LIMIT 1
-    """, (allocation_id,))
-    latest = cur.fetchone()
+    """, (connection_id,))
+    latest_snap = cur.fetchone()
+    equity = float(latest_snap["total_equity_usd"]) if latest_snap else capital
 
-    if latest:
-        equity = float(latest["equity_usd"] or 0)
-        daily_return = float(latest["daily_return"] or 0)
-        drawdown = float(latest["drawdown"] or 0)
-    else:
-        equity = capital
-        daily_return = 0
-        drawdown = 0
+    # Session-start baseline: prefer runtime_state (written per bar by the
+    # trader's monitoring loop); fall back to today's pre-session snapshot.
+    session_start = runtime_state.get("session_start_equity_usdt")
+    try:
+        session_start = float(session_start) if session_start is not None else None
+    except (TypeError, ValueError):
+        session_start = None
 
-    all_time_pnl = equity - capital
-    daily_pnl_usd = capital * daily_return / 100
+    if session_start is None:
+        # Same helper-equivalent query as trader_blofin.py uses to rescue
+        # a crashed-before-first-bar baseline. Session opens at 06:35 UTC,
+        # so the latest snapshot <= 06:30 UTC is the pre-positions tick.
+        cur.execute("""
+            SELECT total_equity_usd
+            FROM user_mgmt.exchange_snapshots
+            WHERE connection_id = %s::uuid
+              AND snapshot_at >= date_trunc('day', NOW() AT TIME ZONE 'UTC')
+              AND snapshot_at <= date_trunc('day', NOW() AT TIME ZONE 'UTC')
+                                 + INTERVAL '6 hours 30 minutes'
+              AND fetch_ok = TRUE
+              AND total_equity_usd IS NOT NULL
+            ORDER BY snapshot_at DESC
+            LIMIT 1
+        """, (connection_id,))
+        baseline_row = cur.fetchone()
+        if baseline_row:
+            session_start = float(baseline_row["total_equity_usd"])
+
+    session_pnl_usd = None
+    session_return_pct = None
+    if session_start is not None and session_start > 0:
+        session_pnl_usd = equity - session_start
+        session_return_pct = session_pnl_usd / session_start * 100
+
+    total_pnl_usd = equity - capital
+    total_return_pct = (total_pnl_usd / capital * 100) if capital > 0 else 0.0
 
     return {
         "allocation_id": allocation_id,
-        "capital_usd": capital,
-        "equity_usd": equity,
-        "all_time_pnl": round(all_time_pnl, 2),
-        "daily_return_pct": daily_return,
-        "daily_pnl_usd": round(daily_pnl_usd, 2),
-        "drawdown": drawdown,
+        "capital_usd": round(capital, 2),
+        "equity_usd": round(equity, 2),
+        "session_start_equity_usd": round(session_start, 2) if session_start is not None else None,
+        "session_pnl_usd": round(session_pnl_usd, 2) if session_pnl_usd is not None else None,
+        "session_return_pct": round(session_return_pct, 4) if session_return_pct is not None else None,
+        "total_pnl_usd": round(total_pnl_usd, 2),
+        "total_return_pct": round(total_return_pct, 4),
     }
 
 

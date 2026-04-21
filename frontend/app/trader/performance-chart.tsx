@@ -28,26 +28,35 @@ interface ChartData {
 
 // ─── Transform API response → chart data shape ──────────────────────────────
 
+// Label format per range — matches the bucket granularity chosen by the
+// backend (see RANGE_SPECS in allocator.py):
+//   1D  → 5-min buckets        → "HH:MM"
+//   1W  → 30-min buckets       → "Mon DD HH:MM" (cross-day spans need both)
+//   1M  → 3-hour buckets       → "Mon DD HH:MM"
+//   ALL → 1-day buckets        → "Mon DD"
+function formatLabel(d: Date, range: TimeRange): string {
+  const time = d.toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", hour12: false });
+  const date = d.toLocaleDateString("en-US", { month: "short", day: "numeric" });
+  switch (range) {
+    case "1D":  return time;
+    case "1W":  return `${date} ${time}`;
+    case "1M":  return `${date} ${time}`;
+    case "ALL": return date;
+  }
+}
+
 function transformHistory(history: ApiBalanceHistory[], range: TimeRange): ChartData {
   const equity: number[] = [];
   const pnl: number[] = [];
   const labels: string[] = [];
 
-  const intraday = range === "1D";
-
   for (let i = 0; i < history.length; i++) {
     const row = history[i];
     equity.push(row.equity_usd);
-    // Per-row P&L = equity change since previous row. First row has no prior
-    // reference → 0 baseline. For 1D (5-min snapshots) this shows the
-    // rolling 5-min equity delta; for daily rollups it shows day-over-day.
+    // Per-row P&L = equity change between consecutive buckets. First row
+    // has no prior reference → 0 baseline.
     pnl.push(i === 0 ? 0 : row.equity_usd - history[i - 1].equity_usd);
-    const d = new Date(row.date);
-    labels.push(
-      intraday
-        ? d.toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", hour12: false })
-        : d.toLocaleDateString("en-US", { month: "short", day: "numeric" }),
-    );
+    labels.push(formatLabel(new Date(row.date), range));
   }
 
   return { equity, pnl, labels };
