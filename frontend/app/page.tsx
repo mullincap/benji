@@ -217,6 +217,8 @@ export default function LandingPage() {
         .lp-p-cta:hover { border-color: var(--t1) !important; color: var(--t0) !important; }
         .lp-p-cta-featured { transition: opacity 0.3s; }
         .lp-p-cta-featured:hover { opacity: 0.85; }
+        .lp-nav-links { position: absolute; left: 50%; transform: translateX(-50%); }
+        .lp-footer-copyright { position: absolute; left: 50%; transform: translateX(-50%); margin: 0; }
         @media (max-width: 1100px) {
           .lp-modules-grid { grid-template-columns: repeat(3,1fr) !important; }
           .lp-how-layout { grid-template-columns: 1fr !important; gap: 4rem !important; }
@@ -243,6 +245,7 @@ export default function LandingPage() {
           .lp-waitlist { padding: 100px 1.25rem !important; }
           .lp-footer { padding: 2rem 1.25rem !important; }
           .lp-footer-links { gap: 1.25rem !important; flex-wrap: wrap; justify-content: center; }
+          .lp-footer-copyright { position: static !important; transform: none !important; }
         }
         @media (max-width: 480px) {
           .lp-modules-grid { grid-template-columns: 1fr !important; }
@@ -311,7 +314,7 @@ export default function LandingPage() {
             <span className="lp-breathe-fast" style={{
               width: 4, height: 4, borderRadius: '50%', background: 'var(--green)',
             }} />
-            Institutional-grade risk analytics
+            Institutional-grade returns + analytics
           </div>
 
           <h1 className="lp-rise-2" style={{
@@ -608,13 +611,13 @@ export default function LandingPage() {
         position: 'relative', zIndex: 1, padding: '120px 4rem',
         maxWidth: 1200, margin: '0 auto', borderTop: '1px solid var(--line)',
       }}>
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-end', gap: '3rem', marginBottom: '5rem', flexWrap: 'wrap' }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-end', rowGap: '1.25rem', columnGap: '3rem', marginBottom: '5rem', flexWrap: 'wrap' }}>
           <div>
             <div style={{ fontSize: 9, letterSpacing: '0.18em', textTransform: 'uppercase', color: 'var(--t3)', fontWeight: 700, marginBottom: '2rem', display: 'flex', alignItems: 'center', gap: 12 }}>
               <span style={{ width: 20, height: 1, background: 'var(--t3)', flexShrink: 0 }} />
               Access tiers
             </div>
-            <h2 style={{ fontSize: 'clamp(28px, 3.5vw, 48px)', fontWeight: 700, lineHeight: 1.08, letterSpacing: -0.8, color: 'var(--t0)', marginBottom: '1.25rem' }}>
+            <h2 style={{ fontSize: 'clamp(28px, 3.5vw, 48px)', fontWeight: 700, lineHeight: 1.08, letterSpacing: -0.8, color: 'var(--t0)', marginBottom: 0 }}>
               Your fund&rsquo;s name. Our trade engine.<br />White-label the full stack.
             </h2>
           </div>
@@ -776,7 +779,7 @@ export default function LandingPage() {
           }} />
           3M
         </a>
-        <p style={{ fontSize: 10, color: 'var(--t3)', letterSpacing: '0.04em' }}>© {new Date().getFullYear()} Mullin Capital. All rights reserved.</p>
+        <p className="lp-footer-copyright" style={{ fontSize: 10, color: 'var(--t3)', letterSpacing: '0.04em' }}>© {new Date().getFullYear()} Mullin Capital. All rights reserved.</p>
         <ul className="lp-footer-links" style={{ display: 'flex', gap: '2rem', listStyle: 'none' }}>
           <li>
             <Link href="/privacy" className="lp-footer-link" style={{
