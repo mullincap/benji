@@ -261,7 +261,6 @@ export default function PortfolioDetailPage() {
   const [error, setError] = useState<string | null>(null);
   const [ambiguity, setAmbiguity] = useState<AmbiguityDetail | null>(null);
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
-  const [showAllBars, setShowAllBars] = useState(false);
 
   const matrixRef = useRef<HTMLDivElement>(null);
   const wasAtBottomRef = useRef(true);
@@ -518,10 +517,10 @@ export default function PortfolioDetailPage() {
     },
   };
 
-  // Matrix: pick rows based on the toggle. Default = every 6th bar (30 min).
-  const matrixBars = showAllBars
-    ? bars
-    : bars.filter((b, i) => i === 0 || i === bars.length - 1 || b.bar % 6 === 0);
+  // Matrix shows every bar at 5-min resolution. The previous 30-min
+  // subsample toggle was removed — users wanted full fidelity by default
+  // and the table already scrolls inside a fixed-height container.
+  const matrixBars = bars;
 
   return (
     <>
@@ -714,24 +713,6 @@ export default function PortfolioDetailPage() {
                 · {matrixBars.length} of {bars.length} bars
               </span>
             </div>
-            <button
-              onClick={() => setShowAllBars((v) => !v)}
-              style={{
-                background: "transparent",
-                border: "1px solid var(--line)",
-                borderRadius: 4,
-                color: "var(--t2)",
-                fontSize: 9,
-                fontWeight: 700,
-                letterSpacing: "0.12em",
-                textTransform: "uppercase",
-                padding: "4px 10px",
-                cursor: "pointer",
-                fontFamily: FONT_MONO,
-              }}
-            >
-              {showAllBars ? "30-min view" : "Show all bars"}
-            </button>
           </div>
           <div
             ref={matrixRef}
