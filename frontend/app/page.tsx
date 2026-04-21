@@ -257,7 +257,8 @@ export default function LandingPage() {
       {/* Nav */}
       <nav className="lp-nav" style={{
         position: 'fixed', top: 0, left: 0, right: 0, zIndex: 100,
-        display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+        display: 'flex', alignItems: 'center', justifyContent: 'center',
+        gap: '3rem',
         padding: '0 4rem', height: 64,
         fontFamily: 'var(--font-space-mono), Space Mono, monospace',
         background: 'rgba(8, 8, 9, 0.72)',
@@ -763,8 +764,8 @@ export default function LandingPage() {
       {/* Footer */}
       <footer className="lp-footer" style={{
         position: 'relative', zIndex: 1, borderTop: '1px solid var(--line)',
-        padding: '2rem 4rem', display: 'flex', justifyContent: 'space-between',
-        alignItems: 'center', gap: '1rem', flexWrap: 'wrap',
+        padding: '2rem 4rem', display: 'flex', justifyContent: 'center',
+        alignItems: 'center', gap: '3rem', flexWrap: 'wrap',
       }}>
         <a href="#" style={{
           fontSize: 13, fontWeight: 700, color: 'var(--t0)', textDecoration: 'none',
