@@ -4,11 +4,7 @@ import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { useTrader, Position, Exchange, StrategyInstance, StrategyType, STRATEGY_CATALOG, fmt, GHOST_CURVE, RISK_COLOR, RISK_DIM, StrategyCatalogEntry } from "../../context";
 import EquityCurveSvg from "../../equity-curve";
-// COMBINED performance chart removed — was rendering mock data via
-// generateData(). A real aggregate-across-allocations endpoint does not
-// exist yet; per-allocation charts on the trader detail page use real
-// performance_daily data. Restore this import + add an aggregation
-// endpoint (sum equity_usd across active allocations per date) when ready.
+import PerformanceChart from "../../performance-chart";
 import TraderCard from "../../components/TraderCard";
 import {
   Chart as ChartJS,
@@ -44,11 +40,12 @@ function MetricCard({ label, value, color }: { label: string; value: string; col
 
 // ─── Dashboard content ───────────────────────────────────────────────────────
 
-function DashboardContent({ equity, dailyPnl, allTimePnl, sharpe, allocated, activeCount, totalAvailable, positions, showCurve, exchanges, instances }: {
+function DashboardContent({ equity, dailyPnl, allTimePnl, sharpe, allocated, activeCount, totalAvailable, positions, showCurve, showAggregate, exchanges, instances }: {
   equity: number; dailyPnl: number; allTimePnl: number; sharpe: number;
   allocated: number; activeCount: number; totalAvailable: number;
   positions: (Position & { strategy: string; exchange: string })[];
   showCurve?: boolean;
+  showAggregate?: boolean;
   exchanges?: Exchange[];
   instances?: StrategyInstance[];
 }) {
@@ -63,11 +60,6 @@ function DashboardContent({ equity, dailyPnl, allTimePnl, sharpe, allocated, act
         <MetricCard label="SHARPE" value={sharpe > 0 ? fmt(sharpe, 2) : "\u2014"} color={sharpe > 0 ? "var(--t0)" : "var(--t2)"} />
         <MetricCard label="ACTIVE TRADERS" value={String(activeCount)} />
       </div>
-
-      {/* Combined performance chart intentionally omitted — see import-line
-          comment above. MetricCards (total equity, all-time P&L, daily P&L,
-          sharpe, active traders) provide the summary-level figures; the
-          per-allocation time series lives on each trader's detail page. */}
 
       {/* Capital deployed bar */}
       <div style={{
@@ -93,6 +85,11 @@ function DashboardContent({ equity, dailyPnl, allTimePnl, sharpe, allocated, act
           }} />
         </div>
       </div>
+
+      {/* Total account balance — aggregate across all connections */}
+      {showAggregate && (
+        <PerformanceChart title="TOTAL ACCOUNT BALANCE" />
+      )}
 
       {/* Equity curve — ghost only */}
       {showCurve && (
@@ -174,7 +171,7 @@ export default function OverviewPage() {
             {empty ? (
               <DashboardContent equity={293593} dailyPnl={14092} allTimePnl={62847} sharpe={2.41} allocated={94000} activeCount={3} totalAvailable={totalAvailable} positions={GHOST_POSITIONS} showCurve />
             ) : (
-              <DashboardContent equity={totalEquity} dailyPnl={dailyPnl} allTimePnl={allTimePnl} sharpe={sharpe} allocated={totalAllocated} activeCount={activeCount} totalAvailable={totalAvailable} positions={allPositions} exchanges={exchanges} instances={instances} />
+              <DashboardContent equity={totalEquity} dailyPnl={dailyPnl} allTimePnl={allTimePnl} sharpe={sharpe} allocated={totalAllocated} activeCount={activeCount} totalAvailable={totalAvailable} positions={allPositions} exchanges={exchanges} instances={instances} showAggregate />
             )}
           </div>
 

@@ -286,6 +286,12 @@ export const allocatorApi = {
       `/api/allocator/trader/${allocationId}/balance-history${range ? `?range=${range}` : ""}`,
     ),
 
+  // Aggregate equity across all of the current user's exchange connections
+  getAccountBalanceSeries: (range?: "1D" | "1W" | "1M" | "ALL") =>
+    apiFetch<{ range: string; bucket_seconds: number; connections_included: number; history: ApiBalanceHistory[] }>(
+      `/api/allocator/account-balance-series${range ? `?range=${range}` : ""}`,
+    ),
+
   getPnl: (allocationId: string) =>
     apiFetch<ApiPnl>(`/api/allocator/trader/${allocationId}/pnl`),
 

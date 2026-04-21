@@ -13,7 +13,10 @@ import { RangeTabs, TimeRange } from "../components/RangeTabs";
 ChartJS.register(CategoryScale, LinearScale, PointElement, LineElement, BarElement, Filler, Tooltip);
 
 interface PerformanceChartProps {
-  instanceId: string;
+  // Omit instanceId to render the aggregate account-balance series (sum
+  // across all of the user's exchange connections). Pass instanceId to
+  // render the per-allocation curve.
+  instanceId?: string;
   title?: string;
 }
 
@@ -107,7 +110,9 @@ export default function PerformanceChart({ instanceId, title = "PERFORMANCE" }: 
       setLoading(true);
       setError(null);
       try {
-        const result = await allocatorApi.getBalanceHistory(instanceId, range);
+        const result = instanceId
+          ? await allocatorApi.getBalanceHistory(instanceId, range)
+          : await allocatorApi.getAccountBalanceSeries(range);
         if (cancelled) return;
         setData(transformHistory(result.history, range));
       } catch (err) {

@@ -14,6 +14,7 @@ Endpoints:
   POST /api/allocator/allocations         — create or update an allocation
   DELETE /api/allocator/allocations/{id}  — deactivate an allocation
   GET  /api/allocator/trader/{id}/balance-history — daily equity for an allocation
+  GET  /api/allocator/account-balance-series — aggregate equity across all user connections
   GET  /api/allocator/trader/{id}/pnl     — P&L summary for an allocation
   GET  /api/allocator/trader/{id}/positions — open positions from latest snapshot
 
@@ -1406,6 +1407,110 @@ def trader_balance_history(
         "allocation_id": allocation_id,
         "range": range_up or "ALL",
         "bucket_seconds": bucket_s,
+        "history": [
+            {
+                "date": r["ts"].isoformat(),
+                "equity_usd": float(r["equity_usd"] or 0),
+                "daily_return": 0.0,
+                "drawdown": None,
+            }
+            for r in rows
+        ],
+    }
+
+
+@router.get("/account-balance-series")
+def account_balance_series(
+    range: str | None = None,
+    user_id: str = Depends(get_current_user),
+    cur=Depends(get_cursor),
+) -> dict[str, Any]:
+    """Aggregate equity curve across ALL of the user's exchange connections.
+
+    Sums total_equity_usd across Binance + BloFin (and any future venues)
+    per time bucket. Used on the allocator overview to show total account
+    balance — distinct from per-allocation equity on the trader detail page.
+
+    Bucketing pattern mirrors trader_balance_history so the frontend can
+    reuse PerformanceChart without adapter code. Per-bucket equity =
+    sum(DISTINCT ON (connection_id, bucket) latest snapshot) — this
+    matches the intraday-equity pattern from the manager.py fix and avoids
+    the naive-AVG-across-snapshots bug.
+    """
+    RANGE_SPECS = {
+        "1D":  {"bucket_seconds": 300,    "lookback_interval": "24 hours"},
+        "1W":  {"bucket_seconds": 1800,   "lookback_interval": "7 days"},
+        "1M":  {"bucket_seconds": 10800,  "lookback_interval": "30 days"},
+        "ALL": {"bucket_seconds": 86400,  "lookback_interval": None},
+    }
+    range_up = (range or "").upper()
+    spec = RANGE_SPECS.get(range_up, RANGE_SPECS["ALL"])
+    bucket_s = spec["bucket_seconds"]
+    lookback = spec["lookback_interval"]
+
+    # Latest snapshot per (connection, bucket), then sum across connections
+    # per bucket. Only include snapshots from connections owned by the user.
+    base_select = """
+        SELECT s.connection_id,
+               s.snapshot_at,
+               to_timestamp(
+                 floor(extract(epoch from s.snapshot_at) / %(bucket)s) * %(bucket)s
+               ) AS bucket,
+               s.total_equity_usd AS equity
+        FROM user_mgmt.exchange_snapshots s
+        JOIN user_mgmt.exchange_connections ec
+          ON ec.connection_id = s.connection_id
+        WHERE ec.user_id = %(uid)s::uuid
+          AND s.fetch_ok = TRUE
+          AND s.total_equity_usd IS NOT NULL
+    """
+    if lookback:
+        base_select += " AND s.snapshot_at >= NOW() - %(lookback)s::interval"
+
+    query = f"""
+        WITH bucketed AS ({base_select}),
+        latest_per_conn AS (
+          SELECT DISTINCT ON (connection_id, bucket)
+                 connection_id, bucket, equity
+          FROM bucketed
+          ORDER BY connection_id, bucket, snapshot_at DESC
+        )
+        SELECT bucket AS ts,
+               SUM(equity) AS equity_usd,
+               COUNT(*) AS connections_in_bucket
+        FROM latest_per_conn
+        GROUP BY bucket
+        ORDER BY bucket
+    """
+    params: dict[str, Any] = {"uid": user_id, "bucket": bucket_s}
+    if lookback:
+        params["lookback"] = lookback
+
+    cur.execute(query, params)
+    rows = cur.fetchall()
+
+    # Count distinct connections that contributed at least one bucket
+    cur.execute(
+        """
+        SELECT COUNT(DISTINCT ec.connection_id) AS n
+        FROM user_mgmt.exchange_connections ec
+        WHERE ec.user_id = %s::uuid
+          AND EXISTS (
+            SELECT 1 FROM user_mgmt.exchange_snapshots s
+            WHERE s.connection_id = ec.connection_id
+              AND s.fetch_ok = TRUE
+              AND s.total_equity_usd IS NOT NULL
+          )
+        """,
+        (user_id,),
+    )
+    count_row = cur.fetchone()
+    conn_count = int(count_row["n"]) if count_row and count_row["n"] is not None else 0
+
+    return {
+        "range": range_up or "ALL",
+        "bucket_seconds": bucket_s,
+        "connections_included": int(conn_count or 0),
         "history": [
             {
                 "date": r["ts"].isoformat(),
