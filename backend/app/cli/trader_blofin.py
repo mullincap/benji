@@ -3224,6 +3224,43 @@ def _run_fresh_session_for_allocation(
         f"kill_y={config.kill_y * 100:.2f}%"
     )
 
+    # Persist conviction to user_mgmt.daily_signals so the Indexer →
+    # Signals view shows it as soon as the gate evaluates — matches the
+    # master trader's behavior at trader_blofin.py:1826. Scoped by the
+    # allocation's strategy_version_id so multi-tenant allocations on
+    # different versions each update their own row. Best-effort: failure
+    # here doesn't block trading.
+    try:
+        _c = _trader_db_connect()
+        try:
+            with _c.cursor() as _cur:
+                _cur.execute("""
+                    UPDATE user_mgmt.daily_signals
+                    SET conviction_roi_x  = %s,
+                        conviction_kill_y = %s,
+                        conviction_passed = %s
+                    WHERE signal_date = %s
+                      AND strategy_version_id = (
+                          SELECT strategy_version_id
+                          FROM user_mgmt.allocations
+                          WHERE allocation_id = %s::uuid
+                      )
+                """, (
+                    round(float(roi_x) * 100, 4),
+                    round(float(config.kill_y) * 100, 4),
+                    float(roi_x) >= float(config.kill_y),
+                    today,
+                    allocation_id,
+                ))
+            _c.commit()
+        finally:
+            _c.close()
+    except Exception as _e:
+        log.warning(
+            f"Allocation {allocation_id}: could not persist conviction "
+            f"to daily_signals: {_e}"
+        )
+
     # ── Phase 2a: missed execution window ────────────────────────────────
     if past_cutoff:
         log.warning(

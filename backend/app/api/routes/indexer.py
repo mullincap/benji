@@ -294,15 +294,60 @@ def list_signals(
 
     # ── Conviction gate: compute roi_x for each signal date ────────────
     # roi_x = equal-weight avg return from 06:00 to 06:35 UTC across
-    # the signal's selected symbols. Computed from market.futures_1m.
+    # the signal's selected symbols.
+    #
+    # Resolution order (each falls through on NULL):
+    #   1. daily_signals.conviction_roi_x — populated by the per-allocation
+    #      trader at gate-evaluation time (or legacy master trader).
+    #   2. allocation_returns.conviction_roi_x — written by the trader at
+    #      session close / early-exit paths. Covers historical rows that
+    #      predate the per-allocation daily_signals UPDATE.
+    #   3. Compute from market.futures_1m (06:00 open → 06:35 close) —
+    #      fallback only used when futures_1m has the bars; for today's
+    #      signal_date this bucket isn't in futures_1m until tomorrow's
+    #      00:15 UTC metl run, so this path is effectively
+    #      yesterday-or-earlier.
     KILL_Y = 0.3  # conviction threshold (%)
 
-    # Use stored conviction from trader when available; compute from
-    # futures_1m only for dates where the trader hasn't stored it yet.
     conviction_by_date: dict[str, float | None] = {}
     for r in rows:
         if r["signal_date"] and r["stored_conviction"] is not None:
             conviction_by_date[r["signal_date"].isoformat()] = round(float(r["stored_conviction"]), 4)
+
+    # Step 2: allocation_returns fallback. Per-strategy-version JOIN so
+    # each daily_signals row pulls conviction from an allocation on its
+    # own version. Since conviction is computed from signal symbols, any
+    # allocation's value is representative — pick MAX arbitrarily when
+    # multiple allocations share a version (values should agree).
+    dates_missing = list({
+        r["signal_date"] for r in rows
+        if r["signal_date"]
+        and r["signal_date"].isoformat() not in conviction_by_date
+    })
+    if dates_missing:
+        cur.execute("""
+            SELECT ds.signal_date,
+                   ds.strategy_version_id,
+                   MAX(ar.conviction_roi_x) AS conviction_roi_x
+            FROM user_mgmt.daily_signals ds
+            JOIN user_mgmt.allocations a
+              ON a.strategy_version_id = ds.strategy_version_id
+            JOIN user_mgmt.allocation_returns ar
+              ON ar.allocation_id = a.allocation_id
+             AND ar.session_date  = ds.signal_date
+            WHERE ds.signal_date = ANY(%s::date[])
+              AND ar.conviction_roi_x IS NOT NULL
+            GROUP BY ds.signal_date, ds.strategy_version_id
+        """, (dates_missing,))
+        # allocation_returns.conviction_roi_x is stored as a fraction
+        # (0.01187 = +1.187%) whereas daily_signals.conviction_roi_x is
+        # stored as a percent (1.187). Scale to percent here so the
+        # frontend's ConvictionBadge (which renders `${roiX.toFixed(2)}%`)
+        # shows a sensible magnitude regardless of source.
+        for row in cur.fetchall():
+            d = row["signal_date"].isoformat()
+            if d not in conviction_by_date:
+                conviction_by_date[d] = round(float(row["conviction_roi_x"]) * 100, 4)
 
     signal_dates = list({
         r["signal_date"] for r in rows
