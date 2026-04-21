@@ -136,12 +136,10 @@ function SubItem({ label, href, active, dot, allocationLabel }: { label: string;
 // ─── Sidebar ─────────────────────────────────────────────────────────────────
 
 function Sidebar() {
-  const CATALOG_ENTRIES = Object.entries(STRATEGY_CATALOG) as [string, StrategyCatalogEntry][];
   const pathname = usePathname();
   const router = useRouter();
   const { instances, exchanges } = useTrader();
   const [collapsed, setCollapsed] = useState(false);
-  const [strategiesOpen, setStrategiesOpen] = useState(true);
   const [tradersOpen, setTradersOpen] = useState(true);
 
   return (
@@ -267,43 +265,22 @@ function Sidebar() {
           {/* Divider */}
           <div style={{ borderTop: "1px solid var(--line)", margin: "8px 14px" }} />
 
-          {/* Strategies — collapsible */}
+          {/* Strategies — flat nav entry. Previously a collapsible
+              with a chevron that expanded a sub-list of uninstantiated
+              catalog strategies; removed per UX cleanup 2026-04-21.
+              The Strategies index page at /trader/strategies still
+              lists the same catalog inline. */}
           {(() => {
             const active = pathname.startsWith("/trader/strategies");
             return (
-              <div style={{
-                display: "flex", alignItems: "center", justifyContent: "space-between",
-                padding: "5px 8px 5px 0",
-                borderLeft: "none",
-                background: "transparent",
-                marginBottom: 2,
-              }}>
-                <button onClick={() => router.push("/trader/strategies")} style={{
-                  flex: 1, background: "transparent", border: "none", textAlign: "left",
-                  padding: "0 0 0 14px", fontSize: 10, cursor: "pointer",
-                  color: active ? "var(--t0)" : "var(--t2)", fontWeight: active ? 700 : 400,
-                  display: "flex", alignItems: "center", gap: 7,
-                }}
-                  onMouseEnter={e => { if (!active) e.currentTarget.style.color = "var(--t1)"; }}
-                  onMouseLeave={e => { if (!active) e.currentTarget.style.color = "var(--t2)"; }}
-                ><IconStrategies color={active ? "var(--t0)" : "var(--t2)"} />Strategies</button>
-                <button onClick={() => setStrategiesOpen(v => !v)} style={{
-                  background: "transparent", border: "none", padding: "2px 6px",
-                  cursor: "pointer", display: "inline-flex", alignItems: "center",
-                }}>
-                  <span style={{ fontSize: 8, color: "var(--t2)", transition: "transform 0.2s ease", display: "inline-block", transform: strategiesOpen ? "rotate(0deg)" : "rotate(-90deg)" }}>{"\u25BC"}</span>
-                </button>
-              </div>
+              <NavItem
+                label="Strategies"
+                href="/trader/strategies"
+                active={active}
+                icon={<IconStrategies color={active ? "var(--t0)" : "var(--t2)"} />}
+              />
             );
           })()}
-          {strategiesOpen && CATALOG_ENTRIES.filter(([type]) => !instances.some(i => i.strategyType === type)).map(([type, cat]) => (
-            <SubItem
-              key={type}
-              label={cat.name}
-              href={`/trader/strategies/${type}`}
-              active={pathname === `/trader/strategies/${type}`}
-            />
-          ))}
 
           {/* Divider */}
           <div style={{ borderTop: "1px solid var(--line)", margin: "8px 14px" }} />
