@@ -109,6 +109,7 @@ export default function SessionLogs({
   allocationId,
   expanded,
   onToggle,
+  hint,
 }: {
   selectedDate: string | null;
   /**
@@ -124,6 +125,11 @@ export default function SessionLogs({
    */
   expanded: boolean;
   onToggle: () => void;
+  /**
+   * When set, skip fetching and render this text in the body instead of
+   * log lines. Used when the user hasn't yet picked an allocation/row.
+   */
+  hint?: string;
 }) {
   const collapsed = !expanded;
   const [lines, setLines] = useState<LogLine[]>([]);
@@ -280,18 +286,19 @@ export default function SessionLogs({
 
   // (Re)fetch when expanded OR when the effective date / allocationId
   // changes while expanded. effectiveDate folds in userSelectedDate so
-  // clicking a date-tab triggers a refetch.
+  // clicking a date-tab triggers a refetch. Hint mode short-circuits the
+  // fetch — nothing to load when we're just showing instructions.
   useEffect(() => {
-    if (collapsed) return;
+    if (collapsed || hint) return;
     fetchInitial(effectiveDate);
-  }, [collapsed, effectiveDate, fetchInitial]);
+  }, [collapsed, effectiveDate, fetchInitial, hint]);
 
-  // Poll while expanded + active.
+  // Poll while expanded + active. Hint mode never polls.
   useEffect(() => {
-    if (collapsed || !sessionActive) return;
+    if (collapsed || !sessionActive || hint) return;
     const id = setInterval(pollNew, POLL_INTERVAL_MS);
     return () => clearInterval(id);
-  }, [collapsed, sessionActive, pollNew]);
+  }, [collapsed, sessionActive, pollNew, hint]);
 
   // Header summary text on the right side
   const headerRight = (() => {
@@ -363,7 +370,21 @@ export default function SessionLogs({
       </button>
 
       {/* Body */}
-      {!collapsed && (
+      {!collapsed && hint && (
+        <div
+          style={{
+            borderTop: "1px solid var(--line)",
+            padding: "18px 16px",
+            fontSize: 10,
+            color: "var(--t2)",
+            lineHeight: 1.6,
+            fontFamily: FONT_MONO,
+          }}
+        >
+          {hint}
+        </div>
+      )}
+      {!collapsed && !hint && (
         <div style={{
           borderTop: "1px solid var(--line)",
           display: "flex",
