@@ -50,6 +50,8 @@ interface LogLine {
 
 interface LogResponse {
   date: string | null;
+  allocation_id?: string | null;
+  available_dates?: string[];  // last 3 available dates, DESC (alloc mode only)
   total_lines: number;
   from_line: number;
   lines: LogLine[];
@@ -129,9 +131,20 @@ export default function SessionLogs({
   const [fromLine, setFromLine] = useState(0);
   const [sessionActive, setSessionActive] = useState(false);
   const [sessionDate, setSessionDate] = useState<string | null>(null);
+  const [availableDates, setAvailableDates] = useState<string[]>([]);
   const [loading, setLoading] = useState(false);
   const [loadingEarlier, setLoadingEarlier] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  // Override for the date query param. Set when the user clicks one of the
+  // date-picker tabs. Cleared whenever the parent-provided selectedDate or
+  // allocationId changes — those indicate a new context and the user's prior
+  // tab selection no longer applies.
+  const [userSelectedDate, setUserSelectedDate] = useState<string | null>(null);
+  useEffect(() => {
+    setUserSelectedDate(null);
+  }, [selectedDate, allocationId]);
+  const effectiveDate = userSelectedDate ?? selectedDate;
 
   const scrollRef = useRef<HTMLDivElement>(null);
   const bottomedOutRef = useRef(true);
@@ -166,6 +179,7 @@ export default function SessionLogs({
       setFromLine(data.from_line);
       setSessionActive(data.session_active);
       setSessionDate(data.date);
+      setAvailableDates(data.available_dates ?? []);
       bottomedOutRef.current = true;
       // Scroll to bottom after layout.
       requestAnimationFrame(() => {
@@ -264,13 +278,13 @@ export default function SessionLogs({
       el.scrollHeight - el.scrollTop - el.clientHeight <= BOTTOM_THRESHOLD_PX;
   };
 
-  // (Re)fetch when expanded OR when selectedDate / allocationId changes
-  // while expanded. (allocationId is baked into fetchInitial via its deps,
-  // so change reference → new callback → effect re-fires.)
+  // (Re)fetch when expanded OR when the effective date / allocationId
+  // changes while expanded. effectiveDate folds in userSelectedDate so
+  // clicking a date-tab triggers a refetch.
   useEffect(() => {
     if (collapsed) return;
-    fetchInitial(selectedDate);
-  }, [collapsed, selectedDate, fetchInitial]);
+    fetchInitial(effectiveDate);
+  }, [collapsed, effectiveDate, fetchInitial]);
 
   // Poll while expanded + active.
   useEffect(() => {
@@ -357,6 +371,70 @@ export default function SessionLogs({
           flex: 1,
           minHeight: 0,
         }}>
+          {/* Date picker — allocation mode only; renders when we have ≥2
+              dates available (nothing to switch if we only have one). */}
+          {allocationId && availableDates.length >= 2 && (
+            <div
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: 8,
+                padding: "8px 16px",
+                borderBottom: "1px solid var(--line)",
+                background: "var(--bg1)",
+                fontFamily: FONT_MONO,
+              }}
+            >
+              <span
+                style={{
+                  fontSize: 9,
+                  fontWeight: 700,
+                  letterSpacing: "0.12em",
+                  color: "var(--t3)",
+                  textTransform: "uppercase",
+                }}
+              >
+                Date
+              </span>
+              <div style={{ display: "flex", border: "1px solid var(--line)", borderRadius: 4, overflow: "hidden" }}>
+                {availableDates.map((d, i) => {
+                  const active = d === sessionDate;
+                  return (
+                    <button
+                      key={d}
+                      type="button"
+                      onClick={() => setUserSelectedDate(d)}
+                      style={{
+                        background: active ? "var(--bg4)" : "transparent",
+                        color: active ? "var(--t0)" : "var(--t2)",
+                        border: "none",
+                        borderLeft: i === 0 ? "none" : "1px solid var(--line)",
+                        padding: "4px 10px",
+                        fontSize: 10,
+                        fontWeight: 700,
+                        letterSpacing: "0.04em",
+                        fontFamily: FONT_MONO,
+                        cursor: "pointer",
+                        transition: "background 0.15s ease, color 0.15s ease",
+                      }}
+                      onMouseEnter={(e) => {
+                        if (!active) e.currentTarget.style.color = "var(--t1)";
+                      }}
+                      onMouseLeave={(e) => {
+                        if (!active) e.currentTarget.style.color = "var(--t2)";
+                      }}
+                    >
+                      {d}
+                    </button>
+                  );
+                })}
+              </div>
+              <span style={{ fontSize: 9, color: "var(--t3)" }}>
+                (last {availableDates.length} available)
+              </span>
+            </div>
+          )}
+
           {fromLine > 0 && (
             <div
               style={{
@@ -416,7 +494,9 @@ export default function SessionLogs({
                   fontSize: 10,
                 }}
               >
-                No log lines for this session yet.
+                {allocationId
+                  ? "No sessions in the selected range for this allocation."
+                  : "No log lines for this session yet."}
               </div>
             )}
             {lines.map((line) => (

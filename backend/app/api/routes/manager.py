@@ -1378,6 +1378,10 @@ def _resolve_log_path() -> Path:
     return Path(__file__).resolve().parents[4] / "blofin_executor.log"
 
 
+_ALLOC_LOG_DIR = Path("/mnt/quant-data/logs/trader")
+_ALLOC_LOG_DATE_RE = re.compile(r"^allocation_[0-9a-f-]{36}_(\d{4}-\d{2}-\d{2})\.log$")
+
+
 def _resolve_allocation_log_path(allocation_id: str, date: str) -> Path:
     """
     Per-allocation log path. Each spawn_traders subprocess redirects its
@@ -1385,7 +1389,34 @@ def _resolve_allocation_log_path(allocation_id: str, date: str) -> Path:
     — see backend/app/cli/spawn_traders.py. Mount at /mnt/quant-data is
     shared with the host (docker-compose.yml).
     """
-    return Path("/mnt/quant-data/logs/trader") / f"allocation_{allocation_id}_{date}.log"
+    return _ALLOC_LOG_DIR / f"allocation_{allocation_id}_{date}.log"
+
+
+def _list_allocation_log_dates(allocation_id: str, limit: int = 3) -> list[str]:
+    """
+    Scan /mnt/quant-data/logs/trader/ for allocation_<id>_YYYY-MM-DD.log files
+    and return up to `limit` most-recent date strings (descending). Empty list
+    if no files exist for this allocation. Used for:
+      - auto-resolving "show me the latest session I have" when the UI omits
+        the date query param (picks [0] of the returned list)
+      - populating the date-picker tabs in SessionLogs.tsx so the user can
+        navigate back up to `limit - 1` days
+    """
+    if not _ALLOC_LOG_DIR.exists():
+        return []
+    try:
+        dates: list[str] = []
+        prefix = f"allocation_{allocation_id}_"
+        for p in _ALLOC_LOG_DIR.iterdir():
+            if not p.is_file() or not p.name.startswith(prefix):
+                continue
+            m = _ALLOC_LOG_DATE_RE.match(p.name)
+            if m:
+                dates.append(m.group(1))
+        dates.sort(reverse=True)  # ISO dates sort lexicographically
+        return dates[:limit]
+    except OSError:
+        return []
 
 
 def _parse_log_line(raw: str) -> dict[str, str] | None:
@@ -1475,11 +1506,13 @@ def execution_logs(
           Uses SESSION header markers to segment into per-day windows.
       (b) Allocation mode (allocation_id provided): reads the per-allocation
           per-day file at /mnt/quant-data/logs/trader/allocation_<id>_<date>.log.
-          One file = one session; no header segmentation needed. `date` is
-          REQUIRED in this mode since the filename encodes it.
+          One file = one session. When date is omitted, auto-resolves to the
+          most recent log file for that allocation (glob on filename dates) —
+          supports "show me the latest session I have" when today's hasn't
+          opened yet. Returns empty response if no files exist at all.
 
-    date:           YYYY-MM-DD. Required in allocation mode; omitted in master
-                    mode → most recent session.
+    date:           YYYY-MM-DD. Omitted in master mode → most recent session.
+                    Omitted in allocation mode → most recent existing log file.
     allocation_id:  Optional UUID. When provided, switches to allocation mode.
     since_line:     return only lines with n > since_line (live-polling cursor).
                     Omitted → tail the last `limit` lines.
@@ -1493,13 +1526,28 @@ def execution_logs(
         if len(date) != 10 or date[4] != "-" or date[7] != "-":
             raise HTTPException(status_code=400, detail="invalid date")
 
+    available_dates: list[str] = []
     if allocation_id is not None:
         # Allocation mode — one file per (allocation, date).
+        # Always enumerate available dates (last 3) so the UI can render
+        # date-picker tabs. When `date` is omitted, auto-resolve to the
+        # most recent — supports "show latest session" UX when the current
+        # session hasn't opened yet.
+        available_dates = _list_allocation_log_dates(allocation_id, limit=3)
         if not date:
-            raise HTTPException(
-                status_code=400,
-                detail="date query param is required when allocation_id is provided",
-            )
+            if not available_dates:
+                # No log files exist for this allocation yet — return empty
+                # response; frontend shows the "No sessions" placeholder.
+                return {
+                    "date":            None,
+                    "allocation_id":   allocation_id,
+                    "available_dates": [],
+                    "total_lines":     0,
+                    "from_line":       0,
+                    "lines":           [],
+                    "session_active":  False,
+                }
+            date = available_dates[0]
         window = _read_log_file(_resolve_allocation_log_path(allocation_id, date))
         session_date = date
     else:
@@ -1547,10 +1595,11 @@ def execution_logs(
         session_active = cur.fetchone() is not None
 
     return {
-        "date":           session_date,
-        "allocation_id":  allocation_id,
-        "total_lines":    total,
-        "from_line":      start,
-        "lines":          lines,
-        "session_active": session_active,
+        "date":            session_date,
+        "allocation_id":   allocation_id,
+        "available_dates": available_dates,
+        "total_lines":     total,
+        "from_line":       start,
+        "lines":           lines,
+        "session_active":  session_active,
     }

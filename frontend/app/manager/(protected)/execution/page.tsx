@@ -892,27 +892,43 @@ export default function ExecutionPage() {
           </span>
           <span>Session Logs</span>
         </button>
-        {activeSection === "logs" && (
-          selectedLogDate ? (
-            // Some row selected — render SessionLogs. allocationId non-null
-            // for allocation rows (reads /mnt/quant-data/logs/trader/alloc_*.log);
-            // null for master rows (reads blofin_executor.log).
+        {activeSection === "logs" && (() => {
+          // Effective scope for the log viewer:
+          //   1. Manual row click (selectedLogDate set) → use clicked values
+          //   2. Filter is a specific allocation → auto-scope to that alloc,
+          //      let backend pick its latest available log file
+          //   3. Filter is "all" AND no click → show hint panel (need a choice)
+          const hasManualSelection = selectedLogDate !== null;
+          const filterIsSpecific = allocFilter !== "all";
+          const shouldShowHint = !hasManualSelection && !filterIsSpecific;
+
+          if (shouldShowHint) {
+            return (
+              <div style={{ padding: "0 16px 18px", fontSize: 10, color: "var(--t2)", lineHeight: 1.6 }}>
+                Click a row in the Daily Execution Summary above to view its
+                session logs here, or pick a specific allocation in the filter
+                dropdown to auto-scope the viewer to that allocation&apos;s
+                latest session.
+              </div>
+            );
+          }
+
+          const effectiveAllocId = hasManualSelection
+            ? selectedLogAllocationId
+            : (filterIsSpecific ? allocFilter : null);
+          // Null date when auto-scoping — backend resolves to the latest
+          // available log file for the allocation.
+          const effectiveDate = hasManualSelection ? selectedLogDate : null;
+
+          return (
             <SessionLogs
-              selectedDate={selectedLogDate}
-              allocationId={selectedLogAllocationId}
+              selectedDate={effectiveDate}
+              allocationId={effectiveAllocId}
               expanded
               onToggle={() => toggleSection("logs")}
             />
-          ) : (
-            // No row clicked yet — hint panel.
-            <div style={{ padding: "0 16px 18px", fontSize: 10, color: "var(--t2)", lineHeight: 1.6 }}>
-              Click a row in the Daily Execution Summary above to view its
-              session logs here. Allocation rows load from the per-allocation
-              log file at <code>/mnt/quant-data/logs/trader/allocation_&lt;id&gt;_&lt;date&gt;.log</code>;
-              master rows load from <code>blofin_executor.log</code>.
-            </div>
-          )
-        )}
+          );
+        })()}
       </div>
     </div>
   );
