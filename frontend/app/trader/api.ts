@@ -181,6 +181,8 @@ export interface ApiPosition {
   size: number;
   entry_price: number;
   mark_price: number;
+  contract_value?: number;
+  notional_usd?: number;
   unrealized_pnl: number;
   leverage: number;
   margin_mode: string;

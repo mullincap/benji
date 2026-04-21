@@ -107,6 +107,52 @@ def _blofin_get(
     return resp.json()
 
 
+# In-process cache of BloFin contract values. Needed for notional = size ×
+# mark × contractValue since BloFin position sizes are in contracts, not
+# coins. Instrument list is near-static; a 30-min TTL is plenty.
+_BLOFIN_CONTRACT_CACHE: dict[str, float] = {}
+_BLOFIN_CONTRACT_CACHE_TS: float = 0.0
+_BLOFIN_CONTRACT_TTL_S = 1800
+
+
+def _blofin_contract_values() -> dict[str, float]:
+    """Return {instId → contractValue} for BloFin SWAP instruments.
+
+    Public endpoint (no auth). Cached per-process with a 30-min TTL so
+    bursts of /positions calls don't hammer the exchange.
+    """
+    global _BLOFIN_CONTRACT_CACHE_TS
+    if (
+        _BLOFIN_CONTRACT_CACHE
+        and time.time() - _BLOFIN_CONTRACT_CACHE_TS < _BLOFIN_CONTRACT_TTL_S
+    ):
+        return _BLOFIN_CONTRACT_CACHE
+    try:
+        resp = http_requests.get(
+            BLOFIN_BASE_URL + "/api/v1/market/instruments",
+            params={"instType": "SWAP"},
+            timeout=10,
+        )
+        resp.raise_for_status()
+        data = resp.json().get("data") or []
+        fresh: dict[str, float] = {}
+        for row in data:
+            iid = row.get("instId")
+            if not iid:
+                continue
+            try:
+                fresh[iid] = float(row.get("contractValue") or 1.0)
+            except (TypeError, ValueError):
+                fresh[iid] = 1.0
+        if fresh:
+            _BLOFIN_CONTRACT_CACHE.clear()
+            _BLOFIN_CONTRACT_CACHE.update(fresh)
+            _BLOFIN_CONTRACT_CACHE_TS = time.time()
+    except Exception as e:
+        log.warning(f"BloFin contract-value fetch failed: {e}")
+    return _BLOFIN_CONTRACT_CACHE
+
+
 def _safe_decimal(val) -> Decimal | None:
     if val is None or val == "":
         return None
@@ -144,19 +190,32 @@ def _fetch_live_blofin(
                 break
 
     # Parse positions
+    # BloFin's actual response fields (verified against live API):
+    #   averagePrice, markPrice, unrealizedPnl, leverage, positionSide,
+    #   marginMode, positions (size in contracts).
+    # avgPx/markPx/upl/posSide/lever/pos are legacy aliases — kept as
+    # fallbacks so any schema drift doesn't silently zero fields.
+    contract_values = _blofin_contract_values()
     positions = []
     for pos in (pos_resp.get("data") or []):
         size = float(pos.get("positions", 0) or pos.get("pos", 0) or 0)
         if size == 0:
             continue
+        inst_id = pos.get("instId") or ""
+        entry_price = float(pos.get("averagePrice") or pos.get("avgPx") or pos.get("avgPrice") or 0)
+        mark_price = float(pos.get("markPrice") or pos.get("markPx") or 0)
+        contract_value = contract_values.get(inst_id, 1.0)
+        notional_usd = size * mark_price * contract_value
         positions.append({
-            "symbol": (pos.get("instId") or "").replace("-", ""),
-            "side": (pos.get("posSide") or "net").lower(),
+            "symbol": inst_id.replace("-", ""),
+            "side": (pos.get("positionSide") or pos.get("posSide") or "net").lower(),
             "size": size,
-            "entry_price": float(pos.get("avgPx") or pos.get("avgPrice") or 0),
-            "mark_price": float(pos.get("markPx") or pos.get("markPrice") or 0),
-            "unrealized_pnl": float(pos.get("upl") or pos.get("unrealizedPnl") or 0),
-            "leverage": int(float(pos.get("lever") or pos.get("leverage") or 0)),
+            "entry_price": entry_price,
+            "mark_price": mark_price,
+            "contract_value": contract_value,
+            "notional_usd": round(notional_usd, 2),
+            "unrealized_pnl": float(pos.get("unrealizedPnl") or pos.get("upl") or 0),
+            "leverage": int(float(pos.get("leverage") or pos.get("lever") or 0)),
             "margin_mode": (pos.get("marginMode") or "cross").lower(),
         })
 

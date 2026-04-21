@@ -23,12 +23,14 @@ export interface Exchange {
 
 export interface Position {
   symbol: string;
-  side: "LONG" | "SHORT";
+  side: "LONG" | "SHORT" | "NET";
   size: number;
   entry: number;
   mark: number;
   pnl: number;
   pnlPct: number;
+  notionalUsd?: number;
+  leverage?: number;
 }
 
 export type StrategyType = string;

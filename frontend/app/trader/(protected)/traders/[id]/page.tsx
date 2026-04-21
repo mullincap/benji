@@ -181,16 +181,48 @@ function UnlinkedMode({ instanceId }: { instanceId: string }) {
 function mapApiPosition(p: ApiPosition): Position {
   const entry = p.entry_price;
   const mark = p.mark_price;
-  const pnlPct = entry > 0 ? ((mark - entry) / entry) * 100 : 0;
+  const lev = p.leverage || 1;
+  // Leveraged ROI: the % move a user actually sees on the exchange UI
+  // for the margin committed to this position. Raw 1x move × leverage.
+  // When entry is missing, fall back to 0 rather than showing NaN.
+  const pnlPct = entry > 0 ? ((mark - entry) / entry) * 100 * lev : 0;
   return {
     symbol: p.symbol,
-    side: (p.side || "long").toUpperCase() as "LONG" | "SHORT",
+    side: (p.side || "net").toUpperCase() as "LONG" | "SHORT" | "NET",
     size: p.size,
     entry,
     mark,
     pnl: p.unrealized_pnl,
     pnlPct: Math.round(pnlPct * 100) / 100,
+    notionalUsd: p.notional_usd,
+    leverage: p.leverage,
   };
+}
+
+// Adaptive price formatting — same number picks readable precision based
+// on magnitude, so $92.45 and $0.006122 both render without lying.
+function fmtPrice(n: number): string {
+  if (!isFinite(n) || n === 0) return "$0";
+  const abs = Math.abs(n);
+  let decimals: number;
+  if (abs >= 1000) decimals = 0;
+  else if (abs >= 1)   decimals = 2;
+  else if (abs >= 0.01) decimals = 4;
+  else if (abs >= 0.0001) decimals = 6;
+  else decimals = 8;
+  return `$${n.toLocaleString("en-US", { minimumFractionDigits: decimals, maximumFractionDigits: decimals })}`;
+}
+
+// Strip the quote suffix so "BASUSDT" renders as "BAS". Every position
+// in this view is USDT-quoted; the suffix adds noise without info.
+function stripQuote(sym: string): string {
+  if (sym.endsWith("USDT")) return sym.slice(0, -4);
+  return sym;
+}
+
+function fmtNotional(n: number | undefined): string {
+  if (n == null || !isFinite(n)) return "—";
+  return `$${n.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 }
 
 function LiveMode({ instanceId }: { instanceId: string }) {
@@ -393,7 +425,17 @@ function LiveMode({ instanceId }: { instanceId: string }) {
               background: positionsOpen ? "transparent" : "var(--bg2)",
             }}
           >
-            <span style={{ fontSize: 9, color: "var(--t3)", letterSpacing: "0.12em", fontWeight: 700, textTransform: "uppercase" }}>OPEN POSITIONS</span>
+            <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+              <span style={{ fontSize: 9, color: "var(--t3)", letterSpacing: "0.12em", fontWeight: 700, textTransform: "uppercase" }}>OPEN POSITIONS</span>
+              <span style={{ fontSize: 9, color: "var(--t3)" }}>·</span>
+              <span style={{ fontSize: 9, color: "var(--t2)" }}>{livePositions.length} open</span>
+              {snapshotAt && (
+                <>
+                  <span style={{ fontSize: 9, color: "var(--t3)" }}>·</span>
+                  <span style={{ fontSize: 9, color: "var(--t3)" }}>{syncedAgo}</span>
+                </>
+              )}
+            </div>
             <span style={{ fontSize: 10, color: "var(--t2)", transition: "transform 0.2s ease", display: "inline-block", transform: positionsOpen ? "rotate(0deg)" : "rotate(-90deg)" }}>{"\u25BC"}</span>
           </div>
           <div ref={positionsContentRef} style={{
@@ -404,21 +446,44 @@ function LiveMode({ instanceId }: { instanceId: string }) {
             <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 10 }}>
               <thead>
                 <tr style={{ borderBottom: "1px solid var(--line)" }}>
-                  {["SYMBOL", "SIDE", "SIZE", "ENTRY", "MARK", "P&L"].map(h => (
-                    <th key={h} style={{ padding: "8px 16px", textAlign: h === "P&L" ? "right" : "left", color: "var(--t3)", fontSize: 9, fontWeight: 700, letterSpacing: "0.12em" }}>{h}</th>
+                  {([
+                    { label: "SYMBOL",   align: "left"  },
+                    { label: "SIDE",     align: "left"  },
+                    { label: "SIZE",     align: "right" },
+                    { label: "NOTIONAL", align: "right" },
+                    { label: "ENTRY",    align: "right" },
+                    { label: "MARK",     align: "right" },
+                    { label: "LEV",      align: "right" },
+                    { label: "P&L",      align: "right" },
+                  ] as const).map(h => (
+                    <th key={h.label} style={{ padding: "8px 16px", textAlign: h.align, color: "var(--t3)", fontSize: 9, fontWeight: 700, letterSpacing: "0.12em" }}>{h.label}</th>
                   ))}
                 </tr>
               </thead>
               <tbody>
                 {livePositions.map((p, i) => (
-                  <tr key={`${p.symbol}-${i}`} style={{ borderBottom: i < livePositions.length - 1 ? "1px solid var(--bg3)" : "none" }}>
-                    <td style={{ padding: "9px 16px", color: "var(--t1)" }}>{p.symbol}</td>
+                  <tr
+                    key={`${p.symbol}-${i}`}
+                    style={{
+                      borderBottom: i < livePositions.length - 1 ? "1px solid var(--bg3)" : "none",
+                      transition: "background 0.1s ease",
+                    }}
+                    onMouseEnter={e => { e.currentTarget.style.background = "var(--bg2)"; }}
+                    onMouseLeave={e => { e.currentTarget.style.background = "transparent"; }}
+                  >
+                    <td style={{ padding: "9px 16px", color: "var(--t0)", fontWeight: 700 }}>{stripQuote(p.symbol)}</td>
                     <td style={{ padding: "9px 16px" }}>
-                      <span style={{ fontSize: 9, padding: "2px 6px", borderRadius: 2, background: p.side === "LONG" ? "var(--green-dim)" : "var(--red-dim)", color: p.side === "LONG" ? "var(--green)" : "var(--red)" }}>{p.side}</span>
+                      <span style={{
+                        fontSize: 9,
+                        letterSpacing: "0.06em",
+                        color: p.side === "LONG" ? "var(--green)" : p.side === "SHORT" ? "var(--red)" : "var(--t2)",
+                      }}>{p.side}</span>
                     </td>
-                    <td style={{ padding: "9px 16px", color: "var(--t1)" }}>{p.size}</td>
-                    <td style={{ padding: "9px 16px", color: "var(--t1)" }}>${fmt(p.entry, 0)}</td>
-                    <td style={{ padding: "9px 16px", color: "var(--t1)" }}>${fmt(p.mark, 0)}</td>
+                    <td style={{ padding: "9px 16px", color: "var(--t1)", textAlign: "right" }}>{p.size.toLocaleString("en-US")}</td>
+                    <td style={{ padding: "9px 16px", color: "var(--t1)", textAlign: "right" }}>{fmtNotional(p.notionalUsd)}</td>
+                    <td style={{ padding: "9px 16px", color: "var(--t1)", textAlign: "right" }}>{fmtPrice(p.entry)}</td>
+                    <td style={{ padding: "9px 16px", color: "var(--t1)", textAlign: "right" }}>{fmtPrice(p.mark)}</td>
+                    <td style={{ padding: "9px 16px", color: "var(--t2)", textAlign: "right" }}>{p.leverage ? `${p.leverage}×` : "—"}</td>
                     <td style={{ padding: "9px 16px", textAlign: "right", color: p.pnl >= 0 ? "var(--green)" : "var(--red)" }}>
                       {p.pnl >= 0 ? "+" : ""}${fmt(p.pnl)}
                       <span style={{ fontSize: 9, opacity: 0.7, marginLeft: 4 }}>({p.pnlPct >= 0 ? "+" : ""}{fmt(p.pnlPct)}%)</span>
@@ -426,7 +491,7 @@ function LiveMode({ instanceId }: { instanceId: string }) {
                   </tr>
                 ))}
                 {livePositions.length === 0 && !positionsLoading && (
-                  <tr><td colSpan={6} style={{ padding: "20px 16px", textAlign: "center", color: "var(--t2)", fontSize: 10 }}>No open positions</td></tr>
+                  <tr><td colSpan={8} style={{ padding: "20px 16px", textAlign: "center", color: "var(--t2)", fontSize: 10 }}>No open positions</td></tr>
                 )}
               </tbody>
             </table>
