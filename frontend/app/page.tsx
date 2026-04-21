@@ -285,7 +285,7 @@ export default function LandingPage() {
             </li>
           ))}
         </ul>
-        <Link href="/simulator" className="lp-nav-cta" style={{
+        <Link href="/trader/overview" className="lp-nav-cta" style={{
           padding: '9px 22px', background: 'transparent',
           border: '1px solid var(--line2)', color: 'var(--t1)',
           fontFamily: 'var(--font-space-mono)', fontSize: 11,
@@ -330,12 +330,12 @@ export default function LandingPage() {
           </p>
 
           <div className="lp-rise-4 lp-hero-actions" style={{ display: 'flex', gap: 12, marginBottom: '5rem' }}>
-            <Link href="/simulator" className="lp-btn-primary" style={{
+            <Link href="/trader/overview" className="lp-btn-primary" style={{
               padding: '13px 32px', background: 'var(--green)', color: '#000',
               fontFamily: 'var(--font-space-mono)', fontWeight: 700,
               fontSize: 11, letterSpacing: '0.1em', textTransform: 'uppercase', textDecoration: 'none',
             }}>
-              Launch Audit Engine
+              Launch App
             </Link>
             <a href="#modules" className="lp-btn-ghost" style={{
               padding: '13px 32px', border: '1px solid var(--line2)',
@@ -793,7 +793,7 @@ export default function LandingPage() {
             }}>Contact</a>
           </li>
           <li>
-            <Link href="/simulator" className="lp-footer-link" style={{
+            <Link href="/trader/overview" className="lp-footer-link" style={{
               fontSize: 10, color: 'var(--t3)', textDecoration: 'none',
               letterSpacing: '0.08em', textTransform: 'uppercase',
             }}>App</Link>
