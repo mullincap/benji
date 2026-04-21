@@ -530,25 +530,139 @@ export default function SessionLogs({
   );
 }
 
+// ─── Log text tokenization ──────────────────────────────────────────────────
+// Single-pass polish pipeline applied to each log line's text:
+//   1. Color-code signed percentages (+green / -red), incl. `delta=`
+//   2. Color-code signed dollar amounts (`$+X` / `$-X`)
+//   3. Dim the redundant `[alloc XXXXXXXX]` prefix (user already scoped the
+//      panel to one allocation via the filter dropdown)
+//   5. Bold the `Bar N` counter — gives the eye a hook when skimming
+//   7. Distinct accent for SYMBOL-USDT tickers so they pop in prose
+// Patterns are applied in declared order; matched ranges are not re-tokenized,
+// so a value already styled by an earlier pattern stays that way.
+type StyledSegment = { text: string; style: React.CSSProperties | null };
+
+const SYMBOL_COLOR = "#7aa2f7"; // soft blue — distinct from green/red/white
+
+function negColor(v: string): string {
+  return v.startsWith("-") || v.startsWith("−") ? "var(--red)" : "var(--green)";
+}
+
+const TOKEN_PATTERNS: Array<{
+  re: RegExp;
+  style: (match: string) => React.CSSProperties;
+}> = [
+  // Dim the allocation prefix — redundant with the panel's filter scope.
+  {
+    re: /\[alloc [0-9a-f]{6,}\]/g,
+    style: () => ({ color: "var(--t3)", opacity: 0.45 }),
+  },
+  // Bold the bar counter — primary scannable anchor.
+  {
+    re: /\bBar\s+\d+/g,
+    style: () => ({ color: "var(--t0)", fontWeight: 700 }),
+  },
+  // Symbol tickers (BASE-USDT pattern). 2+ uppercase alnum chars + -USDT.
+  {
+    re: /\b[A-Z][A-Z0-9]{1,15}-USDT\b/g,
+    style: () => ({ color: SYMBOL_COLOR, fontWeight: 500 }),
+  },
+  // Signed percentages — must have explicit +/- sign (so neutral values
+  // like `0.3%` or `kill_y=0.3` stay uncolored).
+  {
+    re: /[+−-]\d+(?:\.\d+)?%/g,
+    style: (m) => ({ color: negColor(m), fontWeight: 500 }),
+  },
+  // Signed dollar amounts ($+X.XX, $-X.XX).
+  {
+    re: /\$[+−-][\d,]+(?:\.\d+)?/g,
+    style: (m) => ({
+      color: /\$[-−]/.test(m) ? "var(--red)" : "var(--green)",
+      fontWeight: 500,
+    }),
+  },
+];
+
+function tokenizeLogText(text: string): StyledSegment[] {
+  // Start with the whole text as a single unstyled segment; each pattern
+  // pass carves matching substrings into styled segments.
+  let segments: StyledSegment[] = [{ text, style: null }];
+
+  for (const { re, style } of TOKEN_PATTERNS) {
+    const next: StyledSegment[] = [];
+    for (const seg of segments) {
+      if (seg.style !== null) {
+        // Already styled by an earlier pattern — don't re-match within.
+        next.push(seg);
+        continue;
+      }
+      const matches = Array.from(seg.text.matchAll(re));
+      if (matches.length === 0) {
+        next.push(seg);
+        continue;
+      }
+      let cursor = 0;
+      for (const m of matches) {
+        const start = m.index ?? 0;
+        if (start > cursor) {
+          next.push({ text: seg.text.slice(cursor, start), style: null });
+        }
+        next.push({ text: m[0], style: style(m[0]) });
+        cursor = start + m[0].length;
+      }
+      if (cursor < seg.text.length) {
+        next.push({ text: seg.text.slice(cursor), style: null });
+      }
+    }
+    segments = next;
+  }
+
+  return segments;
+}
+
 function LogRow({ line }: { line: LogLine }) {
   const color = levelColor(line.level);
+  const level = line.level === "WARNING" ? "WARN" : line.level;
+  const isWarn = level === "WARN";
+  const isError = level === "ERROR" || level === "CRITICAL";
+
+  // Level-based row treatment: WARN gets an amber left-border + faint
+  // tinted bg; ERROR gets the same in red. INFO rows stay transparent so
+  // events stand out during a scroll-scan.
+  const borderLeft = isError
+    ? "3px solid var(--red)"
+    : isWarn
+      ? "3px solid var(--amber)"
+      : "3px solid transparent";
+  const background = isError
+    ? "var(--red-dim)"
+    : isWarn
+      ? "var(--amber-dim)"
+      : "transparent";
+
+  const segments = tokenizeLogText(line.text);
+
   return (
     <div
       style={{
         display: "grid",
         gridTemplateColumns: "48px 72px 48px 1fr",
         gap: 8,
-        padding: "0 14px",
+        padding: "0 14px 0 11px", // offset padding for the 3px left border
         whiteSpace: "pre-wrap",
         wordBreak: "break-word",
+        borderLeft,
+        background,
       }}
     >
       <span style={{ color: "var(--t3)", textAlign: "right" }}>{line.n}</span>
       <span style={{ color: "var(--t3)" }}>{shortTime(line.ts)}</span>
-      <span style={{ color: color, fontWeight: 700 }}>
-        {line.level === "WARNING" ? "WARN" : line.level}
+      <span style={{ color, fontWeight: 700 }}>{level}</span>
+      <span style={{ color }}>
+        {segments.map((seg, i) => (
+          <span key={i} style={seg.style ?? undefined}>{seg.text}</span>
+        ))}
       </span>
-      <span style={{ color: color }}>{line.text}</span>
     </div>
   );
 }

@@ -2059,7 +2059,8 @@ def _run_monitoring_loop(today, today_date, api: ExchangeAdapter, inst_ids,
                          capital_deployed_usd: float = 0.0,
                          fill_report: dict | None = None,
                          conviction_roi_x: float | None = None,
-                         signal_count: int | None = None):
+                         signal_count: int | None = None,
+                         resume_sym_stopped: list[str] | None = None):
     """
     Intraday monitoring loop (bars 7-216).
 
@@ -2102,8 +2103,26 @@ def _run_monitoring_loop(today, today_date, api: ExchangeAdapter, inst_ids,
 
     # Per-symbol stop tracking (matches apply_raw_stop in rebuild_portfolio_matrix.py)
     # sym_stopped: {inst_id: clamped_return}  -- symbols closed by per-symbol stop
-    # Once stopped, a symbol contributes PORT_SL_PCT (-6%) to the portfolio average.
-    sym_stopped = {}   # {inst_id: PORT_SL_PCT}
+    # Once stopped, a symbol contributes PORT_SL_PCT (-7.5%) to the portfolio average.
+    #
+    # On resume, rehydrate sym_stopped from runtime_state.sym_stopped (list of
+    # instrument IDs) so the incr = mean(sym_returns) calculation continues
+    # including the clamped -7.5% contribution for previously-stopped symbols.
+    # Without this, a mid-session trader restart would drop those symbols
+    # from the portfolio_avg entirely and distort incr upward (less negative),
+    # which in turn distorts expected = incr × eff_lev and the delta vs
+    # actual_roi. port_sl_pct is the canonical clamp value — the stored list
+    # only records which symbols stopped, not their individual clamp values,
+    # because all per-symbol stops clamp at the same cfg threshold.
+    sym_stopped: dict[str, float] = {}
+    if resume_sym_stopped:
+        _clamp = float(cfg.port_sl_pct)
+        for _iid in resume_sym_stopped:
+            sym_stopped[_iid] = _clamp
+        log.info(
+            f"{log_prefix}Rehydrated {len(sym_stopped)} stopped symbol(s) from "
+            f"runtime_state: {list(sym_stopped.keys())}"
+        )
     active_positions = list(positions)   # shrinks as per-symbol stops fire
     bars_monitored = 0
     # Exit-price snapshots for slippage reconciliation.
@@ -2278,7 +2297,11 @@ def _run_monitoring_loop(today, today_date, api: ExchangeAdapter, inst_ids,
         log.info(
             f"{log_prefix}Bar {b:3d} | incr={incr*100:+.3f}%  peak={peak*100:.3f}%  "
             f"tsl={tsl_dist*100:+.3f}%  sess={session_ret*100:+.3f}%  "
-            f"active={len(active_positions)}/{len(positions)}  "
+            # Denominator uses inst_ids (the stable full portfolio) rather
+            # than positions (which is only active_positions at loop start
+            # → on resume becomes the post-stops active count, making the
+            # "X/Y" display shrink incorrectly after a restart).
+            f"active={len(active_positions)}/{len(inst_ids)}  "
             f"stopped={len(sym_stopped)}  "
             f"fill={'open' if fill_open else 'closed'}"
         )
@@ -3678,6 +3701,13 @@ def run_session_for_allocation(allocation_id: str, dry_run: bool = False) -> Non
             _inst_ids     = list(state.get("symbols", _open_prices.keys()))
             _today_date   = utcnow().date()
             _resume_baseline = state.get("session_start_equity_usdt")
+            # Persisted sym_stopped is a list of inst_ids that hit the
+            # per-symbol stop earlier in the session; rehydrate so incr
+            # math keeps including their clamped contribution and the
+            # active=X/Y display stays truthful across restarts.
+            _resume_stopped = state.get("sym_stopped") or []
+            if not isinstance(_resume_stopped, list):
+                _resume_stopped = []
             _run_monitoring_loop(
                 today, _today_date, api, _inst_ids,
                 _open_prices, _entry_prices,
@@ -3691,6 +3721,7 @@ def run_session_for_allocation(allocation_id: str, dry_run: bool = False) -> Non
                 config=config,
                 session_id=state.get("session_id"),
                 capital_deployed_usd=float(state.get("capital_deployed_usd", 0.0)),
+                resume_sym_stopped=list(_resume_stopped),
             )
             return
 

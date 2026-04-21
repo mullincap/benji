@@ -307,24 +307,39 @@ def list_signals(
     #      signal_date this bucket isn't in futures_1m until tomorrow's
     #      00:15 UTC metl run, so this path is effectively
     #      yesterday-or-earlier.
+    #
+    # Keying: strategy_versions with different selected symbols compute
+    # different conviction values on the same date. Key by
+    # (signal_date, strategy_version_id) so each row resolves against
+    # its own value rather than collapsing to a shared per-date value.
     KILL_Y = 0.3  # conviction threshold (%)
 
-    conviction_by_date: dict[str, float | None] = {}
+    ConvKey = tuple[str, str]  # (signal_date_iso, strategy_version_id)
+
+    def _row_key(r) -> ConvKey | None:
+        if not r["signal_date"] or not r["strategy_version_id"]:
+            return None
+        return (r["signal_date"].isoformat(), str(r["strategy_version_id"]))
+
+    conviction_by_key: dict[ConvKey, float | None] = {}
+
+    # Step 1: per-row stored_conviction from daily_signals.
     for r in rows:
-        if r["signal_date"] and r["stored_conviction"] is not None:
-            conviction_by_date[r["signal_date"].isoformat()] = round(float(r["stored_conviction"]), 4)
+        k = _row_key(r)
+        if k and r["stored_conviction"] is not None:
+            conviction_by_key[k] = round(float(r["stored_conviction"]), 4)
 
     # Step 2: allocation_returns fallback. Per-strategy-version JOIN so
     # each daily_signals row pulls conviction from an allocation on its
-    # own version. Since conviction is computed from signal symbols, any
-    # allocation's value is representative — pick MAX arbitrarily when
-    # multiple allocations share a version (values should agree).
-    dates_missing = list({
-        r["signal_date"] for r in rows
-        if r["signal_date"]
-        and r["signal_date"].isoformat() not in conviction_by_date
-    })
-    if dates_missing:
+    # own version. Pick MAX arbitrarily when multiple allocations share
+    # a version (conviction values agree across allocations of the same
+    # version — they're computed from the same signal symbols).
+    missing_keys: set[ConvKey] = {
+        k for k in (_row_key(r) for r in rows)
+        if k is not None and k not in conviction_by_key
+    }
+    if missing_keys:
+        missing_dates = list({k[0] for k in missing_keys})
         cur.execute("""
             SELECT ds.signal_date,
                    ds.strategy_version_id,
@@ -338,23 +353,32 @@ def list_signals(
             WHERE ds.signal_date = ANY(%s::date[])
               AND ar.conviction_roi_x IS NOT NULL
             GROUP BY ds.signal_date, ds.strategy_version_id
-        """, (dates_missing,))
+        """, (missing_dates,))
         # allocation_returns.conviction_roi_x is stored as a fraction
         # (0.01187 = +1.187%) whereas daily_signals.conviction_roi_x is
         # stored as a percent (1.187). Scale to percent here so the
         # frontend's ConvictionBadge (which renders `${roiX.toFixed(2)}%`)
         # shows a sensible magnitude regardless of source.
         for row in cur.fetchall():
-            d = row["signal_date"].isoformat()
-            if d not in conviction_by_date:
-                conviction_by_date[d] = round(float(row["conviction_roi_x"]) * 100, 4)
+            k = (row["signal_date"].isoformat(), str(row["strategy_version_id"]))
+            if k in missing_keys and k not in conviction_by_key:
+                conviction_by_key[k] = round(float(row["conviction_roi_x"]) * 100, 4)
 
+    # Step 3: compute from futures_1m for rows still missing conviction.
+    # Same symbol-set per row → conviction differs only by symbol_set, so
+    # group by signal_date for the SQL (cheap) then apply to every
+    # (date, version) key whose symbols match. In practice strategy_versions
+    # sharing a date usually share signal symbols too, so one compute
+    # satisfies multiple keys.
     signal_dates = list({
         r["signal_date"] for r in rows
         if r["signal_date"]
         and int(r["symbol_count"] or 0) > 0
-        and r["signal_date"].isoformat() not in conviction_by_date
+        and _row_key(r) not in conviction_by_key
     })
+    # Legacy dict for the futures_1m fallback — keyed by date only since
+    # the query aggregates across all symbols of that date's signals.
+    conviction_by_date: dict[str, float | None] = {}
 
     if signal_dates:
         # Lightweight query: only conviction (open + bar6), no session close
@@ -396,6 +420,16 @@ def list_signals(
                 round(float(row["roi_x"]), 4) if row["roi_x"] is not None else None
             )
 
+    def _conviction_for(r) -> float | None:
+        """Resolve conviction for one row via the per-key chain, with the
+        futures_1m per-date result as a last-resort fallback."""
+        k = _row_key(r)
+        if k is not None and k in conviction_by_key:
+            return conviction_by_key[k]
+        if r["signal_date"]:
+            return conviction_by_date.get(r["signal_date"].isoformat())
+        return None
+
     return {
         "lookback_days":     days,
         "source_filter":     source,
@@ -413,9 +447,7 @@ def list_signals(
                 "computed_at":         r["computed_at"].isoformat() if r["computed_at"] else None,
                 "symbol_count":        int(r["symbol_count"] or 0),
                 "symbols":             r["symbols"] or [],
-                "conviction_roi_x":    conviction_by_date.get(
-                    r["signal_date"].isoformat() if r["signal_date"] else "", None
-                ),
+                "conviction_roi_x":    _conviction_for(r),
             }
             for r in rows
         ],
