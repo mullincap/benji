@@ -325,8 +325,8 @@ export default function LandingPage() {
           <p className="lp-rise-3" style={{
             fontSize: 13, color: 'var(--t1)', maxWidth: 480, lineHeight: 1.9, marginBottom: '3rem',
           }}>
-            Backtest, stress-test, and validate trading strategies with institutional-grade analytics.
-            Built for fund managers and allocators who demand rigor.
+            Backtest, stress-test, validate, and launch trading strategies with institutional-grade analytics
+            linked directly to your account. Built for fund managers and allocators who demand rigor.
           </p>
 
           <div className="lp-rise-4 lp-hero-actions" style={{ display: 'flex', gap: 12, marginBottom: '5rem' }}>
@@ -556,8 +556,8 @@ export default function LandingPage() {
           <div>
             {[
               { num: '5', suffix: 'B+', label: 'Data points / day' },
-              { num: '40', suffix: '+', label: 'Risk metrics / audit' },
-              { num: '12', suffix: 'ms', label: 'Simulation latency' },
+              { num: '70', suffix: '+', label: 'Risk metrics / audit' },
+              { num: '2', suffix: '', label: 'Supported exchanges' },
               { num: '99', suffix: '.9%', label: 'Uptime SLA' },
             ].map((m, i) => (
               <div key={m.label} style={{
@@ -640,7 +640,7 @@ export default function LandingPage() {
               cta: 'Get started', ctaHref: '#waitlist',
             },
             {
-              tier: 'Professional', price: '$499', priceSub: '/mo', cycle: 'Billed monthly — cancel anytime', featured: true,
+              tier: 'Professional', price: '$1,999', priceSub: '/mo', cycle: 'Billed monthly — cancel anytime', featured: true,
               features: [
                 { on: true, text: 'Unlimited strategy audits' },
                 { on: true, text: 'All 5 platform modules' },
@@ -665,7 +665,7 @@ export default function LandingPage() {
                 { on: true, text: 'Onboarding & training' },
                 { on: true, text: 'Dedicated account manager' },
               ],
-              cta: 'Contact sales', ctaHref: 'mailto:hello@mullincap.com',
+              cta: 'Contact sales', ctaHref: 'mailto:sales@mullincap.com',
             },
           ].map((card) => (
             <div key={card.tier} className="lp-pricing-card" style={{
@@ -776,18 +776,22 @@ export default function LandingPage() {
           }} />
           3M
         </a>
-        <p style={{ fontSize: 10, color: 'var(--t3)', letterSpacing: '0.04em' }}>© 2025 Mullin Capital. All rights reserved.</p>
+        <p style={{ fontSize: 10, color: 'var(--t3)', letterSpacing: '0.04em' }}>© {new Date().getFullYear()} Mullin Capital. All rights reserved.</p>
         <ul className="lp-footer-links" style={{ display: 'flex', gap: '2rem', listStyle: 'none' }}>
-          {['Privacy', 'Terms'].map((label) => (
-            <li key={label}>
-              <a href="#" className="lp-footer-link" style={{
-                fontSize: 10, color: 'var(--t3)', textDecoration: 'none',
-                letterSpacing: '0.08em', textTransform: 'uppercase',
-              }}>{label}</a>
-            </li>
-          ))}
           <li>
-            <a href="mailto:hello@mullincap.com" className="lp-footer-link" style={{
+            <Link href="/privacy" className="lp-footer-link" style={{
+              fontSize: 10, color: 'var(--t3)', textDecoration: 'none',
+              letterSpacing: '0.08em', textTransform: 'uppercase',
+            }}>Privacy</Link>
+          </li>
+          <li>
+            <Link href="/terms" className="lp-footer-link" style={{
+              fontSize: 10, color: 'var(--t3)', textDecoration: 'none',
+              letterSpacing: '0.08em', textTransform: 'uppercase',
+            }}>Terms</Link>
+          </li>
+          <li>
+            <a href="mailto:j@mullincap.com" className="lp-footer-link" style={{
               fontSize: 10, color: 'var(--t3)', textDecoration: 'none',
               letterSpacing: '0.08em', textTransform: 'uppercase',
             }}>Contact</a>
