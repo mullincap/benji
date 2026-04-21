@@ -14,6 +14,7 @@
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { AllocationFilter } from "../_components/AllocationFilter";
+import { useLargestAllocationDefault } from "../_components/useLargestAllocationDefault";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE || "";
 const FONT_MONO = "var(--font-space-mono), Space Mono, monospace";
@@ -156,6 +157,14 @@ export default function PortfoliosListPage() {
   const [response, setResponse] = useState<PortfoliosResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [allocFilter, setAllocFilter] = useState<"all" | string>("all");
+
+  // On first load, snap the allocation filter to the largest-equity
+  // allocation so the user doesn't have to pick it every time.
+  useLargestAllocationDefault(
+    allocFilter,
+    setAllocFilter,
+    response?.available_allocations,
+  );
 
   useEffect(() => {
     let cancelled = false;

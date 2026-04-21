@@ -15,6 +15,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import SessionLogs from "./SessionLogs";
 import { AllocationFilter } from "../_components/AllocationFilter";
+import { useLargestAllocationDefault } from "../_components/useLargestAllocationDefault";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE || "";
 
@@ -509,6 +510,14 @@ export default function ExecutionPage() {
   const toggleSection = useCallback((name: "table" | "logs") => {
     setActiveSection((cur) => (cur === name ? null : name));
   }, []);
+
+  // On first load, snap the allocation filter to the largest-equity
+  // allocation so the user doesn't have to pick it every time.
+  useLargestAllocationDefault(
+    allocFilter,
+    setAllocFilter,
+    summary?.available_allocations,
+  );
 
   // Master-history fetch: only active when "Include master history" is ON.
   // Legacy /api/manager/execution-reports path — retire once master cron
