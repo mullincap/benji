@@ -28,20 +28,26 @@ interface ChartData {
 
 // ─── Transform API response → chart data shape ──────────────────────────────
 
-function transformHistory(history: ApiBalanceHistory[]): ChartData {
+function transformHistory(history: ApiBalanceHistory[], range: TimeRange): ChartData {
   const equity: number[] = [];
   const pnl: number[] = [];
   const labels: string[] = [];
 
+  const intraday = range === "1D";
+
   for (let i = 0; i < history.length; i++) {
     const row = history[i];
     equity.push(row.equity_usd);
-    // Per-day P&L = equity change since previous row.
-    // First row's P&L is unknown (no prior equity reference) → use 0 as the
-    // visual baseline rather than a fake value; tooltip will show the raw row.
+    // Per-row P&L = equity change since previous row. First row has no prior
+    // reference → 0 baseline. For 1D (5-min snapshots) this shows the
+    // rolling 5-min equity delta; for daily rollups it shows day-over-day.
     pnl.push(i === 0 ? 0 : row.equity_usd - history[i - 1].equity_usd);
     const d = new Date(row.date);
-    labels.push(d.toLocaleDateString("en-US", { month: "short", day: "numeric" }));
+    labels.push(
+      intraday
+        ? d.toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", hour12: false })
+        : d.toLocaleDateString("en-US", { month: "short", day: "numeric" }),
+    );
   }
 
   return { equity, pnl, labels };
@@ -97,7 +103,7 @@ export default function PerformanceChart({ instanceId, title = "PERFORMANCE" }: 
       try {
         const result = await allocatorApi.getBalanceHistory(instanceId, range);
         if (cancelled) return;
-        setData(transformHistory(result.history));
+        setData(transformHistory(result.history, range));
       } catch (err) {
         if (cancelled) return;
         const { detail } = parseApiError(err);
@@ -171,28 +177,32 @@ export default function PerformanceChart({ instanceId, title = "PERFORMANCE" }: 
     );
   }
 
-  // Empty: no history rows for this allocation / range yet.
+  // Empty: no snapshot rows in range yet. sync_exchange_snapshots runs
+  // every 5 min so this should resolve within a cron tick of a new
+  // connection going live.
   if (!data || data.equity.length === 0) {
     return (
       <div style={wrapperStyle}>
         {header}
         <StateMessage
-          main="No trading history yet"
-          sub="First data point appears after the next session closes (~23:55 UTC)"
+          main="No balance snapshots yet"
+          sub={range === "1D"
+            ? "Snapshots appear every 5 min once the exchange connection is live."
+            : "Snapshots captured every 5 min; daily rollups start after the first UTC day."}
         />
       </div>
     );
   }
 
-  // Single-point: still too sparse to draw a line or meaningful bar chart.
-  // Render the single value as a plain stat with the same empty-state chrome.
+  // Single-point: still too sparse for a line. Render the single value as
+  // a plain stat until the next snapshot/close lands.
   if (data.equity.length === 1) {
     return (
       <div style={wrapperStyle}>
         {header}
         <StateMessage
-          main={`$${data.equity[0].toLocaleString()} on ${data.labels[0]}`}
-          sub="Only one data point so far — line chart appears after two closes"
+          main={`$${data.equity[0].toLocaleString()} at ${data.labels[0]}`}
+          sub="Only one snapshot so far — line appears after the next 5-min tick."
         />
       </div>
     );

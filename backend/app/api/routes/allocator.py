@@ -1242,49 +1242,121 @@ def trader_balance_history(
     user_id: str = Depends(get_current_user),
     cur=Depends(get_cursor),
 ) -> dict[str, Any]:
-    """Return daily equity curve for an allocation. Verifies ownership.
+    """Return account-equity curve for an allocation. Verifies ownership.
+
+    Sourced from `user_mgmt.exchange_snapshots` (every-5-min account
+    snapshot from `sync_exchange_snapshots` cron) so the curve is visible
+    live, not just after session close at 23:55 UTC. For 1D: intraday
+    5-min resolution; for 1W/1M/ALL: last snapshot per UTC day.
 
     Optional `range` query param filters server-side. Allowed values:
-      - "1D"  → today only (1 row max; daily table → sparse)
-      - "1W"  → last 7 days
-      - "1M"  → last 30 days
-      - "ALL" / None / unknown → full history (no filter)
+      - "1D"  → intraday, last 24h (every 5 min)
+      - "1W"  → daily close, last 7 days
+      - "1M"  → daily close, last 30 days
+      - "ALL" / None / unknown → daily close, full history
+
+    NOTE: exchange_snapshots captures TOTAL account equity keyed by
+    connection_id, not allocation_id. If one connection backs multiple
+    allocations (hypothetical — today each allocation has its own key),
+    the curve here reflects the aggregate account, not an allocation
+    slice. This matches the "Total Account Equity" card semantic.
     """
-    cur.execute("SELECT user_id FROM user_mgmt.allocations WHERE allocation_id = %s::uuid", (allocation_id,))
+    cur.execute(
+        """
+        SELECT a.user_id, a.connection_id
+        FROM user_mgmt.allocations a
+        WHERE a.allocation_id = %s::uuid
+        """,
+        (allocation_id,),
+    )
     row = cur.fetchone()
     if not row:
         raise HTTPException(status_code=404, detail="Allocation not found")
     if str(row["user_id"]) != user_id:
         raise HTTPException(status_code=403, detail="Not your allocation")
+    connection_id = row["connection_id"]
 
-    range_days = {"1D": 1, "1W": 7, "1M": 30}.get((range or "").upper())
+    range_up = (range or "").upper()
+    if range_up == "1D":
+        # Intraday: every snapshot in last 24h.
+        cur.execute(
+            """
+            SELECT snapshot_at AS ts, total_equity_usd AS equity_usd
+            FROM user_mgmt.exchange_snapshots
+            WHERE connection_id = %s::uuid
+              AND snapshot_at >= NOW() - INTERVAL '24 hours'
+              AND fetch_ok = TRUE
+              AND total_equity_usd IS NOT NULL
+            ORDER BY snapshot_at
+            """,
+            (connection_id,),
+        )
+        rows = cur.fetchall()
+        return {
+            "allocation_id": allocation_id,
+            "range": "1D",
+            "granularity": "intraday",
+            "history": [
+                {
+                    "date": r["ts"].isoformat(),
+                    "equity_usd": float(r["equity_usd"] or 0),
+                    "daily_return": 0.0,
+                    "drawdown": None,
+                }
+                for r in rows
+            ],
+        }
+
+    # Daily close: DISTINCT ON (day) picks the latest snapshot within each
+    # UTC day, giving a clean one-point-per-day equity curve.
+    range_days = {"1W": 7, "1M": 30}.get(range_up)
     if range_days is not None:
-        from datetime import date as _date, timedelta as _timedelta
-        since_date = _date.today() - _timedelta(days=range_days - 1)
-        cur.execute("""
-            SELECT date, equity_usd, daily_return, drawdown
-            FROM user_mgmt.performance_daily
-            WHERE allocation_id = %s::uuid
-              AND date >= %s
-            ORDER BY date
-        """, (allocation_id, since_date))
+        cur.execute(
+            """
+            SELECT DISTINCT ON (day_utc) day_utc::date AS date, equity_usd
+            FROM (
+              SELECT snapshot_at,
+                     date_trunc('day', snapshot_at AT TIME ZONE 'UTC') AS day_utc,
+                     total_equity_usd AS equity_usd
+              FROM user_mgmt.exchange_snapshots
+              WHERE connection_id = %s::uuid
+                AND snapshot_at >= NOW() - (%s || ' days')::interval
+                AND fetch_ok = TRUE
+                AND total_equity_usd IS NOT NULL
+            ) t
+            ORDER BY day_utc, snapshot_at DESC
+            """,
+            (connection_id, range_days),
+        )
     else:
-        cur.execute("""
-            SELECT date, equity_usd, daily_return, drawdown
-            FROM user_mgmt.performance_daily
-            WHERE allocation_id = %s::uuid
-            ORDER BY date
-        """, (allocation_id,))
+        cur.execute(
+            """
+            SELECT DISTINCT ON (day_utc) day_utc::date AS date, equity_usd
+            FROM (
+              SELECT snapshot_at,
+                     date_trunc('day', snapshot_at AT TIME ZONE 'UTC') AS day_utc,
+                     total_equity_usd AS equity_usd
+              FROM user_mgmt.exchange_snapshots
+              WHERE connection_id = %s::uuid
+                AND fetch_ok = TRUE
+                AND total_equity_usd IS NOT NULL
+            ) t
+            ORDER BY day_utc, snapshot_at DESC
+            """,
+            (connection_id,),
+        )
     rows = cur.fetchall()
 
     return {
         "allocation_id": allocation_id,
+        "range": range_up or "ALL",
+        "granularity": "daily",
         "history": [
             {
                 "date": r["date"].isoformat(),
                 "equity_usd": float(r["equity_usd"] or 0),
-                "daily_return": float(r["daily_return"] or 0),
-                "drawdown": float(r["drawdown"] or 0) if r["drawdown"] is not None else None,
+                "daily_return": 0.0,
+                "drawdown": None,
             }
             for r in rows
         ],
