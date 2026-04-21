@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useState, useRef } from "react";
 import Skeleton, { KPIGridSkeleton, TableSkeleton } from "../../../components/Skeleton";
+import { RangeTabs, TimeRange } from "../../../components/RangeTabs";
 import {
   Chart as ChartJS,
   CategoryScale,
@@ -93,6 +94,15 @@ interface OverviewData {
   total_unrealized_pnl: number | null;
 }
 
+interface PortfolioSeries {
+  range: TimeRange;
+  granularity: "intraday" | "daily";
+  first_data_date: string | null;
+  real_days: number;
+  portfolio_equity: { date: string; equity_usd: number }[];
+  daily_returns: { date: string; return_pct: number; return_usd: number }[];
+}
+
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
 function pctColor(v: number): string {
@@ -110,6 +120,62 @@ function fmtUsdSigned(v: number): string {
   const sign = v > 0 ? "+" : v < 0 ? "−" : "";
   const abs = Math.abs(v);
   return `${sign}$${abs.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+}
+
+/** Human "Apr 20" from an ISO date string. Returns "—" for falsy input. */
+function shortDate(iso: string | null | undefined): string {
+  if (!iso) return "—";
+  const d = new Date(iso);
+  return d.toLocaleDateString("en-US", { month: "short", day: "numeric" });
+}
+
+function equitySubtitle(range: TimeRange, s: PortfolioSeries | null): string {
+  if (!s) return "Loading…";
+  if (range === "1D") {
+    return s.portfolio_equity.length > 0
+      ? `Today · ${s.portfolio_equity.length} snapshots`
+      : "Today · no snapshots yet";
+  }
+  const expected = range === "1W" ? 7 : range === "1M" ? 30 : null;
+  if (expected !== null && s.real_days >= expected) {
+    return `Last ${expected} days`;
+  }
+  if (s.first_data_date && s.real_days > 0) {
+    const unit = s.real_days === 1 ? "day" : "days";
+    return `Since ${shortDate(s.first_data_date)} (${s.real_days} ${unit})`;
+  }
+  return "No recorded data yet";
+}
+
+function returnsSubtitle(range: TimeRange, s: PortfolioSeries | null): string {
+  if (!s) return "Loading…";
+  if (range === "1D") {
+    return s.daily_returns.length > 0
+      ? "1 session (today)"
+      : "No session yet today";
+  }
+  const expected = range === "1W" ? 7 : range === "1M" ? 30 : null;
+  const n = s.daily_returns.length;
+  if (expected !== null && n >= expected) {
+    return `Last ${expected} sessions`;
+  }
+  if (n > 0) {
+    const unit = n === 1 ? "session" : "sessions";
+    return `${n} ${unit} so far`;
+  }
+  return "No sessions recorded yet";
+}
+
+function emptyCopyForRange(range: TimeRange, kind: "equity" | "returns"): string {
+  const unit = kind === "equity" ? "data" : "sessions";
+  switch (range) {
+    case "1D":  return kind === "equity"
+      ? "No snapshots captured today yet."
+      : "Daily returns are a per-session metric — first bar appears after today's 23:55 UTC session close.";
+    case "1W":  return `No ${unit} in the last 7 days yet.`;
+    case "1M":  return `No ${unit} in the last 30 days yet.`;
+    case "ALL": return `No ${unit} recorded yet.`;
+  }
 }
 
 function statusBadge(status: string) {
@@ -230,6 +296,11 @@ function KpiCard({
 export default function OverviewPage() {
   const [data, setData] = useState<OverviewData | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // Each chart owns its own range — they're independent controls.
+  const [equityRange, setEquityRange] = useState<TimeRange>("1M");
+  const [returnsRange, setReturnsRange] = useState<TimeRange>("1M");
+  const [equitySeries, setEquitySeries] = useState<PortfolioSeries | null>(null);
+  const [returnsSeries, setReturnsSeries] = useState<PortfolioSeries | null>(null);
 
   const loadOverview = useCallback(() => {
     fetch(`${API_BASE}/api/allocator/snapshots/refresh`, {
@@ -248,6 +319,31 @@ export default function OverviewPage() {
           .catch((e) => setError(e.message));
       });
   }, []);
+
+  // Fetch series for each chart independently when its range changes.
+  // Daily Returns on 1D falls back to the server's empty response —
+  // render path shows a "not meaningful at intraday cadence" hint.
+  useEffect(() => {
+    let cancelled = false;
+    fetch(`${API_BASE}/api/manager/portfolio-series?range=${equityRange}`, {
+      credentials: "include",
+    })
+      .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
+      .then((d: PortfolioSeries) => { if (!cancelled) setEquitySeries(d); })
+      .catch(() => { if (!cancelled) setEquitySeries(null); });
+    return () => { cancelled = true; };
+  }, [equityRange]);
+
+  useEffect(() => {
+    let cancelled = false;
+    fetch(`${API_BASE}/api/manager/portfolio-series?range=${returnsRange}`, {
+      credentials: "include",
+    })
+      .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
+      .then((d: PortfolioSeries) => { if (!cancelled) setReturnsSeries(d); })
+      .catch(() => { if (!cancelled) setReturnsSeries(null); });
+    return () => { cancelled = true; };
+  }, [returnsRange]);
 
   useEffect(() => {
     loadOverview();
@@ -312,24 +408,20 @@ export default function OverviewPage() {
     );
   }
 
-  // Build daily return array from allocations' perf data
-  const dailyReturnsByDate: Record<string, number> = {};
-  for (const a of data.allocations) {
-    for (const p of a.performance_30d) {
-      const ret = (a.capital_usd || 0) * ((p.daily_return || 0) / 100);
-      dailyReturnsByDate[p.date] = (dailyReturnsByDate[p.date] || 0) + ret;
-    }
-  }
-  const dailyReturnDates = Object.keys(dailyReturnsByDate).sort();
-  const dailyReturnPcts = dailyReturnDates.map((d) =>
-    data.total_aum > 0
-      ? (dailyReturnsByDate[d] / data.total_aum) * 100
-      : 0
-  );
+  // Chart series are fetched server-side per selected range. Format
+  // x-axis labels based on granularity:
+  //   intraday (1D)  → HH:MM
+  //   daily (others) → MM-DD
+  const fmtEquityLabel = (iso: string) =>
+    equitySeries?.granularity === "intraday"
+      ? new Date(iso).toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", hour12: false })
+      : iso.slice(5); // MM-DD
 
-  // Equity curve
-  const eqDates = data.portfolio_equity_30d.map((d) => d.date.slice(5)); // MM-DD
-  const eqValues = data.portfolio_equity_30d.map((d) => d.equity_usd);
+  const eqDates = equitySeries?.portfolio_equity.map((d) => fmtEquityLabel(d.date)) ?? [];
+  const eqValues = equitySeries?.portfolio_equity.map((d) => d.equity_usd) ?? [];
+
+  const dailyReturnDates = returnsSeries?.daily_returns.map((d) => d.date.slice(5)) ?? [];
+  const dailyReturnPcts = returnsSeries?.daily_returns.map((d) => d.return_pct) ?? [];
 
   const hasEquityData = eqValues.length > 0;
   const hasDailyData = dailyReturnDates.length > 0;
@@ -396,17 +488,29 @@ export default function OverviewPage() {
             flexDirection: "column",
           }}
         >
+          {/* Header: title + dynamic subtitle + range tabs */}
           <div
             style={{
-              fontSize: 9,
-              fontWeight: 700,
-              letterSpacing: "0.12em",
-              color: "var(--t3)",
-              textTransform: "uppercase",
+              display: "flex",
+              alignItems: "flex-start",
+              justifyContent: "space-between",
+              gap: 10,
               marginBottom: 8,
             }}
           >
-            Portfolio Equity (30d)
+            <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+              <span style={{
+                fontSize: 9,
+                fontWeight: 700,
+                letterSpacing: "0.12em",
+                color: "var(--t3)",
+                textTransform: "uppercase",
+              }}>Portfolio Equity</span>
+              <span style={{ fontSize: 9, color: "var(--t3)", fontWeight: 400 }}>
+                {equitySubtitle(equityRange, equitySeries)}
+              </span>
+            </div>
+            <RangeTabs value={equityRange} onChange={setEquityRange} />
           </div>
           {hasEquityData ? (
             <div style={{ flex: 1, position: "relative" }}>
@@ -420,7 +524,10 @@ export default function OverviewPage() {
                       backgroundColor: "rgba(0, 200, 150, 0.08)",
                       fill: true,
                       tension: 0.3,
-                      pointRadius: 0,
+                      // Show a visible marker when there's only one point
+                      // so the user can tell it's intentional, not a glitch.
+                      pointRadius: eqValues.length === 1 ? 4 : 0,
+                      pointBackgroundColor: "#00c896",
                       borderWidth: 1.5,
                     },
                   ],
@@ -469,9 +576,11 @@ export default function OverviewPage() {
                 justifyContent: "center",
                 fontSize: 9,
                 color: "var(--t3)",
+                textAlign: "center",
+                padding: "0 20px",
               }}
             >
-              No data yet
+              {emptyCopyForRange(equityRange, "equity")}
             </div>
           )}
         </div>
@@ -488,23 +597,43 @@ export default function OverviewPage() {
             flexDirection: "column",
           }}
         >
+          {/* Header: title + dynamic subtitle + range tabs.
+              1D is present but disabled — daily returns are a per-session
+              metric, one bar per UTC day, so an intraday view is not
+              meaningful. Keep the tab visible for affordance consistency
+              with the Equity chart but block clicks. */}
           <div
             style={{
-              fontSize: 9,
-              fontWeight: 700,
-              letterSpacing: "0.12em",
-              color: "var(--t3)",
-              textTransform: "uppercase",
+              display: "flex",
+              alignItems: "flex-start",
+              justifyContent: "space-between",
+              gap: 10,
               marginBottom: 8,
             }}
           >
-            Daily Returns (30d)
+            <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+              <span style={{
+                fontSize: 9,
+                fontWeight: 700,
+                letterSpacing: "0.12em",
+                color: "var(--t3)",
+                textTransform: "uppercase",
+              }}>Daily Returns</span>
+              <span style={{ fontSize: 9, color: "var(--t3)", fontWeight: 400 }}>
+                {returnsSubtitle(returnsRange, returnsSeries)}
+              </span>
+            </div>
+            <RangeTabs
+              value={returnsRange}
+              onChange={setReturnsRange}
+              disabled={["1D"]}
+            />
           </div>
           {hasDailyData ? (
             <div style={{ flex: 1, position: "relative" }}>
               <Bar
                 data={{
-                  labels: dailyReturnDates.map((d) => d.slice(5)),
+                  labels: dailyReturnDates,
                   datasets: [
                     {
                       data: dailyReturnPcts,
@@ -526,11 +655,31 @@ export default function OverviewPage() {
                     },
                     y: {
                       display: true,
-                      ticks: { color: "#5a5754", font: { size: 8 }, maxTicksLimit: 4 },
+                      ticks: {
+                        color: "#5a5754", font: { size: 8 }, maxTicksLimit: 4,
+                        callback: (v: unknown) => `${Number(v).toFixed(2)}%`,
+                      },
                       grid: { color: "rgba(50,50,59,0.3)" },
                     },
                   },
-                  plugins: { tooltip: { enabled: true }, legend: { display: false } },
+                  plugins: {
+                    tooltip: {
+                      enabled: true,
+                      backgroundColor: "rgba(20,20,22,0.95)",
+                      titleFont: { family: "Space Mono", size: 10 },
+                      bodyFont: { family: "Space Mono", size: 11 },
+                      padding: 10,
+                      cornerRadius: 4,
+                      callbacks: {
+                        label: (ctx: { raw: unknown }) => {
+                          const v = Number(ctx.raw);
+                          const sign = v >= 0 ? "+" : "";
+                          return `${sign}${v.toFixed(2)}%`;
+                        },
+                      },
+                    },
+                    legend: { display: false },
+                  },
                 }}
               />
             </div>
@@ -543,9 +692,11 @@ export default function OverviewPage() {
                 justifyContent: "center",
                 fontSize: 9,
                 color: "var(--t3)",
+                textAlign: "center",
+                padding: "0 20px",
               }}
             >
-              No data yet
+              {emptyCopyForRange(returnsRange, "returns")}
             </div>
           )}
         </div>

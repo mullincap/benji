@@ -8,12 +8,9 @@ import {
 } from "chart.js";
 import { Line, Bar } from "react-chartjs-2";
 import { allocatorApi, ApiBalanceHistory, parseApiError } from "./api";
+import { RangeTabs, TimeRange } from "../components/RangeTabs";
 
 ChartJS.register(CategoryScale, LinearScale, PointElement, LineElement, BarElement, Filler, Tooltip);
-
-// ─── Types ───────────────────────────────────────────────────────────────────
-
-type TimeRange = "1D" | "1W" | "1M" | "ALL";
 
 interface PerformanceChartProps {
   instanceId: string;
@@ -132,31 +129,13 @@ export default function PerformanceChart({ instanceId, title = "PERFORMANCE" }: 
   const t2 = getCssVar("--t2") || "#5a5754";
   const t3 = getCssVar("--t3") || "#bbbbbb";
 
-  const ranges: TimeRange[] = ["1D", "1W", "1M", "ALL"];
-
   // Header (always rendered — tabs remain visible across loading/empty/error).
   const header = (
     <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10 }}>
       <span style={{ fontSize: 9, color: "var(--t3)", fontWeight: 700, letterSpacing: "0.08em", textTransform: "uppercase" }}>
         {title}
       </span>
-      <div style={{ display: "flex", border: "1px solid var(--line)", borderRadius: 4, overflow: "hidden" }}>
-        {ranges.map(r => (
-          <button
-            key={r}
-            onClick={() => setRange(r)}
-            style={{
-              padding: "3px 8px", fontSize: 9, fontWeight: 700,
-              background: range === r ? "var(--bg4)" : "transparent",
-              color: range === r ? "var(--t0)" : "var(--t3)",
-              border: "none", cursor: "pointer",
-              borderRight: r !== "ALL" ? "1px solid var(--line)" : "none",
-            }}
-          >
-            {r}
-          </button>
-        ))}
-      </div>
+      <RangeTabs value={range} onChange={setRange} />
     </div>
   );
 
