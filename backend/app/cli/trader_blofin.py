@@ -2138,9 +2138,18 @@ def _run_monitoring_loop(today, today_date, api: ExchangeAdapter, inst_ids,
     # ── Actual-account ROI baseline ───────────────────────────────────────
     # Captures total account equity at session start so each bar can log
     # the real account ROI + session PnL alongside the strategy's 1x
-    # incr / peak values. Fresh sessions pass balance_pre_entry; resumed
-    # sessions read from runtime_state or fall back to the current equity
-    # (approximate baseline) if no prior capture exists.
+    # incr / peak values.
+    #
+    # Resolution order (each falls through on None/failure):
+    #   1. balance_pre_entry (fresh-session caller passes pre-entry total)
+    #   2. runtime_state.session_start_equity_usdt (prior bar persisted it)
+    #   3. exchange_snapshots — earliest snapshot today at/before session
+    #      start hour; this is the fallback for a mid-session rescue where
+    #      the trader crashed BEFORE the first bar wrote runtime_state.
+    #      Cleaner than "current equity at resume" because today's price
+    #      movement has already made current equity inaccurate as a
+    #      session-start baseline.
+    #   4. current equity — last-resort approximation if all else fails.
     session_start_equity_usdt = balance_pre_entry
     if allocation_id is not None and session_start_equity_usdt is None:
         try:
@@ -2150,14 +2159,30 @@ def _run_monitoring_loop(today, today_date, api: ExchangeAdapter, inst_ids,
                 session_start_equity_usdt = float(_cur_state["session_start_equity_usdt"])
         except Exception as _e:
             log.warning(f"{log_prefix}runtime_state read for equity baseline failed: {_e}")
+    if allocation_id is not None and session_start_equity_usdt is None:
+        # Query exchange_snapshots for the earliest today-UTC snapshot on
+        # this allocation's connection at or before the session start hour.
+        try:
+            _baseline_from_snaps = _fetch_session_start_equity_from_snapshots(
+                allocation_id, session_start_hour=cfg.session_start_hour,
+            )
+            if _baseline_from_snaps is not None:
+                session_start_equity_usdt = _baseline_from_snaps
+                log.info(
+                    f"{log_prefix}Captured session-start equity baseline: "
+                    f"${session_start_equity_usdt:,.2f} "
+                    "(from exchange_snapshots — trader crashed before first bar write)"
+                )
+        except Exception as _e:
+            log.warning(f"{log_prefix}exchange_snapshots baseline lookup failed: {_e}")
     if session_start_equity_usdt is None and allocation_id is not None:
         try:
             _bal0 = api.get_balance()
             session_start_equity_usdt = float(_bal0.total_usdt)
-            log.info(
-                f"{log_prefix}Captured session-start equity baseline: "
-                f"${session_start_equity_usdt:,.2f} "
-                "(resumed session — using current equity)"
+            log.warning(
+                f"{log_prefix}Using current equity ${session_start_equity_usdt:,.2f} "
+                "as session-start baseline (no prior capture found). "
+                "actual-ROI will be relative to restart time, not session start."
             )
         except Exception as _e:
             log.warning(
@@ -2767,6 +2792,56 @@ def _fetch_allocation(allocation_id: str) -> dict:
     return dict(zip(cols, row))
 
 
+def _fetch_session_start_equity_from_snapshots(
+    allocation_id: str,
+    session_start_hour: int = 6,
+) -> float | None:
+    """Return total_equity_usd from the snapshot closest to session start.
+
+    Every session opens at `session_start_hour:35` UTC. Equity at
+    `session_start_hour:30` UTC (5 min pre-open, last pre-positions tick)
+    is the correct session-start baseline for actual-ROI tracking.
+
+    Joins allocations.connection_id → exchange_snapshots, filters to
+    today UTC, picks the latest snapshot with `snapshot_at <= hh:30 UTC`.
+    Returns None if no qualifying snapshot exists (fresh connection, or
+    sync_exchange_snapshots cron was down).
+
+    Used as a fallback in the monitoring loop when runtime_state lacks
+    session_start_equity_usdt (trader crashed before first bar write).
+    """
+    conn = _trader_db_connect()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT es.total_equity_usd
+                FROM user_mgmt.exchange_snapshots es
+                JOIN user_mgmt.allocations a
+                  ON a.connection_id = es.connection_id
+                WHERE a.allocation_id = %s::uuid
+                  AND es.snapshot_at >= date_trunc('day', NOW() AT TIME ZONE 'UTC')
+                  AND es.snapshot_at <= date_trunc('day', NOW() AT TIME ZONE 'UTC')
+                                        + make_interval(hours => %s, mins => 30)
+                  AND es.fetch_ok = TRUE
+                  AND es.total_equity_usd IS NOT NULL
+                ORDER BY es.snapshot_at DESC
+                LIMIT 1
+                """,
+                (allocation_id, session_start_hour),
+            )
+            row = cur.fetchone()
+    finally:
+        conn.close()
+    if row is None:
+        return None
+    val = row[0] if not isinstance(row, dict) else row.get("total_equity_usd")
+    try:
+        return float(val) if val is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
 def _fetch_strategy_version(strategy_version_id: str) -> dict:
     """Load strategy_version row (config JSONB + identity + live vol_boost)."""
     conn = _trader_db_connect()
@@ -3255,10 +3330,24 @@ def _run_fresh_session_for_allocation(
     peak = 0.0
 
     with _account_advisory_lock(connection_id):
-        account_balance = get_account_balance_usdt(api)
-        log.info(
-            f"Allocation {allocation_id}: USDT available=${account_balance:,.2f}"
-        )
+        # Fetch balance once, keep both values:
+        #   - available_usdt drives sizing (legacy `account_balance`)
+        #   - total_usdt is the pre-entry account equity baseline for
+        #     actual-ROI tracking; captured BEFORE orders fire so the
+        #     monitoring-loop baseline matches the session start (not a
+        #     post-entry approximation).
+        _balance_snapshot = api.get_balance()
+        account_balance = _balance_snapshot.available_usdt
+        total_equity_pre_entry = _balance_snapshot.total_usdt
+        if account_balance > 0:
+            log.info(
+                f"Allocation {allocation_id}: USDT available=${account_balance:,.2f} "
+                f"(total equity=${total_equity_pre_entry:,.2f})"
+            )
+        else:
+            log.warning(
+                f"Allocation {allocation_id}: USDT available is zero; aborting may be required"
+            )
 
         # Test scaffolding — exercise the lock under concurrency in dry-run.
         # Set TRADER_LOCK_TEST_SLEEP_S to a positive float to hold the lock
@@ -3347,19 +3436,16 @@ def _run_fresh_session_for_allocation(
     # Master's _run_monitoring_loop accepts allocation-mode kwargs (config,
     # session_id, allocation_id, capital_deployed_usd) and branches at the
     # write sites. Per-bar check order + portfolio-return math are shared.
-    # balance_pre_entry forwarded so the monitoring loop has an accurate
-    # session-start equity baseline for actual-ROI logging. Falls through
-    # to a live get_balance fetch if the adapter-side balance field is
-    # unavailable at this point.
-    try:
-        _entry_bal = float(api.get_balance().total_usdt)
-    except Exception:
-        _entry_bal = None
+    # balance_pre_entry is the total account equity captured BEFORE any
+    # orders were placed (line ~3258, inside the advisory lock). Using the
+    # pre-entry value ensures the actual-ROI baseline matches session
+    # start — a post-entry fetch would include order fees/slippage and
+    # understate session PnL.
     _run_monitoring_loop(
         today, today_date, api, inst_ids,
         open_prices, entry_prices, entry_1x, eff_lev,
         peak, positions, dry_run,
-        balance_pre_entry=_entry_bal,
+        balance_pre_entry=float(total_equity_pre_entry) if total_equity_pre_entry else None,
         allocation_id=allocation_id,
         config=config,
         session_id=session_id,
