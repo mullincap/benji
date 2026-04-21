@@ -63,6 +63,30 @@ def ensure_session_files():
         path.write_text('{"tokens": {}}')
 
 
+@app.on_event("startup")
+def resume_orphaned_traders():
+    """On backend container boot, respawn any trader subprocess that was
+    killed by the container restart mid-session.
+
+    Scans user_mgmt.allocations for phase=active sessions whose
+    runtime_state.updated_at predates this container's start time, and
+    issues a resume-only respawn via the trader supervisor. Backoff +
+    corrupted-state guardrails apply (see trader_supervisor.py).
+
+    Wrapped so any failure here never blocks the backend from serving
+    requests — the periodic supervisor cron picks up any sessions the
+    startup hook missed within ~20 min.
+    """
+    try:
+        from app.cli.trader_supervisor import startup_recovery
+        startup_recovery()
+    except Exception:
+        import logging
+        logging.getLogger("main").exception(
+            "startup trader-recovery failed (non-blocking)"
+        )
+
+
 @app.get("/health")
 def health() -> dict:
     return {"status": "ok"}

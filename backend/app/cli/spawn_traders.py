@@ -27,9 +27,18 @@ Binance allocations are filtered out — the trader executor's per-allocation
 path only supports BloFin in this release. Open work list.
 
 Usage:
-    python -m app.cli.spawn_traders                # spawn all eligible
+    python -m app.cli.spawn_traders                # spawn all eligible (fresh session)
     python -m app.cli.spawn_traders --dry-run      # log what would spawn, don't actually spawn
     python -m app.cli.spawn_traders --verbose      # verbose logging
+    python -m app.cli.spawn_traders --resume-stuck # supervisor tick — detect stale
+                                                     active sessions and respawn.
+                                                     NEVER creates new sessions.
+
+The --resume-stuck flag is cron-driven every 5 min; the default (fresh
+spawn) runs once at 06:05 UTC. Both modes are safe to run concurrently —
+the supervisor only touches allocations whose runtime_state is already
+phase=active for today, while fresh-spawn only touches allocations
+without a today-runtime_state.
 """
 
 from __future__ import annotations
@@ -175,6 +184,10 @@ def main() -> int:
                         help="Log what would spawn without actually spawning.")
     parser.add_argument("--verbose", action="store_true",
                         help="Verbose logging.")
+    parser.add_argument("--resume-stuck", action="store_true",
+                        help="Supervisor mode: detect stale active sessions "
+                             "(runtime_state.updated_at > 15m) and respawn "
+                             "their traders. Never creates new sessions.")
     args = parser.parse_args()
 
     logging.basicConfig(
@@ -182,6 +195,13 @@ def main() -> int:
         format="%(asctime)s [%(levelname)s] %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
     )
+
+    # --resume-stuck branches to the trader supervisor. Kept in this
+    # CLI so there's a single cron entry point and a single place to
+    # configure trader-lifecycle logging.
+    if args.resume_stuck:
+        from app.cli.trader_supervisor import supervisor_pass
+        return supervisor_pass()
 
     log.info(f"spawn_traders starting at {datetime.now(timezone.utc).isoformat()}")
 
