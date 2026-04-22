@@ -73,6 +73,12 @@ def _fetch_portfolio_context(cur) -> dict[str, Any]:
     """Build the full portfolio context dict used by overview and chat."""
 
     # ── Allocations with strategy info ───────────────────────────────────
+    # Active-only. Drives CURRENT-STATE aggregates: TOTAL AUM, the
+    # allocations list rendered in the overview, today's P&L baseline.
+    # Historical aggregates (Max DD, portfolio equity curve, total P&L
+    # baseline) use the separate historical_alloc_ids set below so that
+    # pausing an allocation doesn't silently rewrite the historical
+    # denominator.
     cur.execute("""
         SELECT
             a.allocation_id, a.strategy_version_id, a.connection_id,
@@ -112,20 +118,43 @@ def _fetch_portfolio_context(cur) -> dict[str, Any]:
             "connection_label": a["connection_label"],
         })
 
+    # ── Historical allocations (all statuses) ────────────────────────────
+    # Drives HISTORICAL aggregates that should not migrate when the set
+    # of currently-active allocations changes:
+    #   - Max DD  — lifetime worst peak-to-trough equity
+    #   - Portfolio Equity curve — historical 30D account equity
+    #   - perf_by_alloc fallback denominator
+    # Includes paused and closed allocations; excludes connections that
+    # have never held strategy capital (exploratory links) so Max DD
+    # doesn't pick up equity from wallets that weren't part of the
+    # allocator's book.
+    cur.execute("""
+        SELECT DISTINCT allocation_id, connection_id
+        FROM user_mgmt.allocations
+    """)
+    historical_rows = cur.fetchall()
+    historical_alloc_ids = [r["allocation_id"] for r in historical_rows]
+    historical_connection_uuids = list({r["connection_id"] for r in historical_rows})
+
     # ── Performance daily (last 30 days per allocation) ──────────────────
     perf_by_alloc: dict[str, list[dict]] = {}
     today_return_by_alloc: dict[str, float] = {}
     drawdown_by_alloc: dict[str, float] = {}
     today = datetime.date.today()
 
-    if alloc_list:
+    # Historical: pull perf rows for every allocation that has ever been
+    # strategy capital, not just active ones. The chart / Max DD / total P&L
+    # baseline downstream all aggregate across perf_by_alloc — if we filtered
+    # to active-only here, pausing an allocation would silently shorten the
+    # 30D curve and move the DD peak.
+    if historical_alloc_ids:
         cur.execute("""
             SELECT allocation_id, date, equity_usd, daily_return, drawdown
             FROM user_mgmt.performance_daily
             WHERE allocation_id = ANY(%s::uuid[])
               AND date >= CURRENT_DATE - INTERVAL '30 days'
             ORDER BY allocation_id, date
-        """, (all_alloc_ids,))
+        """, (historical_alloc_ids,))
         for row in cur.fetchall():
             aid = str(row["allocation_id"])
             perf_by_alloc.setdefault(aid, []).append({
@@ -143,7 +172,8 @@ def _fetch_portfolio_context(cur) -> dict[str, Any]:
     # ── Fallback: compute daily performance from exchange_snapshots ──────
     # When performance_daily is empty (no pipeline populates it yet),
     # build per-day equity + returns from the last exchange snapshot per day.
-    if not perf_by_alloc and all_alloc_ids:
+    # Same historical-scope rule as the primary path above.
+    if not perf_by_alloc and historical_alloc_ids:
         cur.execute("""
             SELECT DISTINCT ON (a.allocation_id, date_trunc('day', es.snapshot_at))
                 a.allocation_id,
@@ -155,7 +185,7 @@ def _fetch_portfolio_context(cur) -> dict[str, Any]:
               AND es.fetch_ok = TRUE
               AND es.snapshot_at >= NOW() - INTERVAL '30 days'
             ORDER BY a.allocation_id, date_trunc('day', es.snapshot_at), es.snapshot_at DESC
-        """, (all_alloc_ids,))
+        """, (historical_alloc_ids,))
         # Group by allocation
         snap_by_alloc: dict[str, list[tuple]] = {}
         for row in cur.fetchall():
@@ -238,7 +268,15 @@ def _fetch_portfolio_context(cur) -> dict[str, Any]:
     # metric captures peak-to-trough losses that happen WITHIN a session and
     # recover before close — daily-close buckets would mask them entirely.
     # USD magnitude is the dollar gap at the worst-percentage moment.
-    connection_uuids = list({a["connection_id"] for a in allocations})
+    #
+    # Historical metric — scope is all-ever connections. Pausing or closing
+    # an allocation must NOT silently redefine the historical denominator.
+    # Using historical_connection_uuids (connections that have ever held
+    # strategy capital) instead of the active-only set fixes a 2026-04-22
+    # bug where pausing Alpha Main made Max DD jump from -9.9% → -13.0%
+    # because the calc silently switched from BloFin+Binance combined to
+    # BloFin-only.
+    connection_uuids = historical_connection_uuids
     max_dd = 0.0
     max_dd_usd = 0.0
     if connection_uuids:
@@ -278,9 +316,12 @@ def _fetch_portfolio_context(cur) -> dict[str, Any]:
                         max_dd_usd = eq - peak
 
     # ── Portfolio equity curve (sum of equity_usd per date) ──────────────
+    # Historical metric — iterate all perf rows (including paused/closed
+    # allocations' history), not just alloc_list. Pausing an allocation
+    # must not silently shorten or reshape the 30D curve.
     equity_by_date: dict[str, float] = {}
-    for a in alloc_list:
-        for p in perf_by_alloc.get(a["allocation_id"], []):
+    for perf_list in perf_by_alloc.values():
+        for p in perf_list:
             equity_by_date[p["date"]] = equity_by_date.get(p["date"], 0) + (p["equity_usd"] or 0)
 
     portfolio_equity = [
