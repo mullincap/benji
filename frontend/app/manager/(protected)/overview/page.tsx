@@ -213,11 +213,14 @@ function emptyCopyForRange(range: TimeRange, kind: "equity" | "returns"): string
 
 function statusBadge(status: string) {
   const map: Record<string, { bg: string; color: string; label: string }> = {
-    complete: { bg: "var(--green-dim)", color: "var(--green)", label: "COMPLETE" },
-    running: { bg: "var(--amber-dim)", color: "var(--amber)", label: "RUNNING" },
-    failed: { bg: "var(--red-dim)", color: "var(--red)", label: "FAILED" },
-    stale: { bg: "var(--amber-dim)", color: "var(--amber)", label: "STALE" },
-    unknown: { bg: "var(--bg3)", color: "var(--t3)", label: "UNKNOWN" },
+    complete:         { bg: "var(--green-dim)", color: "var(--green)", label: "COMPLETE" },
+    running:          { bg: "var(--green-dim)", color: "var(--green)", label: "RUNNING" },
+    stalled:          { bg: "var(--amber-dim)", color: "var(--amber)", label: "STALLED" },
+    idle:             { bg: "var(--bg3)",       color: "var(--t3)",    label: "IDLE" },
+    no_deployments:   { bg: "var(--bg3)",       color: "var(--t3)",    label: "—" },
+    failed:           { bg: "var(--red-dim)",   color: "var(--red)",   label: "FAILED" },
+    stale:            { bg: "var(--amber-dim)", color: "var(--amber)", label: "STALE" },
+    unknown:          { bg: "var(--bg3)",       color: "var(--t3)",    label: "UNKNOWN" },
   };
   const s = map[status] || map.unknown;
   return (
@@ -250,6 +253,10 @@ function relTime(iso: string | null): string {
 }
 
 function staleCheck(job: PipelineJob): string {
+  // Trader-specific states pass through (they carry their own semantics
+  // from the backend — last_run may be null for no_deployments).
+  if (job.status === "no_deployments") return "no_deployments";
+  if (job.status === "stalled" || job.status === "idle") return job.status;
   if (job.status === "unknown") return "unknown";
   if (!job.last_run) return "unknown";
   const diff = Date.now() - new Date(job.last_run).getTime();

@@ -364,20 +364,66 @@ def _fetch_portfolio_context(cur) -> dict[str, Any]:
         if times:
             signals_time = max(times)
 
-    # Trader: check most recent deployment for last execution
-    cur.execute("""
-        SELECT status, created_at, entry_at, exit_at
-        FROM user_mgmt.deployments
-        ORDER BY created_at DESC LIMIT 1
+    # Trader: derive status from allocations.runtime_state — the durability
+    # layer's source of truth for live trader subprocesses (see commit
+    # f538b7c / trader_supervisor.py). The supervisor uses STALE_THRESHOLD_MIN
+    # to decide whether a trader needs respawning; we reuse the same constant
+    # so the Pipeline Status row and the supervisor never disagree on what
+    # "stalled" means.
+    #
+    # Per-allocation classification:
+    #   - phase='active'  AND updated within threshold → 'running'
+    #   - phase='active'  AND updated past threshold   → 'stalled'
+    #   - phase IN ('closed','no_entry','errored') AND same UTC day → 'complete'
+    #   - updated yesterday or earlier                 → 'idle'
+    #   - no runtime_state                             → (ignored in aggregation)
+    #
+    # Portfolio aggregation: worst-case wins (stalled > running > idle >
+    # complete) so the most actionable state surfaces first. If no allocation
+    # has a runtime_state at all → 'no_deployments'.
+    from ...cli.trader_supervisor import STALE_THRESHOLD_MIN  # noqa: PLC0415
+    cur.execute(f"""
+        SELECT a.runtime_state->>'phase'                       AS phase,
+               (a.runtime_state->>'updated_at')::timestamptz   AS updated_at,
+               (a.runtime_state->>'date')                       AS rs_date,
+               (NOW() - (a.runtime_state->>'updated_at')::timestamptz)
+                 > INTERVAL '{STALE_THRESHOLD_MIN} minutes'     AS is_stale
+        FROM user_mgmt.allocations a
+        WHERE a.status IN ('active', 'paused')
+          AND a.runtime_state IS NOT NULL
+          AND a.runtime_state->>'updated_at' IS NOT NULL
     """)
-    trader_row = cur.fetchone()
-    if trader_row:
-        trader_status = {
-            "status": trader_row["status"],
-            "last_run": _iso(trader_row["entry_at"] or trader_row["created_at"]),
-        }
-    else:
+    rs_rows = cur.fetchall()
+
+    today_utc_str = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d")
+    per_alloc_states: list[str] = []
+    last_run_ts = None
+    for r in rs_rows:
+        phase = r["phase"]
+        updated_at = r["updated_at"]
+        rs_date = r["rs_date"]
+        is_stale = bool(r["is_stale"])
+        if updated_at and (last_run_ts is None or updated_at > last_run_ts):
+            last_run_ts = updated_at
+        if phase == "active":
+            per_alloc_states.append("stalled" if is_stale else "running")
+        elif phase in ("closed", "no_entry", "errored") and rs_date == today_utc_str:
+            per_alloc_states.append("complete")
+        else:
+            per_alloc_states.append("idle")
+
+    if not per_alloc_states:
         trader_status = {"status": "no_deployments", "last_run": None}
+    else:
+        if "stalled" in per_alloc_states:
+            agg = "stalled"
+        elif "running" in per_alloc_states:
+            agg = "running"
+        elif "idle" in per_alloc_states:
+            agg = "idle"
+        else:
+            agg = "complete"
+        trader_status = {"status": agg, "last_run": _iso(last_run_ts)}
 
     pipeline = {
         "compiler": _job_status(compiler_job),
