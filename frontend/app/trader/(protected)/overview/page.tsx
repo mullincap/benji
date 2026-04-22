@@ -1,10 +1,11 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { useRouter } from "next/navigation";
-import { useTrader, Position, Exchange, StrategyInstance, StrategyType, STRATEGY_CATALOG, fmt, GHOST_CURVE, RISK_COLOR, RISK_DIM, StrategyCatalogEntry } from "../../context";
+import { useTrader, Position, Exchange, StrategyInstance, StrategyType, fmt, GHOST_CURVE, RISK_COLOR, RISK_DIM } from "../../context";
 import EquityCurveSvg from "../../equity-curve";
 import PerformanceChart from "../../performance-chart";
+import { allocatorApi } from "../../api";
 import TraderCard from "../../components/TraderCard";
 import {
   Chart as ChartJS,
@@ -82,7 +83,7 @@ function DashboardContent({ equity, dailyPnl, allTimePnl, sharpe, allocated, act
           <div style={{
             height: "100%",
             width: `${totalAvailable > 0 ? Math.min(100, (allocated / totalAvailable) * 100) : 0}%`,
-            background: "#b6b6b7",
+            background: "#484848",
             borderRadius: 3,
           }} />
         </div>
@@ -133,18 +134,52 @@ export default function OverviewPage() {
   const totalAllocatedRaw = instances.reduce((s, i) => s + (i.allocation ?? 0), 0);
   const totalAvailable = exchangeBalance > 0 ? exchangeBalance : totalAllocatedRaw;
 
-  const totalEquity = instances.reduce((s, i) => s + i.equity, 0);
-  const dailyPnl = instances.reduce((s, i) => s + i.dailyPnl, 0);
+  // Account-wide figures sourced from exchange wallet totals (not per-allocation
+  // sums). Matches the Total Account Balance chart and the sidebar balance donut.
+  const totalEquity = exchangeBalance;
   const totalAllocated = instances.reduce((s, i) => s + (i.allocation ?? 0), 0);
   const activeCount = instances.filter(i => i.status === "live").length;
 
-  // All-time P&L: equity above the originally allocated capital, summed across instances
-  const allTimePnl = instances.reduce((s, i) => s + (i.equity - (i.allocation ?? 0)), 0);
+  // All-time P&L approximated as wallet total minus total capital assigned to
+  // allocations. Imperfect without a capital_events table (treats idle wallet
+  // balance as P&L); revisit once deposits/transfers ledger ships.
+  const allTimePnl = exchangeBalance - totalAllocatedRaw;
 
-  // Portfolio Sharpe: equity-weighted average of per-strategy Sharpe from STRATEGY_CATALOG
-  const sharpe = totalEquity > 0
-    ? instances.reduce((s, i) => s + ((STRATEGY_CATALOG[i.strategyType]?.sharpe ?? 0) * i.equity), 0) / totalEquity
-    : 0;
+  // Daily P&L + Sharpe are derived from the account-balance-series endpoint
+  // (same source as the chart). Fetched on mount; re-derived when instances
+  // change so a new allocation triggers a refresh.
+  const [accountMetrics, setAccountMetrics] = useState<{ dailyPnl: number; sharpe: number }>({ dailyPnl: 0, sharpe: 0 });
+  useEffect(() => {
+    if (empty) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const [oneDay, all] = await Promise.all([
+          allocatorApi.getAccountBalanceSeries("1D"),
+          allocatorApi.getAccountBalanceSeries("ALL"),
+        ]);
+        if (cancelled) return;
+        const eq1d = oneDay.history.map(h => h.equity_usd);
+        const dpnl = eq1d.length >= 2 ? eq1d[eq1d.length - 1] - eq1d[0] : 0;
+        const eqAll = all.history.map(h => h.equity_usd);
+        const returns: number[] = [];
+        for (let i = 1; i < eqAll.length; i++) {
+          if (eqAll[i - 1] > 0) returns.push((eqAll[i] - eqAll[i - 1]) / eqAll[i - 1]);
+        }
+        let sharpe = 0;
+        if (returns.length >= 7) {
+          const mean = returns.reduce((a, b) => a + b, 0) / returns.length;
+          const variance = returns.reduce((s, r) => s + (r - mean) ** 2, 0) / returns.length;
+          const std = Math.sqrt(variance);
+          if (std > 0) sharpe = (mean / std) * Math.sqrt(252);
+        }
+        setAccountMetrics({ dailyPnl: dpnl, sharpe });
+      } catch { /* leave defaults; KPIs render em-dash */ }
+    })();
+    return () => { cancelled = true; };
+  }, [empty, instances.length]);
+  const dailyPnl = accountMetrics.dailyPnl;
+  const sharpe = accountMetrics.sharpe;
 
   const allPositions: (Position & { strategy: string; exchange: string })[] = [];
   for (const inst of instances) {

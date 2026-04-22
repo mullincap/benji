@@ -495,7 +495,9 @@ export default function ExecutionPage() {
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [windowPreset, setWindowPreset] = useState<WindowPreset>(DEFAULT_WINDOW);
   const [allocFilter, setAllocFilter] = useState<"all" | string>("all");
-  const [includeMaster, setIncludeMaster] = useState(false);
+  // Master-history toggle removed from UI; state kept at false so the fetch
+  // effect short-circuits and master rows don't render.
+  const [includeMaster] = useState(false);
   // null → SessionLogs shows the most recent session. Any row click sets this
   // to the clicked row's date so the log viewer correlates with the table.
   const [selectedLogDate, setSelectedLogDate] = useState<string | null>(null);
@@ -613,17 +615,11 @@ export default function ExecutionPage() {
     return reports.filter((r) => r.date >= cutoffStr);
   })();
 
-  // Banner logic — two distinct empty-state conditions.
-  // Condition A: zero sessions ever (no data yet — first session pending)
-  // Condition B: sessions exist but execution-quality metrics are universally null
-  //              (telemetry writer hasn't shipped yet).
+  // Banner logic — one empty-state condition today (zero sessions ever).
   let bannerText: string | null = null;
   if (summary.daily.length === 0) {
     bannerText =
       "Execution telemetry begins with the first session close (~23:55 UTC 2026-04-21).";
-  } else if (summary.daily.every((d) => d.fill_rate === null)) {
-    bannerText =
-      "Execution-quality metrics (fill rate, slippage, retries) populate once the per-allocation telemetry writer ships. Tracked for Session E/F.";
   }
 
   // When a single allocation is selected, hide the ALLOCATION column in the
@@ -662,13 +658,11 @@ export default function ExecutionPage() {
         overflow: "auto",
       }}
     >
-      {/* Row 0: filter + master toggle (controls row) */}
+      {/* Row 0: filter (controls row) */}
       <AllocationFilter
         selected={allocFilter}
         onChange={setAllocFilter}
         options={summary.available_allocations}
-        includeMaster={includeMaster}
-        onIncludeMasterChange={setIncludeMaster}
       />
 
       {/* Row 0b: banner (Condition A / B / none) */}

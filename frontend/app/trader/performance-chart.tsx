@@ -260,6 +260,15 @@ export default function PerformanceChart({ instanceId, title = "PERFORMANCE", co
     }],
   };
 
+  // Data-driven Y bounds so small movements in a narrow equity band
+  // (e.g. $3,969–$4,418) use the full chart height instead of being
+  // squashed by Chart.js's default round-number padding.
+  const eqMin = Math.min(...data.equity);
+  const eqMax = Math.max(...data.equity);
+  const flatEq = eqMin === eqMax;
+  const yMin = flatEq ? eqMin * 0.95 : eqMin * 0.98;
+  const yMax = flatEq ? eqMax * 1.05 : eqMax * 1.02;
+
   const equityOptions = {
     responsive: true,
     maintainAspectRatio: false,
@@ -272,6 +281,8 @@ export default function PerformanceChart({ instanceId, title = "PERFORMANCE", co
         grid: { display: false },
         border: { display: false },
         afterFit: (axis: { width: number }) => { axis.width = 60; },
+        min: yMin,
+        max: yMax,
         ticks: {
           maxTicksLimit: 2,
           font: { family: "'Space Mono', monospace", size: 9 },
