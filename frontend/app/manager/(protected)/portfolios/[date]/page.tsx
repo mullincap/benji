@@ -671,7 +671,7 @@ export default function PortfolioDetailPage() {
           />
           <KpiCard
             label="Symbols"
-            value={`${enteredCount} / ${meta.symbols.length}`}
+            value={`${enteredCount - symStopsCount} / ${enteredCount}`}
             subtitle={symStopsCount > 0 ? `${symStopsCount} stopped` : undefined}
           />
           <KpiCard label="Eff Leverage" value={`${meta.eff_lev.toFixed(2)}x`} />
