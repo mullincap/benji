@@ -212,7 +212,7 @@ function Sidebar() {
               }],
             };
 
-            const fmtFull = (n: number) => "$" + n.toLocaleString("en-US");
+            const fmtFull = (n: number) => "$" + Math.round(n).toLocaleString("en-US");
 
             return (
               <div style={{ padding: "14px 12px 10px", borderBottom: "0.5px solid var(--line)", display: "flex", flexDirection: "column", alignItems: "center" }}>
