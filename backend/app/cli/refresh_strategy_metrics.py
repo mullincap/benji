@@ -20,13 +20,16 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import shutil
 import sys
 import tempfile
+import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from app.core.config import settings
 from app.db import get_worker_conn
 from app.services.audit.current_metrics import build_current_metrics
 from app.services.audit.pipeline_runner import run_audit
@@ -37,6 +40,70 @@ from app.workers.pipeline_worker import _persist_audit_job_row_at_cursor
 from app.api.routes.simulator import _build_result_row
 
 log = logging.getLogger("refresh_strategy_metrics")
+
+# Simulator UI's Audit History panel reads from the disk job_store
+# (/app/backend/jobs/{id}/job.json), not audit.jobs DB. Without a disk
+# breadcrumb, nightly refreshes stay invisible in the UI even though
+# the trader is already consuming the fresh metrics. Mirror the
+# Celery worker's completion write here so each night's fresh fees_table
+# is browsable in the Simulator view.
+_PUBLISHED_FOLDER_ID = "b24a9618-2759-4277-b01f-7479da731db7"
+
+
+def _write_nightly_job_json(
+    job_id: str,
+    sv: dict[str, Any],
+    metrics: dict[str, Any],
+    params: dict[str, Any],
+    audit_output_path: Path,
+) -> None:
+    """Persist a disk job.json breadcrumb so the Simulator UI can see
+    this nightly refresh in its Audit History panel.
+
+    Overwrite-in-place: deletes the previous nightly's disk job for this
+    strategy_version first, so Audit History shows exactly one
+    "Nightly — <display_name>" entry per strategy. DB audit trail is
+    untouched — audit.jobs / audit.results keep full history.
+    """
+    jobs_dir = Path(settings.JOBS_DIR)
+    nightly_tag = f"nightly:{sv['strategy_version_id']}"
+
+    for path in jobs_dir.glob("*/job.json"):
+        try:
+            old = json.loads(path.read_text())
+        except (json.JSONDecodeError, OSError):
+            continue
+        if old.get("nightly_tag") == nightly_tag:
+            shutil.rmtree(path.parent, ignore_errors=True)
+
+    job_dir = jobs_dir / job_id
+    job_dir.mkdir(parents=True, exist_ok=True)
+
+    results = {
+        "metrics":               metrics,
+        "audit_output_path":     str(audit_output_path),
+        "starting_capital":      params.get("starting_capital", 100000.0),
+        "fees_tables_by_filter": metrics.get("fees_tables_by_filter"),
+        "fees_table":            metrics.get("fees_table"),
+    }
+
+    now = time.time()
+    label_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    job_json = {
+        "id":           job_id,
+        "display_name": f"Nightly {label_date} — {sv['strategy_display_name']}",
+        "folder_id":    _PUBLISHED_FOLDER_ID,
+        "status":       "complete",
+        "stage":        "done",
+        "progress":     100,
+        "params":       params,
+        "results":      results,
+        "error":        None,
+        "created_at":   now,
+        "updated_at":   now,
+        "nightly_tag":  nightly_tag,
+    }
+    (job_dir / "job.json").write_text(json.dumps(job_json, indent=2))
 
 
 def _fetch_active_published_versions() -> list[dict[str, Any]]:
@@ -217,6 +284,16 @@ def refresh_one(sv: dict[str, Any], *, dry_run: bool = False) -> dict[str, Any]:
         raise
     finally:
         conn.close()
+
+    # Best-effort: write a disk job.json so the Simulator UI sees this refresh.
+    # DB writes above are the source of truth for the trader — a failure here
+    # should never surface a refresh as failed. Log and move on.
+    try:
+        _write_nightly_job_json(
+            job_id, sv, metrics, params_for_audit, audit_output_path,
+        )
+    except Exception as e:
+        log.warning(f"  [{short_id}] disk job.json write failed: {e}")
 
     return {
         "status":       "ok",
