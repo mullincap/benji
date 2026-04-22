@@ -213,6 +213,78 @@ edit from shifting displayed P&L. The full capital_events table
 subsumes this — once it ships, both formulas should migrate to use
 `max(capital_event_ts, session_start)` as the baseline reference.
 
+## Session F+ follow-up: exchange account-history backfill + net-imports PnL
+
+Surfaced 2026-04-22 while fixing the Max DD scope bug. Two related gaps:
+
+**1. `user_mgmt.performance_daily` has almost no rows.** Across three
+allocations (Alpha Max active, Alpha Main paused, Alpha Low closed), the
+table currently holds **one row** (Alpha Max 2026-04-21). The Manager
+Overview's Portfolio Equity 30D curve, per-allocation drawdown rollup,
+and WTD/MTD aggregates all read from this table, so they're almost
+entirely running on the `exchange_snapshots`-based fallback path in
+`manager.py:_fetch_portfolio_context` (lines 146-184) rather than their
+primary source. That fallback works but loses precision on days where
+snapshots had gaps. Whatever upstream job is meant to populate
+`performance_daily` per (allocation, day) is either not running,
+scoped to a subset of allocations, or silently failing.
+
+**2. No authoritative record of capital in/out.** Session E+ capital_events
+(above) tracks when the *allocator UI* changes `capital_usd`, but exchange
+wallets also receive deposits, withdrawals, sub-account transfers, and
+cross-exchange moves that bypass our system entirely. Today's P&L math
+treats any equity change as strategy return — a $500 deposit and a
+$500 win are indistinguishable in the displayed numbers. On 2026-04-20
+a manual $980 transfer between BloFin and Binance caused +5083% nonsense
+returns until the pre-transfer snapshots were manually deleted.
+
+**What to build:**
+
+- **Account-history pullers** per exchange adapter:
+  - BloFin: `/api/v1/asset/deposit-withdrawal-history` (already partly
+    exposed in `BlofinREST`; needs wiring)
+  - Binance: `/sapi/v1/capital/deposit/hisrec` + `/sapi/v1/capital/withdraw/history`
+    + `/sapi/v1/margin/transfer` (cross-margin in/out)
+- **New table** `user_mgmt.capital_imports`
+  `(connection_id, event_ts, amount_usd, direction in ('deposit', 'withdrawal', 'transfer_in', 'transfer_out'), exchange_ref_id, source)`
+  Pulled nightly via a new cron entry, deduplicated by `exchange_ref_id`.
+- **Backfill job** — one-time script that walks each connection's account
+  history as far back as the exchange API allows (BloFin: 90 days;
+  Binance: 365 days on some endpoints) and populates `capital_imports`
+  + rebuilds `performance_daily` rows using
+  `return_usd[d] = equity[d] - equity[d-1] - sum(capital_imports where event_ts in d)`.
+- **Net-imports PnL formula** — update `manager.py` and
+  `allocator.py:/trader/{id}/pnl` so every P&L number (Session,
+  Today, WTD, MTD, Total, Max DD USD) is computed as:
+  ```
+  real_pnl = end_equity - start_equity - net_imports_over_window
+  ```
+  Same baseline-reset behavior as capital_events but driven by
+  exchange-authoritative history rather than UI state.
+
+**Why this matters:**
+- Backfilled `performance_daily` gives the Portfolio Equity 30D curve
+  real data (currently it's effectively a 1-point chart for most users).
+- Net-imports-aware PnL eliminates an entire class of silent
+  misattribution — the allocator UI stops lying about returns whenever
+  the user moves capital in/out of an exchange.
+- Capital_events (Session E+) and capital_imports are complementary:
+  capital_events is the UI-driven intent record; capital_imports is the
+  exchange-authoritative fact record. When both ship, queries should
+  use `max(capital_event_ts, capital_import_ts, period_start)` as the
+  baseline anchor.
+
+**Scope estimate:** ~250-400 LOC across adapter methods (~80), new
+table + cron (~60), backfill CLI (~100), PnL formula updates in 3-4
+routes (~80). Gated on Session E+ capital_events landing first OR
+shipping as the full replacement (either order works; the formula
+update in route handlers is shared).
+
+**Not urgent today** — current single-user deployment works because the
+user is not actively moving capital around. Becomes urgent before
+multi-user or before we publish "verified track record" numbers to
+anyone external.
+
 ## Session F+ follow-up: exit-fill reconcile reliability + size-mismatch visibility
 
 Triggered while diagnosing the 2026-04-21 allocation_returns null-telemetry
