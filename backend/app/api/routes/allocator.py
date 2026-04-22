@@ -374,6 +374,7 @@ def _fetch_live_binance(*, api_key: str, api_secret: str) -> dict:
                 "unrealized_pnl": upl,
                 "leverage":       leverage,
                 "margin_mode":    margin_mode,
+                "notional_usd":   round(notional, 2) if notional else 0.0,
             })
 
         return {
@@ -471,6 +472,7 @@ def _fetch_live_binance(*, api_key: str, api_secret: str) -> dict:
             "unrealized_pnl": upl,
             "leverage":       leverage,
             "margin_mode":    margin_mode,
+            "notional_usd":   round(notional, 2) if notional else 0.0,
         })
 
     return {
