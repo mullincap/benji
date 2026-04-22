@@ -33,6 +33,34 @@ const API_BASE = process.env.NEXT_PUBLIC_API_BASE || "";
 // first data fetch when the default resolves to ALL. Cleared on full reload.
 const seriesCache = new Map<TimeRange, unknown>();
 
+// In-flight map for deduping concurrent fetches of the same range. On first
+// mount, both charts default to the same tab and fire their effects in the
+// same tick — without this, both would hit the network. Promise gets cleared
+// on rejection so a later caller can retry rather than inherit the failure.
+const inflightSeries = new Map<TimeRange, Promise<unknown>>();
+
+function fetchPortfolioSeries(range: TimeRange): Promise<unknown> {
+  const cached = seriesCache.get(range);
+  if (cached) return Promise.resolve(cached);
+  const existing = inflightSeries.get(range);
+  if (existing) return existing;
+  const p = fetch(`${API_BASE}/api/manager/portfolio-series?range=${range}`, {
+    credentials: "include",
+  })
+    .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
+    .then((d) => {
+      seriesCache.set(range, d);
+      inflightSeries.delete(range);
+      return d;
+    })
+    .catch((e) => {
+      inflightSeries.delete(range);
+      throw e;
+    });
+  inflightSeries.set(range, p);
+  return p;
+}
+
 /** Derive the initial range-tab value from history length. */
 function pickDefaultRange(realDays: number | null | undefined): TimeRange {
   const d = realDays ?? 0;
@@ -309,19 +337,15 @@ export default function OverviewPage() {
   const [returnsSeries, setReturnsSeries] = useState<PortfolioSeries | null>(null);
 
   // Bootstrap: one-shot fetch against range=ALL to read real_days and pick
-  // the default tab. Result is cached so the first chart fetch for ALL is a
-  // hit (zero duplicate roundtrips when derived default is ALL or when the
-  // user clicks ALL afterwards). Bootstrap failure → default to 1M.
+  // the default tab. Goes through the shared fetcher so the response lands
+  // in seriesCache and any subsequent chart fetch for ALL is a cache hit.
+  // Bootstrap failure → default to 1M.
   useEffect(() => {
     let cancelled = false;
-    fetch(`${API_BASE}/api/manager/portfolio-series?range=ALL`, {
-      credentials: "include",
-    })
-      .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
-      .then((d: PortfolioSeries) => {
+    fetchPortfolioSeries("ALL")
+      .then((d) => {
         if (cancelled) return;
-        seriesCache.set("ALL", d);
-        const def = pickDefaultRange(d.real_days);
+        const def = pickDefaultRange((d as PortfolioSeries).real_days);
         setEquityRange(def);
         setReturnsRange(def);
       })
@@ -354,41 +378,22 @@ export default function OverviewPage() {
 
   // Fetch series for each chart independently when its range changes.
   // Both effects short-circuit while the bootstrap is still in flight
-  // (range === null) and check the module cache before hitting the network,
-  // so the bootstrap's range=ALL response is reused when the default resolves
-  // to ALL or when the user later toggles to a previously-fetched range.
+  // (range === null). The shared fetcher dedupes concurrent requests for
+  // the same range and caches resolved results for the page session.
   useEffect(() => {
     if (!equityRange) return;
-    const cached = seriesCache.get(equityRange) as PortfolioSeries | undefined;
-    if (cached) { setEquitySeries(cached); return; }
     let cancelled = false;
-    fetch(`${API_BASE}/api/manager/portfolio-series?range=${equityRange}`, {
-      credentials: "include",
-    })
-      .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
-      .then((d: PortfolioSeries) => {
-        if (cancelled) return;
-        seriesCache.set(equityRange, d);
-        setEquitySeries(d);
-      })
+    fetchPortfolioSeries(equityRange)
+      .then((d) => { if (!cancelled) setEquitySeries(d as PortfolioSeries); })
       .catch(() => { if (!cancelled) setEquitySeries(null); });
     return () => { cancelled = true; };
   }, [equityRange]);
 
   useEffect(() => {
     if (!returnsRange) return;
-    const cached = seriesCache.get(returnsRange) as PortfolioSeries | undefined;
-    if (cached) { setReturnsSeries(cached); return; }
     let cancelled = false;
-    fetch(`${API_BASE}/api/manager/portfolio-series?range=${returnsRange}`, {
-      credentials: "include",
-    })
-      .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
-      .then((d: PortfolioSeries) => {
-        if (cancelled) return;
-        seriesCache.set(returnsRange, d);
-        setReturnsSeries(d);
-      })
+    fetchPortfolioSeries(returnsRange)
+      .then((d) => { if (!cancelled) setReturnsSeries(d as PortfolioSeries); })
       .catch(() => { if (!cancelled) setReturnsSeries(null); });
     return () => { cancelled = true; };
   }, [returnsRange]);
@@ -648,7 +653,7 @@ export default function OverviewPage() {
                 padding: "0 20px",
               }}
             >
-              {emptyCopyForRange(equityRange, "equity")}
+              {equitySeries === null ? "Loading…" : emptyCopyForRange(equityRange, "equity")}
             </div>
           )}
         </div>
@@ -763,7 +768,7 @@ export default function OverviewPage() {
                 padding: "0 20px",
               }}
             >
-              {emptyCopyForRange(returnsRange, "returns")}
+              {returnsSeries === null ? "Loading…" : emptyCopyForRange(returnsRange, "returns")}
             </div>
           )}
         </div>

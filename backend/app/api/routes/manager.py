@@ -781,9 +781,6 @@ def portfolio_series(
     bucket_s = spec["bucket_seconds"]
     lookback = spec["lookback_interval"]
 
-    # TEMP VERIFICATION LOG — remove after confirming 1M fetch returns rows.
-    print(f"[portfolio-series.verify] range={range_up} cids_count={len(connection_ids)} cids={[str(c) for c in connection_ids]}", flush=True)
-
     base_select = """
         SELECT s.connection_id,
                s.snapshot_at,
@@ -817,8 +814,6 @@ def portfolio_series(
         params["lookback"] = lookback
     cur.execute(query, params)
     rows = cur.fetchall()
-    # TEMP VERIFICATION LOG — remove after confirming 1M fetch returns rows.
-    print(f"[portfolio-series.verify] range={range_up} rows_returned={len(rows)}", flush=True)
     portfolio_points = [
         {"date": r["ts"].isoformat(), "equity_usd": float(r["equity_usd"] or 0)}
         for r in rows
@@ -837,13 +832,17 @@ def portfolio_series(
         last_eq_by_day[day] = p["equity_usd"]  # later rows overwrite — last of day wins
     days_sorted = sorted(last_eq_by_day.keys())
     daily_returns = []
-    for i in range(1, len(days_sorted)):
+    # NOTE: can't use range() here — the function's `range` parameter
+    # shadows the built-in. enumerate() sidesteps the collision.
+    for i, day in enumerate(days_sorted):
+        if i == 0:
+            continue
         prev_eq = last_eq_by_day[days_sorted[i - 1]]
-        curr_eq = last_eq_by_day[days_sorted[i]]
+        curr_eq = last_eq_by_day[day]
         ret_usd = curr_eq - prev_eq
         ret_pct = (ret_usd / prev_eq * 100.0) if prev_eq > 0 else 0.0
         daily_returns.append({
-            "date": days_sorted[i],
+            "date": day,
             "return_usd": round(ret_usd, 2),
             "return_pct": round(ret_pct, 4),
         })
