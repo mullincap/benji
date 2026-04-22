@@ -80,7 +80,7 @@ function DashboardContent({ equity, dailyPnl, allTimePnl, sharpe, allocated, act
           <div style={{
             height: "100%",
             width: `${totalAvailable > 0 ? Math.min(100, (allocated / totalAvailable) * 100) : 0}%`,
-            background: "var(--green)",
+            background: "#b6b6b7",
             borderRadius: 3,
           }} />
         </div>
@@ -125,6 +125,7 @@ function DashboardContent({ equity, dailyPnl, allTimePnl, sharpe, allocated, act
 export default function OverviewPage() {
   const router = useRouter();
   const { instances, exchanges, loading, error } = useTrader();
+  const [breakdownOpen, setBreakdownOpen] = useState(false);
   const empty = instances.length === 0;
   const exchangeBalance = exchanges.reduce((s, e) => s + e.balance, 0);
   const totalAllocatedRaw = instances.reduce((s, i) => s + (i.allocation ?? 0), 0);
@@ -235,15 +236,22 @@ export default function OverviewPage() {
                     background: "var(--bg1)", border: "1px solid var(--line)", borderRadius: 6,
                     padding: "10px 14px", marginBottom: 8,
                   }}>
-                    <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 8 }}>
-                      <span style={{ fontSize: 9, color: "var(--t3)", letterSpacing: "0.12em", fontWeight: 700, textTransform: "uppercase" }}>ALLOCATION BREAKDOWN</span>
+                    <div
+                      onClick={() => setBreakdownOpen(o => !o)}
+                      style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: breakdownOpen ? 8 : 0, cursor: "pointer", userSelect: "none" }}
+                    >
+                      <span style={{ fontSize: 9, color: "var(--t3)", letterSpacing: "0.12em", fontWeight: 700, textTransform: "uppercase", display: "flex", alignItems: "center", gap: 6 }}>
+                        <span style={{ display: "inline-block", transform: breakdownOpen ? "rotate(90deg)" : "rotate(0deg)", transition: "transform 0.15s ease", fontSize: 8 }}>▶</span>
+                        ALLOCATION BREAKDOWN
+                      </span>
                       <span style={{ fontSize: 9, color: "var(--t3)" }}>${fmt(treemapTotal, 0)} total</span>
                     </div>
+                    {breakdownOpen && (<>
                     <div style={{ display: "flex", gap: 4, height: 36, borderRadius: 5, overflow: "hidden", marginBottom: 6 }}>
                       {activeInstances.map(inst => {
                         const alloc = inst.allocation ?? 0;
                         const pctWidth = treemapTotal > 0 ? (alloc / treemapTotal) * 100 : 0;
-                        const bc = BAND_COLORS[inst.risk] ?? BAND_COLORS.low;
+                        const bc = inst.status === "live" ? BAND_COLORS.low : (BAND_COLORS[inst.risk] ?? BAND_COLORS.low);
                         const showText = pctWidth >= 8;
                         const pctOfTotal = treemapTotal > 0 ? ((alloc / treemapTotal) * 100).toFixed(1) : "0.0";
                         return (
@@ -318,6 +326,7 @@ export default function OverviewPage() {
                         );
                       })()}
                     </div>
+                    </>)}
                   </div>
                 );
               })()}
