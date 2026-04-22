@@ -233,7 +233,42 @@ def _fetch_portfolio_context(cur) -> dict[str, Any]:
     wtd_pct = (wtd_dollar / total_aum_f * 100) if total_aum_f > 0 else 0.0
     mtd_pct = (mtd_dollar / total_aum_f * 100) if total_aum_f > 0 else 0.0
 
-    max_dd = min((a["max_drawdown"] for a in alloc_list), default=0.0)
+    # Lifetime account-wide max drawdown, computed from daily-close wallet
+    # equity summed across connections. Not bound to the current session, so
+    # it stays meaningful when the session is inactive. USD magnitude is the
+    # peak-to-trough dollar loss that produced the worst percentage.
+    connection_uuids = list({a["connection_id"] for a in allocations})
+    max_dd = 0.0
+    max_dd_usd = 0.0
+    if connection_uuids:
+        cur.execute("""
+            WITH daily_per_conn AS (
+              SELECT DISTINCT ON (connection_id, date_trunc('day', snapshot_at))
+                     connection_id,
+                     date_trunc('day', snapshot_at)::date AS day,
+                     total_equity_usd AS equity
+              FROM user_mgmt.exchange_snapshots
+              WHERE connection_id = ANY(%s::uuid[])
+                AND fetch_ok = TRUE
+                AND total_equity_usd IS NOT NULL
+              ORDER BY connection_id, date_trunc('day', snapshot_at),
+                       snapshot_at DESC
+            )
+            SELECT day, SUM(equity) AS total_equity
+            FROM daily_per_conn
+            GROUP BY day
+            ORDER BY day
+        """, (connection_uuids,))
+        daily_equity = [(r["day"], float(r["total_equity"])) for r in cur.fetchall()]
+        if daily_equity:
+            peak = daily_equity[0][1]
+            for _, eq in daily_equity:
+                peak = max(peak, eq)
+                if peak > 0:
+                    dd_pct = (eq - peak) / peak * 100.0
+                    if dd_pct < max_dd:
+                        max_dd = dd_pct
+                        max_dd_usd = eq - peak
 
     # ── Portfolio equity curve (sum of equity_usd per date) ──────────────
     equity_by_date: dict[str, float] = {}
@@ -380,40 +415,58 @@ def _fetch_portfolio_context(cur) -> dict[str, Any]:
             "positions": r["positions"] if r["positions"] is not None else [],
         })
 
-    # ── Intraday equity curve (today, 15-min intervals) ────────────────
+    # ── Intraday equity curve (latest UTC day with data, 15-min intervals) ─
+    # Find the most recent UTC day that has snapshots for any of these
+    # allocations, then return that day's 15-min buckets. Mirrors the
+    # Session Logs viewer's "auto-scope to most recent session" behaviour
+    # so the chart keeps showing the last session between close and the
+    # next open rather than a blank "no data" state.
+    #
     # DISTINCT ON (allocation_id, bucket) + ORDER BY snapshot_at DESC →
     # take the LATEST snapshot per allocation within each 15-min bucket.
-    # Then SUM across allocations in Python. This replaces a previous AVG()
-    # that incorrectly collapsed multi-allocation equity into a mean
-    # (e.g., BloFin $3,950 + Binance $19 → $1,985 instead of $3,969).
-    #
-    # DISTINCT ON vs MAX: end-of-bucket semantic (what a user expects from
-    # an intraday chart) rather than high-water-mark bias inside the bucket.
-    cur.execute("""
-        SELECT DISTINCT ON (a.allocation_id, bucket)
-            date_trunc('hour', es.snapshot_at) +
-              INTERVAL '15 min' * FLOOR(EXTRACT(MINUTE FROM es.snapshot_at) / 15)
-              AS bucket,
-            a.allocation_id,
-            es.total_equity_usd AS equity_usd
-        FROM user_mgmt.exchange_snapshots es
-        JOIN user_mgmt.allocations a ON a.connection_id = es.connection_id
-        WHERE a.allocation_id = ANY(%s::uuid[])
-          AND es.fetch_ok = TRUE
-          AND es.snapshot_at >= CURRENT_DATE
-        ORDER BY a.allocation_id, bucket, es.snapshot_at DESC
-    """, (all_alloc_ids,))
+    # Then SUM across allocations in Python. (Prior AVG() bug collapsed
+    # multi-allocation equity into a mean — preserved as DISTINCT ON + SUM.)
+    intraday_date: str | None = None
+    intraday_equity: list[dict[str, Any]] = []
+    if all_alloc_ids:
+        cur.execute("""
+            SELECT date_trunc('day', es.snapshot_at)::date AS day
+            FROM user_mgmt.exchange_snapshots es
+            JOIN user_mgmt.allocations a ON a.connection_id = es.connection_id
+            WHERE a.allocation_id = ANY(%s::uuid[])
+              AND es.fetch_ok = TRUE
+              AND es.total_equity_usd IS NOT NULL
+            ORDER BY es.snapshot_at DESC
+            LIMIT 1
+        """, (all_alloc_ids,))
+        day_row = cur.fetchone()
+        if day_row:
+            intraday_date = day_row["day"].isoformat()
+            cur.execute("""
+                SELECT DISTINCT ON (a.allocation_id, bucket)
+                    date_trunc('hour', es.snapshot_at) +
+                      INTERVAL '15 min' * FLOOR(EXTRACT(MINUTE FROM es.snapshot_at) / 15)
+                      AS bucket,
+                    a.allocation_id,
+                    es.total_equity_usd AS equity_usd
+                FROM user_mgmt.exchange_snapshots es
+                JOIN user_mgmt.allocations a ON a.connection_id = es.connection_id
+                WHERE a.allocation_id = ANY(%s::uuid[])
+                  AND es.fetch_ok = TRUE
+                  AND date_trunc('day', es.snapshot_at)::date = %s::date
+                ORDER BY a.allocation_id, bucket, es.snapshot_at DESC
+            """, (all_alloc_ids, intraday_date))
 
-    from collections import defaultdict
-    bucketed: dict = defaultdict(float)
-    for r in cur.fetchall():
-        if r["equity_usd"] is None:
-            continue
-        bucketed[r["bucket"]] += float(r["equity_usd"])
-    intraday_equity = [
-        {"time": b.isoformat(), "equity_usd": v}
-        for b, v in sorted(bucketed.items())
-    ]
+            from collections import defaultdict
+            bucketed: dict = defaultdict(float)
+            for r in cur.fetchall():
+                if r["equity_usd"] is None:
+                    continue
+                bucketed[r["bucket"]] += float(r["equity_usd"])
+            intraday_equity = [
+                {"time": b.isoformat(), "equity_usd": v}
+                for b, v in sorted(bucketed.items())
+            ]
 
     # USD P&L is the actual dollar profit over the window. Given the period
     # % `p` and the current live equity `E`, the implied period-start equity
@@ -455,8 +508,10 @@ def _fetch_portfolio_context(cur) -> dict[str, Any]:
         "total_pnl_usd": round(total_pnl_usd, 2),
         "total_pnl_pct": round(total_pnl_pct, 2),
         "max_drawdown": round(max_dd, 1),
+        "max_drawdown_usd": round(max_dd_usd, 2),
         "portfolio_equity_30d": portfolio_equity,
         "intraday_equity": intraday_equity,
+        "intraday_date": intraday_date,
         "signals": signals,
         "pipeline": pipeline,
         "exchange_snapshots": exchange_snapshots,
@@ -594,9 +649,6 @@ def overview(cur=Depends(get_cursor)) -> dict[str, Any]:
 # still returns portfolio_equity_30d for backward compat; charts now read
 # from this endpoint so they can offer multiple ranges.
 
-_RANGE_DAYS = {"1W": 7, "1M": 30}  # ALL and 1D handled specially
-
-
 @router.get("/portfolio-series")
 def portfolio_series(
     range: str | None = None,
@@ -648,9 +700,7 @@ def portfolio_series(
             "daily_returns": [],
         }
 
-    alloc_ids = [r["allocation_id"] for r in alloc_rows]
     connection_ids = list({r["connection_id"] for r in alloc_rows})
-    total_aum = sum(float(r["capital_usd"] or 0) for r in alloc_rows)
 
     # ── 1D: intraday from exchange_snapshots (per-bucket sum across
     # all of the user's active connections) ─────────────────────────────
@@ -707,111 +757,87 @@ def portfolio_series(
             "daily_returns": [],
         }
 
-    # ── 1W / 1M / ALL: daily close ──────────────────────────────────────
-    # Primary source: performance_daily. Fallback: last exchange_snapshot
-    # per UTC day (mirrors _fetch_portfolio_context's fallback).
-    range_days = _RANGE_DAYS.get(range_up)
-    if range_days is not None:
-        cutoff_clause = "AND date >= CURRENT_DATE - (%s || ' days')::interval"
-        cutoff_args: tuple = (range_days,)
-    else:
-        cutoff_clause = ""
-        cutoff_args = ()
+    # ── 1W / 1M / ALL: bucketed wallet equity from exchange_snapshots ──────
+    # Bucket sizes match the allocator's account-balance-series endpoint so
+    # the Manager Overview charts and the Allocator Overview chart use the
+    # same intervals (30-min on 1W, 3-hour on 1M, 1-day on ALL). Per-bucket
+    # equity = SUM(DISTINCT ON (connection, bucket) latest snapshot).
+    range_specs = {
+        "1W":  {"bucket_seconds": 1800,   "lookback_interval": "7 days"},
+        "1M":  {"bucket_seconds": 10800,  "lookback_interval": "30 days"},
+        "ALL": {"bucket_seconds": 86400,  "lookback_interval": None},
+    }
+    spec = range_specs[range_up]
+    bucket_s = spec["bucket_seconds"]
+    lookback = spec["lookback_interval"]
 
-    cur.execute(f"""
-        SELECT allocation_id, date, equity_usd, daily_return
-        FROM user_mgmt.performance_daily
-        WHERE allocation_id = ANY(%s::uuid[])
-          {cutoff_clause}
-        ORDER BY allocation_id, date
-    """, (alloc_ids, *cutoff_args))
-    pd_rows = cur.fetchall()
+    base_select = """
+        SELECT s.connection_id,
+               s.snapshot_at,
+               to_timestamp(
+                 floor(extract(epoch from s.snapshot_at) / %(bucket)s) * %(bucket)s
+               ) AS bucket,
+               s.total_equity_usd AS equity
+        FROM user_mgmt.exchange_snapshots s
+        WHERE s.connection_id = ANY(%(cids)s::uuid[])
+          AND s.fetch_ok = TRUE
+          AND s.total_equity_usd IS NOT NULL
+    """
+    if lookback:
+        base_select += " AND s.snapshot_at >= NOW() - %(lookback)s::interval"
 
-    per_alloc_days: dict[str, list[tuple]] = {}
-    for r in pd_rows:
-        aid = str(r["allocation_id"])
-        per_alloc_days.setdefault(aid, []).append(
-            (r["date"], float(r["equity_usd"] or 0), float(r["daily_return"] or 0))
+    query = f"""
+        WITH bucketed AS ({base_select}),
+        latest_per_conn AS (
+          SELECT DISTINCT ON (connection_id, bucket)
+                 connection_id, bucket, equity
+          FROM bucketed
+          ORDER BY connection_id, bucket, snapshot_at DESC
         )
-
-    # Fallback to exchange_snapshots daily close if performance_daily is empty
-    if not per_alloc_days:
-        if range_days is not None:
-            es_cutoff = "AND es.snapshot_at >= NOW() - (%s || ' days')::interval"
-            es_args: tuple = (range_days,)
-        else:
-            es_cutoff = ""
-            es_args = ()
-
-        cur.execute(f"""
-            SELECT DISTINCT ON (a.allocation_id, date_trunc('day', es.snapshot_at))
-                a.allocation_id,
-                date_trunc('day', es.snapshot_at)::date AS day,
-                es.total_equity_usd
-            FROM user_mgmt.exchange_snapshots es
-            JOIN user_mgmt.allocations a ON a.connection_id = es.connection_id
-            WHERE a.allocation_id = ANY(%s::uuid[])
-              AND es.fetch_ok = TRUE
-              AND es.total_equity_usd IS NOT NULL
-              {es_cutoff}
-            ORDER BY a.allocation_id, date_trunc('day', es.snapshot_at),
-                     es.snapshot_at DESC
-        """, (alloc_ids, *es_args))
-
-        for r in cur.fetchall():
-            aid = str(r["allocation_id"])
-            per_alloc_days.setdefault(aid, []).append(
-                (r["day"], float(r["total_equity_usd"] or 0), 0.0)
-            )
-        # Compute daily_return from consecutive equity deltas when
-        # fallback data was used (performance_daily.daily_return missing)
-        for aid, points in per_alloc_days.items():
-            points.sort(key=lambda p: p[0])
-            rebuilt: list[tuple] = []
-            prev_eq: float | None = None
-            for d, eq, _ in points:
-                ret = ((eq / prev_eq - 1) * 100) if prev_eq and prev_eq > 0 else 0.0
-                rebuilt.append((d, eq, ret))
-                prev_eq = eq
-            per_alloc_days[aid] = rebuilt
-
-    # Aggregate across allocations: portfolio_equity_by_date, and
-    # total_usd_return_by_date for the daily returns bars.
-    equity_by_date: dict[datetime.date, float] = {}
-    # Capital deployed per allocation (used to translate per-allocation
-    # daily_return % into absolute USD so portfolio % = sum($) / total_aum)
-    cap_by_alloc = {str(r["allocation_id"]): float(r["capital_usd"] or 0) for r in alloc_rows}
-    usd_return_by_date: dict[datetime.date, float] = {}
-    for aid, points in per_alloc_days.items():
-        cap = cap_by_alloc.get(aid, 0)
-        for d, eq, ret in points:
-            equity_by_date[d] = equity_by_date.get(d, 0) + eq
-            usd_return_by_date[d] = usd_return_by_date.get(d, 0) + (cap * ret / 100)
-
-    dates_sorted = sorted(equity_by_date.keys())
+        SELECT bucket AS ts, SUM(equity) AS equity_usd
+        FROM latest_per_conn
+        GROUP BY bucket
+        ORDER BY bucket
+    """
+    params: dict[str, Any] = {"cids": connection_ids, "bucket": bucket_s}
+    if lookback:
+        params["lookback"] = lookback
+    cur.execute(query, params)
+    rows = cur.fetchall()
     portfolio_points = [
-        {"date": d.isoformat(), "equity_usd": round(equity_by_date[d], 2)}
-        for d in dates_sorted
-    ]
-    daily_returns = [
-        {
-            "date": d.isoformat(),
-            "return_usd": round(usd_return_by_date.get(d, 0), 2),
-            "return_pct": round(
-                (usd_return_by_date.get(d, 0) / total_aum * 100) if total_aum > 0 else 0.0,
-                4,
-            ),
-        }
-        for d in dates_sorted
+        {"date": r["ts"].isoformat(), "equity_usd": float(r["equity_usd"] or 0)}
+        for r in rows
     ]
 
-    first_date = dates_sorted[0].isoformat() if dates_sorted else None
+    # real_days = distinct UTC calendar days represented in the bucket series.
+    distinct_days = sorted({p["date"][:10] for p in portfolio_points})
+    first_date = distinct_days[0] if distinct_days else None
+
+    # daily_returns: one per closed UTC session (last bucket of each day
+    # minus last bucket of prior day). Frontend on 1W/1M may also compute
+    # per-bucket deltas from portfolio_equity for a finer-grained P&L view.
+    last_eq_by_day: dict[str, float] = {}
+    for p in portfolio_points:
+        day = p["date"][:10]
+        last_eq_by_day[day] = p["equity_usd"]  # later rows overwrite — last of day wins
+    days_sorted = sorted(last_eq_by_day.keys())
+    daily_returns = []
+    for i in range(1, len(days_sorted)):
+        prev_eq = last_eq_by_day[days_sorted[i - 1]]
+        curr_eq = last_eq_by_day[days_sorted[i]]
+        ret_usd = curr_eq - prev_eq
+        ret_pct = (ret_usd / prev_eq * 100.0) if prev_eq > 0 else 0.0
+        daily_returns.append({
+            "date": days_sorted[i],
+            "return_usd": round(ret_usd, 2),
+            "return_pct": round(ret_pct, 4),
+        })
 
     return {
         "range": range_up,
-        "granularity": "daily",
+        "granularity": "intraday" if range_up in ("1W", "1M") else "daily",
         "first_data_date": first_date,
-        "real_days": len(dates_sorted),
+        "real_days": len(distinct_days),
         "portfolio_equity": portfolio_points,
         "daily_returns": daily_returns,
     }

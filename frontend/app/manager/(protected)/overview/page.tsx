@@ -95,8 +95,10 @@ interface OverviewData {
   total_pnl_usd: number;
   total_pnl_pct: number;
   max_drawdown: number;
+  max_drawdown_usd: number;
   portfolio_equity_30d: { date: string; equity_usd: number }[];
   intraday_equity: { time: string; equity_usd: number }[];
+  intraday_date: string | null;
   pipeline: {
     compiler: PipelineJob;
     indexer: PipelineJob;
@@ -163,22 +165,10 @@ function equitySubtitle(range: TimeRange, s: PortfolioSeries | null): string {
 
 function returnsSubtitle(range: TimeRange, s: PortfolioSeries | null): string {
   if (!s) return "Loading…";
-  if (range === "1D") {
-    // Intraday bars = N-1 deltas from N equity snapshots. Matches Portfolio
-    // Equity's subtitle wording so the pair reads as intentional.
-    const n = Math.max(0, s.portfolio_equity.length - 1);
-    return n > 0 ? `Today · ${n} intervals` : "Today · no intervals yet";
-  }
-  const expected = range === "1W" ? 7 : range === "1M" ? 30 : null;
-  const n = s.daily_returns.length;
-  if (expected !== null && n >= expected) {
-    return `Last ${expected} sessions`;
-  }
-  if (n > 0) {
-    const unit = n === 1 ? "session" : "sessions";
-    return `${n} ${unit} so far`;
-  }
-  return "No sessions recorded yet";
+  // Returns bars are now per-bucket deltas derived from portfolio_equity at
+  // all ranges, so the subtitle can reuse the equity-chart wording — both
+  // charts are driven by the same underlying series.
+  return equitySubtitle(range, s);
 }
 
 function emptyCopyForRange(range: TimeRange, kind: "equity" | "returns"): string {
@@ -481,28 +471,22 @@ export default function OverviewPage() {
   const eqDates = equitySeries?.portfolio_equity.map((d) => fmtEquityLabel(d.date)) ?? [];
   const eqValues = equitySeries?.portfolio_equity.map((d) => d.equity_usd) ?? [];
 
-  // Returns chart data — two sources by range:
-  //   - 1D: backend returns daily_returns=[] at 5-min cadence, so we compute
-  //     5-min equity deltas client-side from portfolio_equity. Visual parity
-  //     with the Portfolio Equity chart (same bucket size) at the cost of
-  //     labelling intraday mark-to-market as "realized".
-  //   - 1W/1M/ALL: use the backend's per-session daily_returns (one bar per
-  //     closed UTC session).
-  const returnsIsIntraday = returnsRange === "1D";
-  let returnsBarDates: string[];
-  let returnsBarValues: number[];
-  if (returnsIsIntraday && returnsSeries) {
+  // Realized Returns bars = per-bucket $ P&L delta. Bucket size comes from
+  // the backend (5-min on 1D, 30-min on 1W, 3-hour on 1M, 1-day on ALL —
+  // matching the Allocator Overview chart). Both charts are driven by the
+  // same portfolio_equity array so the visuals stay in lockstep.
+  const returnsBarDates: string[] = [];
+  const returnsBarValues: number[] = [];
+  if (returnsSeries) {
     const eq = returnsSeries.portfolio_equity;
-    returnsBarDates = [];
-    returnsBarValues = [];
+    const intraday = returnsSeries.granularity === "intraday";
     for (let i = 1; i < eq.length; i++) {
-      const d = new Date(eq[i].date);
-      returnsBarDates.push(d.toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", hour12: false }));
+      const label = intraday
+        ? new Date(eq[i].date).toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", hour12: false })
+        : eq[i].date.slice(5);
+      returnsBarDates.push(label);
       returnsBarValues.push(eq[i].equity_usd - eq[i - 1].equity_usd);
     }
-  } else {
-    returnsBarDates = returnsSeries?.daily_returns.map((d) => d.date.slice(5)) ?? [];
-    returnsBarValues = returnsSeries?.daily_returns.map((d) => d.return_pct) ?? [];
   }
 
   const hasEquityData = eqValues.length > 0;
@@ -553,6 +537,8 @@ export default function OverviewPage() {
           label="Max Drawdown"
           value={data.max_drawdown === 0 ? "0.0%" : `${data.max_drawdown.toFixed(1)}%`}
           color={data.max_drawdown < 0 ? "var(--red)" : "var(--t1)"}
+          subvalue={data.max_drawdown_usd === 0 ? undefined : fmtUsdSigned(data.max_drawdown_usd)}
+          subvalueColor={data.max_drawdown_usd < 0 ? "var(--red)" : "var(--t1)"}
         />
       </div>
 
@@ -738,9 +724,7 @@ export default function OverviewPage() {
                       display: true,
                       ticks: {
                         color: "#5a5754", font: { size: 8 }, maxTicksLimit: 4,
-                        callback: (v: unknown) => returnsIsIntraday
-                          ? `$${Number(v).toLocaleString("en-US", { maximumFractionDigits: 0 })}`
-                          : `${Number(v).toFixed(2)}%`,
+                        callback: (v: unknown) => `$${Number(v).toLocaleString("en-US", { maximumFractionDigits: 0 })}`,
                       },
                       grid: { color: "rgba(50,50,59,0.3)" },
                     },
@@ -757,9 +741,7 @@ export default function OverviewPage() {
                         label: (ctx: { raw: unknown }) => {
                           const v = Number(ctx.raw);
                           const sign = v >= 0 ? "+" : "−";
-                          return returnsIsIntraday
-                            ? `${sign}$${Math.abs(v).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
-                            : `${v >= 0 ? "+" : ""}${v.toFixed(2)}%`;
+                          return `${sign}$${Math.abs(v).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
                         },
                       },
                     },
@@ -787,7 +769,10 @@ export default function OverviewPage() {
         </div>
       </div>
 
-      {/* Intraday Equity (today) */}
+      {/* Intraday Equity — follows the latest session with data (mirrors
+          the Session Logs viewer's auto-scope). When today's session
+          hasn't started or has no snapshots yet, the chart still renders
+          the previous session so the user isn't left staring at a blank. */}
       {(() => {
         // Build full deployment window grid: 06:00 → 00:00 UTC at 15-min intervals
         const grid: string[] = [];
@@ -796,6 +781,15 @@ export default function OverviewPage() {
             grid.push(`${h.toString().padStart(2, "0")}:${m.toString().padStart(2, "0")}`);
           }
         }
+
+        // Derive the title's session label from intraday_date. Today →
+        // "today". Any prior day → "last session · Apr 20" (short date).
+        const todayUtc = new Date().toISOString().slice(0, 10);
+        const sessionLabel = !data.intraday_date
+          ? "today"
+          : data.intraday_date === todayUtc
+            ? "today"
+            : `last session · ${shortDate(data.intraday_date)}`;
 
         // Map actual data onto the grid
         const dataMap: Record<string, number> = {};
@@ -842,7 +836,7 @@ export default function OverviewPage() {
             height: 330,
           }}>
             <div style={{ fontSize: 9, fontWeight: 700, letterSpacing: "0.12em", color: "var(--t3)", textTransform: "uppercase", marginBottom: 8 }}>
-              Intraday Equity (today) · 06:00–00:00 UTC
+              Intraday Equity ({sessionLabel}) · 06:00–00:00 UTC
             </div>
             <div style={{ height: "calc(100% - 24px)" }}>
               {hasAny ? (
