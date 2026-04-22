@@ -262,6 +262,30 @@ export default function PortfolioDetailPage() {
   const [ambiguity, setAmbiguity] = useState<AmbiguityDetail | null>(null);
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
 
+  // Chart view mode persisted in the URL so users can share links to a
+  // specific layout. Hidden-symbol state is local-only and resets on
+  // navigation — too granular to belong in the URL.
+  const view: "portfolio" | "symbols" =
+    searchParams.get("view") === "symbols" ? "symbols" : "portfolio";
+  const [hiddenSymbols, setHiddenSymbols] = useState<Set<string>>(new Set());
+
+  const setView = useCallback((next: "portfolio" | "symbols") => {
+    const params = new URLSearchParams(searchParams.toString());
+    if (next === "symbols") params.set("view", "symbols");
+    else params.delete("view");
+    const qs = params.toString();
+    router.replace(qs ? `?${qs}` : "?", { scroll: false });
+  }, [router, searchParams]);
+
+  const toggleSymbolHidden = useCallback((label: string) => {
+    setHiddenSymbols((prev) => {
+      const next = new Set(prev);
+      if (next.has(label)) next.delete(label);
+      else next.add(label);
+      return next;
+    });
+  }, []);
+
   const matrixRef = useRef<HTMLDivElement>(null);
   const wasAtBottomRef = useRef(true);
 
@@ -433,12 +457,13 @@ export default function PortfolioDetailPage() {
   const labels = bars.map((b) => fmtTime(b.ts));
   const symbolDatasets = symbolsOrdered.map((sym, idx) => {
     const stoppedBar = stoppedAtBar.get(sym);
+    const displayLabel = sym.replace("-USDT", "");
     const data = bars.map((b) => {
       const v = b.sym_returns[sym];
       return v !== undefined ? v * 100 : null;
     });
     return {
-      label: sym.replace("-USDT", ""),
+      label: displayLabel,
       data,
       borderColor: colorFor(sym, idx),
       backgroundColor: colorFor(sym, idx),
@@ -446,6 +471,7 @@ export default function PortfolioDetailPage() {
       pointRadius: 0,
       pointHoverRadius: 4,
       tension: 0.15,
+      hidden: hiddenSymbols.has(displayLabel),
       // Dash the segment after the stop bar.
       segment: stoppedBar !== undefined
         ? {
@@ -458,11 +484,23 @@ export default function PortfolioDetailPage() {
       _isSymbol: true,
     };
   });
+  // Portfolio series always renders as a filled area anchored to the zero
+  // axis (not the chart min) — matches the trader-page Performance chart's
+  // gradient treatment so the pair reads as part of the same design system.
   const portfolioDataset = {
     label: "Portfolio",
     data: bars.map((b) => b.incr * 100),
     borderColor: PORTFOLIO_COLOR,
-    backgroundColor: PORTFOLIO_COLOR,
+    backgroundColor: (ctx: { chart: ChartJS }) => {
+      const c = ctx.chart.ctx;
+      const area = ctx.chart.chartArea;
+      if (!area) return PORTFOLIO_COLOR + "26";
+      const gradient = c.createLinearGradient(0, area.top, 0, area.bottom);
+      gradient.addColorStop(0, PORTFOLIO_COLOR + "33");
+      gradient.addColorStop(1, PORTFOLIO_COLOR + "03");
+      return gradient;
+    },
+    fill: "origin" as const,
     borderWidth: 3,
     pointRadius: 0,
     pointHoverRadius: 5,
@@ -470,11 +508,19 @@ export default function PortfolioDetailPage() {
     _isSymbol: false,
   };
 
+  // Datasets shown to Chart.js depend on the mode. Portfolio-only mode strips
+  // symbol lines entirely (cleaner view); All Symbols mode stacks them under
+  // the portfolio area. The `hidden` flag on each symbol dataset is driven by
+  // React state so toggle visibility survives mode switches.
+  const chartDatasets = view === "symbols"
+    ? [portfolioDataset, ...symbolDatasets]
+    : [portfolioDataset];
+
   const chartOptions: ChartOptions<"line"> = {
     responsive: true,
     maintainAspectRatio: false,
     interaction: { mode: "index", intersect: false },
-    animation: false,
+    animation: { duration: 250 },
     plugins: {
       legend: { display: false },
       tooltip: {
@@ -486,11 +532,30 @@ export default function PortfolioDetailPage() {
         titleFont: { family: "Space Mono", size: 10, weight: "bold" },
         bodyFont:  { family: "Space Mono", size: 10 },
         padding: 8,
+        itemSort: (a, b) => {
+          // Portfolio row always first so it anchors the tooltip.
+          const aPortfolio = a.dataset.label === "Portfolio" ? -1 : 0;
+          const bPortfolio = b.dataset.label === "Portfolio" ? -1 : 0;
+          return aPortfolio - bPortfolio;
+        },
         callbacks: {
+          labelColor: (ctx) => {
+            const isPortfolio = ctx.dataset.label === "Portfolio";
+            return {
+              borderColor: PORTFOLIO_COLOR,
+              backgroundColor: isPortfolio ? PORTFOLIO_COLOR : (ctx.dataset.borderColor as string),
+              borderWidth: isPortfolio ? 0 : 2,
+              borderRadius: isPortfolio ? 2 : 0,
+            };
+          },
           label: (ctx) => {
             const v = ctx.parsed.y;
-            if (v === null || v === undefined) return `${ctx.dataset.label}: —`;
-            return `${ctx.dataset.label}: ${v >= 0 ? "+" : ""}${v.toFixed(3)}%`;
+            const name = ctx.dataset.label ?? "";
+            if (v === null || v === undefined) return `${name}: —`;
+            const pct = `${v >= 0 ? "+" : ""}${v.toFixed(3)}%`;
+            // Emphasize Portfolio row with an arrow bullet so the line stands
+            // out among the symbol rows in All Symbols mode.
+            return name === "Portfolio" ? `▸ ${name}: ${pct}` : `  ${name}: ${pct}`;
           },
         },
       },
@@ -641,32 +706,45 @@ export default function PortfolioDetailPage() {
                 textTransform: "uppercase",
               }}
             >
-              Cumulative ROI by Symbol
+              Cumulative ROI {view === "symbols" ? "by Symbol" : ""}
             </div>
-            {/* Custom legend */}
-            <div
-              style={{
-                display: "flex",
-                flexWrap: "wrap",
-                gap: 12,
-                fontSize: 10,
-                color: "var(--t1)",
-              }}
-            >
-              <LegendChip label="Portfolio" color={PORTFOLIO_COLOR} thick />
-              {symbolsOrdered.map((sym, idx) => (
-                <LegendChip
-                  key={sym}
-                  label={sym.replace("-USDT", "")}
-                  color={colorFor(sym, idx)}
-                  dashed={stoppedAtBar.has(sym)}
-                />
-              ))}
+            <div style={{ display: "flex", alignItems: "center", gap: 14, flexWrap: "wrap" }}>
+              {/* Custom legend — only shown in All Symbols mode. Symbols are
+                  clickable to toggle visibility; Portfolio is always visible
+                  and rendered non-interactive. */}
+              {view === "symbols" && (
+                <div
+                  style={{
+                    display: "flex",
+                    flexWrap: "wrap",
+                    gap: 12,
+                    fontSize: 10,
+                    color: "var(--t1)",
+                  }}
+                >
+                  <LegendChip label="Portfolio" color={PORTFOLIO_COLOR} thick />
+                  {symbolsOrdered.map((sym, idx) => {
+                    const display = sym.replace("-USDT", "");
+                    return (
+                      <LegendChip
+                        key={sym}
+                        label={display}
+                        color={colorFor(sym, idx)}
+                        dashed={stoppedAtBar.has(sym)}
+                        hidden={hiddenSymbols.has(display)}
+                        onClick={() => toggleSymbolHidden(display)}
+                      />
+                    );
+                  })}
+                </div>
+              )}
+              {/* Mode toggle */}
+              <ModeToggle value={view} onChange={setView} />
             </div>
           </div>
           <div style={{ height: 320 }}>
             <Line
-              data={{ labels, datasets: [...symbolDatasets, portfolioDataset] }}
+              data={{ labels, datasets: chartDatasets }}
               options={chartOptions}
             />
           </div>
@@ -813,19 +891,79 @@ export default function PortfolioDetailPage() {
 
 // ─── Legend chip ────────────────────────────────────────────────────────────
 
+function ModeToggle({
+  value,
+  onChange,
+}: {
+  value: "portfolio" | "symbols";
+  onChange: (next: "portfolio" | "symbols") => void;
+}) {
+  const opts: { key: "portfolio" | "symbols"; label: string }[] = [
+    { key: "portfolio", label: "PORTFOLIO" },
+    { key: "symbols",   label: "ALL SYMBOLS" },
+  ];
+  return (
+    <div
+      role="tablist"
+      aria-label="Chart view mode"
+      style={{
+        display: "inline-flex",
+        border: "1px solid var(--line)",
+        borderRadius: 4,
+        overflow: "hidden",
+        fontFamily: FONT_MONO,
+      }}
+    >
+      {opts.map((opt, i) => {
+        const active = opt.key === value;
+        return (
+          <button
+            key={opt.key}
+            type="button"
+            role="tab"
+            aria-selected={active}
+            onClick={() => onChange(opt.key)}
+            style={{
+              padding: "4px 10px",
+              fontSize: 9,
+              fontWeight: 700,
+              letterSpacing: "0.08em",
+              background: active ? "var(--bg4)" : "transparent",
+              color: active ? "var(--t0)" : "var(--t2)",
+              border: "none",
+              borderLeft: i === 0 ? "none" : "1px solid var(--line)",
+              cursor: "pointer",
+              transition: "background 0.15s, color 0.15s",
+            }}
+            onMouseEnter={(e) => { if (!active) e.currentTarget.style.color = "var(--t1)"; }}
+            onMouseLeave={(e) => { if (!active) e.currentTarget.style.color = "var(--t2)"; }}
+          >
+            {opt.label}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
 function LegendChip({
   label,
   color,
   thick,
   dashed,
+  hidden,
+  onClick,
 }: {
   label: string;
   color: string;
   thick?: boolean;
   dashed?: boolean;
+  hidden?: boolean;
+  onClick?: () => void;
 }) {
-  return (
-    <div style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+  const isClickable = !!onClick;
+  const content = (
+    <>
       <span
         style={{
           display: "inline-block",
@@ -842,11 +980,38 @@ function LegendChip({
           color: "var(--t1)",
           fontSize: 10,
           fontWeight: thick ? 700 : 400,
+          textDecoration: hidden ? "line-through" : undefined,
         }}
       >
         {label}
       </span>
-    </div>
+    </>
+  );
+  if (!isClickable) {
+    return (
+      <div style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+        {content}
+      </div>
+    );
+  }
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      style={{
+        display: "inline-flex",
+        alignItems: "center",
+        gap: 6,
+        background: "transparent",
+        border: "none",
+        padding: 0,
+        cursor: "pointer",
+        opacity: hidden ? 0.4 : 1,
+        transition: "opacity 0.15s",
+      }}
+    >
+      {content}
+    </button>
   );
 }
 
