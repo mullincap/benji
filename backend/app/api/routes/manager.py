@@ -429,6 +429,14 @@ def _fetch_portfolio_context(cur) -> dict[str, Any]:
     intraday_date: str | None = None
     intraday_equity: list[dict[str, Any]] = []
     if all_alloc_ids:
+        # Pick the latest UTC day that has at least one snapshot INSIDE the
+        # 06:00+ session window — otherwise the cron's post-close snapshots
+        # (00:00–05:59 UTC after 23:55 session close) would anchor us to
+        # "today" with no buckets that land on the 06:00–23:45 frontend grid.
+        #
+        # 7-day lookback bounds the hypertable scan; LIMIT 1 makes the planner
+        # walk the snapshot_at index backward and stop on first match, so the
+        # extract(hour) filter is paid per-row only until a hit.
         cur.execute("""
             SELECT date_trunc('day', es.snapshot_at)::date AS day
             FROM user_mgmt.exchange_snapshots es
@@ -436,6 +444,8 @@ def _fetch_portfolio_context(cur) -> dict[str, Any]:
             WHERE a.allocation_id = ANY(%s::uuid[])
               AND es.fetch_ok = TRUE
               AND es.total_equity_usd IS NOT NULL
+              AND es.snapshot_at >= NOW() - INTERVAL '7 days'
+              AND extract(hour from es.snapshot_at) >= 6
             ORDER BY es.snapshot_at DESC
             LIMIT 1
         """, (all_alloc_ids,))
@@ -771,6 +781,9 @@ def portfolio_series(
     bucket_s = spec["bucket_seconds"]
     lookback = spec["lookback_interval"]
 
+    # TEMP VERIFICATION LOG — remove after confirming 1M fetch returns rows.
+    print(f"[portfolio-series.verify] range={range_up} cids_count={len(connection_ids)} cids={[str(c) for c in connection_ids]}", flush=True)
+
     base_select = """
         SELECT s.connection_id,
                s.snapshot_at,
@@ -804,6 +817,8 @@ def portfolio_series(
         params["lookback"] = lookback
     cur.execute(query, params)
     rows = cur.fetchall()
+    # TEMP VERIFICATION LOG — remove after confirming 1M fetch returns rows.
+    print(f"[portfolio-series.verify] range={range_up} rows_returned={len(rows)}", flush=True)
     portfolio_points = [
         {"date": r["ts"].isoformat(), "equity_usd": float(r["equity_usd"] or 0)}
         for r in rows
