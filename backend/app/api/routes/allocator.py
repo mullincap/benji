@@ -1147,7 +1147,7 @@ def get_allocations(user_id: str = Depends(get_current_user), cur=Depends(get_cu
     cur.execute("""
         SELECT
             a.allocation_id, a.strategy_version_id, a.connection_id,
-            a.capital_usd, a.status, a.created_at,
+            a.capital_usd, a.status, a.compounding_mode, a.created_at,
             sv.version_label, sv.strategy_id,
             s.display_name AS strategy_display_name, s.name AS strategy_name,
             s.filter_mode,
@@ -1189,6 +1189,7 @@ def get_allocations(user_id: str = Depends(get_current_user), cur=Depends(get_cu
             "connection_id": str(a["connection_id"]),
             "capital_usd": capital,
             "status": a["status"],
+            "compounding_mode": a["compounding_mode"],
             "strategy_name": a["strategy_display_name"] or a["strategy_name"],
             "strategy_slug": a["strategy_name"],
             "filter_mode": a["filter_mode"],
@@ -1229,14 +1230,21 @@ def create_allocation(body: AllocationRequest, user_id: str = Depends(get_curren
 class AllocationUpdateRequest(BaseModel):
     capital_usd: float | None = None
     status: str | None = None
+    compounding_mode: str | None = None  # 'compound' | 'fixed'
 
 
 @router.patch("/allocations/{allocation_id}")
 def update_allocation(allocation_id: str, body: AllocationUpdateRequest, user_id: str = Depends(get_current_user), cur=Depends(get_cursor)) -> dict[str, Any]:
-    """Update an allocation's capital or status. Verifies ownership."""
-    # Ownership check
+    """Update an allocation's capital, status, or compounding mode.
+    Verifies ownership. Emits a WARN when capital_usd is edited while a
+    session is active — the compounding feature's whole point is to
+    eliminate that pattern, so manual edits during live trading are
+    tracked as an exception path.
+    """
+    # Ownership + session-state check in one round-trip.
     cur.execute("""
-        SELECT user_id FROM user_mgmt.allocations WHERE allocation_id = %s::uuid
+        SELECT user_id, compounding_mode, runtime_state
+        FROM user_mgmt.allocations WHERE allocation_id = %s::uuid
     """, (allocation_id,))
     row = cur.fetchone()
     if not row:
@@ -1250,6 +1258,15 @@ def update_allocation(allocation_id: str, body: AllocationUpdateRequest, user_id
     if body.capital_usd is not None:
         if body.capital_usd <= 0:
             raise HTTPException(status_code=400, detail="capital_usd must be positive")
+        # WARN if editing capital during an active session — baseline drift
+        # risk (mitigated by the P&L baseline fix but still worth logging).
+        runtime_state = row["runtime_state"] or {}
+        if runtime_state.get("phase") == "active":
+            log.warning(
+                "Manual capital_usd change during active session "
+                f"(allocation_id={allocation_id}, mode={row['compounding_mode']}); "
+                "capital tracking may be inconsistent until next session close."
+            )
         updates.append("capital_usd = %s")
         params.append(body.capital_usd)
     if body.status is not None:
@@ -1259,6 +1276,11 @@ def update_allocation(allocation_id: str, body: AllocationUpdateRequest, user_id
         params.append(body.status)
         if body.status == "closed":
             updates.append("closed_at = NOW()")
+    if body.compounding_mode is not None:
+        if body.compounding_mode not in ("compound", "fixed"):
+            raise HTTPException(status_code=400, detail="Invalid compounding_mode")
+        updates.append("compounding_mode = %s")
+        params.append(body.compounding_mode)
 
     if not updates:
         raise HTTPException(status_code=400, detail="No fields to update")

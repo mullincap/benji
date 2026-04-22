@@ -50,6 +50,7 @@ export interface StrategyInstance {
   allocation: number | null;
   equity: number;
   dailyPnl: number;
+  compoundingMode: "compound" | "fixed";
   positions: Position[];
   // Backend references
   strategyVersionId?: string;
@@ -320,6 +321,7 @@ export function TraderProvider({ children }: { children: ReactNode }) {
           allocation: a.capital_usd,
           equity: a.equity_usd,
           dailyPnl: a.daily_pnl_usd,
+          compoundingMode: a.compounding_mode ?? "compound",
           positions,
           strategyVersionId: a.strategy_version_id,
           connectionId: a.connection_id,

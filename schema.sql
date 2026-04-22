@@ -668,6 +668,10 @@ CREATE TABLE IF NOT EXISTS user_mgmt.allocations (
     connection_id        UUID    NOT NULL REFERENCES user_mgmt.exchange_connections(connection_id),
     capital_usd          NUMERIC(18,2) NOT NULL,
     status               TEXT    NOT NULL DEFAULT 'active',  -- active|paused|closed
+    -- 'compound' → capital_usd auto-updates to wallet equity at session close;
+    -- 'fixed'    → capital_usd stays user-set; profits accumulate idle in wallet.
+    compounding_mode     TEXT    NOT NULL DEFAULT 'compound'
+        CHECK (compounding_mode IN ('compound', 'fixed')),
     created_at           TIMESTAMPTZ DEFAULT NOW(),
     updated_at           TIMESTAMPTZ DEFAULT NOW(),
     closed_at            TIMESTAMPTZ,

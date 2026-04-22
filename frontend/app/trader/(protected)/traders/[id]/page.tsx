@@ -246,6 +246,14 @@ function LiveMode({ instanceId }: { instanceId: string }) {
   const [editing, setEditing] = useState(false);
   const [editAllocation, setEditAllocation] = useState("");
   const [editAlerts, setEditAlerts] = useState(false);
+  // Compounding toggle has its own always-on auto-save path (no edit mode);
+  // the transient "Saved" confirmation is scoped to this pill.
+  const [compoundingSavedAt, setCompoundingSavedAt] = useState<number | null>(null);
+  useEffect(() => {
+    if (compoundingSavedAt === null) return;
+    const t = setTimeout(() => setCompoundingSavedAt(null), 1500);
+    return () => clearTimeout(t);
+  }, [compoundingSavedAt]);
   const positionsContentRef = useRef<HTMLDivElement>(null);
   const settingsContentRef = useRef<HTMLDivElement>(null);
 
@@ -560,7 +568,7 @@ function LiveMode({ instanceId }: { instanceId: string }) {
             transition: "height 0.2s ease",
           }}>
             <div style={{ padding: "16px 18px" }}>
-              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr", gap: 14, marginBottom: 16 }}>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr 1fr", gap: 14, marginBottom: 16 }}>
                 {/* USD Allocation */}
                 <div>
                   <div style={{ fontSize: 9, color: "var(--t3)", letterSpacing: "0.12em", fontWeight: 700, textTransform: "uppercase", marginBottom: 6 }}>USD ALLOCATION</div>
@@ -604,6 +612,62 @@ function LiveMode({ instanceId }: { instanceId: string }) {
                   ) : (
                     <div style={{ fontSize: 10, color: "var(--t1)", padding: "8px 0" }}>{inst.alerts ? "On" : "Off"}</div>
                   )}
+                </div>
+                {/* Compounding — always interactive, auto-saves on change */}
+                <div>
+                  <div style={{ fontSize: 9, color: "var(--t3)", letterSpacing: "0.12em", fontWeight: 700, textTransform: "uppercase", marginBottom: 6, display: "flex", alignItems: "center", gap: 6 }}>
+                    <span>COMPOUNDING</span>
+                    {compoundingSavedAt !== null && (
+                      <span style={{ color: "var(--green)", fontSize: 9, letterSpacing: 0, textTransform: "none", opacity: 0.9 }}>✓ saved</span>
+                    )}
+                  </div>
+                  <div style={{ display: "flex", gap: 4, padding: "4px 0" }}>
+                    {(["compound", "fixed"] as const).map((mode) => {
+                      const active = inst.compoundingMode === mode;
+                      return (
+                        <button
+                          key={mode}
+                          type="button"
+                          onClick={async (e) => {
+                            e.stopPropagation();
+                            if (active) return;
+                            // Optimistic update; roll back on failure.
+                            const prev = inst.compoundingMode;
+                            updateInstance(inst.id, { compoundingMode: mode });
+                            try {
+                              await allocatorApi.updateAllocation(inst.id, { compounding_mode: mode });
+                              setCompoundingSavedAt(Date.now());
+                            } catch {
+                              updateInstance(inst.id, { compoundingMode: prev });
+                            }
+                          }}
+                          style={{
+                            flex: 1,
+                            padding: "6px 8px",
+                            fontSize: 9,
+                            fontWeight: 700,
+                            letterSpacing: "0.08em",
+                            textTransform: "uppercase",
+                            background: active ? "var(--bg4)" : "transparent",
+                            color: active ? "var(--t0)" : "var(--t2)",
+                            border: "1px solid var(--line)",
+                            borderRadius: 3,
+                            cursor: active ? "default" : "pointer",
+                            transition: "background 0.15s, color 0.15s",
+                          }}
+                          onMouseEnter={(e) => { if (!active) e.currentTarget.style.color = "var(--t1)"; }}
+                          onMouseLeave={(e) => { if (!active) e.currentTarget.style.color = "var(--t2)"; }}
+                        >
+                          {mode}
+                        </button>
+                      );
+                    })}
+                  </div>
+                  <div style={{ fontSize: 9, color: "var(--t3)", marginTop: 4, lineHeight: 1.4 }}>
+                    {inst.compoundingMode === "compound"
+                      ? "Next session's capital follows wallet equity at session close."
+                      : "Allocation stays constant; profits accumulate in wallet as idle capital."}
+                  </div>
                 </div>
               </div>
 

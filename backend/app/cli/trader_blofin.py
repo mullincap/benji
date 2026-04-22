@@ -2625,6 +2625,30 @@ def _run_monitoring_loop(today, today_date, api: ExchangeAdapter, inst_ids,
                     f"nightly backfill cron runs"
                 )
 
+            # ── Compounding mode: roll session-close equity into capital_usd ─
+            # When allocations.compounding_mode = 'compound', capital_usd
+            # auto-updates to the post-exit wallet equity so the next
+            # session sizes off realized gains/losses without a manual
+            # edit. Fixed mode leaves capital_usd alone; profits accumulate
+            # in the wallet as idle capital. Runs once per session, guarded
+            # by the same NaN-check as the writer. Best-effort — on DB
+            # failure we log a WARN and leave capital_usd as-is rather
+            # than destabilizing the next session start.
+            if not dry_run and post_exit_equity_usd is not None:
+                try:
+                    _compound_capital_if_enabled(
+                        allocation_id, post_exit_equity_usd, log_prefix,
+                    )
+                except Exception as e:
+                    log.warning(
+                        f"{log_prefix}Compound update skipped: {e}"
+                    )
+            elif not dry_run and post_exit_equity_usd is None:
+                log.warning(
+                    f"{log_prefix}Compound update skipped for allocation "
+                    f"{allocation_id}: no session close equity captured"
+                )
+
         _close_portfolio_session_for_allocation(
             session_id=session_id,
             exit_reason=exit_reason,
@@ -2950,6 +2974,60 @@ def _mark_runtime_state(allocation_id: str, state: dict) -> None:
         conn.commit()
     except Exception as e:
         log.warning(f"  Could not persist runtime_state for {allocation_id}: {e}")
+    finally:
+        conn.close()
+
+
+def _compound_capital_if_enabled(
+    allocation_id: str,
+    session_close_equity: float,
+    log_prefix: str,
+) -> None:
+    """If allocations.compounding_mode = 'compound', update capital_usd to
+    the post-exit wallet equity captured at session close. Called once per
+    session from the allocation-mode close path.
+
+    No-op for 'fixed' mode. Emits an INFO log on actual update so the
+    compounding audit trail is visible in the session log. The UPDATE
+    only touches rows currently in compound mode — if the user flips to
+    fixed mid-session, this runs as a no-op at close.
+    """
+    conn = _trader_db_connect()
+    try:
+        with conn.cursor() as cur:
+            # Read mode + current capital in a single round-trip to produce
+            # a clean log message without a second SELECT.
+            cur.execute(
+                """
+                SELECT capital_usd, compounding_mode
+                FROM user_mgmt.allocations
+                WHERE allocation_id = %s::uuid
+                """,
+                (allocation_id,),
+            )
+            row = cur.fetchone()
+            if not row:
+                return
+            current_capital = float(row[0] or 0)
+            mode = row[1]
+            if mode != "compound":
+                return
+
+            cur.execute(
+                """
+                UPDATE user_mgmt.allocations
+                SET capital_usd = %s, updated_at = NOW()
+                WHERE allocation_id = %s::uuid
+                  AND compounding_mode = 'compound'
+                """,
+                (round(float(session_close_equity), 2), allocation_id),
+            )
+        conn.commit()
+        log.info(
+            f"{log_prefix}Compound mode — capital_usd "
+            f"${current_capital:,.2f} -> ${float(session_close_equity):,.2f} "
+            f"(session close equity)"
+        )
     finally:
         conn.close()
 

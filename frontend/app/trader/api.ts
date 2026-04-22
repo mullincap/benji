@@ -145,12 +145,15 @@ export interface StoreKeysSuccess {
   permissions: ExchangePermissions;
 }
 
+export type CompoundingMode = "compound" | "fixed";
+
 export interface ApiAllocation {
   allocation_id: string;
   strategy_version_id: string;
   connection_id: string;
   capital_usd: number;
   status: string;
+  compounding_mode: CompoundingMode;
   strategy_name: string;
   strategy_slug: string;
   filter_mode: string;
@@ -271,7 +274,7 @@ export const allocatorApi = {
       { method: "POST", body: JSON.stringify(data) },
     ),
 
-  updateAllocation: (allocationId: string, data: { capital_usd?: number; status?: string }) =>
+  updateAllocation: (allocationId: string, data: { capital_usd?: number; status?: string; compounding_mode?: CompoundingMode }) =>
     apiFetch<{ updated: boolean }>(
       `/api/allocator/allocations/${allocationId}`,
       { method: "PATCH", body: JSON.stringify(data) },

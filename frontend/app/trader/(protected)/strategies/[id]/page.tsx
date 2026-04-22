@@ -256,6 +256,7 @@ export default function MarketplaceDetailPage() {
       allocation: null,
       equity: 0,
       dailyPnl: 0,
+      compoundingMode: "compound",
       positions: [],
     };
     addInstance(newInst);
