@@ -18,6 +18,8 @@ interface PerformanceChartProps {
   // render the per-allocation curve.
   instanceId?: string;
   title?: string;
+  containerStyle?: React.CSSProperties;
+  equityHeight?: number;
 }
 
 interface ChartData {
@@ -95,7 +97,7 @@ function StateMessage({ main, sub }: { main: string; sub?: string }) {
 
 // ─── Component ───────────────────────────────────────────────────────────────
 
-export default function PerformanceChart({ instanceId, title = "PERFORMANCE" }: PerformanceChartProps) {
+export default function PerformanceChart({ instanceId, title = "PERFORMANCE", containerStyle, equityHeight = 180 }: PerformanceChartProps) {
   const [range, setRange] = useState<TimeRange>("1M");
   const [data, setData] = useState<ChartData | null>(null);
   const [loading, setLoading] = useState(false);
@@ -144,10 +146,11 @@ export default function PerformanceChart({ instanceId, title = "PERFORMANCE" }: 
     </div>
   );
 
-  const wrapperStyle = {
+  const wrapperStyle: React.CSSProperties = {
     background: "var(--bg1)", border: "1px solid var(--line)",
     borderRadius: 6, padding: "12px 14px", marginBottom: 20,
-    position: "relative" as const,
+    position: "relative",
+    ...containerStyle,
   };
 
   // Loading: show header + skeleton.
@@ -379,7 +382,7 @@ export default function PerformanceChart({ instanceId, title = "PERFORMANCE" }: 
       {header}
 
       {/* Equity curve */}
-      <div style={{ height: 180 }}>
+      <div style={{ height: equityHeight }}>
         <Line data={equityData} options={equityOptions as never} plugins={[crosshairPlugin]} />
       </div>
 

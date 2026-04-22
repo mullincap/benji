@@ -88,7 +88,11 @@ function DashboardContent({ equity, dailyPnl, allTimePnl, sharpe, allocated, act
 
       {/* Total account balance — aggregate across all connections */}
       {showAggregate && (
-        <PerformanceChart title="TOTAL ACCOUNT BALANCE" />
+        <PerformanceChart
+          title="TOTAL ACCOUNT BALANCE"
+          containerStyle={{ marginBottom: 0, height: 400 }}
+          equityHeight={250}
+        />
       )}
 
       {/* Equity curve — ghost only */}
@@ -283,7 +287,7 @@ export default function OverviewPage() {
                           const leftPct = treemapTotal > 0 ? (cumulative / treemapTotal) * 100 : 0;
                           const widthPct = treemapTotal > 0 ? (alloc / treemapTotal) * 100 : 0;
                           cumulative += alloc;
-                          const fillColor = BAR_FILL[inst.risk] ?? "var(--green)";
+                          const fillColor = "var(--green)";
                           return (
                             <div key={inst.id} style={{ display: "flex", alignItems: "center", gap: 8 }}>
                               <span style={{ width: 7, height: 7, borderRadius: 2, background: fillColor, flexShrink: 0 }} />
@@ -303,10 +307,10 @@ export default function OverviewPage() {
                         const widthPct = treemapTotal > 0 ? (unalloc / treemapTotal) * 100 : 0;
                         return (
                           <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                            <span style={{ width: 7, height: 7, borderRadius: 2, background: "var(--bg3)", flexShrink: 0 }} />
+                            <span style={{ width: 7, height: 7, borderRadius: 2, background: "var(--amber)", flexShrink: 0 }} />
                             <span style={{ fontSize: 10, color: "var(--t3)", width: 80, flexShrink: 0 }}>Unallocated</span>
                             <div style={{ flex: 1, height: 4, background: "var(--bg3)", borderRadius: 2, overflow: "hidden" }}>
-                              <div style={{ height: "100%", marginLeft: `${leftPct}%`, width: `${widthPct}%`, background: "var(--bg3)", borderRadius: 2 }} />
+                              <div style={{ height: "100%", marginLeft: `${leftPct}%`, width: `${widthPct}%`, background: "var(--amber)", borderRadius: 2 }} />
                             </div>
                             <span style={{ fontSize: 10, fontWeight: 700, color: "var(--t3)", flexShrink: 0, textAlign: "right", width: 65 }}>${fmt(unalloc, 0)}</span>
                             <span style={{ fontSize: 9, color: "var(--t3)", flexShrink: 0, width: 35, textAlign: "right" }}>{treemapTotal > 0 ? ((unalloc / treemapTotal) * 100).toFixed(1) : "0.0"}%</span>
