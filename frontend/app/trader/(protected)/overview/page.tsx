@@ -140,15 +140,14 @@ export default function OverviewPage() {
   const totalAllocated = instances.reduce((s, i) => s + (i.allocation ?? 0), 0);
   const activeCount = instances.filter(i => i.status === "live").length;
 
-  // All-time P&L approximated as wallet total minus total capital assigned to
-  // allocations. Imperfect without a capital_events table (treats idle wallet
-  // balance as P&L); revisit once deposits/transfers ledger ships.
-  const allTimePnl = exchangeBalance - totalAllocatedRaw;
-
-  // Daily P&L + Sharpe are derived from the account-balance-series endpoint
-  // (same source as the chart). Fetched on mount; re-derived when instances
-  // change so a new allocation triggers a refresh.
-  const [accountMetrics, setAccountMetrics] = useState<{ dailyPnl: number; sharpe: number }>({ dailyPnl: 0, sharpe: 0 });
+  // Daily P&L, Sharpe, and All-Time P&L are all derived from the
+  // account-balance-series endpoint (same source as the chart). Keeping
+  // the All-Time baseline on the earliest recorded wallet equity — not
+  // sum(allocation.capital_usd) — means editing an allocation's size
+  // doesn't shift the displayed P&L. Mirrors the trader-detail fix.
+  const [accountMetrics, setAccountMetrics] = useState<{
+    dailyPnl: number; sharpe: number; allTimePnl: number | null;
+  }>({ dailyPnl: 0, sharpe: 0, allTimePnl: null });
   useEffect(() => {
     if (empty) return;
     let cancelled = false;
@@ -162,6 +161,15 @@ export default function OverviewPage() {
         const eq1d = oneDay.history.map(h => h.equity_usd);
         const dpnl = eq1d.length >= 2 ? eq1d[eq1d.length - 1] - eq1d[0] : 0;
         const eqAll = all.history.map(h => h.equity_usd);
+
+        // All-time P&L = current wallet equity − earliest recorded wallet
+        // equity. Immutable across allocation.capital_usd edits.
+        const earliestEq = eqAll.length > 0 ? eqAll[0] : null;
+        const latestEq = eqAll.length > 0 ? eqAll[eqAll.length - 1] : null;
+        const atpnl = earliestEq !== null && latestEq !== null
+          ? latestEq - earliestEq
+          : null;
+
         const returns: number[] = [];
         for (let i = 1; i < eqAll.length; i++) {
           if (eqAll[i - 1] > 0) returns.push((eqAll[i] - eqAll[i - 1]) / eqAll[i - 1]);
@@ -173,13 +181,19 @@ export default function OverviewPage() {
           const std = Math.sqrt(variance);
           if (std > 0) sharpe = (mean / std) * Math.sqrt(252);
         }
-        setAccountMetrics({ dailyPnl: dpnl, sharpe });
+        setAccountMetrics({ dailyPnl: dpnl, sharpe, allTimePnl: atpnl });
       } catch { /* leave defaults; KPIs render em-dash */ }
     })();
     return () => { cancelled = true; };
   }, [empty, instances.length]);
   const dailyPnl = accountMetrics.dailyPnl;
   const sharpe = accountMetrics.sharpe;
+  // Fallback to capital-based approximation only for brand-new accounts
+  // where the aggregate history hasn't landed yet; otherwise use the
+  // wallet-based delta so allocation edits don't shift the number.
+  const allTimePnl = accountMetrics.allTimePnl !== null
+    ? accountMetrics.allTimePnl
+    : (exchangeBalance - totalAllocatedRaw);
 
   const allPositions: (Position & { strategy: string; exchange: string })[] = [];
   for (const inst of instances) {
