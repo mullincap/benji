@@ -277,6 +277,41 @@ def _fetch_live_binance(*, api_key: str, api_secret: str) -> dict:
     """
     client = BinanceClient(api_key=api_key, api_secret=api_secret)
 
+    # Futures positionRisk is authoritative for entry prices on live positions.
+    # We query it regardless of which balance path runs below, so that UTA /
+    # portfolio-margin accounts (where /fapi/v2/account.totalMarginBalance
+    # reports 0 and we fall through to the margin path) still get the real
+    # entryPrice rather than 0.0. Maps symbol -> {entry, mark, leverage,
+    # margin_mode}; callers look up by symbol when building the positions list.
+    risk_by_symbol: dict[str, dict] = {}
+    try:
+        risk_rows = client.get_futures_position_risk() or []
+        for r in risk_rows:
+            try:
+                amt = float(r.get("positionAmt", 0) or 0)
+            except (TypeError, ValueError):
+                amt = 0.0
+            if amt == 0:
+                continue
+            sym = r.get("symbol", "")
+            try:
+                risk_by_symbol[sym] = {
+                    "entry":       float(r.get("entryPrice", 0) or 0),
+                    "mark":        float(r.get("markPrice", 0) or 0),
+                    "upl":         float(r.get("unRealizedProfit", 0) or 0),
+                    "leverage":    int(float(r.get("leverage") or 0)),
+                    "margin_mode": (r.get("marginType") or "").lower(),
+                    "size":        abs(amt),
+                    "side":        "long" if amt > 0 else "short",
+                }
+            except (TypeError, ValueError):
+                continue
+    except BinanceError:
+        # positionRisk fetch failed — proceed with the balance path and
+        # best-effort dust-only positions (no entry prices). Better than
+        # raising; the UI can still display equity and flag missing entry.
+        pass
+
     # ── Futures primary ─────────────────────────────────────────────────
     futures = client.get_futures_account()
     futures_equity = _safe_decimal(futures.get("totalMarginBalance")) if futures else None
@@ -290,6 +325,9 @@ def _fetch_live_binance(*, api_key: str, api_secret: str) -> dict:
         used_margin = _safe_decimal(futures.get("totalInitialMargin"))
         unrealized_pnl = _safe_decimal(futures.get("totalUnrealizedProfit"))
 
+        # /fapi/v2/account.positions has entryPrice but no markPrice.
+        # positionRisk has both. Prefer positionRisk when available, fall
+        # back to account payload otherwise.
         positions = []
         for p in futures.get("positions") or []:
             try:
@@ -298,23 +336,44 @@ def _fetch_live_binance(*, api_key: str, api_secret: str) -> dict:
                 amt = 0.0
             if amt == 0:
                 continue
-            try:
-                entry = float(p.get("entryPrice", 0) or 0)
-            except (TypeError, ValueError):
-                entry = 0.0
-            try:
-                upl = float(p.get("unRealizedProfit", 0) or 0)
-            except (TypeError, ValueError):
-                upl = 0.0
+            sym = p.get("symbol", "")
+            risk = risk_by_symbol.get(sym)
+            if risk:
+                entry = risk["entry"]
+                mark = risk["mark"]
+                upl = risk["upl"]
+                leverage = risk["leverage"]
+                margin_mode = risk["margin_mode"]
+            else:
+                try:
+                    entry = float(p.get("entryPrice", 0) or 0)
+                except (TypeError, ValueError):
+                    entry = 0.0
+                try:
+                    upl = float(p.get("unRealizedProfit", 0) or 0)
+                except (TypeError, ValueError):
+                    upl = 0.0
+                mark = 0.0
+                leverage = int(float(p.get("leverage") or 0))
+                margin_mode = (p.get("marginType") or "").lower()
+
+            # Dust filter: drop positions whose notional is < $1. Binance
+            # UTA / cross-margin keeps microscopic leftover balances around
+            # indefinitely; they clutter the allocator view without being
+            # tradable. Threshold in USD assumes mark_price is USDT-quoted.
+            notional = abs(amt) * (mark or entry or 0)
+            if notional and notional < 1.0:
+                continue
+
             positions.append({
-                "symbol": p.get("symbol", ""),
-                "side": "long" if amt > 0 else "short",
-                "size": abs(amt),
-                "entry_price": entry,
-                "mark_price": 0.0,           # not in /fapi/v2/account payload
+                "symbol":         sym,
+                "side":           "long" if amt > 0 else "short",
+                "size":           abs(amt),
+                "entry_price":    entry,
+                "mark_price":     mark,
                 "unrealized_pnl": upl,
-                "leverage": int(float(p.get("leverage") or 0)),
-                "margin_mode": (p.get("marginType") or "").lower(),
+                "leverage":       leverage,
+                "margin_mode":    margin_mode,
             })
 
         return {
@@ -352,6 +411,12 @@ def _fetch_live_binance(*, api_key: str, api_secret: str) -> dict:
     # Cross-margin doesn't have a positions endpoint, so "position" = any
     # non-stablecoin asset with a non-zero net (long = owned, short = borrowed).
     # Enrich each with live spot price via /api/v3/ticker/price.
+    #
+    # When positionRisk has entry data for this symbol (common in UTA where
+    # futures positions show up both as userAssets AND on positionRisk), we
+    # prefer positionRisk values — entry_price, leverage, real margin_mode,
+    # and live UPL. Pure spot holdings (no positionRisk row) keep the
+    # entry_price=0 / leverage=0 cross defaults.
     STABLECOINS = {"USDT", "USDC", "BUSD", "DAI", "TUSD", "FDUSD"}
     positions = []
     for item in margin.get("userAssets", []) or []:
@@ -365,21 +430,47 @@ def _fetch_live_binance(*, api_key: str, api_secret: str) -> dict:
         if net == 0:
             continue
         symbol = f"{asset}USDT"
-        mark = _get_binance_spot_price(symbol)
-        if mark is None:
-            # Leave mark_price=0.0 with a log so UI can show "—" rather than
-            # crashing the entire snapshot. UPL also uncomputable without mark.
-            log.warning(f"Binance margin: no spot price for {symbol}, leaving mark_price=0")
-            mark = 0.0
+        risk = risk_by_symbol.get(symbol)
+        if risk:
+            entry = risk["entry"]
+            mark = risk["mark"]
+            upl = risk["upl"]
+            leverage = risk["leverage"]
+            margin_mode = risk["margin_mode"]
+            # Prefer positionRisk's positionAmt when present — userAssets'
+            # netAsset is an asset-level balance that can differ from the
+            # futures contract count (e.g. if user has spot + futures of
+            # the same coin).
+            size = risk["size"]
+            side = risk["side"]
+        else:
+            mark = _get_binance_spot_price(symbol)
+            if mark is None:
+                log.warning(f"Binance margin: no spot price for {symbol}, leaving mark_price=0")
+                mark = 0.0
+            entry = 0.0
+            upl = 0.0
+            leverage = 0
+            margin_mode = "cross"
+            size = abs(net)
+            side = "long" if net > 0 else "short"
+
+        # Dust filter: drop positions worth < $1. UTA / cross-margin keeps
+        # microscopic leftover asset balances around indefinitely and they
+        # clutter the allocator view without being tradable.
+        notional = size * (mark or entry or 0)
+        if notional and notional < 1.0:
+            continue
+
         positions.append({
             "symbol":         symbol,
-            "side":           "long" if net > 0 else "short",
-            "size":           abs(net),
-            "entry_price":    0.0,           # cross-margin: no stored entry price
+            "side":           side,
+            "size":           size,
+            "entry_price":    entry,
             "mark_price":     mark,
-            "unrealized_pnl": 0.0,           # requires entry_price — defer until writer persists it
-            "leverage":       0,             # cross-margin: per-account, not per-symbol
-            "margin_mode":    "cross",
+            "unrealized_pnl": upl,
+            "leverage":       leverage,
+            "margin_mode":    margin_mode,
         })
 
     return {

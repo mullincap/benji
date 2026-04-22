@@ -148,3 +148,23 @@ class BinanceClient:
             return None
         except BinanceAuthError:
             return None
+
+    def get_futures_position_risk(self) -> list[dict] | None:
+        """GET /fapi/v2/positionRisk — per-symbol futures positions with entry price.
+
+        Unlike /fapi/v2/account (aggregate balances), this endpoint always
+        returns the live positions array with entryPrice, markPrice, leverage,
+        marginType. Works in both classic and UTA / portfolio-margin account
+        modes, so it's the authoritative source for "what futures positions
+        are open RIGHT NOW".
+
+        Returns None if the key lacks futures permission. Callers merge the
+        entry prices from this response into whatever balance path they took
+        (futures-primary or cross-margin fallback).
+        """
+        try:
+            return self._get_signed(self._fapi_base, "/fapi/v2/positionRisk")
+        except BinancePermissionError:
+            return None
+        except BinanceAuthError:
+            return None
