@@ -237,7 +237,7 @@ export default function PortfoliosListPage() {
 
         <div
           style={{
-            background: "var(--bg2)",
+            background: "var(--bg1)",
             border: "1px solid var(--line)",
             borderRadius: 5,
             padding: "12px 16px",

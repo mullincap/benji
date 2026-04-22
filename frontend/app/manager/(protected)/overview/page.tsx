@@ -259,7 +259,7 @@ function KpiCard({
     <div
       style={{
         flex: 1,
-        background: "var(--bg2)",
+        background: "var(--bg1)",
         border: "1px solid var(--line)",
         borderRadius: 5,
         padding: "14px 16px",
@@ -442,7 +442,7 @@ export default function OverviewPage() {
           {Array.from({ length: 2 }).map((_, i) => (
             <div key={i} style={{
               flex: 1,
-              background: "var(--bg2)",
+              background: "var(--bg1)",
               border: "1px solid var(--line)",
               borderRadius: 5,
               padding: "12px 16px",
@@ -540,7 +540,7 @@ export default function OverviewPage() {
         <div
           style={{
             flex: 1,
-            background: "var(--bg2)",
+            background: "var(--bg1)",
             border: "1px solid var(--line)",
             borderRadius: 5,
             padding: "12px 16px",
@@ -649,7 +649,7 @@ export default function OverviewPage() {
         <div
           style={{
             flex: 1,
-            background: "var(--bg2)",
+            background: "var(--bg1)",
             border: "1px solid var(--line)",
             borderRadius: 5,
             padding: "12px 16px",
@@ -812,7 +812,7 @@ export default function OverviewPage() {
 
         return (
           <div style={{
-            background: "var(--bg2)",
+            background: "var(--bg1)",
             border: "1px solid var(--line)",
             borderRadius: 5,
             padding: "12px 16px",
@@ -901,7 +901,7 @@ export default function OverviewPage() {
         <div
           style={{
             flex: 1,
-            background: "var(--bg2)",
+            background: "var(--bg1)",
             border: "1px solid var(--line)",
             borderRadius: 5,
             padding: "12px 16px",
@@ -1019,7 +1019,7 @@ export default function OverviewPage() {
         <div
           style={{
             flex: 1,
-            background: "var(--bg2)",
+            background: "var(--bg1)",
             border: "1px solid var(--line)",
             borderRadius: 5,
             padding: "12px 16px",

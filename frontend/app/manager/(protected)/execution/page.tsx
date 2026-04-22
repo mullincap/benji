@@ -355,7 +355,7 @@ function KpiCard({
     <div
       style={{
         flex: 1,
-        background: "var(--bg2)",
+        background: "var(--bg1)",
         border: "1px solid var(--line)",
         borderRadius: 5,
         padding: "14px 16px",
@@ -471,7 +471,7 @@ function TabBanner({ text }: { text: string }) {
   return (
     <div
       style={{
-        background: "var(--bg2)",
+        background: "var(--bg1)",
         border: "1px solid var(--line)",
         borderLeft: "3px solid var(--green)",
         borderRadius: 4,
@@ -737,7 +737,7 @@ export default function ExecutionPage() {
       {/* Row 3: Daily summary table (collapsible; mutually exclusive with logs) */}
       <div
         style={{
-          background: "var(--bg2)",
+          background: "var(--bg1)",
           border: "1px solid var(--line)",
           borderRadius: 5,
           overflow: "hidden",
