@@ -1,5 +1,49 @@
 # Open Work List
 
+## 🔴 TOP PRIORITY — Next session (starting 2026-04-22)
+
+### Simulator parity with live symbol selection
+
+**Goal:** Make `pipeline/overlap_analysis.py` (audit/simulator) produce the *same* symbol basket per day as `daily_signal.py` (live), with the **only** permitted difference being the data source (live Binance/BloFin API vs. pre-built parquet / `market.leaderboards` DB). Once the simulator can match live basket-for-basket, audit RET NET% becomes a credible proxy for what live-money actually earns — closing the 46pp-over-14-days measurement gap we found 2026-04-21.
+
+**Motivation:** Live money is running on daily_signal.py. The audit/simulator is how we evaluate strategy edits, parameter sweeps, and new filters before promoting them. Right now the two pipelines share w20c20 constants and a comment claiming they match ("matches backtest exactly", `daily_signal.py:245`) but diverge on six specific axes — no parity test exists, no fixture compares them, and the assumption was never verified. Until parity is restored, every Simulator-driven decision about live strategy is made against a basket that doesn't reflect what live actually trades.
+
+**Six divergences to reconcile** (source: 2026-04-21 investigation, full detail in session memory `project_open_work_strat_roi_vs_audit.md` and the diff we ran on job `63bbe197-9a46-42a9-8fa4-788315065bb2`):
+
+| # | Axis | Live (`daily_signal.py`) | Audit (`overlap_analysis.py`) | Fix direction |
+|---|---|---|---|---|
+| 1 | Universe size | Top **100** by 24h quoteVolume ([daily_signal.py:49,205](../daily_signal.py#L49)) | Top **333** pre-ranked ([overlap_analysis.py:176](../pipeline/overlap_analysis.py#L176)) | Add `--leaderboard-universe N` CLI flag to `overlap_analysis.py`; default to 100 to match live. Existing `--leaderboard-index` is close but check semantics match exactly. |
+| 2 | Symbol normalization | `bare = sym[:-4]` — strips "USDT" only ([daily_signal.py:197](../daily_signal.py#L197)) | `normalize_symbol()` — multi-quote + 1000× prefix strip + stablecoin/non-crypto reject ([overlap_analysis.py:216-244](../pipeline/overlap_analysis.py#L216-L244)) | Extract `normalize_symbol()` into `pipeline/symbol_utils.py`, expose a `--normalization minimal\|full` flag on audit. Default audit to `full` but allow `minimal` to match live. Parallel: fix `daily_signal.py` to import the full normalizer (separate task — live-money change, handle carefully). |
+| 3 | Market cap filter | None | Optional `--min-mcap` (audit often runs with $50M) | Already configurable — just ensure audit runs with `--min-mcap 0` when targeting live-parity mode. Document in README. |
+| 4 | OI sparse fallback | If OI coverage < 50%, fall back to `quoteVolume` ([daily_signal.py:352-366](../daily_signal.py#L352-L366)) | No fallback — queries OI leaderboard directly | Add a volume-fallback branch in `overlap_analysis.py`'s DB mode. Only triggers in historical periods where OI data was sparse. |
+| 5 | Entry filters | Tail Guardrail / Tail + Dispersion applied inside `daily_signal.py` itself (sit_flat written to CSV) | Raw baskets output; audit.py applies filters during backtest | Keep the architectural split (audit produces baskets, audit.py applies filters) — but ensure the filter configs available in audit.py include *exactly* the ones daily_signal.py can run (currently Tail Guardrail and Tail + Dispersion). Verify both filters match bit-for-bit including the filter-switch-midway case we saw 2026-04-15 → 04-16. |
+| 6 | Data-source timing | Binance REST pulled at 05:58 UTC daily | Parquet built hours/days ago; `market.leaderboards` DB populated nightly 01:00 UTC | **Permitted difference** — this is the exception the user explicitly allowed. But document that audit runs should prefer `market.leaderboards` DB mode (freshest) over parquet unless reproducing a specific historical run. |
+
+**Approach (ordered):**
+
+1. **Diagnose on one day first.** Pick 2026-04-16 (live traded, audit didn't). Pull both baskets for that exact date, walk the delta symbol-by-symbol to confirm which of the six divergences is actually driving the mismatch. ~1 hour, no code changes.
+2. **Extract `normalize_symbol()` + related constants** into `pipeline/symbol_utils.py`. Pure refactor, no behavior change. Both scripts import from the shared module.
+3. **Add `--live-parity` preset to `overlap_analysis.py`** that sets: `--leaderboard-universe 100`, `--min-mcap 0`, `--normalization minimal`, `--volume-fallback on`. One flag, not six, so the Simulator UI can flip it cleanly.
+4. **Expose the preset in the Simulator UI.** Toggle: "Use live symbol selection" → sends `live_parity: true` through PromoteRequest / audit params. When on, any other conflicting flag is overridden.
+5. **Parity harness.** Nightly script that runs both basket generators for yesterday's date, diffs the symbol lists, logs any divergence. Should be silent on parity-mode days and loud on any drift. ~60 LOC.
+6. **Re-run the 2026-04-07 → 2026-04-21 diff** with live-parity mode on. If the 46pp spread closes to < 5pp, we've succeeded. If a material gap remains, a seventh divergence exists and we repeat step 1.
+
+**Scope estimate:** ~200 LOC backend (overlap_analysis CLI flags + symbol_utils extraction + volume fallback + parity harness) + ~30 LOC frontend (Simulator toggle). One session, maybe two if step 6 surfaces a seventh divergence.
+
+**Non-goals (explicit):**
+- Do NOT change `daily_signal.py` in this work. Live money runs against it daily at 05:58 UTC; any change is a separate, carefully-sequenced task with its own validation. The audit conforms *to* live, not the other way around.
+- Do NOT change the fee/leverage math in the audit. The 2026-04-21 investigation confirmed fee/SL/TSL/profit-take constants match; only symbol selection diverges.
+
+**Depends on:** none. Can start immediately 2026-04-22.
+
+**Blocks:** every future Simulator-driven strategy decision.
+
+**Sub-item A — Per-exchange symbol-availability gate in Simulator.** Surfaced by the 2026-04-22 06:05 UTC session launch: Alpha Main on Binance dropped 5 of 7 signal symbols (`BAS, CLO, EDGE, M, RIVER`) as unsupported, traded on only `MET` and `PENGU` — a 29% basket. The audit/simulator currently assumes every signal symbol is tradeable on every exchange, so simulator returns for Binance-backed allocations **systematically overstate** what those allocations can actually earn (they include PnL from symbols Binance can't trade). Fix: before computing returns in audit.py, drop symbols not in the target exchange's instrument list (cache the list per-exchange in `market.exchange_instruments` or similar, refresh nightly). Backtests for BloFin allocations should keep all symbols (BloFin has broader coverage); Binance backtests should filter. Scope: ~40 LOC in audit.py + ~20 LOC nightly refresh job. Prereq: decide whether "drop symbol" means (a) zero-weight it and re-normalize the remaining basket, or (b) treat the allocation as sit-flat that day if coverage < N%. The 2-symbol-out-of-7 case tonight is an existence proof that (a) can produce nonsense returns on some days.
+
+**Sub-item B — Backfill `active_filter` in strategy_version configs.** Same 2026-04-22 session surfaced config drift: Alpha Main's strategy_version.config is missing `active_filter` (WARN: `TraderConfig.from_strategy_version: field 'active_filter' not found (tried aliases ['active_filter', 'filter_mode'])`); Alpha Max's has it correctly. Both allocations ended up with filter='Tail Guardrail' tonight — Alpha Main via master-default fallback, Alpha Max via config — but this means the two strategy_versions carry different config schemas, and any filter change to one won't automatically propagate to the other. Fix: one-shot SQL to populate `active_filter` on every `audit.strategy_versions.config` JSONB where it's currently absent. Values should match the `filter_mode` column on the parent `audit.strategies` row. Confirm via `SELECT sv.strategy_version_id, sv.config ? 'active_filter', s.filter_mode FROM audit.strategy_versions sv JOIN audit.strategies s ON s.strategy_id = sv.strategy_id` before/after. Scope: ~10-line migration. Low risk — the fallback path works, so this is cleanup, not a fire.
+
+---
+
 ## Track 3 — Group B implementation (decisions locked, see session_handoff_2026-04-18.md)
 
 - ✅ Item 5: Audit convention sweep (scope: `IDENTITY_FIELDS`) — SHIPPED in `9b14233` (docs-only, zero convention mismatches)
