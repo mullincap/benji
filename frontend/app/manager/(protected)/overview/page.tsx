@@ -164,9 +164,10 @@ function equitySubtitle(range: TimeRange, s: PortfolioSeries | null): string {
 function returnsSubtitle(range: TimeRange, s: PortfolioSeries | null): string {
   if (!s) return "Loading…";
   if (range === "1D") {
-    return s.daily_returns.length > 0
-      ? "1 session (today)"
-      : "No session yet today";
+    // Intraday bars = N-1 deltas from N equity snapshots. Matches Portfolio
+    // Equity's subtitle wording so the pair reads as intentional.
+    const n = Math.max(0, s.portfolio_equity.length - 1);
+    return n > 0 ? `Today · ${n} intervals` : "Today · no intervals yet";
   }
   const expected = range === "1W" ? 7 : range === "1M" ? 30 : null;
   const n = s.daily_returns.length;
@@ -185,7 +186,7 @@ function emptyCopyForRange(range: TimeRange, kind: "equity" | "returns"): string
   switch (range) {
     case "1D":  return kind === "equity"
       ? "No snapshots captured today yet."
-      : "Realized returns are a per-session metric — first bar appears after today's 23:55 UTC session close.";
+      : "No intraday P&L yet — bars appear once at least two snapshots land.";
     case "1W":  return `No ${unit} in the last 7 days yet.`;
     case "1M":  return `No ${unit} in the last 30 days yet.`;
     case "ALL": return `No ${unit} recorded yet.`;
@@ -332,7 +333,7 @@ export default function OverviewPage() {
         seriesCache.set("ALL", d);
         const def = pickDefaultRange(d.real_days);
         setEquityRange(def);
-        setReturnsRange(def === "1D" ? "1W" : def); // 1D disabled on returns chart
+        setReturnsRange(def);
       })
       .catch((e) => {
         if (cancelled) return;
@@ -480,11 +481,32 @@ export default function OverviewPage() {
   const eqDates = equitySeries?.portfolio_equity.map((d) => fmtEquityLabel(d.date)) ?? [];
   const eqValues = equitySeries?.portfolio_equity.map((d) => d.equity_usd) ?? [];
 
-  const dailyReturnDates = returnsSeries?.daily_returns.map((d) => d.date.slice(5)) ?? [];
-  const dailyReturnPcts = returnsSeries?.daily_returns.map((d) => d.return_pct) ?? [];
+  // Returns chart data — two sources by range:
+  //   - 1D: backend returns daily_returns=[] at 5-min cadence, so we compute
+  //     5-min equity deltas client-side from portfolio_equity. Visual parity
+  //     with the Portfolio Equity chart (same bucket size) at the cost of
+  //     labelling intraday mark-to-market as "realized".
+  //   - 1W/1M/ALL: use the backend's per-session daily_returns (one bar per
+  //     closed UTC session).
+  const returnsIsIntraday = returnsRange === "1D";
+  let returnsBarDates: string[];
+  let returnsBarValues: number[];
+  if (returnsIsIntraday && returnsSeries) {
+    const eq = returnsSeries.portfolio_equity;
+    returnsBarDates = [];
+    returnsBarValues = [];
+    for (let i = 1; i < eq.length; i++) {
+      const d = new Date(eq[i].date);
+      returnsBarDates.push(d.toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", hour12: false }));
+      returnsBarValues.push(eq[i].equity_usd - eq[i - 1].equity_usd);
+    }
+  } else {
+    returnsBarDates = returnsSeries?.daily_returns.map((d) => d.date.slice(5)) ?? [];
+    returnsBarValues = returnsSeries?.daily_returns.map((d) => d.return_pct) ?? [];
+  }
 
   const hasEquityData = eqValues.length > 0;
-  const hasDailyData = dailyReturnDates.length > 0;
+  const hasReturnsData = returnsBarDates.length > 0;
 
   return (
     <div
@@ -658,11 +680,10 @@ export default function OverviewPage() {
           }}
         >
           {/* Header: title + dynamic subtitle + range tabs.
-              1D is present but disabled — realized returns are a per-session
-              metric (one bar per UTC day), so intraday 5-min equity deltas
-              would mislabel unrealized mark-to-market as realized P&L. Keep
-              the tab visible for affordance consistency with the Equity
-              chart, block clicks, and surface the reason via title tooltip. */}
+              On 1D, the chart renders 5-min equity deltas (intraday P&L
+              bars) computed client-side from portfolio_equity — backend
+              returns daily_returns=[] at that cadence. On 1W/1M/ALL, it
+              renders the backend's per-session daily_returns. */}
           <div
             style={{
               display: "flex",
@@ -687,19 +708,17 @@ export default function OverviewPage() {
             <RangeTabs
               value={returnsRange}
               onChange={setReturnsRange}
-              disabled={["1D"]}
-              disabledTitles={{ "1D": "Sessions close once per day. Use 1W+ for realized returns." }}
             />
           </div>
-          {hasDailyData ? (
+          {hasReturnsData ? (
             <div style={{ flex: 1, position: "relative" }}>
               <Bar
                 data={{
-                  labels: dailyReturnDates,
+                  labels: returnsBarDates,
                   datasets: [
                     {
-                      data: dailyReturnPcts,
-                      backgroundColor: dailyReturnPcts.map((v) =>
+                      data: returnsBarValues,
+                      backgroundColor: returnsBarValues.map((v) =>
                         v >= 0 ? "rgba(0, 200, 150, 0.6)" : "rgba(255, 77, 77, 0.6)"
                       ),
                       borderRadius: 2,
@@ -719,7 +738,9 @@ export default function OverviewPage() {
                       display: true,
                       ticks: {
                         color: "#5a5754", font: { size: 8 }, maxTicksLimit: 4,
-                        callback: (v: unknown) => `${Number(v).toFixed(2)}%`,
+                        callback: (v: unknown) => returnsIsIntraday
+                          ? `$${Number(v).toLocaleString("en-US", { maximumFractionDigits: 0 })}`
+                          : `${Number(v).toFixed(2)}%`,
                       },
                       grid: { color: "rgba(50,50,59,0.3)" },
                     },
@@ -735,8 +756,10 @@ export default function OverviewPage() {
                       callbacks: {
                         label: (ctx: { raw: unknown }) => {
                           const v = Number(ctx.raw);
-                          const sign = v >= 0 ? "+" : "";
-                          return `${sign}${v.toFixed(2)}%`;
+                          const sign = v >= 0 ? "+" : "−";
+                          return returnsIsIntraday
+                            ? `${sign}$${Math.abs(v).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+                            : `${v >= 0 ? "+" : ""}${v.toFixed(2)}%`;
                         },
                       },
                     },
