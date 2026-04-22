@@ -40,12 +40,14 @@ function MetricCard({ label, value, color }: { label: string; value: string; col
 
 // ─── Dashboard content ───────────────────────────────────────────────────────
 
-function DashboardContent({ equity, dailyPnl, allTimePnl, sharpe, allocated, activeCount, totalAvailable, positions, showCurve, showAggregate, exchanges, instances }: {
+function DashboardContent({ equity, dailyPnl, allTimePnl, sharpe, allocated, activeCount, totalAvailable, positions, showCurve, showAggregate, chartContainerHeight = 400, chartEquityHeight = 250, exchanges, instances }: {
   equity: number; dailyPnl: number; allTimePnl: number; sharpe: number;
   allocated: number; activeCount: number; totalAvailable: number;
   positions: (Position & { strategy: string; exchange: string })[];
   showCurve?: boolean;
   showAggregate?: boolean;
+  chartContainerHeight?: number;
+  chartEquityHeight?: number;
   exchanges?: Exchange[];
   instances?: StrategyInstance[];
 }) {
@@ -90,8 +92,8 @@ function DashboardContent({ equity, dailyPnl, allTimePnl, sharpe, allocated, act
       {showAggregate && (
         <PerformanceChart
           title="TOTAL ACCOUNT BALANCE"
-          containerStyle={{ marginBottom: 0, height: 400 }}
-          equityHeight={250}
+          containerStyle={{ marginBottom: 0, height: chartContainerHeight, transition: "height 0.2s ease" }}
+          equityHeight={chartEquityHeight}
         />
       )}
 
@@ -176,7 +178,21 @@ export default function OverviewPage() {
             {empty ? (
               <DashboardContent equity={293593} dailyPnl={14092} allTimePnl={62847} sharpe={2.41} allocated={94000} activeCount={3} totalAvailable={totalAvailable} positions={GHOST_POSITIONS} showCurve />
             ) : (
-              <DashboardContent equity={totalEquity} dailyPnl={dailyPnl} allTimePnl={allTimePnl} sharpe={sharpe} allocated={totalAllocated} activeCount={activeCount} totalAvailable={totalAvailable} positions={allPositions} exchanges={exchanges} instances={instances} showAggregate />
+              <DashboardContent
+                equity={totalEquity}
+                dailyPnl={dailyPnl}
+                allTimePnl={allTimePnl}
+                sharpe={sharpe}
+                allocated={totalAllocated}
+                activeCount={activeCount}
+                totalAvailable={totalAvailable}
+                positions={allPositions}
+                exchanges={exchanges}
+                instances={instances}
+                showAggregate
+                chartContainerHeight={breakdownOpen ? 400 : 530}
+                chartEquityHeight={breakdownOpen ? 250 : 380}
+              />
             )}
           </div>
 
