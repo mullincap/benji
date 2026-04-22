@@ -62,6 +62,42 @@ function MetricCard({ label, value, color, subtitle, subtitleColor }: {
   );
 }
 
+// Settings list row — label on the left, control on the right.
+// Read-only rows get slightly muted value text to visually distinguish
+// from interactive rows.
+function SettingsRow({
+  label,
+  control,
+  readOnly,
+}: {
+  label: React.ReactNode;
+  control: React.ReactNode;
+  readOnly?: boolean;
+}) {
+  return (
+    <div
+      style={{
+        display: "grid",
+        gridTemplateColumns: "180px 1fr",
+        alignItems: "center",
+        gap: 16,
+        padding: "10px 0",
+      }}
+    >
+      <div style={{
+        fontSize: 9,
+        color: readOnly ? "var(--t3)" : "var(--t2)",
+        letterSpacing: "0.12em",
+        fontWeight: 700,
+        textTransform: "uppercase",
+      }}>
+        {label}
+      </div>
+      <div>{control}</div>
+    </div>
+  );
+}
+
 // ─── PnL formatting helpers ──────────────────────────────────────────────────
 
 function fmtUsdSigned(n: number): string {
@@ -245,15 +281,23 @@ function LiveMode({ instanceId }: { instanceId: string }) {
   const [settingsOpen, setSettingsOpen] = useState(true);
   const [editing, setEditing] = useState(false);
   const [editAllocation, setEditAllocation] = useState("");
-  const [editAlerts, setEditAlerts] = useState(false);
-  // Compounding toggle has its own always-on auto-save path (no edit mode);
-  // the transient "Saved" confirmation is scoped to this pill.
+  // Two-step confirmation when editing capital_usd during a live session —
+  // surfaces the risk inline without a modal.
+  const [capitalEditConfirm, setCapitalEditConfirm] = useState(false);
+  // Compounding + Alerts both auto-save on click; the transient "✓ saved"
+  // pill next to their labels fades out after 1.5s.
   const [compoundingSavedAt, setCompoundingSavedAt] = useState<number | null>(null);
+  const [alertsSavedAt, setAlertsSavedAt] = useState<number | null>(null);
   useEffect(() => {
     if (compoundingSavedAt === null) return;
     const t = setTimeout(() => setCompoundingSavedAt(null), 1500);
     return () => clearTimeout(t);
   }, [compoundingSavedAt]);
+  useEffect(() => {
+    if (alertsSavedAt === null) return;
+    const t = setTimeout(() => setAlertsSavedAt(null), 1500);
+    return () => clearTimeout(t);
+  }, [alertsSavedAt]);
   const positionsContentRef = useRef<HTMLDivElement>(null);
   const settingsContentRef = useRef<HTMLDivElement>(null);
 
@@ -543,23 +587,7 @@ function LiveMode({ instanceId }: { instanceId: string }) {
           >
             <span onClick={() => setSettingsOpen(v => !v)} style={{ flex: 1, fontSize: 9, color: "var(--t3)", letterSpacing: "0.12em", fontWeight: 700, textTransform: "uppercase" }}>SETTINGS</span>
             <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-              {settingsOpen && !editing && (
-                <button onClick={e => { e.stopPropagation(); setEditing(true); setEditAllocation(String(inst.allocation ?? 0)); setEditAlerts(inst.alerts); }}
-                  style={{ background: "transparent", border: "none", color: "var(--t2)", fontSize: 9, cursor: "pointer", padding: 0 }}>Edit</button>
-              )}
-              {settingsOpen && editing && (
-                <>
-                  {(() => {
-                    const val = parseInt(editAllocation) || 0;
-                    const valid = val > 0 && val <= editMaxAllocation;
-                    return <button onClick={async e => { e.stopPropagation(); if (valid) { await allocatorApi.updateAllocation(inst.id, { capital_usd: val }).catch(() => {}); updateInstance(inst.id, { allocation: val, alerts: editAlerts }); setEditing(false); } else { updateInstance(inst.id, { alerts: editAlerts }); setEditing(false); } }}
-                      style={{ background: "transparent", border: "none", color: valid ? "var(--green)" : "var(--t2)", fontSize: 9, cursor: valid ? "pointer" : "not-allowed", padding: 0, opacity: valid ? 1 : 0.4 }}>Save</button>;
-                  })()}
-                  <button onClick={e => { e.stopPropagation(); setEditing(false); }}
-                    style={{ background: "transparent", border: "none", color: "var(--t3)", fontSize: 9, cursor: "pointer", padding: 0 }}>Cancel</button>
-                </>
-              )}
-              <span onClick={() => setSettingsOpen(v => !v)} style={{ fontSize: 10, color: "var(--t2)", transition: "transform 0.2s ease", display: "inline-block", transform: settingsOpen ? "rotate(0deg)" : "rotate(-90deg)" }}>{"\u25BC"}</span>
+<span onClick={() => setSettingsOpen(v => !v)} style={{ fontSize: 10, color: "var(--t2)", transition: "transform 0.2s ease", display: "inline-block", transform: settingsOpen ? "rotate(0deg)" : "rotate(-90deg)" }}>{"\u25BC"}</span>
             </div>
           </div>
           <div ref={settingsContentRef} style={{
@@ -567,112 +595,190 @@ function LiveMode({ instanceId }: { instanceId: string }) {
             height: settingsOpen ? "auto" : 0,
             transition: "height 0.2s ease",
           }}>
-            <div style={{ padding: "16px 18px" }}>
-              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr 1fr", gap: 14, marginBottom: 16 }}>
-                {/* USD Allocation */}
-                <div>
-                  <div style={{ fontSize: 9, color: "var(--t3)", letterSpacing: "0.12em", fontWeight: 700, textTransform: "uppercase", marginBottom: 6 }}>USD ALLOCATION</div>
-                  {editing ? (
-                    <>
-                    <input type="text"
-                      value={editAllocation}
-                      onChange={e => {
-                        const raw = e.target.value.replace(/[^0-9]/g, "");
-                        const num = parseInt(raw) || 0;
-                        if (num > editMaxAllocation) return;
-                        setEditAllocation(raw);
-                      }}
-                      autoFocus
-                      style={{ width: "100%", background: "var(--bg3)", border: "1px solid var(--line)", borderRadius: 3, padding: "8px 10px", color: "var(--t1)", fontSize: 10, outline: "none" }}
-                      onFocus={e => (e.target.style.borderColor = "var(--green)")}
-                      onBlur={e => (e.target.style.borderColor = "var(--line)")} />
-                    <div style={{ fontSize: 9, color: "var(--t3)", marginTop: 3 }}>Max: ${editMaxAllocation.toLocaleString("en-US")}</div>
-                    </>
-                  ) : (
-                    <div style={{ fontSize: 10, color: "var(--t1)", padding: "8px 0" }}>${(inst.allocation ?? 0).toLocaleString("en-US")}</div>
-                  )}
-                </div>
-                {/* Exchange — always read-only */}
-                <div>
-                  <div style={{ fontSize: 9, color: "var(--t3)", letterSpacing: "0.12em", fontWeight: 700, textTransform: "uppercase", marginBottom: 6 }}>EXCHANGE</div>
-                  <div style={{ fontSize: 10, color: "var(--t1)", padding: "8px 0" }}>{inst.exchangeName}</div>
-                </div>
-                {/* Strategy — always read-only */}
-                <div>
-                  <div style={{ fontSize: 9, color: "var(--t3)", letterSpacing: "0.12em", fontWeight: 700, textTransform: "uppercase", marginBottom: 6 }}>STRATEGY</div>
-                  <div style={{ fontSize: 10, color: "var(--t1)", padding: "8px 0" }}>{inst.strategyName}</div>
-                </div>
-                {/* Alerts */}
-                <div>
-                  <div style={{ fontSize: 9, color: "var(--t3)", letterSpacing: "0.12em", fontWeight: 700, textTransform: "uppercase", marginBottom: 6 }}>ALERTS</div>
-                  {editing ? (
-                    <div style={{ padding: "6px 0" }}>
-                      <Toggle on={editAlerts} onColor="var(--green)" offColor="var(--t2)" onToggle={() => setEditAlerts(v => !v)} label={editAlerts ? "On" : "Off"} />
+            <div style={{ padding: "4px 18px 16px" }}>
+              {/* ── Editable config ─────────────────────────────────── */}
+
+              {/* USD Allocation */}
+              <SettingsRow
+                label="USD ALLOCATION"
+                control={
+                  editing ? (
+                    <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                      <input type="text"
+                        value={editAllocation}
+                        onChange={e => {
+                          const raw = e.target.value.replace(/[^0-9]/g, "");
+                          const num = parseInt(raw) || 0;
+                          if (num > editMaxAllocation) return;
+                          setEditAllocation(raw);
+                        }}
+                        autoFocus
+                        style={{ width: 120, background: "var(--bg3)", border: "1px solid var(--line)", borderRadius: 3, padding: "6px 10px", color: "var(--t1)", fontSize: 10, outline: "none" }}
+                        onFocus={e => (e.target.style.borderColor = "var(--green)")}
+                        onBlur={e => (e.target.style.borderColor = "var(--line)")} />
+                      {(() => {
+                        const val = parseInt(editAllocation) || 0;
+                        const valid = val > 0 && val <= editMaxAllocation;
+                        return (
+                          <>
+                            <button onClick={async () => {
+                              if (!valid) return;
+                              if (isLive && !capitalEditConfirm) { setCapitalEditConfirm(true); return; }
+                              await allocatorApi.updateAllocation(inst.id, { capital_usd: val }).catch(() => {});
+                              updateInstance(inst.id, { allocation: val });
+                              setEditing(false); setCapitalEditConfirm(false);
+                            }}
+                              style={{ background: "transparent", border: "none", color: valid ? (isLive && !capitalEditConfirm ? "var(--amber)" : "var(--green)") : "var(--t3)", fontSize: 9, cursor: valid ? "pointer" : "not-allowed", padding: 0, opacity: valid ? 1 : 0.4, fontWeight: 700, letterSpacing: "0.08em", textTransform: "uppercase" }}>
+                              {isLive && !capitalEditConfirm ? "Update anyway?" : "Save"}
+                            </button>
+                            <button onClick={() => { setEditing(false); setCapitalEditConfirm(false); }}
+                              style={{ background: "transparent", border: "none", color: "var(--t3)", fontSize: 9, cursor: "pointer", padding: 0, fontWeight: 700, letterSpacing: "0.08em", textTransform: "uppercase" }}>Cancel</button>
+                          </>
+                        );
+                      })()}
+                      <span style={{ fontSize: 9, color: "var(--t3)" }}>Max ${editMaxAllocation.toLocaleString("en-US")}</span>
                     </div>
                   ) : (
-                    <div style={{ fontSize: 10, color: "var(--t1)", padding: "8px 0" }}>{inst.alerts ? "On" : "Off"}</div>
-                  )}
-                </div>
-                {/* Compounding — always interactive, auto-saves on change */}
-                <div>
-                  <div style={{ fontSize: 9, color: "var(--t3)", letterSpacing: "0.12em", fontWeight: 700, textTransform: "uppercase", marginBottom: 6, display: "flex", alignItems: "center", gap: 6 }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+                      <span style={{ fontSize: 11, color: "var(--t1)" }}>${(inst.allocation ?? 0).toLocaleString("en-US")}</span>
+                      <button
+                        onClick={() => { setEditing(true); setEditAllocation(String(inst.allocation ?? 0)); setCapitalEditConfirm(false); }}
+                        onMouseEnter={e => { e.currentTarget.style.color = "var(--t1)"; }}
+                        onMouseLeave={e => { e.currentTarget.style.color = "var(--t3)"; }}
+                        style={{ background: "transparent", border: "none", color: "var(--t3)", fontSize: 9, cursor: "pointer", padding: 0, fontWeight: 700, letterSpacing: "0.08em", textTransform: "uppercase", transition: "color 0.15s" }}>Edit</button>
+                    </div>
+                  )
+                }
+              />
+
+              {/* Compounding — segmented pill, auto-saves on click */}
+              <SettingsRow
+                label={
+                  <span style={{ display: "flex", alignItems: "center", gap: 6 }}>
                     <span>COMPOUNDING</span>
                     {compoundingSavedAt !== null && (
                       <span style={{ color: "var(--green)", fontSize: 9, letterSpacing: 0, textTransform: "none", opacity: 0.9 }}>✓ saved</span>
                     )}
+                  </span>
+                }
+                control={
+                  <div>
+                    <div style={{ display: "inline-flex", gap: 4 }}>
+                      {(["compound", "fixed"] as const).map((mode) => {
+                        const active = inst.compoundingMode === mode;
+                        return (
+                          <button
+                            key={mode}
+                            type="button"
+                            onClick={async () => {
+                              if (active) return;
+                              const prev = inst.compoundingMode;
+                              updateInstance(inst.id, { compoundingMode: mode });
+                              try {
+                                await allocatorApi.updateAllocation(inst.id, { compounding_mode: mode });
+                                setCompoundingSavedAt(Date.now());
+                              } catch {
+                                updateInstance(inst.id, { compoundingMode: prev });
+                              }
+                            }}
+                            style={{
+                              padding: "5px 14px",
+                              fontSize: 9,
+                              fontWeight: 700,
+                              letterSpacing: "0.08em",
+                              textTransform: "uppercase",
+                              background: active ? "var(--green-dim)" : "transparent",
+                              color: active ? "var(--green)" : "var(--t2)",
+                              border: "1px solid " + (active ? "var(--green-mid)" : "var(--line)"),
+                              borderRadius: 3,
+                              cursor: active ? "default" : "pointer",
+                              transition: "background 0.15s, color 0.15s, border-color 0.15s",
+                            }}
+                            onMouseEnter={(e) => { if (!active) e.currentTarget.style.color = "var(--t1)"; }}
+                            onMouseLeave={(e) => { if (!active) e.currentTarget.style.color = "var(--t2)"; }}
+                          >
+                            {mode}
+                          </button>
+                        );
+                      })}
+                    </div>
+                    <div style={{ fontSize: 9, color: "var(--t3)", marginTop: 6, lineHeight: 1.5, maxWidth: 520 }}>
+                      {inst.compoundingMode === "compound"
+                        ? "Next session's capital follows your wallet equity at session close."
+                        : "Allocation stays constant. Profits and losses accumulate in your wallet as idle capital."}
+                    </div>
                   </div>
-                  <div style={{ display: "flex", gap: 4, padding: "4px 0" }}>
-                    {(["compound", "fixed"] as const).map((mode) => {
-                      const active = inst.compoundingMode === mode;
+                }
+              />
+
+              {/* Alerts */}
+              <SettingsRow
+                label={
+                  <span style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                    <span>ALERTS</span>
+                    {alertsSavedAt !== null && (
+                      <span style={{ color: "var(--green)", fontSize: 9, letterSpacing: 0, textTransform: "none", opacity: 0.9 }}>✓ saved</span>
+                    )}
+                  </span>
+                }
+                control={
+                  <div style={{ display: "inline-flex", gap: 4 }}>
+                    {([false, true] as const).map((val) => {
+                      const active = inst.alerts === val;
+                      const label = val ? "On" : "Off";
                       return (
                         <button
-                          key={mode}
+                          key={label}
                           type="button"
-                          onClick={async (e) => {
-                            e.stopPropagation();
+                          onClick={() => {
                             if (active) return;
-                            // Optimistic update; roll back on failure.
-                            const prev = inst.compoundingMode;
-                            updateInstance(inst.id, { compoundingMode: mode });
-                            try {
-                              await allocatorApi.updateAllocation(inst.id, { compounding_mode: mode });
-                              setCompoundingSavedAt(Date.now());
-                            } catch {
-                              updateInstance(inst.id, { compoundingMode: prev });
-                            }
+                            updateInstance(inst.id, { alerts: val });
+                            setAlertsSavedAt(Date.now());
                           }}
                           style={{
-                            flex: 1,
-                            padding: "6px 8px",
+                            padding: "5px 14px",
                             fontSize: 9,
                             fontWeight: 700,
                             letterSpacing: "0.08em",
                             textTransform: "uppercase",
-                            background: active ? "var(--bg4)" : "transparent",
-                            color: active ? "var(--t0)" : "var(--t2)",
-                            border: "1px solid var(--line)",
+                            background: active ? "var(--green-dim)" : "transparent",
+                            color: active ? "var(--green)" : "var(--t2)",
+                            border: "1px solid " + (active ? "var(--green-mid)" : "var(--line)"),
                             borderRadius: 3,
                             cursor: active ? "default" : "pointer",
-                            transition: "background 0.15s, color 0.15s",
+                            transition: "background 0.15s, color 0.15s, border-color 0.15s",
                           }}
                           onMouseEnter={(e) => { if (!active) e.currentTarget.style.color = "var(--t1)"; }}
                           onMouseLeave={(e) => { if (!active) e.currentTarget.style.color = "var(--t2)"; }}
                         >
-                          {mode}
+                          {label}
                         </button>
                       );
                     })}
                   </div>
-                  <div style={{ fontSize: 9, color: "var(--t3)", marginTop: 4, lineHeight: 1.4 }}>
-                    {inst.compoundingMode === "compound"
-                      ? "Next session's capital follows wallet equity at session close."
-                      : "Allocation stays constant; profits accumulate in wallet as idle capital."}
-                  </div>
-                </div>
-              </div>
+                }
+              />
+
+              {/* ── Read-only identity (divider above) ────────────── */}
+              <div style={{ borderTop: "0.5px solid var(--line)", margin: "14px 0" }} />
+
+              <SettingsRow
+                label="EXCHANGE"
+                readOnly
+                control={
+                  <span style={{ fontSize: 11, color: "var(--t1)" }}>{inst.exchangeName}</span>
+                }
+              />
+              <SettingsRow
+                label="STRATEGY"
+                readOnly
+                control={
+                  <span style={{ fontSize: 11, color: "var(--t1)" }}>{inst.strategyName}</span>
+                }
+              />
 
               {/* Remove trader */}
-              <div style={{ borderTop: "0.5px solid var(--line)", paddingTop: 12, display: "flex", justifyContent: "flex-end" }}>
+              <div style={{ borderTop: "0.5px solid var(--line)", marginTop: 14, paddingTop: 12, display: "flex", justifyContent: "flex-end" }}>
                 {!confirmRemoveTrader ? (
                   <button
                     onClick={() => setConfirmRemoveTrader(true)}
