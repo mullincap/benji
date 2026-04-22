@@ -30,6 +30,7 @@ import hmac
 import base64
 import hashlib
 import logging
+import datetime
 from decimal import Decimal
 from typing import Any
 from uuid import uuid4
@@ -1527,24 +1528,40 @@ def account_balance_series(
 def trader_pnl(allocation_id: str, user_id: str = Depends(get_current_user), cur=Depends(get_cursor)) -> dict[str, Any]:
     """Return live P&L summary for an allocation. Verifies ownership.
 
+    Baselines are decoupled from allocation.capital_usd so mid-session or
+    mid-day allocation-size edits don't shift a computed P&L value — the
+    user's allocator configuration is not a trading outcome.
+
     Sources:
       - equity_usd        : latest row in user_mgmt.exchange_snapshots
-                            for this allocation's connection
-      - session_pnl_usd   : equity_usd - session_start_equity
+                            for this allocation's connection.
+      - session_pnl_usd   : equity_usd - session_start_equity.
+                            Only populated when runtime_state.phase='active'
+                            AND runtime_state.date == today UTC. Between
+                            sessions the field returns null (frontend
+                            renders em-dash) — "session" is defined by the
+                            trader's daily loop, not by allocation edits.
       - session_start     : runtime_state.session_start_equity_usdt
-                            (populated by the trader's monitoring loop);
-                            falls back to the latest exchange_snapshot at
-                            or before today's 06:30 UTC if runtime_state
-                            hasn't captured it yet.
-      - total_pnl_usd     : equity_usd - capital_usd (cumulative since
-                            allocation creation)
+                            (written by the trader's monitoring loop at
+                            session open); fallback chain picks the
+                            latest pre-06:30 UTC snapshot only when
+                            runtime_state hasn't captured it yet.
+      - total_pnl_usd     : equity_usd - initial_equity_usd.
+                            initial_equity_usd = earliest exchange_snapshot
+                            for this connection at or after the allocation's
+                            created_at (immutable once the first snapshot
+                            lands). Falls back to capital_usd only for
+                            brand-new allocations with no snapshot history.
 
-    Returns None for session_pnl / session_return_pct when no baseline is
-    available (e.g. fresh allocation with no snapshots yet); frontend
-    should render an em-dash in that case.
+    Trade-off: total_pnl baselines on WALLET equity, which may include
+    other allocations or idle balance on the same connection. Still
+    immutable under allocation.capital_usd edits (the target of this fix)
+    and good enough until the Session E+ capital_events table ships — see
+    docs/open_work_list.md.
     """
     cur.execute("""
-        SELECT capital_usd, user_id, connection_id, runtime_state
+        SELECT capital_usd, user_id, connection_id, runtime_state,
+               created_at
         FROM user_mgmt.allocations
         WHERE allocation_id = %s::uuid
     """, (allocation_id,))
@@ -1557,6 +1574,7 @@ def trader_pnl(allocation_id: str, user_id: str = Depends(get_current_user), cur
     capital = float(alloc["capital_usd"] or 0)
     connection_id = alloc["connection_id"]
     runtime_state = alloc["runtime_state"] or {}
+    created_at = alloc["created_at"]
 
     # Current equity: latest exchange_snapshot for this connection.
     cur.execute("""
@@ -1571,42 +1589,74 @@ def trader_pnl(allocation_id: str, user_id: str = Depends(get_current_user), cur
     latest_snap = cur.fetchone()
     equity = float(latest_snap["total_equity_usd"]) if latest_snap else capital
 
-    # Session-start baseline: prefer runtime_state (written per bar by the
-    # trader's monitoring loop); fall back to today's pre-session snapshot.
-    session_start = runtime_state.get("session_start_equity_usdt")
-    try:
-        session_start = float(session_start) if session_start is not None else None
-    except (TypeError, ValueError):
-        session_start = None
+    # ── Session P&L ─────────────────────────────────────────────────────────
+    # Only meaningful during an active session. Between sessions (post-close
+    # at 23:55 UTC through pre-open at 06:35 UTC next day), there's no
+    # session to measure and the previous session's P&L has already been
+    # persisted via allocation_returns. Returning null here prevents the
+    # chart/card from displaying a stale or misleading number.
+    today_utc = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d")
+    session_phase = runtime_state.get("phase")
+    session_date = runtime_state.get("date")
+    session_active = session_phase == "active" and session_date == today_utc
 
-    if session_start is None:
-        # Same helper-equivalent query as trader_blofin.py uses to rescue
-        # a crashed-before-first-bar baseline. Session opens at 06:35 UTC,
-        # so the latest snapshot <= 06:30 UTC is the pre-positions tick.
+    session_start: float | None = None
+    if session_active:
+        raw = runtime_state.get("session_start_equity_usdt")
+        try:
+            session_start = float(raw) if raw is not None else None
+        except (TypeError, ValueError):
+            session_start = None
+
+        if session_start is None:
+            # Rescue path: if the trader crashed before first-bar write but
+            # session is nominally active, use the latest pre-06:30 snapshot.
+            cur.execute("""
+                SELECT total_equity_usd
+                FROM user_mgmt.exchange_snapshots
+                WHERE connection_id = %s::uuid
+                  AND snapshot_at >= date_trunc('day', NOW() AT TIME ZONE 'UTC')
+                  AND snapshot_at <= date_trunc('day', NOW() AT TIME ZONE 'UTC')
+                                     + INTERVAL '6 hours 30 minutes'
+                  AND fetch_ok = TRUE
+                  AND total_equity_usd IS NOT NULL
+                ORDER BY snapshot_at DESC
+                LIMIT 1
+            """, (connection_id,))
+            baseline_row = cur.fetchone()
+            if baseline_row:
+                session_start = float(baseline_row["total_equity_usd"])
+
+    session_pnl_usd = None
+    session_return_pct = None
+    if session_active and session_start is not None and session_start > 0:
+        session_pnl_usd = equity - session_start
+        session_return_pct = session_pnl_usd / session_start * 100
+
+    # ── Total P&L ───────────────────────────────────────────────────────────
+    # Baseline = earliest exchange_snapshot for this connection at or after
+    # the allocation's created_at. Immutable across allocation.capital_usd
+    # edits (the bug this fix targets). Falls back to capital_usd only for
+    # brand-new allocations that haven't captured any snapshot yet.
+    initial_equity = None
+    if created_at is not None:
         cur.execute("""
             SELECT total_equity_usd
             FROM user_mgmt.exchange_snapshots
             WHERE connection_id = %s::uuid
-              AND snapshot_at >= date_trunc('day', NOW() AT TIME ZONE 'UTC')
-              AND snapshot_at <= date_trunc('day', NOW() AT TIME ZONE 'UTC')
-                                 + INTERVAL '6 hours 30 minutes'
+              AND snapshot_at >= %s
               AND fetch_ok = TRUE
               AND total_equity_usd IS NOT NULL
-            ORDER BY snapshot_at DESC
+            ORDER BY snapshot_at ASC
             LIMIT 1
-        """, (connection_id,))
-        baseline_row = cur.fetchone()
-        if baseline_row:
-            session_start = float(baseline_row["total_equity_usd"])
+        """, (connection_id, created_at))
+        initial_row = cur.fetchone()
+        if initial_row:
+            initial_equity = float(initial_row["total_equity_usd"])
 
-    session_pnl_usd = None
-    session_return_pct = None
-    if session_start is not None and session_start > 0:
-        session_pnl_usd = equity - session_start
-        session_return_pct = session_pnl_usd / session_start * 100
-
-    total_pnl_usd = equity - capital
-    total_return_pct = (total_pnl_usd / capital * 100) if capital > 0 else 0.0
+    total_baseline = initial_equity if initial_equity is not None else capital
+    total_pnl_usd = equity - total_baseline
+    total_return_pct = (total_pnl_usd / total_baseline * 100) if total_baseline > 0 else 0.0
 
     return {
         "allocation_id": allocation_id,
@@ -1615,6 +1665,7 @@ def trader_pnl(allocation_id: str, user_id: str = Depends(get_current_user), cur
         "session_start_equity_usd": round(session_start, 2) if session_start is not None else None,
         "session_pnl_usd": round(session_pnl_usd, 2) if session_pnl_usd is not None else None,
         "session_return_pct": round(session_return_pct, 4) if session_return_pct is not None else None,
+        "initial_equity_usd": round(initial_equity, 2) if initial_equity is not None else None,
         "total_pnl_usd": round(total_pnl_usd, 2),
         "total_return_pct": round(total_return_pct, 4),
     }

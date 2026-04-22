@@ -159,6 +159,16 @@ Scope estimate: ~80-120 LOC (schema + writer + 3-4 query updates in
 `snapshot_at < <transfer completion time>` for affected connections)
 in the interim.
 
+**Supersession note** (2026-04-22): a tactical fix in
+`/api/allocator/trader/{id}/pnl` now baselines Session P&L and Total
+P&L against immutable sources instead of `allocation.capital_usd`
+(Session: `runtime_state.session_start_equity_usdt` during active
+sessions only; Total: earliest `exchange_snapshot` at/after
+`allocation.created_at`). Stops the most common mid-session allocation
+edit from shifting displayed P&L. The full capital_events table
+subsumes this — once it ships, both formulas should migrate to use
+`max(capital_event_ts, session_start)` as the baseline reference.
+
 ## Session F+ follow-up: exit-fill reconcile reliability + size-mismatch visibility
 
 Triggered while diagnosing the 2026-04-21 allocation_returns null-telemetry
