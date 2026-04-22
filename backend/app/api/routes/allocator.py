@@ -498,6 +498,73 @@ INSERT_SQL = """
 """
 
 
+def _enrich_positions_from_runtime_state(
+    cur, connection_id: str, positions: list[dict],
+) -> list[dict]:
+    """Fill in entry_price / leverage / UPL from the trader's runtime_state
+    when the exchange read path couldn't supply them (Binance keys without
+    /fapi read permission fall into this case — Binance returns -2015 on
+    /fapi/v2/account and /fapi/v2/positionRisk, so we only see cross-margin
+    userAssets with no entry prices).
+
+    Runtime_state is authoritative for the strategy's own positions because
+    the trader persists fill_entry_price straight from the order-confirm
+    response. Non-strategy holdings (dust / pre-existing coins not opened
+    by any active allocation) keep whatever defaults the fetch path set.
+    """
+    cur.execute(
+        """
+        SELECT runtime_state
+        FROM user_mgmt.allocations
+        WHERE connection_id = %s AND status = 'active'
+          AND runtime_state IS NOT NULL
+        """,
+        (connection_id,),
+    )
+    entry_by_sym: dict[str, dict] = {}
+    for row in cur.fetchall():
+        rs = row["runtime_state"] or {}
+        for p in rs.get("positions") or []:
+            inst_id = p.get("inst_id") or ""
+            fill = p.get("fill_entry_price")
+            if not inst_id or fill is None:
+                continue
+            # runtime_state uses "PENGU-USDT"; Binance snapshot uses "PENGUUSDT".
+            sym_nodash = inst_id.replace("-", "")
+            try:
+                entry_by_sym[sym_nodash] = {
+                    "entry":       float(fill),
+                    "leverage":    int(p.get("lev_int") or 0),
+                    "margin_mode": p.get("marginMode") or "cross",
+                }
+            except (TypeError, ValueError):
+                continue
+
+    if not entry_by_sym:
+        return positions
+
+    enriched: list[dict] = []
+    for pos in positions:
+        sym = pos.get("symbol", "")
+        rs = entry_by_sym.get(sym)
+        if rs and not pos.get("entry_price"):
+            pos = dict(pos)
+            pos["entry_price"] = rs["entry"]
+            if not pos.get("leverage"):
+                pos["leverage"] = rs["leverage"]
+            if pos.get("margin_mode") in (None, "", "cross"):
+                pos["margin_mode"] = rs["margin_mode"]
+            # Compute UPL from mark we already have + entry we just merged.
+            mark = pos.get("mark_price") or 0
+            size = pos.get("size") or 0
+            side = pos.get("side") or "long"
+            if mark and rs["entry"] and size:
+                sign = 1 if side == "long" else -1
+                pos["unrealized_pnl"] = (mark - rs["entry"]) * size * sign
+        enriched.append(pos)
+    return enriched
+
+
 def refresh_snapshots(cur, *, user_id: str | None = None) -> None:
     """
     Fetch live data from active exchanges and write fresh snapshot rows.
@@ -553,6 +620,14 @@ def refresh_snapshots(cur, *, user_id: str | None = None) -> None:
 
                 data = _fetch_live_binance(
                     api_key=api_key, api_secret=api_secret,
+                )
+                # Binance cross-margin has no per-symbol entry price, and keys
+                # with trade-only perms can't hit /fapi/v2/positionRisk either.
+                # The trader's runtime_state persists fill_entry_price from the
+                # order confirm — use that as the authoritative source for
+                # positions owned by this account's active allocations.
+                data["positions"] = _enrich_positions_from_runtime_state(
+                    cur, str(cid), data["positions"],
                 )
             else:
                 log.warning(f"Unsupported exchange '{exchange}' for live fetch — skipping")
