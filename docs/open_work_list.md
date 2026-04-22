@@ -159,6 +159,31 @@ Scope estimate: ~80-120 LOC (schema + writer + 3-4 query updates in
 `snapshot_at < <transfer completion time>` for affected connections)
 in the interim.
 
+## Session F+ follow-up: exit-fill reconcile reliability + size-mismatch visibility
+
+Triggered while diagnosing the 2026-04-21 allocation_returns null-telemetry
+bug (fixed by reordering `_log_allocation_return()` to run AFTER
+`reconcile_exit_prices()`). Two orthogonal issues remain:
+
+**1. Exit-fill reconcile race** — `reconcile_exit_prices()` emits `"exit fill
+price not found on blofin -- leaving null"` for a fraction of symbols each
+session (3 of 7 on 2026-04-21: BAS, TRADOOR, AAVE). The new WARN in
+`_log_allocation_return()` will surface the frequency; if it fires daily,
+the root cause is worth chasing. Likely: a narrow window between the close
+order returning and BloFin's fill-history API indexing the fill. Potential
+fixes: retry with backoff, or fallback to `close-position`'s response body
+(which carries fill price in its ack). Partial data is structurally honest
+(null-safe _mean_slip ignores nulls) so this isn't blocking.
+
+**2. Size mismatch between state and BloFin** — session logs show
+consistent state/exchange disagreement at close (`state=760 BloFin=842.0`
+etc., 2026-04-21 log lines 413-419). Trader already recovers by closing the
+BloFin size rather than the state size, so accounting stays correct. But
+the drift implies state-write misses somewhere mid-session — could mean
+partial fills that never reconcile, or orders placed outside the trader's
+visibility. Not urgent; flag fires as WARN already; revisit if it grows
+beyond cosmetic.
+
 ## Future (larger scope, not scheduled)
 
 - Generic strategy executor dispatch (today's `trader-blofin.py` hardcodes Overlap logic)

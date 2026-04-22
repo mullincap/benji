@@ -2417,39 +2417,14 @@ def _run_monitoring_loop(today, today_date, api: ExchangeAdapter, inst_ids,
         f"lev={eff_lev:.3f}x  net~{net_pct if not math.isnan(net_pct) else 'nan':+.3f}%"
     )
 
+    # Master path logs the daily return here. Allocation path defers its
+    # _log_allocation_return() call until AFTER reconcile_exit_prices runs
+    # (below, in the allocation-mode close block) so the writer captures
+    # post-reconcile exit_slippage_bps. Prior ordering wrote the row before
+    # reconcile, leaving avg_exit_slip_bps NULL for every live session.
     if not math.isnan(final_return_1x):
         if allocation_id is None:
             log_daily_return(net_pct, exit_reason, session_date=today, eff_lev=eff_lev)
-        else:
-            # Fetch post-exit equity for the performance_daily chart row.
-            # Best-effort: on fetch failure we still record allocation_returns
-            # (primary accounting) but skip the chart row for this session.
-            post_exit_equity_usd = None
-            if not dry_run:
-                try:
-                    post_exit_equity_usd = get_account_balance_usdt(api)
-                except Exception as e:
-                    log.warning(
-                        f"{log_prefix}Could not fetch post-exit equity for "
-                        f"performance_daily: {e}"
-                    )
-            # Mirror of log_daily_return — applies same fee + funding drag internally.
-            # Pass execution-quality telemetry so the writer persists fill_rate,
-            # slip_bps, retries, signal_count, conviction roi_x. positions at this
-            # point have both entry_slippage_bps + exit_slippage_bps reconciled.
-            _log_allocation_return(
-                allocation_id, today,
-                net_return_pct=net_pct,
-                exit_reason=exit_reason,
-                effective_leverage=eff_lev,
-                capital_deployed_usd=float(capital_deployed_usd),
-                config=cfg,
-                equity_usd=post_exit_equity_usd,
-                signal_count=signal_count,
-                conviction_roi_x=conviction_roi_x,
-                fill_report=fill_report,
-                positions=positions,
-            )
     else:
         log.warning(f"{log_prefix}Return not logged (NaN -- price unavailable at close)")
 
@@ -2579,14 +2554,76 @@ def _run_monitoring_loop(today, today_date, api: ExchangeAdapter, inst_ids,
         })
     else:
         # ── Allocation-mode close ─────────────────────────────────────────
-        # Exit-price reconcile still fires (same data, different surface).
-        # No execution report. Session row + runtime_state closed via
-        # allocation-aware writers.
+        # Reconcile exit prices FIRST so _log_allocation_return() captures
+        # post-reconcile exit_slippage_bps. Previously the writer ran in the
+        # earlier return-logging block with un-reconciled positions, which
+        # persisted NULL slip/fill values every session.
         if not dry_run and est_exit_prices:
             try:
                 reconcile_exit_prices(api, positions, est_exit_prices)
             except Exception as e:
                 log.warning(f"{log_prefix}Exit-price reconcile failed: {e}")
+
+        # Now write allocation_returns with reconciled telemetry. Guarded by
+        # NaN-check (same as master's log_daily_return) and wrapped in a
+        # one-retry try/except so a transient DB hiccup doesn't drop the row.
+        # A WARN fires when positions are non-empty but slip is null — surfaces
+        # future reconcile misses before they become silent data gaps.
+        if not math.isnan(final_return_1x):
+            post_exit_equity_usd = None
+            if not dry_run:
+                try:
+                    post_exit_equity_usd = get_account_balance_usdt(api)
+                except Exception as e:
+                    log.warning(
+                        f"{log_prefix}Could not fetch post-exit equity for "
+                        f"performance_daily: {e}"
+                    )
+
+            # Telemetry completeness check — log a WARN if reconcile ran but
+            # exit_slippage_bps is missing on every non-dry-run position. That
+            # combination means the writer is about to persist NULL despite
+            # having the opportunity to capture real values.
+            if not dry_run and positions:
+                n_with_exit_slip = sum(
+                    1 for p in positions
+                    if p.get("exit_slippage_bps") is not None
+                )
+                if n_with_exit_slip == 0:
+                    log.warning(
+                        f"{log_prefix}Writer called with {len(positions)} positions but "
+                        f"zero have exit_slippage_bps — avg_exit_slip_bps will be NULL"
+                    )
+
+            last_err: Exception | None = None
+            for attempt in (1, 2):
+                try:
+                    _log_allocation_return(
+                        allocation_id, today,
+                        net_return_pct=net_pct,
+                        exit_reason=exit_reason,
+                        effective_leverage=eff_lev,
+                        capital_deployed_usd=float(capital_deployed_usd),
+                        config=cfg,
+                        equity_usd=post_exit_equity_usd,
+                        signal_count=signal_count,
+                        conviction_roi_x=conviction_roi_x,
+                        fill_report=fill_report,
+                        positions=positions,
+                    )
+                    last_err = None
+                    break
+                except Exception as e:
+                    last_err = e
+                    log.warning(
+                        f"{log_prefix}_log_allocation_return attempt {attempt}/2 failed: {e}"
+                    )
+            if last_err is not None:
+                log.error(
+                    f"{log_prefix}_log_allocation_return failed twice; "
+                    f"allocation_returns row will be incomplete until the "
+                    f"nightly backfill cron runs"
+                )
 
         _close_portfolio_session_for_allocation(
             session_id=session_id,
