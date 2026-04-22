@@ -152,7 +152,7 @@ export default function OverviewPage() {
 
         {/* Section label — always visible, outside blur */}
         <div style={{ fontSize: 9, fontWeight: 700, letterSpacing: "0.12em", color: "var(--t3)", textTransform: "uppercase", marginBottom: 16 }}>
-          OVERVIEW
+          CAPITAL
         </div>
 
         {loading && (
@@ -309,7 +309,7 @@ export default function OverviewPage() {
 
               {/* Treemap */}
               {activeInstances.length > 0 && (
-                <div style={{ display: "flex", gap: 4, height: 200, marginBottom: unlinkedInstances.length > 0 ? 10 : 0 }}>
+                <div style={{ display: "flex", gap: 4, height: 100, marginBottom: unlinkedInstances.length > 0 ? 10 : 0 }}>
                   {activeInstances.map(inst => {
                     const isLive = inst.status === "live";
                     const alloc = inst.allocation ?? 0;
