@@ -200,3 +200,36 @@ beyond cosmetic.
 - Manager module product work
 - Publish more strategy variants (operational via Simulator UI, not code)
 - Portfolios master NDJSON overlay — parallel to Execution tab's "Include master history" toggle. Reads `/root/benji/blofin_execution_reports/portfolios/*.ndjson`, aggregates per-session summaries from bar rows, merges into `/api/manager/portfolios` response. Deferred because `portfolio_sessions` table has 0 master rows today (host cron only writes DB on conviction-pass days, which are rare); 3+ years of master portfolio history lives exclusively in NDJSON files not surfaced by this endpoint. Scope: ~80-100 LOC backend (new file-reader + aggregator), frontend toggle component reuse from Execution tab. Session F+.
+
+### Session F+ — Simulator promote: strategy matching by string
+
+**Current** (`backend/app/api/routes/simulator.py:218-222`):
+
+```python
+cur.execute(
+    "SELECT strategy_id, name FROM audit.strategies WHERE display_name = %s",
+    (body.strategy_name,),
+)
+```
+
+**Bug:** if a strategy is renamed, re-promoting an old audit that still carries the old `display_name` doesn't match the renamed row — it creates a brand-new duplicate strategy row with the old name. The rename flow itself is fine (joins across allocator/trader/signals all use `strategy_id`); only the Simulator promote path is string-coupled.
+
+**Proposed fix:** extend `PromoteRequest` with an optional `strategy_id` field. When present, promote into that strategy directly. When absent, fall back to the existing `display_name` match (preserves the new-strategy-from-fresh-audit path).
+
+**Frontend:** Simulator Promote modal gains a `Pick existing strategy ▾` dropdown above the free-text name field. Dropdown queries `audit.strategies` live. Selecting a strategy sends `strategy_id`; typing a new name sends `null strategy_id + new name`.
+
+**Scope:** ~30 LOC backend (PromoteRequest + SELECT branch) + ~50 LOC frontend (dropdown + modal update).
+
+**Not urgent.** Edge case — admin-level re-promote flow only. Workaround if triggered: delete the duplicate `audit.strategies` row.
+
+**Bundled sub-item — rename confirmation M-count:** the rename modal toast currently shows only `N active allocations now reference '<new name>'`. The original plan also called for `M daily_signals` but was dropped from the initial ship because extending the rename endpoint would have required a backend redeploy inside the 06:00 UTC trader window. When this Session F+ item ships (which requires a backend redeploy anyway), extend `POST /api/allocator/strategies/{id}/rename` to also return:
+
+```sql
+SELECT COUNT(*) FROM user_mgmt.daily_signals
+ WHERE strategy_version_id IN (
+   SELECT strategy_version_id FROM audit.strategy_versions
+    WHERE strategy_id = %s
+ )
+```
+
+and plumb the count into the toast. ~5 LOC backend + ~3 LOC frontend.

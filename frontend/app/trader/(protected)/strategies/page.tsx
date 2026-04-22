@@ -446,17 +446,14 @@ function RenameStrategyModal({
           </div>
         )}
         <div style={{
-          fontSize: 9, color: "var(--t1)", lineHeight: 1.6,
-          background: "var(--amber-dim)", border: "1px solid var(--amber)",
+          fontSize: 9, color: "var(--t2)", lineHeight: 1.6,
+          background: "var(--bg3)", border: "1px solid var(--line)",
           borderRadius: 4, padding: "8px 10px", marginBottom: 16,
-          display: "flex", gap: 8, alignItems: "flex-start",
         }}>
-          <span style={{ color: "var(--amber)", flexShrink: 0, fontWeight: 700 }}>⚠</span>
-          <span>
-            Future Simulator re-promotes referencing the OLD label will create
-            a brand-new strategy rather than matching this one. Use the new
-            label in the Simulator going forward.
-          </span>
+          Renaming updates this strategy everywhere it&rsquo;s referenced
+          (allocations, signals, traders). Already-completed Simulator audits
+          retain the old name as historical metadata — this is expected and
+          doesn&rsquo;t affect anything.
         </div>
         <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
           <button
@@ -514,13 +511,24 @@ export default function StrategiesPage() {
     { strategyId: number; displayName: string } | null
   >(null);
   const [renameTarget, setRenameTarget] = useState<
-    { strategyId: number; currentDisplayName: string } | null
+    { strategyId: number; currentDisplayName: string; allocators: number } | null
+  >(null);
+  const [renameToast, setRenameToast] = useState<
+    { newName: string; allocators: number } | null
   >(null);
 
-  const handleRenameSuccess = useCallback(() => {
+  const handleRenameSuccess = useCallback((newDisplayName: string) => {
+    const allocators = renameTarget?.allocators ?? 0;
     setRenameTarget(null);
+    setRenameToast({ newName: newDisplayName, allocators });
     refresh();
-  }, [refresh]);
+  }, [refresh, renameTarget]);
+
+  useEffect(() => {
+    if (!renameToast) return;
+    const t = setTimeout(() => setRenameToast(null), 4500);
+    return () => clearTimeout(t);
+  }, [renameToast]);
 
   useEffect(() => {
     let cancelled = false;
@@ -729,7 +737,7 @@ export default function StrategiesPage() {
                     <AdminButtons
                       isPublished={effectivePublished}
                       busy={busy}
-                      onRename={() => setRenameTarget({ strategyId, currentDisplayName: cat.name })}
+                      onRename={() => setRenameTarget({ strategyId, currentDisplayName: cat.name, allocators: CAPACITY_DATA[type]?.allocators ?? 0 })}
                       onToggle={onAdminToggle}
                     />
                   )}
@@ -828,7 +836,7 @@ export default function StrategiesPage() {
                   <AdminButtons
                     isPublished={effectivePublished}
                     busy={busy}
-                    onRename={() => setRenameTarget({ strategyId, currentDisplayName: cat.name })}
+                    onRename={() => setRenameTarget({ strategyId, currentDisplayName: cat.name, allocators: CAPACITY_DATA[type]?.allocators ?? 0 })}
                     onToggle={onAdminToggle}
                   />
                 )}
@@ -921,6 +929,36 @@ export default function StrategiesPage() {
           onCancel={() => setConfirmTarget(null)}
           onConfirm={() => handleRetire(confirmTarget.strategyId)}
         />
+      )}
+      {renameToast && (
+        <div
+          role="status"
+          style={{
+            position: "fixed",
+            bottom: 24,
+            left: "50%",
+            transform: "translateX(-50%)",
+            background: "var(--bg2)",
+            border: "1px solid var(--green)",
+            color: "var(--t1)",
+            borderRadius: 4,
+            padding: "10px 16px",
+            fontSize: 10,
+            fontFamily: "var(--font-space-mono), Space Mono, monospace",
+            boxShadow: "0 4px 12px rgba(0,0,0,0.4)",
+            zIndex: 1100,
+            display: "flex",
+            gap: 10,
+            alignItems: "center",
+            maxWidth: "80vw",
+          }}
+        >
+          <span style={{ color: "var(--green)", fontWeight: 700 }}>✓</span>
+          <span>
+            Updated. {renameToast.allocators} active allocation{renameToast.allocators === 1 ? "" : "s"} now reference{" "}
+            <span style={{ color: "var(--t0)" }}>&lsquo;{renameToast.newName}&rsquo;</span>.
+          </span>
+        </div>
       )}
     </div>
   );
