@@ -517,13 +517,27 @@ def signals_strat_roi(
     """
     from collections import defaultdict
 
-    KILL_Y = 0.3
-    STRAT_LEVERAGE       = 1.33
-    STRAT_SL             = -6.0
-    STRAT_TSL            = -7.5
-    STRAT_EARLY_KILL_BAR = 35
-    STRAT_EARLY_KILL_Y   = 0.3
-    STRAT_EARLY_FILL_Y   = 9.0
+    # Constants mirror the BloFin allocation running Alpha Tail Guardrail -
+    # High lev. Values lifted from audit.strategy_versions.config so the
+    # strat_roi column on /indexer/signals rehydrates the same leverage +
+    # exit rules + fee model the live trader uses.
+    #
+    # Known gap: the live trader also scales l_high by a daily vol-boost
+    # (vol_lev_scaling, target_vol=0.02, max_boost=2.0, 30-day window),
+    # which here would require rolling historical strat returns + a DD
+    # regime filter. Without it strat_roi matches the "vol_lev off"
+    # Simulator run exactly. Enabling the dynamic boost is a follow-up
+    # change (~60 LOC); with it we'd match the actual eff_lev per day
+    # that live BloFin uses (today ≈ 2.95× vs. our 2.0×).
+    KILL_Y = 0.3                            # conviction gate at bar 6 (06:35 UTC)
+    STRAT_LEVERAGE             = 2.0        # was 1.33; config.l_high
+    STRAT_SL                   = -7.5       # was -6.0;  config.port_sl × 100
+    STRAT_TSL                  = -9.5       # was -7.5;  config.port_tsl × 100
+    STRAT_EARLY_KILL_BAR       = 35         # config.early_kill_x
+    STRAT_EARLY_KILL_Y         = 0.3        # config.early_kill_y × 100
+    STRAT_EARLY_FILL_Y         = 9.0        # config.early_fill_y × 100
+    TAKER_FEE_PCT_PER_LEV      = 0.08       # round-trip 0.04% × 2; config.taker_fee_pct × 100
+    FUNDING_DRAG_PCT_PER_LEV   = 0.02       # 2 windows/day; config.funding_rate_daily_pct × 100
 
     interval_str = f"{days} days"
 
@@ -666,8 +680,15 @@ def signals_strat_roi(
         if exit_ret is None:
             exit_ret = bar_returns[-1][1] if bar_returns else 0.0
 
+        # Apply leverage, then deduct round-trip taker fees + 2-window funding
+        # drag — both scaled by leverage to match the live trader's net-return
+        # accounting (trader_blofin._log_allocation_return / audit simulate).
+        # "Held to close" positions pay fees the same as any other exit;
+        # only the conviction no-entry path above is fee-free.
         leveraged_ret = exit_ret * STRAT_LEVERAGE
-        result[d] = {"return_pct": round(leveraged_ret, 4), "exit_reason": exit_reason}
+        fee_drag = (TAKER_FEE_PCT_PER_LEV + FUNDING_DRAG_PCT_PER_LEV) * STRAT_LEVERAGE
+        net_ret = leveraged_ret - fee_drag
+        result[d] = {"return_pct": round(net_ret, 4), "exit_reason": exit_reason}
 
     # Also mark sit-flat dates
     for r in sig_rows:
