@@ -278,7 +278,7 @@ function LiveMode({ instanceId }: { instanceId: string }) {
   const [syncedAgo, setSyncedAgo] = useState<string>("never synced");
   const [pnl, setPnl] = useState<ApiPnl | null>(null);
   const [positionsOpen, setPositionsOpen] = useState(true);
-  const [settingsOpen, setSettingsOpen] = useState(true);
+  const [settingsOpen, setSettingsOpen] = useState(false);
   const [editing, setEditing] = useState(false);
   const [editAllocation, setEditAllocation] = useState("");
   // Two-step confirmation when editing capital_usd during a live session —
