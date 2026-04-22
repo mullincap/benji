@@ -233,36 +233,43 @@ def _fetch_portfolio_context(cur) -> dict[str, Any]:
     wtd_pct = (wtd_dollar / total_aum_f * 100) if total_aum_f > 0 else 0.0
     mtd_pct = (mtd_dollar / total_aum_f * 100) if total_aum_f > 0 else 0.0
 
-    # Lifetime account-wide max drawdown, computed from daily-close wallet
-    # equity summed across connections. Not bound to the current session, so
-    # it stays meaningful when the session is inactive. USD magnitude is the
-    # peak-to-trough dollar loss that produced the worst percentage.
+    # Lifetime account-wide max drawdown, computed from 5-min bucketed wallet
+    # equity summed across connections. Intraday cadence is required so the
+    # metric captures peak-to-trough losses that happen WITHIN a session and
+    # recover before close — daily-close buckets would mask them entirely.
+    # USD magnitude is the dollar gap at the worst-percentage moment.
     connection_uuids = list({a["connection_id"] for a in allocations})
     max_dd = 0.0
     max_dd_usd = 0.0
     if connection_uuids:
         cur.execute("""
-            WITH daily_per_conn AS (
-              SELECT DISTINCT ON (connection_id, date_trunc('day', snapshot_at))
-                     connection_id,
-                     date_trunc('day', snapshot_at)::date AS day,
+            WITH bucketed AS (
+              SELECT connection_id,
+                     snapshot_at,
+                     to_timestamp(
+                       floor(extract(epoch from snapshot_at) / 300) * 300
+                     ) AS bucket,
                      total_equity_usd AS equity
               FROM user_mgmt.exchange_snapshots
               WHERE connection_id = ANY(%s::uuid[])
                 AND fetch_ok = TRUE
                 AND total_equity_usd IS NOT NULL
-              ORDER BY connection_id, date_trunc('day', snapshot_at),
-                       snapshot_at DESC
+            ),
+            latest_per_conn AS (
+              SELECT DISTINCT ON (connection_id, bucket)
+                     connection_id, bucket, equity
+              FROM bucketed
+              ORDER BY connection_id, bucket, snapshot_at DESC
             )
-            SELECT day, SUM(equity) AS total_equity
-            FROM daily_per_conn
-            GROUP BY day
-            ORDER BY day
+            SELECT bucket, SUM(equity) AS total_equity
+            FROM latest_per_conn
+            GROUP BY bucket
+            ORDER BY bucket
         """, (connection_uuids,))
-        daily_equity = [(r["day"], float(r["total_equity"])) for r in cur.fetchall()]
-        if daily_equity:
-            peak = daily_equity[0][1]
-            for _, eq in daily_equity:
+        intraday_equity_series = [float(r["total_equity"]) for r in cur.fetchall()]
+        if intraday_equity_series:
+            peak = intraday_equity_series[0]
+            for eq in intraday_equity_series:
                 peak = max(peak, eq)
                 if peak > 0:
                     dd_pct = (eq - peak) / peak * 100.0
