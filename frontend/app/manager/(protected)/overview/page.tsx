@@ -27,6 +27,20 @@ ChartJS.register(
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE || "";
 
+// Module-level cache for portfolio-series responses, keyed by range. Survives
+// across chart range toggles within a single page session so the bootstrap
+// fetch (range=ALL, used to derive the initial default range) doubles as the
+// first data fetch when the default resolves to ALL. Cleared on full reload.
+const seriesCache = new Map<TimeRange, unknown>();
+
+/** Derive the initial range-tab value from history length. */
+function pickDefaultRange(realDays: number | null | undefined): TimeRange {
+  const d = realDays ?? 0;
+  if (d < 7) return "1D";
+  if (d < 30) return "1W";
+  return "1M";
+}
+
 // ─── Types ──────────────────────────────────────────────────────────────────
 
 interface PerfDay {
@@ -171,7 +185,7 @@ function emptyCopyForRange(range: TimeRange, kind: "equity" | "returns"): string
   switch (range) {
     case "1D":  return kind === "equity"
       ? "No snapshots captured today yet."
-      : "Daily returns are a per-session metric — first bar appears after today's 23:55 UTC session close.";
+      : "Realized returns are a per-session metric — first bar appears after today's 23:55 UTC session close.";
     case "1W":  return `No ${unit} in the last 7 days yet.`;
     case "1M":  return `No ${unit} in the last 30 days yet.`;
     case "ALL": return `No ${unit} recorded yet.`;
@@ -296,11 +310,38 @@ function KpiCard({
 export default function OverviewPage() {
   const [data, setData] = useState<OverviewData | null>(null);
   const [error, setError] = useState<string | null>(null);
-  // Each chart owns its own range — they're independent controls.
-  const [equityRange, setEquityRange] = useState<TimeRange>("1M");
-  const [returnsRange, setReturnsRange] = useState<TimeRange>("1M");
+  // Each chart owns its own range after initial load — but both default to
+  // the same history-derived value on mount. null = bootstrap still in flight.
+  const [equityRange, setEquityRange] = useState<TimeRange | null>(null);
+  const [returnsRange, setReturnsRange] = useState<TimeRange | null>(null);
   const [equitySeries, setEquitySeries] = useState<PortfolioSeries | null>(null);
   const [returnsSeries, setReturnsSeries] = useState<PortfolioSeries | null>(null);
+
+  // Bootstrap: one-shot fetch against range=ALL to read real_days and pick
+  // the default tab. Result is cached so the first chart fetch for ALL is a
+  // hit (zero duplicate roundtrips when derived default is ALL or when the
+  // user clicks ALL afterwards). Bootstrap failure → default to 1M.
+  useEffect(() => {
+    let cancelled = false;
+    fetch(`${API_BASE}/api/manager/portfolio-series?range=ALL`, {
+      credentials: "include",
+    })
+      .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
+      .then((d: PortfolioSeries) => {
+        if (cancelled) return;
+        seriesCache.set("ALL", d);
+        const def = pickDefaultRange(d.real_days);
+        setEquityRange(def);
+        setReturnsRange(def === "1D" ? "1W" : def); // 1D disabled on returns chart
+      })
+      .catch((e) => {
+        if (cancelled) return;
+        console.error("portfolio-series bootstrap failed:", e);
+        setEquityRange("1M");
+        setReturnsRange("1M");
+      });
+    return () => { cancelled = true; };
+  }, []);
 
   const loadOverview = useCallback(() => {
     fetch(`${API_BASE}/api/allocator/snapshots/refresh`, {
@@ -321,26 +362,42 @@ export default function OverviewPage() {
   }, []);
 
   // Fetch series for each chart independently when its range changes.
-  // Daily Returns on 1D falls back to the server's empty response —
-  // render path shows a "not meaningful at intraday cadence" hint.
+  // Both effects short-circuit while the bootstrap is still in flight
+  // (range === null) and check the module cache before hitting the network,
+  // so the bootstrap's range=ALL response is reused when the default resolves
+  // to ALL or when the user later toggles to a previously-fetched range.
   useEffect(() => {
+    if (!equityRange) return;
+    const cached = seriesCache.get(equityRange) as PortfolioSeries | undefined;
+    if (cached) { setEquitySeries(cached); return; }
     let cancelled = false;
     fetch(`${API_BASE}/api/manager/portfolio-series?range=${equityRange}`, {
       credentials: "include",
     })
       .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
-      .then((d: PortfolioSeries) => { if (!cancelled) setEquitySeries(d); })
+      .then((d: PortfolioSeries) => {
+        if (cancelled) return;
+        seriesCache.set(equityRange, d);
+        setEquitySeries(d);
+      })
       .catch(() => { if (!cancelled) setEquitySeries(null); });
     return () => { cancelled = true; };
   }, [equityRange]);
 
   useEffect(() => {
+    if (!returnsRange) return;
+    const cached = seriesCache.get(returnsRange) as PortfolioSeries | undefined;
+    if (cached) { setReturnsSeries(cached); return; }
     let cancelled = false;
     fetch(`${API_BASE}/api/manager/portfolio-series?range=${returnsRange}`, {
       credentials: "include",
     })
       .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
-      .then((d: PortfolioSeries) => { if (!cancelled) setReturnsSeries(d); })
+      .then((d: PortfolioSeries) => {
+        if (cancelled) return;
+        seriesCache.set(returnsRange, d);
+        setReturnsSeries(d);
+      })
       .catch(() => { if (!cancelled) setReturnsSeries(null); });
     return () => { cancelled = true; };
   }, [returnsRange]);
@@ -366,7 +423,10 @@ export default function OverviewPage() {
     );
   }
 
-  if (!data) {
+  // Wait for both the overview payload AND the bootstrap range-derivation
+  // before rendering — otherwise we'd have to render RangeTabs with a
+  // placeholder value that would flicker to the real default a moment later.
+  if (!data || !equityRange || !returnsRange) {
     return (
       <div style={{
         padding: 20,
@@ -598,10 +658,11 @@ export default function OverviewPage() {
           }}
         >
           {/* Header: title + dynamic subtitle + range tabs.
-              1D is present but disabled — daily returns are a per-session
-              metric, one bar per UTC day, so an intraday view is not
-              meaningful. Keep the tab visible for affordance consistency
-              with the Equity chart but block clicks. */}
+              1D is present but disabled — realized returns are a per-session
+              metric (one bar per UTC day), so intraday 5-min equity deltas
+              would mislabel unrealized mark-to-market as realized P&L. Keep
+              the tab visible for affordance consistency with the Equity
+              chart, block clicks, and surface the reason via title tooltip. */}
           <div
             style={{
               display: "flex",
@@ -618,7 +679,7 @@ export default function OverviewPage() {
                 letterSpacing: "0.12em",
                 color: "var(--t3)",
                 textTransform: "uppercase",
-              }}>Daily Returns</span>
+              }}>Realized Returns</span>
               <span style={{ fontSize: 9, color: "var(--t3)", fontWeight: 400 }}>
                 {returnsSubtitle(returnsRange, returnsSeries)}
               </span>
@@ -627,6 +688,7 @@ export default function OverviewPage() {
               value={returnsRange}
               onChange={setReturnsRange}
               disabled={["1D"]}
+              disabledTitles={{ "1D": "Sessions close once per day. Use 1W+ for realized returns." }}
             />
           </div>
           {hasDailyData ? (

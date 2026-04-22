@@ -16,6 +16,7 @@ export function RangeTabs({
   onChange,
   ranges = ALL_RANGES,
   disabled,
+  disabledTitles,
 }: {
   value: TimeRange;
   onChange: (next: TimeRange) => void;
@@ -23,6 +24,8 @@ export function RangeTabs({
   ranges?: TimeRange[];
   /** Ranges that render greyed-out and are unclickable (e.g. "1D" on a daily-only chart). */
   disabled?: TimeRange[];
+  /** Native-tooltip text per disabled range; shown on hover to explain why. */
+  disabledTitles?: Partial<Record<TimeRange, string>>;
 }) {
   return (
     <div
@@ -42,6 +45,7 @@ export function RangeTabs({
             type="button"
             onClick={() => { if (!isDisabled) onChange(r); }}
             disabled={isDisabled}
+            title={isDisabled ? disabledTitles?.[r] : undefined}
             style={{
               padding: "3px 8px",
               fontSize: 9,
