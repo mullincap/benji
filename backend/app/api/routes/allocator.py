@@ -1484,6 +1484,121 @@ def delete_allocation(allocation_id: str, user_id: str = Depends(get_current_use
     return {"closed": True, "allocation_id": allocation_id}
 
 
+@router.post("/allocations/{allocation_id}/close-positions")
+def close_allocation_positions(
+    allocation_id: str,
+    user_id: str = Depends(get_current_user),
+    cur=Depends(get_cursor),
+) -> dict[str, Any]:
+    """Flatten all open positions for this allocation on the real exchange.
+
+    Reads runtime_state.positions for the symbols/sizes the trader is tracking,
+    dispatches to the right ExchangeAdapter (BloFin or Binance), and calls the
+    same close_all_positions() routine the trader's end-of-session path uses.
+    Also flips allocation.status to 'paused' so no new session spawns while the
+    user still holds the connection.
+
+    Race-safety: the trader subprocess polls every 5 minutes and reconciles
+    against the exchange; if it sees positions missing it treats them as
+    "already closed" and skips redundant sells (trader_blofin.py:1576-1580).
+    So concurrent manual close + trader subprocess is non-destructive.
+    """
+    cur.execute("""
+        SELECT user_id, connection_id::text AS connection_id, runtime_state
+        FROM user_mgmt.allocations
+        WHERE allocation_id = %s::uuid
+    """, (allocation_id,))
+    row = cur.fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="Allocation not found")
+    if str(row["user_id"]) != user_id:
+        raise HTTPException(status_code=403, detail="Not your allocation")
+
+    runtime_state = row["runtime_state"] or {}
+    positions = runtime_state.get("positions") or []
+    if not positions:
+        # No tracked positions — just flip status to paused for consistency.
+        cur.execute("""
+            UPDATE user_mgmt.allocations
+            SET status = 'paused', updated_at = NOW()
+            WHERE allocation_id = %s::uuid AND user_id = %s::uuid
+              AND status IN ('active', 'paused')
+        """, (allocation_id, user_id))
+        return {
+            "closed": True,
+            "allocation_id": allocation_id,
+            "attempted": 0,
+            "closed_ok": 0,
+            "failed": [],
+            "note": "No tracked positions — status set to paused.",
+        }
+
+    # Lazy import the close helper + credential loader + adapter factory
+    # so routes that never hit this path don't pay the import cost.
+    from app.services.trading.credential_loader import (
+        load_credentials, CredentialDecryptError,
+    )
+    from app.services.exchanges.adapter import adapter_for
+    from app.cli.trader_blofin import close_all_positions
+
+    try:
+        creds = load_credentials(row["connection_id"])
+    except CredentialDecryptError as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    try:
+        api = adapter_for(creds)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    # close_all_positions() handles reconciliation (skips positions already
+    # gone from the exchange), primary close via close_position(), and
+    # reduce-only fallback. Returns list of positions that failed to close.
+    try:
+        failed = close_all_positions(
+            api, positions, reason=f"manual close via UI (user {user_id})", dry_run=False,
+        )
+    except Exception as e:
+        log.exception(f"close_all_positions raised for allocation {allocation_id}: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Close routine raised: {type(e).__name__}: {e}",
+        )
+
+    attempted = len(positions)
+    closed_ok = attempted - len(failed)
+
+    # On full success, mark state as exited and pause the allocation. On
+    # partial failure, leave runtime_state alone so the trader's next poll
+    # can reconcile — but still pause to block future spawns.
+    new_runtime_state = dict(runtime_state)
+    if not failed:
+        new_runtime_state["positions"] = []
+        new_runtime_state["phase"] = "exited_manual"
+        new_runtime_state["updated_at"] = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+
+    cur.execute(
+        """
+        UPDATE user_mgmt.allocations
+        SET status = 'paused',
+            runtime_state = %s::jsonb,
+            updated_at = NOW()
+        WHERE allocation_id = %s::uuid AND user_id = %s::uuid
+        """,
+        (json.dumps(new_runtime_state), allocation_id, user_id),
+    )
+
+    return {
+        "closed": not failed,
+        "allocation_id": allocation_id,
+        "attempted": attempted,
+        "closed_ok": closed_ok,
+        "failed": [p.get("inst_id") for p in failed],
+    }
+
+
 # ── Trader data (per-allocation) ───────────────────────────────────────────
 
 @router.get("/trader/{allocation_id}/balance-history")

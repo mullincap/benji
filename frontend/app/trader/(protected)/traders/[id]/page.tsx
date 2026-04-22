@@ -271,6 +271,11 @@ function LiveMode({ instanceId }: { instanceId: string }) {
   const [confirmPause, setConfirmPause] = useState(false);
   const [exchangeLost, setExchangeLost] = useState(false);
   const [confirmClose, setConfirmClose] = useState(false);
+  const [closing, setClosing] = useState(false);
+  const [closeError, setCloseError] = useState<string | null>(null);
+  const [closeResult, setCloseResult] = useState<
+    { closed: boolean; attempted: number; closed_ok: number; failed: string[]; note?: string } | null
+  >(null);
   const [confirmRemoveTrader, setConfirmRemoveTrader] = useState(false);
   const [livePositions, setLivePositions] = useState<Position[]>(inst.positions);
   const [positionsLoading, setPositionsLoading] = useState(false);
@@ -547,11 +552,14 @@ function LiveMode({ instanceId }: { instanceId: string }) {
                 )}
               </tbody>
             </table>
-            {/* Close all positions */}
-            <div style={{ borderTop: "0.5px solid var(--line)", padding: "10px 16px", display: "flex", justifyContent: "flex-end" }}>
-              {!confirmClose ? (
+            {/* Close all positions — issues real market-close orders on the
+                exchange via POST /allocations/{id}/close-positions. Also
+                pauses the allocation so no new session spawns. On success,
+                refreshes snapshot so the table reflects actual state. */}
+            <div style={{ borderTop: "0.5px solid var(--line)", padding: "10px 16px", display: "flex", flexDirection: "column", gap: 8, alignItems: "flex-end" }}>
+              {!confirmClose && !closeResult ? (
                 <button
-                  onClick={() => setConfirmClose(true)}
+                  onClick={() => { setConfirmClose(true); setCloseError(null); }}
                   onMouseEnter={e => { e.currentTarget.style.color = "var(--red)"; }}
                   onMouseLeave={e => { e.currentTarget.style.color = "var(--t3)"; }}
                   style={{
@@ -561,13 +569,83 @@ function LiveMode({ instanceId }: { instanceId: string }) {
                     transition: "color 0.15s ease",
                   }}
                 >CLOSE ALL POSITIONS</button>
-              ) : (
+              ) : confirmClose && !closeResult ? (
                 <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                  <span style={{ fontSize: 9, color: "var(--red)" }}>Close all {livePositions.length} positions?</span>
-                  <button onClick={async () => { await allocatorApi.updateAllocation(inst.id, { status: "paused" }).catch(() => {}); updateInstance(inst.id, { positions: [], status: "paused" }); setLivePositions([]); setConfirmClose(false); }}
-                    style={{ background: "var(--red)", color: "var(--bg0)", border: "none", borderRadius: 3, padding: "5px 10px", fontSize: 9, fontWeight: 700, letterSpacing: "0.12em", textTransform: "uppercase", cursor: "pointer" }}>CONFIRM</button>
-                  <button onClick={() => setConfirmClose(false)}
-                    style={{ background: "transparent", color: "var(--t2)", border: "1px solid var(--line)", borderRadius: 3, padding: "5px 10px", fontSize: 9, fontWeight: 700, letterSpacing: "0.12em", textTransform: "uppercase", cursor: "pointer" }}>CANCEL</button>
+                  <span style={{ fontSize: 9, color: "var(--red)" }}>
+                    {closing
+                      ? `Closing ${livePositions.length} position${livePositions.length === 1 ? "" : "s"}…`
+                      : `Send market-close for ${livePositions.length} position${livePositions.length === 1 ? "" : "s"}? Allocation will be paused.`}
+                  </span>
+                  <button
+                    disabled={closing}
+                    onClick={async () => {
+                      setClosing(true);
+                      setCloseError(null);
+                      try {
+                        const res = await allocatorApi.closeAllocationPositions(inst.id);
+                        setCloseResult({
+                          closed: res.closed,
+                          attempted: res.attempted,
+                          closed_ok: res.closed_ok,
+                          failed: res.failed || [],
+                          note: res.note,
+                        });
+                        if (res.closed) {
+                          updateInstance(inst.id, { positions: [], status: "paused" });
+                          setLivePositions([]);
+                        } else {
+                          updateInstance(inst.id, { status: "paused" });
+                        }
+                        setConfirmClose(false);
+                      } catch (err) {
+                        const msg = err instanceof Error ? err.message : String(err);
+                        setCloseError(msg);
+                      } finally {
+                        setClosing(false);
+                      }
+                    }}
+                    style={{
+                      background: "var(--red)", color: "var(--bg0)", border: "none",
+                      borderRadius: 3, padding: "5px 10px", fontSize: 9, fontWeight: 700,
+                      letterSpacing: "0.12em", textTransform: "uppercase",
+                      cursor: closing ? "wait" : "pointer", opacity: closing ? 0.6 : 1,
+                    }}
+                  >{closing ? "CLOSING…" : "CONFIRM"}</button>
+                  <button
+                    disabled={closing}
+                    onClick={() => { setConfirmClose(false); setCloseError(null); }}
+                    style={{
+                      background: "transparent", color: "var(--t2)",
+                      border: "1px solid var(--line)", borderRadius: 3,
+                      padding: "5px 10px", fontSize: 9, fontWeight: 700,
+                      letterSpacing: "0.12em", textTransform: "uppercase",
+                      cursor: closing ? "wait" : "pointer",
+                    }}
+                  >CANCEL</button>
+                </div>
+              ) : closeResult ? (
+                <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                  <span style={{ fontSize: 9, color: closeResult.closed ? "var(--green)" : "var(--amber)" }}>
+                    {closeResult.note
+                      ? closeResult.note
+                      : closeResult.closed
+                        ? `✓ Closed ${closeResult.closed_ok}/${closeResult.attempted} positions — allocation paused.`
+                        : `⚠ Closed ${closeResult.closed_ok}/${closeResult.attempted}. Failed: ${closeResult.failed.join(", ")}. Check exchange manually.`}
+                  </span>
+                  <button
+                    onClick={() => setCloseResult(null)}
+                    style={{
+                      background: "transparent", color: "var(--t2)",
+                      border: "1px solid var(--line)", borderRadius: 3,
+                      padding: "5px 10px", fontSize: 9, fontWeight: 700,
+                      letterSpacing: "0.12em", textTransform: "uppercase", cursor: "pointer",
+                    }}
+                  >OK</button>
+                </div>
+              ) : null}
+              {closeError && (
+                <div style={{ fontSize: 9, color: "var(--red)" }}>
+                  Error: {closeError}
                 </div>
               )}
             </div>

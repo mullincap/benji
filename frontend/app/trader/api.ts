@@ -283,6 +283,16 @@ export const allocatorApi = {
   deleteAllocation: (allocationId: string) =>
     apiFetch<{ closed: boolean }>(`/api/allocator/allocations/${allocationId}`, { method: "DELETE" }),
 
+  closeAllocationPositions: (allocationId: string) =>
+    apiFetch<{
+      closed: boolean;
+      allocation_id: string;
+      attempted: number;
+      closed_ok: number;
+      failed: string[];
+      note?: string;
+    }>(`/api/allocator/allocations/${allocationId}/close-positions`, { method: "POST" }),
+
   // Trader data (per allocation)
   getBalanceHistory: (allocationId: string, range?: "1D" | "1W" | "1M" | "ALL") =>
     apiFetch<{ allocation_id: string; history: ApiBalanceHistory[] }>(
