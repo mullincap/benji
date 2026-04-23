@@ -1184,7 +1184,18 @@ function CapitalEventsSection() {
             No capital events yet. Record deposits or withdrawals here so trading P&L can be measured against principal moves.
           </div>
         ) : (
-          <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 10, fontFamily: FONT_MONO }}>
+          <table style={{
+            width: "100%", borderCollapse: "collapse", fontSize: 10,
+            fontFamily: FONT_MONO, tableLayout: "fixed",
+          }}>
+            <colgroup>
+              <col style={{ width: "18%" }} />  {/* date */}
+              <col style={{ width: "18%" }} />  {/* allocation */}
+              <col style={{ width: "10%" }} />  {/* kind */}
+              <col style={{ width: "12%" }} />  {/* amount */}
+              <col />                            {/* notes — takes remaining space */}
+              <col style={{ width: "150px" }} />{/* actions — fixed */}
+            </colgroup>
             <thead>
               <tr style={{ borderBottom: "1px solid var(--line)" }}>
                 {["DATE (UTC)", "ALLOCATION", "KIND", "AMOUNT", "NOTES", ""].map(h => (
@@ -1252,27 +1263,37 @@ function CapitalEventsSection() {
                     <td style={{ padding: "10px 14px", color: amountColor, fontWeight: 700 }}>
                       {fmtAmount(ev.amount_usd, ev.kind)}
                     </td>
-                    <td style={{ padding: "10px 14px", color: "var(--t2)" }}>
+                    <td
+                      title={ev.notes ?? ""}
+                      style={{
+                        padding: "10px 14px", color: "var(--t2)",
+                        overflow: "hidden", textOverflow: "ellipsis",
+                        whiteSpace: "nowrap",
+                      }}
+                    >
                       {ev.notes ?? "—"}
                     </td>
-                    <td style={{ padding: "10px 14px", textAlign: "right" }}>
+                    <td style={{
+                      padding: "10px 14px", textAlign: "right",
+                      whiteSpace: "nowrap",
+                    }}>
                       <button
                         onClick={() => setEditingEvent(ev)}
                         style={{
                           background: "transparent", border: "none",
-                          color: "var(--t2)", fontSize: 9,
+                          color: "var(--t1)", fontSize: 9, fontWeight: 700,
                           letterSpacing: "0.12em", textTransform: "uppercase",
-                          marginRight: 8, cursor: "pointer",
+                          marginRight: 12, cursor: "pointer",
                           fontFamily: FONT_MONO,
                         }}
-                        onMouseEnter={e => (e.currentTarget.style.color = "var(--t0)")}
-                        onMouseLeave={e => (e.currentTarget.style.color = "var(--t2)")}
-                      >Edit</button>
+                        onMouseEnter={e => (e.currentTarget.style.color = "var(--green)")}
+                        onMouseLeave={e => (e.currentTarget.style.color = "var(--t1)")}
+                      >Update</button>
                       <button
                         onClick={() => setConfirmDelete(ev)}
                         style={{
                           background: "transparent", border: "none",
-                          color: "var(--t3)", fontSize: 9,
+                          color: "var(--t3)", fontSize: 9, fontWeight: 700,
                           letterSpacing: "0.12em", textTransform: "uppercase",
                           cursor: "pointer", fontFamily: FONT_MONO,
                         }}
