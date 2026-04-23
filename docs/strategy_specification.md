@@ -159,26 +159,52 @@ exchange-availability filter in §2.3) as this reference for any given date.
 
 ### 3.1 Methodology-exploration CLI flags
 
-Two CLI flags on `pipeline/overlap_analysis.py` support methodology exploration and
-are NOT interchangeable:
+Two methodology-exploration surfaces exist on `pipeline/overlap_analysis.py`.
+They are NOT interchangeable:
 
 **`--live-parity`** reproduces `daily_signal.py` v1 exactly, including its
 *asymmetric* ranking (log-return on price via `log(close/anchor)`, absolute-$
-on OI via `oi_usd - anchor_oi_usd`). This is a forensic reproduction tool;
-the −0.55 Sharpe recorded in § 11.2 was measured against this configuration
-and is reproducible via `overlap_analysis.py --live-parity --source db`.
+on OI via `oi_usd - anchor_oi_usd`), top-100-by-24h-quote-volume universe,
+and BloFin instrument filter. Forensic reproduction tool; the −0.55 Sharpe
+recorded in § 11.2 was measured against this configuration and is
+reproducible via `overlap_analysis.py --live-parity --source db`.
 
-**`--ranking-metric {pct_change, abs_dollar}`** applies a *symmetric* ranking
-across both price and OI (both use the same formula), operating on the
-canonical universe (no v1-specific volume or BloFin filters). This is an
-exploratory tool for testing candidate methodology variations under § 5
-governance rules. `pct_change` (default) reads `market.leaderboards`;
-`abs_dollar` reads raw values from `market.futures_1m` and ranks on-the-fly.
+**Three individual knobs** (shipped 2026-04-23, Stream D-medium-split, `11a394a`)
+replace the previous single `--ranking-metric` flag and expose the
+sub-components of live v1's methodology for independent candidate exploration.
+All three default to canonical; opt in to deviate.
 
-**The two flags are mutually exclusive.** argparse errors with a clear
-message if both are set. Combining them would conflate "reproduce v1"
-(asymmetric) with "explore symmetric variants" (symmetric) and produce
-nonsense.
+- `--price-ranking-metric {log_return, pct_change, abs_dollar}` (default
+  `pct_change`). `log_return` = `LN(close/anchor)` (v1 methodology —
+  identical ordering to `pct_change` for positive prices but kept as
+  explicit option for documentation clarity). `abs_dollar` = `close − anchor`
+  — tends to be mega-cap-dominant on the canonical universe.
+- `--oi-ranking-metric {pct_change, abs_dollar}` (default `pct_change`).
+  `abs_dollar` = `oi_usd − anchor_oi_usd` matches v1's OI ranking.
+  `log_return` is NOT valid for OI (semantically questionable and `LN(0)`
+  errors on delisted symbols) — rejected at argparse.
+- `--apply-blofin-filter` (store_true, default off). Narrows universe to
+  symbols currently on BloFin's USDT-swap instrument list BEFORE ranking.
+  Matches live's universe constraint without the 24h-volume proxy of
+  `--live-parity` (Gap A from the Part 1b audit).
+
+**Backward compat**: the previous single `--ranking-metric {pct_change,
+abs_dollar}` flag is deprecated but still accepted for one release cycle.
+When passed, it maps onto both new flags with the same value and emits a
+deprecation warning. New callers should use the two split flags.
+
+**Mutual exclusion**: `--live-parity` and any of the three new knobs (or
+the deprecated `--ranking-metric`) are rejected at argparse and at the
+HTTP boundary (Pydantic `model_validator` on `JobRequest` returns 422).
+Combining them would conflate "reproduce v1 exactly" with "explore
+individual axes" — contradictory intents.
+
+**UI surface**: the Simulator `ParamForm` exposes all three new knobs as
+dropdowns/toggle directly under `mode` in the STRATEGY section. This
+enables full live v1 reproduction from the UI alone (see Test 2 in the
+2026-04-23 acceptance plan): set `price_ranking_metric=log_return`,
+`oi_ranking_metric=abs_dollar`, `apply_blofin_filter=on`, `mode=frequency`,
+`sort_by=volume` — expected Sharpe ~−0.55 within measurement noise.
 
 ---
 
@@ -446,7 +472,31 @@ for pipeline changes enabling the comparison audit.
 - **2026-04-23** commit `bd356c3`: snapshot host-v1 → `archive/daily_signal_v1_host_snapshot_20260423.py` (pre-cutover artifact).
 - **2026-04-23** (ops ~05:20 UTC): cutover executed. Shadow-gate bypass deliberate (1-day smoke test evidence; continuing v1 net-negative EV judged higher risk). Crontab changes applied, v1 archived on host to `/root/benji/archive/daily_signal_v1_archived_2026-04-23.py`.
 
-### 11.4 Shadow-gate bypass record (2026-04-23 cutover)
+### 11.4 D-medium-split: individual ranking-metric knobs (2026-04-23)
+
+Separate from the v1 → v2 cutover but shipped in the same session, the
+single symmetric `--ranking-metric` knob (fcb88be) was replaced with three
+individual knobs per § 3.1:
+
+- `--price-ranking-metric {log_return, pct_change, abs_dollar}`
+- `--oi-ranking-metric {pct_change, abs_dollar}`
+- `--apply-blofin-filter`
+
+The deprecated `--ranking-metric` is retained for one release cycle
+(maps to both split flags with the same value, emits a deprecation
+warning). `--live-parity` unchanged — remains a forensic v1
+reproduction using its own bundled setup.
+
+Motivation: the symmetric single-knob design couldn't reproduce live
+v1's asymmetric ranking (log-return on price, abs-$ on OI) from the
+Simulator UI alone. After the split, the three dropdowns in ParamForm
+suffice — no CLI or --live-parity preset needed for candidate
+exploration along any of these axes.
+
+Commits: `11a394a` (backend), `749bdab` (frontend), spec update in
+this commit.
+
+### 11.5 Shadow-gate bypass record (2026-04-23 cutover)
 
 The §7.2 cutover-gate requirement (J(v2, canonical) ≥ 0.95 for ≥7 consecutive
 shadow days) was **not satisfied** at cutover time. Bypass justification:
