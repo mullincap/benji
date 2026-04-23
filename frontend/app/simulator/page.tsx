@@ -29,6 +29,10 @@ const DEFAULT_PARAMS: Record<string, unknown> = {
   price_ranking_metric: 'pct_change',
   oi_ranking_metric: 'pct_change',
   apply_blofin_filter: false,
+  // D-explore (2026-04-23): basket overlap dimensions knob. 'price_oi' is
+  // canonical (price ∩ OI). Other values add volume as a third axis for
+  // candidate-exploration variants — not promoted unless §5 gate passes.
+  overlap_dimensions: 'price_oi',
   freq_width: 20,
   freq_cutoff: 20,
   sample_interval: 5,

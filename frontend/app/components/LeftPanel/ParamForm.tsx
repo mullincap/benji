@@ -83,12 +83,22 @@ const FILTER_ENABLE_KEYS = [
 // ─────────────────────────────────────────────
 // Sub-components
 // ─────────────────────────────────────────────
-function Row({ label, children }: { label: string; children: React.ReactNode }) {
+function Row({ label, children, help }: { label: string; children: React.ReactNode; help?: string }) {
   return (
-    <div style={row}>
-      <span style={fieldLabel}>{label}</span>
-      {children}
-    </div>
+    <>
+      <div style={row}>
+        <span style={fieldLabel}>{label}</span>
+        {children}
+      </div>
+      {help && (
+        <div style={{
+          fontSize: 9, color: 'var(--t2)', lineHeight: 1.45,
+          marginTop: -4, marginBottom: 6, paddingLeft: 2, maxWidth: 280,
+        }}>
+          {help}
+        </div>
+      )}
+    </>
   );
 }
 
@@ -359,6 +369,21 @@ export default function ParamForm({ params, onChange, onSubmit }: ParamFormProps
           <Toggle
             checked={!!p.apply_blofin_filter}
             onChange={(v) => set('apply_blofin_filter', v)}
+          />
+        </Row>
+        <Row
+          label="overlap_dimensions"
+          help="Which metrics must agree for a symbol to enter the basket. Canonical is Price ∩ OI. Adding Volume as a third axis requires stronger multi-signal agreement and typically produces smaller, higher-conviction baskets — or zero baskets on days without cross-signal agreement."
+        >
+          <SelInput
+            value={p.overlap_dimensions as string ?? 'price_oi'}
+            onChange={(v) => set('overlap_dimensions', v)}
+            options={[
+              { value: 'price_oi',         label: 'Price ∩ OI (canonical)' },
+              { value: 'price_volume',     label: 'Price ∩ Volume' },
+              { value: 'oi_volume',        label: 'OI ∩ Volume' },
+              { value: 'price_oi_volume',  label: 'Price ∩ OI ∩ Volume (three-way)' },
+            ]}
           />
         </Row>
         <Row label="freq_width">
