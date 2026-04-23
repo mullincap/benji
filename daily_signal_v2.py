@@ -195,79 +195,168 @@ def get_blofin_symbols():
 
 
 # ==========================================================================
-# STEP 2 — CANONICAL BASKET (snapshot at 06:00 UTC, on-the-fly from futures_1m)
+# STEP 2 — CANONICAL BASKET (REST source, snapshot at ~05:55 UTC)
 # ==========================================================================
+#
+# HISTORY: the original v2 (shipped at cutover 2026-04-23 05:58 UTC)
+# read market.futures_1m to build the snapshot. That failed on its first
+# live run — futures_1m is populated by the nightly metl cron which lags
+# ~24h, so bars for TODAY do not exist at 05:58 UTC. v2 aborted with "No
+# price leaderboard rows at 06:00 UTC", wrote an empty basket to CSV + DB
+# for all 3 published strategies, and trader spawn at 06:05 UTC read zero
+# symbols. Incident recorded at docs/strategy_specification.md §11.6.
+#
+# Replacement (this version, 2026-04-23 post-incident): fetch 5m klines +
+# openInterestHist directly from Binance FAPI for all USDT perps. At cron
+# time 05:58 UTC, the latest closed 5m bar is the one with open_time=05:55
+# (close at 05:59:59). This is an off-canonical snapshot by ~1 second from
+# the canonical 06:00 UTC definition — functionally identical for
+# daily-frequency ranking (top-20 baskets are extremely stable on 5-min
+# windows). Shifting cron to 06:02 UTC would give the exact 06:00 bar but
+# requires a crontab coordination with trader spawn (06:05); deferred as a
+# future refinement.
+#
+# The canonical methodology axes (unfiltered universe, pct_change ranking,
+# normalize_symbol, top-20 intersection, BloFin filter applied AFTER
+# ranking) are preserved exactly.
+_BINANCE_FAPI   = "https://fapi.binance.com"
+_OI_HIST_URL    = "https://fapi.binance.com/futures/data/openInterestHist"
+_REST_WORKERS   = 8
+_REST_TIMEOUT   = 10
+
+
+def _fetch_all_futures_symbols():
+    """Return list of TRADING USDT perpetual symbols on Binance futures."""
+    r = requests.get(f"{_BINANCE_FAPI}/fapi/v1/exchangeInfo",
+                     timeout=_REST_TIMEOUT)
+    r.raise_for_status()
+    data = r.json()
+    return [
+        s["symbol"] for s in data.get("symbols", [])
+        if s.get("status") == "TRADING"
+        and s.get("contractType") == "PERPETUAL"
+        and s["symbol"].endswith("USDT")
+    ]
+
+
+def _fetch_symbol_snapshot(args):
+    """Fetch 5m klines + OI history for one symbol, extract anchor close
+    (first bar at start_ms) and snapshot close (last bar ≤ end_ms). Returns
+    (symbol, price_pct_change, oi_pct_change). Any failure or missing data
+    maps to None so the symbol is silently dropped from ranking."""
+    symbol, start_ms, end_ms = args
+    try:
+        kr = requests.get(
+            f"{_BINANCE_FAPI}/fapi/v1/klines",
+            params={"symbol": symbol, "interval": "5m",
+                    "startTime": start_ms, "endTime": end_ms, "limit": 80},
+            timeout=_REST_TIMEOUT,
+        )
+        if kr.status_code != 200:
+            return symbol, None, None
+        klines = kr.json()
+        if not klines:
+            return symbol, None, None
+
+        or_ = requests.get(
+            _OI_HIST_URL,
+            params={"symbol": symbol, "period": "5m",
+                    "startTime": start_ms, "endTime": end_ms, "limit": 80},
+            timeout=_REST_TIMEOUT,
+        )
+        oi_hist = or_.json() if or_.status_code == 200 else []
+
+        # klines row: [open_time, open, high, low, close, volume, ...]
+        anchor_close = float(klines[0][4])
+        snap_close   = float(klines[-1][4])
+        price_pct = ((snap_close / anchor_close) - 1) if anchor_close > 0 else None
+
+        # OI item: {"sumOpenInterest": "...", "timestamp": ...}
+        oi_pct = None
+        if isinstance(oi_hist, list) and oi_hist:
+            try:
+                anchor_oi = float(oi_hist[0]["sumOpenInterest"])
+                snap_oi   = float(oi_hist[-1]["sumOpenInterest"])
+                if anchor_oi > 0:
+                    oi_pct = (snap_oi / anchor_oi) - 1
+            except (KeyError, ValueError, TypeError):
+                oi_pct = None
+
+        return symbol, price_pct, oi_pct
+    except Exception:
+        return symbol, None, None
+
 
 def compute_canonical_basket(ref_date):
-    """Compute top-20-by-pct_change for price and OI at the 06:00 UTC snapshot
-    on ref_date, intersect them, and return the normalized basket.
+    """Compute top-20-by-pct_change for price and OI at today's 05:55 UTC
+    snapshot (closest closed 5m bar before 06:00 UTC at cron time 05:58).
+    Intersect them, apply normalize_symbol, return the canonical basket.
 
-    Formula + hygiene exactly mirror build_intraday_leaderboard.py:
-        anchor_val  = futures_1m.{col} at ref_date 00:00 UTC
-        pct_change  = futures_1m.{col} at ref_date 06:00 UTC / anchor_val - 1
-        drop rows where anchor_val == 0 or NULL     (builder line ~1043)
-        rank by pct_change DESC
-        keep top FREQ_WIDTH (=20) per metric
+    Data source: Binance FAPI REST (`/fapi/v1/klines` + `/futures/data/
+    openInterestHist`). Universe = all USDT perps with status=TRADING,
+    contractType=PERPETUAL.
 
     Returns (basket_list, price_top_rows, oi_top_rows).
-        basket_list     = sorted list of normalized base symbols (canonical basket)
+        basket_list     = sorted list of normalized base symbols
         price_top_rows  = [(binance_id, pct_change), ...]  (length ≤ 20)
         oi_top_rows     = [(binance_id, pct_change), ...]  (length ≤ 20)
     """
+    from concurrent.futures import ThreadPoolExecutor
+
     anchor_ts = _dt.datetime.combine(ref_date, _dt.time(ANCHOR_HOUR, 0, 0),
                                      tzinfo=_dt.timezone.utc)
-    snapshot_ts = _dt.datetime.combine(ref_date, _dt.time(DEPLOYMENT_START_HOUR, 0, 0),
+    target_snap = _dt.datetime.combine(ref_date,
+                                       _dt.time(DEPLOYMENT_START_HOUR, 0, 0),
                                        tzinfo=_dt.timezone.utc)
-    log.info(f"Computing canonical basket anchor={anchor_ts.isoformat()} "
-             f"snapshot={snapshot_ts.isoformat()}")
+    log.info(f"Computing canonical basket (REST source) "
+             f"anchor={anchor_ts.isoformat()} "
+             f"snapshot_target={target_snap.isoformat()}")
 
-    conn = _get_db_conn()
-    cur = conn.cursor()
+    start_ms = int(anchor_ts.timestamp() * 1000)
+    # endTime on Binance is inclusive of open_time; add 5 min so if cron
+    # runs at/after 06:00, the 06:00 bar (if closed) is returned.
+    end_ms = int((target_snap + _dt.timedelta(minutes=5)).timestamp() * 1000)
 
-    def _top_n(metric_col, n=FREQ_WIDTH):
-        # Self-join futures_1m at the two target timestamps, filter symbols
-        # with valid anchor (>0), compute pct_change, rank DESC, take top-n.
-        cur.execute(f"""
-            SELECT sym.binance_id,
-                   (n.{metric_col} / a.{metric_col}) - 1 AS pct_change
-            FROM market.futures_1m a
-            JOIN market.futures_1m n
-              ON a.symbol_id = n.symbol_id
-            JOIN market.symbols sym ON sym.symbol_id = a.symbol_id
-            WHERE a.timestamp_utc = %s
-              AND n.timestamp_utc = %s
-              AND a.{metric_col} IS NOT NULL AND a.{metric_col} > 0
-              AND n.{metric_col} IS NOT NULL
-            ORDER BY pct_change DESC NULLS LAST
-            LIMIT %s
-        """, (anchor_ts, snapshot_ts, n))
-        return [(r[0], float(r[1]) if r[1] is not None else None)
-                for r in cur.fetchall()]
+    t0 = time.time()
+    symbols = _fetch_all_futures_symbols()
+    log.info(f"Binance futures universe: {len(symbols)} USDT perps")
 
-    price_top = _top_n("close")
-    oi_top    = _top_n("open_interest")
+    log.info(f"Fetching klines + OI for {len(symbols)} symbols "
+             f"({_REST_WORKERS} workers)...")
+    args_list = [(s, start_ms, end_ms) for s in symbols]
+    results: list = []
+    with ThreadPoolExecutor(max_workers=_REST_WORKERS) as pool:
+        for res in pool.map(_fetch_symbol_snapshot, args_list):
+            results.append(res)
+    log.info(f"  Fetched in {time.time() - t0:.1f}s "
+             f"(price={sum(1 for _, p, _ in results if p is not None)}, "
+             f"oi={sum(1 for _, _, o in results if o is not None)})")
 
-    cur.close()
-    conn.close()
+    price_ranks = sorted(
+        [(s, p) for s, p, _ in results if p is not None],
+        key=lambda x: x[1], reverse=True,
+    )[:FREQ_WIDTH]
+    oi_ranks = sorted(
+        [(s, o) for s, _, o in results if o is not None],
+        key=lambda x: x[1], reverse=True,
+    )[:FREQ_WIDTH]
 
-    if not price_top:
-        log.error("No price leaderboard rows at 06:00 UTC — DB may be missing "
-                  "today's bar data. Aborting basket computation.")
-        return [], price_top, oi_top
-    if not oi_top:
-        log.warning("No OI leaderboard rows at 06:00 UTC — basket will be empty.")
+    if not price_ranks:
+        log.error("No price data returned from REST — aborting basket.")
+        return [], price_ranks, oi_ranks
+    if not oi_ranks:
+        log.warning("No OI data returned from REST — basket will be empty.")
 
-    # Normalize and intersect
-    price_bases = {normalize_symbol(bid) for bid, _ in price_top}
-    oi_bases    = {normalize_symbol(bid) for bid, _ in oi_top}
+    price_bases = {normalize_symbol(s) for s, _ in price_ranks}
+    oi_bases    = {normalize_symbol(s) for s, _ in oi_ranks}
     price_bases.discard(None)
     oi_bases.discard(None)
     basket = sorted(price_bases & oi_bases)
 
-    log.info(f"  Price top-{len(price_top)}: {[b for b, _ in price_top]}")
-    log.info(f"  OI top-{len(oi_top)}:       {[b for b, _ in oi_top]}")
+    log.info(f"  Price top-{len(price_ranks)}: {[s for s, _ in price_ranks]}")
+    log.info(f"  OI top-{len(oi_ranks)}:       {[s for s, _ in oi_ranks]}")
     log.info(f"  Intersection ({len(basket)}): {basket}")
-    return basket, price_top, oi_top
+    return basket, price_ranks, oi_ranks
 
 
 # ==========================================================================
