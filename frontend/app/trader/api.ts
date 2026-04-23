@@ -370,7 +370,8 @@ export const allocatorApi = {
     ),
 
   createCapitalEvent: (data: {
-    allocation_id: string;
+    allocation_id?: string;        // allocation_id OR connection_id required
+    connection_id?: string;
     amount_usd: number;
     kind: "deposit" | "withdrawal";
     event_at?: string;
@@ -403,12 +404,20 @@ export const allocatorApi = {
       { method: "DELETE" },
     ),
 
-  // Wipe all operator-authored capital events (manual entries + manual
-  // overrides on auto rows) and re-sync from the exchange. "Show me
-  // exchange truth only" — clean slate.
-  resetCapitalEventsToDefaults: () =>
-    apiFetch<{ reset: boolean; deleted_rows: number; connections_repolled: number }>(
-      `/api/allocator/capital-events/reset-defaults`,
+  // Wipe operator-authored capital events (manual entries + manual
+  // overrides on auto rows) and re-sync from the exchange.
+  // When connectionId is provided, scope to just that connection;
+  // omitting it wipes everything the caller owns.
+  resetCapitalEventsToDefaults: (connectionId?: string) =>
+    apiFetch<{
+      reset: boolean;
+      connection_id: string | null;
+      deleted_rows: number;
+      connections_repolled: number;
+    }>(
+      `/api/allocator/capital-events/reset-defaults${
+        connectionId ? `?connection_id=${connectionId}` : ""
+      }`,
       { method: "POST" },
     ),
 };

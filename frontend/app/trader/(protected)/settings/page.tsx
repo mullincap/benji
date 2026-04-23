@@ -718,6 +718,8 @@ function ExchangeCapitalGroup({
   onUpdateEvent,
   onDeleteEvent,
   onCreditChange,
+  onRecordNew,
+  onReset,
   allAllocOptions,
 }: {
   group: {
@@ -738,6 +740,10 @@ function ExchangeCapitalGroup({
   onUpdateEvent: (ev: ApiCapitalEvent) => void;
   onDeleteEvent: (ev: ApiCapitalEvent) => void;
   onCreditChange: (eventId: string, allocationId: string | null) => void;
+  // Optional — only present on real exchange panels (not the orphan "no
+  // exchange link" bucket, where these actions don't apply).
+  onRecordNew?: () => void;
+  onReset?: () => void;
   allAllocOptions: { id: string; label: string }[];
 }) {
   const labelById: Record<string, string> = {};
@@ -752,21 +758,61 @@ function ExchangeCapitalGroup({
       background: "var(--bg1)", border: "1px solid var(--line)",
       borderRadius: 6, overflow: "hidden",
     }}>
-      {/* Exchange header */}
+      {/* Exchange header with inline RESET + RECORD buttons */}
       <div style={{
         padding: "10px 14px",
         borderBottom: "1px solid var(--line)",
         display: "flex", alignItems: "center", justifyContent: "space-between",
+        gap: 12,
       }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 12, minWidth: 0 }}>
           <span style={{
             fontSize: 11, fontWeight: 700, color: "var(--t0)",
             letterSpacing: "0.05em",
           }}>{header}</span>
-          <span style={{ fontSize: 9, color: "var(--t3)", letterSpacing: "0.12em", textTransform: "uppercase" }}>
+          <span style={{
+            fontSize: 9, color: "var(--t3)",
+            letterSpacing: "0.12em", textTransform: "uppercase",
+          }}>
             {group.allocations.length} alloc · {group.events.length} event{group.events.length === 1 ? "" : "s"}
           </span>
         </div>
+        {(onReset || onRecordNew) && (
+          <div style={{ display: "flex", gap: 8, flexShrink: 0 }}>
+            {onReset && (
+              <button
+                onClick={onReset}
+                disabled={group.allocations.length === 0 && group.events.length === 0}
+                title={`Delete manual entries + overrides on ${group.exchange_name ?? "this exchange"} and re-sync from the exchange.`}
+                style={{
+                  background: "transparent", border: "1px solid var(--line2)",
+                  borderRadius: 3, color: "var(--amber)",
+                  fontSize: 9, fontWeight: 700, letterSpacing: "0.12em",
+                  textTransform: "uppercase", padding: "5px 12px",
+                  cursor: "pointer", fontFamily: FONT_MONO,
+                }}
+              >RESET TO DEFAULT</button>
+            )}
+            {onRecordNew && (
+              <button
+                onClick={onRecordNew}
+                disabled={group.allocations.length === 0}
+                title={group.allocations.length === 0
+                  ? "No allocations on this exchange yet"
+                  : `Record a capital event on ${group.exchange_name ?? "this exchange"}`}
+                style={{
+                  background: "transparent", border: "1px solid var(--line2)",
+                  borderRadius: 3,
+                  color: group.allocations.length === 0 ? "var(--t3)" : "var(--green)",
+                  fontSize: 9, fontWeight: 700, letterSpacing: "0.12em",
+                  textTransform: "uppercase", padding: "5px 12px",
+                  cursor: group.allocations.length === 0 ? "not-allowed" : "pointer",
+                  fontFamily: FONT_MONO,
+                }}
+              >+ RECORD CAPITAL EVENT</button>
+            )}
+          </div>
+        )}
       </div>
 
       {/* Per-allocation principal summary (none = no tracking for this exchange yet) */}
@@ -1186,10 +1232,15 @@ function CapitalEventsSection() {
   const [events, setEvents] = useState<ApiCapitalEvent[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [editingEvent, setEditingEvent] = useState<ApiCapitalEvent | null>(null);
-  const [showCreate, setShowCreate] = useState(false);
+  // When recording a new event, track which connection initiated so the
+  // modal can scope the allocation dropdown + default-set connection_id.
+  // null = modal closed; string = connection_id of the exchange panel
+  // whose "+ RECORD" button was clicked.
+  const [creatingForConnection, setCreatingForConnection] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState<ApiCapitalEvent | null>(null);
-  const [confirmReset, setConfirmReset] = useState(false);
+  // confirmReset holds the connection_id being reset; null = modal closed.
+  const [confirmReset, setConfirmReset] = useState<string | null>(null);
   const [editingAnchor, setEditingAnchor] = useState<string | null>(null);
   // Per-allocation principal cache (allocation_id → ApiPnl). Fed by /pnl.
   const [pnlByAlloc, setPnlByAlloc] = useState<Record<string, {
@@ -1257,7 +1308,7 @@ function CapitalEventsSection() {
     setSubmitting(true);
     try {
       await allocatorApi.createCapitalEvent(data);
-      setShowCreate(false);
+      setCreatingForConnection(null);
       await refresh();
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -1292,11 +1343,11 @@ function CapitalEventsSection() {
     }
   }
 
-  async function handleReset() {
+  async function handleReset(connectionId: string) {
     setSubmitting(true);
     try {
-      await allocatorApi.resetCapitalEventsToDefaults();
-      setConfirmReset(false);
+      await allocatorApi.resetCapitalEventsToDefaults(connectionId);
+      setConfirmReset(null);
       await refresh();
       // Silent success — the list refresh is the visual confirmation.
     } catch (e) {
@@ -1332,52 +1383,10 @@ function CapitalEventsSection() {
   return (
     <div style={{ marginTop: 20 }}>
       <div style={{
-        display: "flex", justifyContent: "space-between", alignItems: "center",
-        marginBottom: 12,
+        fontSize: 9, fontWeight: 700, letterSpacing: "0.12em",
+        color: "var(--t3)", textTransform: "uppercase", marginBottom: 12,
       }}>
-        <div style={{
-          fontSize: 9, fontWeight: 700, letterSpacing: "0.12em",
-          color: "var(--t3)", textTransform: "uppercase",
-        }}>
-          CAPITAL EVENTS
-        </div>
-        <div style={{ display: "flex", gap: 8 }}>
-          <button
-            onClick={() => setConfirmReset(true)}
-            disabled={allocOptions.length === 0}
-            title="Delete all manual entries + overrides and re-sync from the exchange (exchange truth only)."
-            style={{
-              background: "transparent",
-              border: "1px solid var(--line2)",
-              borderRadius: 3,
-              color: allocOptions.length === 0 ? "var(--t3)" : "var(--amber)",
-              fontSize: 9, fontWeight: 700, letterSpacing: "0.12em",
-              textTransform: "uppercase",
-              padding: "5px 12px",
-              cursor: allocOptions.length === 0 ? "not-allowed" : "pointer",
-              fontFamily: FONT_MONO,
-            }}
-          >
-            RESET TO DEFAULT
-          </button>
-          <button
-            onClick={() => setShowCreate(true)}
-            disabled={allocOptions.length === 0}
-            style={{
-              background: "transparent",
-              border: "1px solid var(--line2)",
-              borderRadius: 3,
-              color: allocOptions.length === 0 ? "var(--t3)" : "var(--green)",
-              fontSize: 9, fontWeight: 700, letterSpacing: "0.12em",
-              textTransform: "uppercase",
-              padding: "5px 12px",
-              cursor: allocOptions.length === 0 ? "not-allowed" : "pointer",
-              fontFamily: FONT_MONO,
-            }}
-          >
-            + RECORD CAPITAL EVENT
-          </button>
-        </div>
+        CAPITAL EVENTS
       </div>
 
       {error && (
@@ -1466,6 +1475,8 @@ function CapitalEventsSection() {
                         : { clear_allocation: true },
                     )
                   }
+                  onRecordNew={grp.connection_id ? () => setCreatingForConnection(grp.connection_id!) : undefined}
+                  onReset={grp.connection_id ? () => setConfirmReset(grp.connection_id!) : undefined}
                   allAllocOptions={allocOptions}
                 />
               ))}
@@ -1482,26 +1493,46 @@ function CapitalEventsSection() {
         })()
       )}
 
-      {(showCreate || editingEvent) && (
-        <CapitalEventModal
-          initial={editingEvent}
-          allocations={allocOptions}
-          submitting={submitting}
-          onCancel={() => { setShowCreate(false); setEditingEvent(null); }}
-          onSubmit={data => {
-            if (editingEvent) {
-              handleEdit(editingEvent.event_id, {
-                amount_usd: data.amount_usd,
-                kind: data.kind,
-                event_at: data.event_at,
-                notes: data.notes,
-              });
-            } else {
-              handleCreate(data);
-            }
-          }}
-        />
-      )}
+      {(creatingForConnection || editingEvent) && (() => {
+        // On CREATE: scope the allocation dropdown to just those on the
+        // initiating exchange's connection. On EDIT: show all the
+        // operator's allocations (remap path for manual overrides).
+        const modalAllocations = creatingForConnection
+          ? instances
+              .filter(i =>
+                i.id && !i.id.startsWith("temp-")
+                && i.connectionId === creatingForConnection,
+              )
+              .map(i => ({
+                id: i.id,
+                label: `${i.strategyName}${i.exchangeName ? ` · ${i.exchangeName}` : ""}`,
+              }))
+          : allocOptions;
+        return (
+          <CapitalEventModal
+            initial={editingEvent}
+            allocations={modalAllocations}
+            submitting={submitting}
+            onCancel={() => { setCreatingForConnection(null); setEditingEvent(null); }}
+            onSubmit={data => {
+              if (editingEvent) {
+                handleEdit(editingEvent.event_id, {
+                  amount_usd: data.amount_usd,
+                  kind: data.kind,
+                  event_at: data.event_at,
+                  notes: data.notes,
+                });
+              } else {
+                handleCreate({
+                  ...data,
+                  // Tie new events to the exchange panel they were initiated from
+                  connection_id: creatingForConnection ?? undefined,
+                });
+              }
+            }}
+          />
+        );
+      })()}
 
       {confirmDelete && (
         <div
@@ -1562,12 +1593,16 @@ function CapitalEventsSection() {
         </div>
       )}
 
-      {/* Reset-to-default confirm */}
-      {confirmReset && (
+      {/* Reset-to-default confirm (connection-scoped) */}
+      {confirmReset && (() => {
+        const exchangeName = exchanges.find(e => e.id === confirmReset)?.name
+          ?? exchanges.find(e => e.id === confirmReset)?.exchange
+          ?? confirmReset.slice(0, 8);
+        return (
         <div
           role="dialog"
           aria-modal="true"
-          onClick={() => { if (!submitting) setConfirmReset(false); }}
+          onClick={() => { if (!submitting) setConfirmReset(null); }}
           style={{
             position: "fixed", inset: 0, background: "rgba(0,0,0,0.7)",
             display: "flex", alignItems: "center", justifyContent: "center",
@@ -1585,18 +1620,19 @@ function CapitalEventsSection() {
             <div style={{
               fontSize: 9, fontWeight: 700, letterSpacing: "0.12em",
               color: "var(--t3)", textTransform: "uppercase", marginBottom: 10,
-            }}>Reset capital events to default?</div>
+            }}>Reset {exchangeName} capital events?</div>
             <div style={{ fontSize: 11, color: "var(--t1)", lineHeight: 1.6, marginBottom: 16 }}>
-              Delete ALL capital events on your allocations — manual entries you created
-              AND manual overrides on auto-detected rows — then re-sync from the exchange.
-              Only events the exchange reports will remain. Principal recomputes from
-              exchange-truth values. This cannot be undone.
+              Delete all capital events on <span style={{ color: "var(--t0)" }}>{exchangeName}</span> —
+              manual entries AND manual overrides on auto-detected rows — then re-sync from
+              the exchange. Only events the exchange reports will remain. Principal on this
+              exchange's allocations recomputes from exchange-truth values. Other exchanges
+              are not affected. This cannot be undone.
             </div>
             <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
               <button
                 type="button"
                 disabled={submitting}
-                onClick={() => setConfirmReset(false)}
+                onClick={() => setConfirmReset(null)}
                 style={{
                   background: "transparent", border: "1px solid var(--line2)",
                   borderRadius: 4, padding: "8px 16px",
@@ -1609,7 +1645,7 @@ function CapitalEventsSection() {
               <button
                 type="button"
                 disabled={submitting}
-                onClick={handleReset}
+                onClick={() => handleReset(confirmReset)}
                 style={{
                   background: "var(--amber-dim)", border: "1px solid var(--amber)",
                   borderRadius: 4, padding: "8px 16px",
@@ -1622,7 +1658,8 @@ function CapitalEventsSection() {
             </div>
           </div>
         </div>
-      )}
+        );
+      })()}
 
       {/* Anchor-edit modal */}
       {editingAnchor && (() => {

@@ -2493,62 +2493,78 @@ def delete_capital_event(
 
 @router.post("/capital-events/reset-defaults")
 def reset_capital_events_to_defaults(
+    connection_id: str | None = None,
     user_id: str = Depends(get_current_user),
     cur=Depends(get_cursor),
 ) -> dict[str, Any]:
-    """Wipe all operator-authored capital events (manual entries + manual
+    """Wipe operator-authored capital events (manual entries + manual
     overrides on auto rows) and re-sync from the exchange. Semantic: "show
     me exchange truth only."
 
-    Steps:
-      1. Hard-delete EVERY row owned by the caller, regardless of source:
-         - source='manual'                    (operator-created records)
-         - source IN ('auto','auto-anomaly') (auto-detected — will be
-           re-inserted on step 2 with their original exchange-reported
-           values, minus any edits/deletes the operator had layered on)
-      2. Re-poll each affected connection via poll_connection with
-         source='auto'. Only auto rows come back; manual entries are gone
-         until the operator re-enters them.
+    Scope:
+      - connection_id provided → only events on that one connection
+        (caller must own it; 403 otherwise). Used by the per-exchange
+        RESET button in /trader/settings.
+      - connection_id omitted  → everything the caller owns across every
+        connection + legacy manual rows without a connection_id. Kept
+        for global-reset scenarios and tests.
 
-    Scope: caller's own allocations + connections. Ownership resolved
-    through allocation_id → allocation.user_id OR connection_id →
-    exchange_connection.user_id. One user's reset can never touch
-    another user's rows.
+    Steps: hard-delete targeted rows, then re-poll each affected
+    connection so auto events re-appear with exchange-reported values.
+    Manual entries stay gone until the operator re-enters them.
     """
-    # Collect connections to re-poll BEFORE deleting (we need the linkage).
-    # Union across all events the user owns (either mapping chain).
-    cur.execute("""
-        SELECT DISTINCT ce.connection_id::text AS connection_id
-          FROM user_mgmt.allocation_capital_events ce
-          LEFT JOIN user_mgmt.allocations a
-                 ON a.allocation_id = ce.allocation_id
-          LEFT JOIN user_mgmt.exchange_connections ec
-                 ON ec.connection_id = ce.connection_id
-         WHERE COALESCE(a.user_id, ec.user_id) = %s::uuid
-           AND ce.connection_id IS NOT NULL
-    """, (user_id,))
-    affected_connections = [r["connection_id"] for r in cur.fetchall()]
+    if connection_id:
+        _verify_connection_owned_by(cur, connection_id, user_id)
 
-    # Delete by connection-ownership path.
-    cur.execute("""
-        DELETE FROM user_mgmt.allocation_capital_events ce
-         USING user_mgmt.exchange_connections ec
-         WHERE ce.connection_id = ec.connection_id
-           AND ec.user_id = %s::uuid
-    """, (user_id,))
-    deleted_count = cur.rowcount
+    if connection_id:
+        # Scoped: only this one connection.
+        affected_connections = [connection_id]
+        cur.execute("""
+            DELETE FROM user_mgmt.allocation_capital_events
+             WHERE connection_id = %s::uuid
+        """, (connection_id,))
+        deleted_count = cur.rowcount
+        # Also sweep legacy NULL-connection_id rows tied via allocation to
+        # this connection (manual entries created before connection_id
+        # was required on create).
+        cur.execute("""
+            DELETE FROM user_mgmt.allocation_capital_events ce
+             USING user_mgmt.allocations a
+             WHERE ce.allocation_id = a.allocation_id
+               AND ce.connection_id IS NULL
+               AND a.connection_id = %s::uuid
+               AND a.user_id = %s::uuid
+        """, (connection_id, user_id))
+        deleted_count += cur.rowcount
+    else:
+        # Global: everything the caller owns.
+        cur.execute("""
+            SELECT DISTINCT ce.connection_id::text AS connection_id
+              FROM user_mgmt.allocation_capital_events ce
+              LEFT JOIN user_mgmt.allocations a
+                     ON a.allocation_id = ce.allocation_id
+              LEFT JOIN user_mgmt.exchange_connections ec
+                     ON ec.connection_id = ce.connection_id
+             WHERE COALESCE(a.user_id, ec.user_id) = %s::uuid
+               AND ce.connection_id IS NOT NULL
+        """, (user_id,))
+        affected_connections = [r["connection_id"] for r in cur.fetchall()]
 
-    # Sweep any remaining rows whose allocation-ownership chain says
-    # user-owned but connection_id was NULL (very rare — only happens if
-    # a manual entry was created with allocation_id only, which the
-    # POST path doesn't explicitly prevent). Covers that edge.
-    cur.execute("""
-        DELETE FROM user_mgmt.allocation_capital_events ce
-         USING user_mgmt.allocations a
-         WHERE ce.allocation_id = a.allocation_id
-           AND a.user_id = %s::uuid
-    """, (user_id,))
-    deleted_count += cur.rowcount
+        cur.execute("""
+            DELETE FROM user_mgmt.allocation_capital_events ce
+             USING user_mgmt.exchange_connections ec
+             WHERE ce.connection_id = ec.connection_id
+               AND ec.user_id = %s::uuid
+        """, (user_id,))
+        deleted_count = cur.rowcount
+        cur.execute("""
+            DELETE FROM user_mgmt.allocation_capital_events ce
+             USING user_mgmt.allocations a
+             WHERE ce.allocation_id = a.allocation_id
+               AND a.user_id = %s::uuid
+               AND ce.connection_id IS NULL
+        """, (user_id,))
+        deleted_count += cur.rowcount
 
     # Re-poll each affected connection so auto events re-appear with
     # their exchange-reported defaults. Import lazily to avoid a module-
@@ -2566,6 +2582,7 @@ def reset_capital_events_to_defaults(
 
     return {
         "reset": True,
+        "connection_id": connection_id,
         "deleted_rows": deleted_count,
         "connections_repolled": repolled,
     }
