@@ -77,6 +77,49 @@ config flows in. Note: this changes the leverage tier from
 Alpha Max (l_high=2.0) to ALTS MAIN (l_high=1.5) — user's capital
 size-drops by ~25% vs current but risk-adjusted return is the bet.
 
+### Gap 8 — Reconcile Execution table vs original Session E design
+The Daily Execution Summary table was designed in the 2026-04-21
+Session E planning conversation (jsonl file `337af576-a17e-4a1d-
+bef9-8380d76414fa.jsonl`, User prompt #2-#3). Column list as
+specified:
+
+  DATE | ALLOCATION | SIGNAL | CONVICTION | FILLED | RETRIED |
+  FILL RATE | ENTRY SLIP | EXIT SLIP | EST RET | ACTUAL RET |
+  PNL GAP | LEV | EXIT | ALERTS
+
+Per-row data sources (also from that session's spec):
+  From `allocation_returns`: session_date, allocation_id,
+    net_return_pct → actual_return_pct, gross_return_pct,
+    exit_reason, effective_leverage → leverage_applied,
+    capital_deployed_usd
+  From `portfolio_sessions` (LEFT JOIN on allocation_id +
+    session_date=signal_date): symbols, entered → conviction/filled,
+    final_portfolio_return → est_return_pct, peak_portfolio_return,
+    max_dd_from_peak, bars_count, sym_stops
+  Nulls (until writer extension): fill_rate, entry_slip_bps,
+    exit_slip_bps, pnl_gap_bps, retried, alerts, conviction_roi_x
+  Derived at read: pnl_gap_pct = final_portfolio_return − net_return_pct
+
+Observed drift in current implementation:
+  - Current table (screenshot 2026-04-23 05:00 UTC) does NOT show
+    the ALLOCATION column — may have been dropped during Option A
+    filter work (user filter replaces per-row allocation tag for
+    single-allocation views, but when filter=All it should render)
+  - 2026-04-23 row shows "Filtered / Signal 0" when the recovered
+    session actually traded 6 symbols — see Gap 6 (source query
+    stale, probably joining first-subprocess portfolio_sessions row)
+
+Missing from original spec but now requested (Gap 7):
+  - Per-row expand to show per-symbol detail (entry/exit prices,
+    slippage, PnL, exit_reason, retries). Need user confirmation
+    this was part of the original plan or is new.
+
+Scope for tomorrow: (1) read 337af576 User #2-#3 prompts in full
+for any missed details, (2) diff spec vs current
+`frontend/app/manager/(protected)/execution/page.tsx`, (3)
+produce concrete delta list + patch order. Gap 6, Gap 7, Gap 8
+all touch the same surface and should ship together.
+
 ### Gap 7 — Execution Daily Summary per-symbol expand
 Rows in the Daily Execution Summary table (Manager → Execution)
 currently show aggregated session-level metrics only (date, signal
