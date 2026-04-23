@@ -77,6 +77,37 @@ config flows in. Note: this changes the leverage tier from
 Alpha Max (l_high=2.0) to ALTS MAIN (l_high=1.5) — user's capital
 size-drops by ~25% vs current but risk-adjusted return is the bet.
 
+### Gap 7 — Execution Daily Summary per-symbol expand
+Rows in the Daily Execution Summary table (Manager → Execution)
+currently show aggregated session-level metrics only (date, signal
+count, conviction pass/fail, fill rate, entry slip, exit slip,
+actual ret, pnl gap, lev, exit, alerts). Clicking a row should
+expand it inline to show per-symbol breakdown:
+
+  symbol · side · size · entry_est · entry_fill · entry_slip_bps ·
+  exit_est · exit_fill · exit_slip_bps · pnl_usd · pnl_pct ·
+  exit_reason (sym_stop / session_close / port_sl / port_tsl /
+  early_fill / other) · retries
+
+Data sources that already carry this (writes from trader_blofin.py):
+- `user_mgmt.execution_reports` (most-granular; per-bar + per-symbol)
+- `runtime_state.positions` (live / current session)
+- `fees_tables_by_filter` in the job results (for historical audit
+  rows — not applicable here since Manager reads live allocation
+  data, not Simulator audit jobs)
+
+Backend: new endpoint `GET /api/manager/execution-summary/{date}/
+positions?allocation_id=<uuid>` returns per-symbol rows for that
+session.
+
+Frontend: add expandable state to the Daily Summary table. On row
+click: fetch the endpoint, inline-expand with the per-symbol rows
+styled similarly to the existing session-logs inner table. Match
+the current theme (no new colors).
+
+Scope: ~2 hrs. Could pair with Gap 6 since both touch the Daily
+Summary query path.
+
 ### Gap 6 — Manager Execution "Daily Summary" stale for 2026-04-23
 Observed 2026-04-23 ~05:00 UTC (Thu): the Manager → Execution →
 Daily Execution Summary table shows the 2026-04-23 row as
