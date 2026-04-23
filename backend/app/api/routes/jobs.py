@@ -82,6 +82,11 @@ class JobRequest(BaseModel):
     oi_ranking_metric:          str   = "pct_change"   # pct_change | abs_dollar (log_return invalid for OI)
     apply_blofin_filter:        bool  = False          # narrow universe to BloFin listings
     ranking_metric:             str | None = None      # DEPRECATED — kept for backward-compat
+    # Stream D-explore (2026-04-23): three-way overlap with volume as a third axis.
+    # 'price_oi' is canonical (preserves current behavior). Other values are
+    # candidate-exploration variants evaluated via the Simulator governance
+    # framework — not canonical unless promoted per §5.
+    overlap_dimensions:         str   = "price_oi"      # price_oi | price_volume | oi_volume | price_oi_volume
     live_parity:                bool  = False
     freq_width:                 int   = 20
     freq_cutoff:                int   = 20
@@ -273,15 +278,25 @@ class JobRequest(BaseModel):
             or self.oi_ranking_metric != "pct_change"
             or self.apply_blofin_filter
             or (self.ranking_metric is not None and self.ranking_metric != "pct_change")
+            or self.overlap_dimensions != "price_oi"
         ):
             raise ValueError(
                 "live_parity is mutually exclusive with price_ranking_metric, "
-                "oi_ranking_metric, apply_blofin_filter, and the deprecated "
-                "ranking_metric field. live_parity reproduces daily_signal.py v1 "
+                "oi_ranking_metric, apply_blofin_filter, the deprecated "
+                "ranking_metric field, and overlap_dimensions (must stay "
+                "'price_oi'). live_parity reproduces daily_signal.py v1 "
                 "exactly (asymmetric: log-return on price, abs-$ on OI; "
-                "top-100 by 24h volume; BloFin-filtered) — its internal "
-                "setup can't be layered with individual knobs. Use one OR "
-                "the other per docs/strategy_specification.md § 3.1."
+                "top-100 by 24h volume; BloFin-filtered; price ∩ OI only) — "
+                "its internal setup can't be layered with individual knobs. "
+                "Use one OR the other per docs/strategy_specification.md § 3.1."
+            )
+        if "volume" in self.overlap_dimensions and self.source != "db":
+            raise ValueError(
+                f"overlap_dimensions={self.overlap_dimensions!r} requires "
+                f"source='db'; got source={self.source!r}. Volume is not in "
+                f"the pre-built market.leaderboards tables — the three-way "
+                f"overlap must be computed on-the-fly from market.futures_1m. "
+                f"Either set source='db' or use overlap_dimensions='price_oi'."
             )
         return self
 

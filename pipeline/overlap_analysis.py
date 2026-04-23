@@ -498,54 +498,110 @@ def compute_daily_snapshot(df: pd.DataFrame, freq_width: int) -> dict:
 # Overlap analysis
 # ─────────────────────────────────────────────
 
+OVERLAP_DIMENSIONS_CHOICES = ("price_oi", "price_volume", "oi_volume", "price_oi_volume")
+
+
 def compute_overlap(price_freq: dict, oi_freq: dict,
                     freq_cutoff: int = FREQ_TOP_N,
-                    sort_by: str = OVERLAP_SORT_BY,) -> pd.DataFrame:
+                    sort_by: str = OVERLAP_SORT_BY,
+                    volume_freq: dict | None = None,
+                    overlap_dimensions: str = "price_oi") -> pd.DataFrame:
     """
-    For each date, find symbols appearing in both price and OI frequency tables.
-    Applies freq_cutoff: only the top-N most frequent symbols from each
-    leaderboard are considered before taking the intersection.
+    For each date, find symbols appearing in the intersection of the
+    frequency tables selected by `overlap_dimensions`.
+
+    freq_cutoff: only the top-N most frequent symbols from each leaderboard
+    are considered before intersecting.
+
+    overlap_dimensions (Stream D-explore, candidate-exploration knob):
+      'price_oi'         — top-N-price ∩ top-N-OI  (canonical, default)
+      'price_volume'     — top-N-price ∩ top-N-volume
+      'oi_volume'        — top-N-OI ∩ top-N-volume
+      'price_oi_volume'  — three-way intersection
+
+    `volume_freq` is required (non-None) whenever overlap_dimensions
+    includes 'volume'. Caller computes it the same way price/OI are
+    computed, with `metric="volume"` on _load_canonical_futures_1m_
+    frequencies. Canonical 'price_oi' mode leaves volume_freq=None.
+
     sort_by: "price" | "open_interest" | "combined" | "price-only" | "oi-only"
-      price-only/oi-only skip the intersection and use just that leaderboard
-    Returns DataFrame: date | price_symbols | oi_symbols | overlap_symbols | overlap_count
+      price-only/oi-only skip the intersection and use just that leaderboard;
+      other values drive the ordering within the selected intersection.
+      The sort_by knob is orthogonal to overlap_dimensions — it controls
+      the ordering of symbols within the already-selected basket.
+
+    Returns DataFrame with columns: date | price_symbols | oi_symbols |
+    volume_symbols (empty list when volume not used) | overlap_symbols |
+    overlap_count | price_count | oi_count | volume_count.
     """
-    all_dates = sorted(set(price_freq.keys()) | set(oi_freq.keys()))
+    if overlap_dimensions not in OVERLAP_DIMENSIONS_CHOICES:
+        raise ValueError(
+            f"overlap_dimensions must be one of {OVERLAP_DIMENSIONS_CHOICES}, "
+            f"got {overlap_dimensions!r}"
+        )
+    uses_volume = "volume" in overlap_dimensions
+    if uses_volume and volume_freq is None:
+        raise ValueError(
+            f"overlap_dimensions={overlap_dimensions!r} requires volume_freq "
+            f"to be supplied (caller should compute it via "
+            f"_load_canonical_futures_1m_frequencies with metric='volume')."
+        )
+
+    all_dates = sorted(
+        set(price_freq.keys()) | set(oi_freq.keys())
+        | (set(volume_freq.keys()) if uses_volume else set())
+    )
     rows = []
+
+    def _top_n(counter: dict) -> set:
+        return set(sym for sym, _ in sorted(counter.items(), key=lambda x: x[1], reverse=True)[:freq_cutoff])
 
     for date in all_dates:
         p_counter = price_freq.get(date, {})
         o_counter = oi_freq.get(date, {})
+        v_counter = volume_freq.get(date, {}) if uses_volume else {}
 
-        # Truncate to top freq_cutoff before intersecting
-        p_syms = set(sym for sym, _ in sorted(p_counter.items(), key=lambda x: x[1], reverse=True)[:freq_cutoff])
-        o_syms = set(sym for sym, _ in sorted(o_counter.items(), key=lambda x: x[1], reverse=True)[:freq_cutoff])
+        p_syms = _top_n(p_counter)
+        o_syms = _top_n(o_counter)
+        v_syms = _top_n(v_counter) if uses_volume else set()
 
-        # ── Symbol selection and sort key driven by sort_by ─────────────────
+        # ── sort_by overrides the intersection for the legacy price-only /
+        # oi-only paths; otherwise overlap_dimensions drives set selection ──
         if sort_by == "price-only":
             overlap = sorted(p_syms)
             key_fn = lambda s: p_counter.get(s, 0)
         elif sort_by == "oi-only":
             overlap = sorted(o_syms)
             key_fn = lambda s: o_counter.get(s, 0)
-        elif sort_by == "open_interest":
-            overlap = sorted(p_syms & o_syms)
-            key_fn = lambda s: o_counter.get(s, 0)
-        elif sort_by == "combined":
-            overlap = sorted(p_syms & o_syms)
-            key_fn = lambda s: p_counter.get(s, 0) + o_counter.get(s, 0)
-        else:  # "price" — default: intersect both, sort by price rank
-            overlap = sorted(p_syms & o_syms)
-            key_fn = lambda s: p_counter.get(s, 0)
+        else:
+            if overlap_dimensions == "price_oi":
+                selected = p_syms & o_syms
+            elif overlap_dimensions == "price_volume":
+                selected = p_syms & v_syms
+            elif overlap_dimensions == "oi_volume":
+                selected = o_syms & v_syms
+            else:  # price_oi_volume
+                selected = p_syms & o_syms & v_syms
+
+            if sort_by == "open_interest":
+                key_fn = lambda s: o_counter.get(s, 0)
+            elif sort_by == "combined":
+                key_fn = lambda s: p_counter.get(s, 0) + o_counter.get(s, 0) + (v_counter.get(s, 0) if uses_volume else 0)
+            else:  # "price" — default
+                key_fn = lambda s: p_counter.get(s, 0)
+            overlap = sorted(selected)
         overlap_sorted = sorted(overlap, key=key_fn, reverse=True)
 
         rows.append({
-            "date":            pd.Timestamp(date),
-            "price_symbols":   sorted(p_syms, key=lambda s: p_counter.get(s, 0), reverse=True),
-            "oi_symbols":      sorted(o_syms, key=lambda s: o_counter.get(s, 0), reverse=True),
-            "overlap_symbols": overlap_sorted,
-            "overlap_count":   len(overlap_sorted),
-            "price_count":     len(p_syms),
-            "oi_count":        len(o_syms),
+            "date":             pd.Timestamp(date),
+            "price_symbols":    sorted(p_syms, key=lambda s: p_counter.get(s, 0), reverse=True),
+            "oi_symbols":       sorted(o_syms, key=lambda s: o_counter.get(s, 0), reverse=True),
+            "volume_symbols":   sorted(v_syms, key=lambda s: v_counter.get(s, 0), reverse=True) if uses_volume else [],
+            "overlap_symbols":  overlap_sorted,
+            "overlap_count":    len(overlap_sorted),
+            "price_count":      len(p_syms),
+            "oi_count":         len(o_syms),
+            "volume_count":     len(v_syms) if uses_volume else 0,
         })
 
     return pd.DataFrame(rows)
@@ -932,8 +988,8 @@ def _load_canonical_futures_1m_frequencies(
     Returns dict[date, Counter[base, int]]. Keys are normalize_symbol()
     bases so the output shape matches _load_frequency_from_db.
     """
-    if metric not in ("close", "open_interest"):
-        raise ValueError(f"metric must be 'close' or 'open_interest', got {metric!r}")
+    if metric not in ("close", "open_interest", "volume"):
+        raise ValueError(f"metric must be 'close', 'open_interest', or 'volume', got {metric!r}")
     if mode not in ("snapshot", "frequency"):
         raise ValueError(f"mode must be 'snapshot' or 'frequency', got {mode!r}")
     if ranking_metric not in ("log_return", "pct_change", "abs_dollar"):
@@ -941,12 +997,14 @@ def _load_canonical_futures_1m_frequencies(
             f"ranking_metric must be 'log_return', 'pct_change', or 'abs_dollar', "
             f"got {ranking_metric!r}"
         )
-    if ranking_metric == "log_return" and metric == "open_interest":
+    if ranking_metric == "log_return" and metric in ("open_interest", "volume"):
         # log_return OI == (oi/anchor_oi), which isn't a meaningful quantity.
         # v1 uses log_return for PRICE only and abs_dollar for OI.
+        # Same logic for volume: log_return on volume isn't a meaningful
+        # cross-sectional ranking (volume is a flow, not a stock).
         raise ValueError(
-            "ranking_metric='log_return' is valid for price (metric='close') only; "
-            "use 'pct_change' or 'abs_dollar' for open_interest."
+            f"ranking_metric='log_return' is valid for price (metric='close') only; "
+            f"use 'pct_change' or 'abs_dollar' for metric={metric!r}."
         )
 
     import sys as _sys
@@ -1725,6 +1783,7 @@ def run(min_mcap: float, freq_width: int, marketcap_dir: Path,
         price_ranking_metric: str = "pct_change",
         oi_ranking_metric: str = "pct_change",
         apply_blofin_filter: bool = False,
+        overlap_dimensions: str = "price_oi",
 ):
     mcap_label      = f"{int(min_mcap / 1_000_000)}M"
     marketcap_path  = marketcap_dir / "marketcap_daily.parquet"
@@ -2021,9 +2080,59 @@ def run(min_mcap: float, freq_width: int, marketcap_dir: Path,
         export_freq_table(oi_freq,    oi_freq_path)
         output_files += [price_freq_path, oi_freq_path]
 
+    # ── Step 2b (conditional): Volume frequency table for Stream D-explore ──
+    # Only computed when overlap_dimensions includes 'volume'. Reads
+    # market.futures_1m directly (volume isn't in the pre-built
+    # market.leaderboards table). Uses the same ranking metric and universe
+    # narrowing as price/OI for symmetry with the canonical intersection.
+    volume_freq: dict | None = None
+    if "volume" in overlap_dimensions:
+        if source != "db":
+            raise RuntimeError(
+                f"overlap_dimensions={overlap_dimensions!r} requires source=db; "
+                f"got source={source!r}. Volume is not in the pre-built "
+                f"market.leaderboards tables — must be computed on-the-fly "
+                f"from market.futures_1m."
+            )
+        if live_parity:
+            raise RuntimeError(
+                "overlap_dimensions with 'volume' is incompatible with "
+                "--live-parity (live-parity reproduces v1 which uses only "
+                "price ∩ OI). Drop --live-parity to explore volume overlaps."
+            )
+        # Volume shares price's ranking_metric (not OI's) because volume is
+        # more naturally a flow-like quantity, like price changes. When the
+        # user has overridden price ranking, volume follows.
+        _vol_ranking = price_ranking_metric
+        # Note: when apply_blofin_filter=True with non-canonical ranking,
+        # the `_non_canonical_ranking` branch above computes a per-day
+        # `universe_by_day` and passes it to price/OI loaders. Volume is
+        # computed here separately and re-derives its own per-day universe
+        # inside `_load_canonical_futures_1m_frequencies` via the
+        # apply_blofin_filter path. For the default canonical call (pct_change
+        # both, no BloFin filter) this is a no-op — universe is unfiltered
+        # across all three axes. Hoisting universe_by_day to share across all
+        # three loaders is a future refinement; for the acceptance-test
+        # scope (canonical pct_change, no BloFin filter) it's equivalent.
+        log.info(f"[D-explore] Computing volume frequencies "
+                 f"(ranking={_vol_ranking}, mode={mode})...")
+        volume_freq = _load_canonical_futures_1m_frequencies(
+            metric="volume", freq_width=freq_width,
+            sample_interval=sample_interval, mode=mode,
+            ranking_metric=_vol_ranking,
+            apply_blofin_filter=apply_blofin_filter,
+            universe_by_day=None,
+        )
+        log.info(f"  → {len(volume_freq)} dates with volume data")
+
     # ── Step 3: Overlap ──
-    log.info(f"Computing overlap (freq_cutoff={freq_cutoff})...")
-    overlap_df = compute_overlap(price_freq, oi_freq, freq_cutoff=freq_cutoff, sort_by=sort_by)
+    log.info(f"Computing overlap (freq_cutoff={freq_cutoff}, dimensions={overlap_dimensions})...")
+    overlap_df = compute_overlap(
+        price_freq, oi_freq,
+        freq_cutoff=freq_cutoff, sort_by=sort_by,
+        volume_freq=volume_freq,
+        overlap_dimensions=overlap_dimensions,
+    )
     log.info(f"  → {len(overlap_df)} dates processed")
 
     # ── Export overlap diagnostic CSV ──
@@ -2328,6 +2437,14 @@ if __name__ == "__main__":
                              "currently listed on BloFin's USDT-swap instrument list BEFORE "
                              "ranking. Matches live trading universe constraints. Fetched once "
                              "per audit-run via BloFin REST API.")
+    parser.add_argument("--overlap-dimensions", dest="overlap_dimensions", type=str,
+                        default="price_oi", choices=list(OVERLAP_DIMENSIONS_CHOICES),
+                        help="Which axes must agree for a symbol to enter the basket. "
+                             "'price_oi' (default) is canonical: intersection of top-N-by-price "
+                             "with top-N-by-OI. Stream D-explore adds 'price_volume' (drop OI), "
+                             "'oi_volume' (drop price), and 'price_oi_volume' (three-way). "
+                             "Requires --source db since volume is not in the pre-built "
+                             "market.leaderboards tables. Mutually exclusive with --live-parity.")
     # ── Deprecated: --ranking-metric (symmetric single knob) ──
     # Mapped to both --price-ranking-metric and --oi-ranking-metric for one release
     # of backward compatibility. Emits a deprecation warning when used. Remove in
@@ -2361,13 +2478,15 @@ if __name__ == "__main__":
         or args.oi_ranking_metric != "pct_change"
         or args.apply_blofin_filter
         or args.ranking_metric is not None
+        or args.overlap_dimensions != "price_oi"
     ):
         parser.error(
             "--live-parity is mutually exclusive with --price-ranking-metric, "
-            "--oi-ranking-metric, --apply-blofin-filter, and --ranking-metric. "
+            "--oi-ranking-metric, --apply-blofin-filter, --ranking-metric, and "
+            "--overlap-dimensions (must stay 'price_oi'). "
             "--live-parity reproduces daily_signal.py v1 exactly (asymmetric: log-return "
-            "on price, absolute $ delta on OI; top-100 by 24h volume; BloFin-filtered). "
-            "Use the individual knobs OR --live-parity, not both, per "
+            "on price, absolute $ delta on OI; top-100 by 24h volume; BloFin-filtered; "
+            "price ∩ OI only). Use the individual knobs OR --live-parity, not both, per "
             "docs/strategy_specification.md § 3.1."
         )
 
@@ -2434,6 +2553,7 @@ if __name__ == "__main__":
         price_ranking_metric = args.price_ranking_metric,
         oi_ranking_metric    = args.oi_ranking_metric,
         apply_blofin_filter  = args.apply_blofin_filter,
+        overlap_dimensions   = args.overlap_dimensions,
     )
 
     elapsed = _time.time() - _start

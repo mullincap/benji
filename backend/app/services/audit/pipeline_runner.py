@@ -68,6 +68,10 @@ def build_cli_args(params: dict) -> list[str]:
         # passes it, overlap_analysis.py maps it onto both new flags and emits
         # a deprecation warning. New callers should use the two split keys.
         "ranking_metric":           "--ranking-metric",
+        # Stream D-explore (2026-04-23): overlap-dimensions knob for
+        # candidate-exploration variants (price_oi canonical / price_volume /
+        # oi_volume / price_oi_volume).
+        "overlap_dimensions":       "--overlap-dimensions",
     }
     bool_flags = {
         "end_cross_midnight":    "--end-cross-midnight",
