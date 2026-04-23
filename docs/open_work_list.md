@@ -1,5 +1,77 @@
 # Open Work List
 
+## 🔴 Follow-up from Stream D-medium (2026-04-23)
+
+### D-perf — precomputed abs_dollar leaderboards
+
+`pipeline/overlap_analysis.py --ranking-metric abs_dollar` (shipped `fcb88be`
+on 2026-04-23) reads raw values from `market.futures_1m` and ranks on-the-fly
+via a CTE + `ROW_NUMBER()` partition. Measured wall-clock per metric: **~12
+minutes** (vs sub-second for `--ranking-metric pct_change` via the
+pre-ranked `market.leaderboards` fast path). Full audit under abs_dollar:
+**~27 minutes** vs `~3.5` min canonical → **~8× slower end-to-end, ~700× on
+the ranking step itself**.
+
+That's a UX problem for the governance framework (§ 5 of
+`docs/strategy_specification.md`): the Simulator's Compare-to-Canonical flow
+asks users to explore candidate configs, but the 20+ minute per-abs_dollar-run
+cost discourages exploration on the single axis where discovery is most
+likely (abs_dollar vs pct_change). Needs a real optimization.
+
+**Scope:**
+- Extend `pipeline/indexer/build_intraday_leaderboard.py` to emit `abs_dollar`
+  rankings alongside `pct_change`. Two options for persistence:
+  (a) Add a `ranking_metric` column to `market.leaderboards` (currently has
+      `metric` ∈ {price, open_interest, volume} but assumes one ranking formula).
+      PK becomes `(timestamp_utc, metric, ranking_metric, variant, anchor_hour, rank)`.
+  (b) Parallel table `market.leaderboards_abs_dollar` with identical schema.
+  Option (a) is cleaner but requires a schema migration and reading-code
+  updates; option (b) is additive and avoids touching any canonical read path.
+  **Recommend (b)**: lower risk, same query cost, easy to deprecate later if
+  abs_dollar turns out to not be a long-lived axis.
+- Update `_load_canonical_futures_1m_frequencies` in `overlap_analysis.py`
+  (or add a parallel `_load_abs_dollar_frequencies_from_leaderboards`) to
+  read from the precomputed source when available. Fall back to on-the-fly
+  only if the table is missing / stale.
+- Backfill: re-run the indexer for the full 432-day window to populate
+  historical abs_dollar rankings. Daily nightly cron maintains it going
+  forward.
+- Scope estimate: ~80 LOC in the builder, ~40 LOC in the consumer, a schema
+  migration, and a ~3-hour backfill. Total ~2-3 hours of code + multi-hour
+  compute time for backfill.
+
+**Outcome:** abs_dollar audits at parity with pct_change wall-clock (~3-5 min
+end-to-end), which is the precondition for `--ranking-metric` being a
+genuinely useful exploration axis in the Simulator UI.
+
+### D-bug — sub-second timestamp handling in `_load_canonical_futures_1m_frequencies`
+
+Discovered during Stream D-medium Test 3 (2026-04-23): the new snapshot
+branch uses `n.timestamp_utc = ANY(%s)` where `%s` is a list of exact
+`HH:00:00` timestamps. `market.futures_1m` stores sub-second timestamps
+(00:00:07, 00:00:09, etc.), so only ~2 rows per day land exactly on
+`HH:00:00`. Result: 276 of 432 dates in the walk-forward window have valid
+data; 158 dates silently dropped based on ingestion-timing artifacts.
+
+Fix: rewrite the snapshot branch to use a range query + minute aggregation,
+mirroring `_load_live_parity_frequencies_from_db`'s pattern
+(`WHERE timestamp_utc >= minute_start AND timestamp_utc < minute_end`). Then
+in Python, take the last-seen value per `(symbol_id, minute)` as the bar
+close.
+
+Test 3's measured Sharpe (−2.089) is on the biased 276-day subset. The
+direction of the finding (abs_dollar on canonical universe disqualifies per
+§ 5) is robust — −2.089 is catastrophically below the ≥canonical+0.3
+threshold, and a 158-day correction is unlikely to flip the sign. But the
+exact number shouldn't be reported as governance-grade until the fix ships.
+
+**Scope:** ~20 LOC change in `_load_canonical_futures_1m_frequencies`
+snapshot branch + rerun Test 3 to produce a clean 432-day Sharpe. ~30 min.
+
+Bundled with D-perf above since the optimized path (read from precomputed
+leaderboards) side-steps this bug entirely — if D-perf ships first, the
+sub-second timestamp handling becomes moot.
+
 ## 🔴 TOP PRIORITY — Next session (starting 2026-04-22)
 
 ### Simulator parity with live symbol selection
