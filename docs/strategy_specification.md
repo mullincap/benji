@@ -157,6 +157,29 @@ Applied in the audit simulation and in the live trader's accounting:
 live signal generator MUST produce the same basket (modulo the documented
 exchange-availability filter in §2.3) as this reference for any given date.
 
+### 3.1 Methodology-exploration CLI flags
+
+Two CLI flags on `pipeline/overlap_analysis.py` support methodology exploration and
+are NOT interchangeable:
+
+**`--live-parity`** reproduces `daily_signal.py` v1 exactly, including its
+*asymmetric* ranking (log-return on price via `log(close/anchor)`, absolute-$
+on OI via `oi_usd - anchor_oi_usd`). This is a forensic reproduction tool;
+the −0.55 Sharpe recorded in § 11.2 was measured against this configuration
+and is reproducible via `overlap_analysis.py --live-parity --source db`.
+
+**`--ranking-metric {pct_change, abs_dollar}`** applies a *symmetric* ranking
+across both price and OI (both use the same formula), operating on the
+canonical universe (no v1-specific volume or BloFin filters). This is an
+exploratory tool for testing candidate methodology variations under § 5
+governance rules. `pct_change` (default) reads `market.leaderboards`;
+`abs_dollar` reads raw values from `market.futures_1m` and ranks on-the-fly.
+
+**The two flags are mutually exclusive.** argparse errors with a clear
+message if both are set. Combining them would conflate "reproduce v1"
+(asymmetric) with "explore symmetric variants" (symmetric) and produce
+nonsense.
+
 ---
 
 ## 4. Evidence supporting canonical choice
