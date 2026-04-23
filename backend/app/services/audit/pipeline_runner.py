@@ -59,13 +59,22 @@ def build_cli_args(params: dict) -> list[str]:
         "capital_mode":             "--capital-mode",
         "fixed_notional_cap":       "--fixed-notional-cap",
         "overlap_source":           "--source",
+        # D-medium-split (2026-04-23): individual ranking-metric knobs + BloFin
+        # universe filter. Replaces the deprecated single `ranking_metric`
+        # flag which is kept below for backward-compat plumbing.
+        "price_ranking_metric":     "--price-ranking-metric",
+        "oi_ranking_metric":        "--oi-ranking-metric",
+        # Keep `ranking_metric` in the map for backward-compat: if a caller
+        # passes it, overlap_analysis.py maps it onto both new flags and emits
+        # a deprecation warning. New callers should use the two split keys.
         "ranking_metric":           "--ranking-metric",
     }
     bool_flags = {
-        "end_cross_midnight": "--end-cross-midnight",
-        "drop_unverified":    "--drop-unverified",
-        "quick":              "--quick",
-        "live_parity":        "--live-parity",
+        "end_cross_midnight":    "--end-cross-midnight",
+        "drop_unverified":       "--drop-unverified",
+        "quick":                 "--quick",
+        "live_parity":           "--live-parity",
+        "apply_blofin_filter":   "--apply-blofin-filter",
     }
 
     audit_source = params.get("price_source", "parquet")

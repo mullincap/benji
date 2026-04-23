@@ -841,16 +841,24 @@ def _load_canonical_futures_1m_frequencies(
     sample_interval: int,
     mode: str,
     ranking_metric: str,
+    apply_blofin_filter: bool = False,
 ) -> dict:
     """Compute per-day top-freq_width frequencies from raw market.futures_1m
-    values, ranked symmetrically by `ranking_metric`. Canonical universe
-    (no v1-specific volume or BloFin filter).
+    values. Canonical universe by default; optionally narrowed to BloFin
+    instrument list.
 
     metric         : 'close' (price) or 'open_interest'
     freq_width     : top-N per bar to award +1 frequency
     sample_interval: minutes between bars (frequency mode only)
     mode           : 'snapshot' | 'frequency'
-    ranking_metric : 'pct_change' | 'abs_dollar'
+    ranking_metric : 'log_return' | 'pct_change' | 'abs_dollar'
+                     log_return: LN(now/anchor)  — PRICE ONLY (matches v1)
+                     pct_change: (now/anchor) - 1  — canonical default
+                     abs_dollar: (now - anchor)    — v1 OI methodology
+    apply_blofin_filter : when True, restrict the universe to symbols whose
+                     base is in today's BloFin USDT-swap list. Used by
+                     --live-parity and by the Simulator's
+                     apply_blofin_filter checkbox.
 
     Returns dict[date, Counter[base, int]]. Keys are normalize_symbol()
     bases so the output shape matches _load_frequency_from_db.
@@ -859,8 +867,18 @@ def _load_canonical_futures_1m_frequencies(
         raise ValueError(f"metric must be 'close' or 'open_interest', got {metric!r}")
     if mode not in ("snapshot", "frequency"):
         raise ValueError(f"mode must be 'snapshot' or 'frequency', got {mode!r}")
-    if ranking_metric not in ("pct_change", "abs_dollar"):
-        raise ValueError(f"ranking_metric must be 'pct_change' or 'abs_dollar', got {ranking_metric!r}")
+    if ranking_metric not in ("log_return", "pct_change", "abs_dollar"):
+        raise ValueError(
+            f"ranking_metric must be 'log_return', 'pct_change', or 'abs_dollar', "
+            f"got {ranking_metric!r}"
+        )
+    if ranking_metric == "log_return" and metric == "open_interest":
+        # log_return OI == (oi/anchor_oi), which isn't a meaningful quantity.
+        # v1 uses log_return for PRICE only and abs_dollar for OI.
+        raise ValueError(
+            "ranking_metric='log_return' is valid for price (metric='close') only; "
+            "use 'pct_change' or 'abs_dollar' for open_interest."
+        )
 
     import sys as _sys
     import datetime as _dt
@@ -875,9 +893,28 @@ def _load_canonical_futures_1m_frequencies(
     # window for frequency mode runs from (DEPLOYMENT_START_HOUR - eff_lookback)
     # to DEPLOYMENT_START_HOUR at sample_interval minute intervals.
 
-    # Ranking formula is passed as a parameter to the SQL CASE branches below
-    # (snapshot via `%s = 'abs_dollar'`, frequency via _canonical_score_expr_freq).
-    # Kept as a validated-enum string so psycopg2 parameter substitution is safe.
+    # Ranking formula + universe narrowing are both passed as parameters to
+    # the SQL below. Kept as validated-enum strings (ranking_metric) and
+    # an optional text[] (blofin_bases) so psycopg2 parameter substitution
+    # is safe.
+
+    # Fetch BloFin instrument list if the universe filter is requested.
+    # Returns {} on fetch failure → we fall back to the canonical unfiltered
+    # universe with a warning, rather than silently producing empty baskets.
+    blofin_bases = None
+    if apply_blofin_filter:
+        blofin = _fetch_blofin_instruments()
+        if blofin:
+            blofin_bases = sorted(blofin)
+        else:
+            log.warning("[canonical] apply_blofin_filter=True but BloFin "
+                        "fetch returned empty — proceeding without filter")
+
+    # Build the optional WHERE clause for the BloFin narrowing.
+    # Applied in the `scored` CTE (after anchor+snapshot rows are joined to
+    # the symbols table), so ranking happens ONLY over symbols that survive
+    # the filter.
+    blofin_clause = "AND sym.base = ANY(%s)" if blofin_bases else ""
 
     conn = get_conn()
     cur = conn.cursor()
@@ -906,7 +943,7 @@ def _load_canonical_futures_1m_frequencies(
         # seeks within remaining chunks via PK index.
         ts_min = min(anchor_minutes[0], snapshot_ts[0])
         ts_max = snapshot_ts[-1] + _dt.timedelta(minutes=1)
-        cur.execute(f"""
+        sql = f"""
             WITH anchor_rows AS (
                 SELECT DISTINCT ON (a.symbol_id, date_trunc('minute', a.timestamp_utc))
                     a.symbol_id,
@@ -938,15 +975,20 @@ def _load_canonical_futures_1m_frequencies(
             scored AS (
                 SELECT s.minute::date AS day,
                        sym.binance_id,
-                       (CASE WHEN %s = 'abs_dollar'
-                             THEN (s.snapshot_val - a.anchor_val)
-                             ELSE ((s.snapshot_val / NULLIF(a.anchor_val, 0)) - 1)
+                       (CASE
+                          WHEN %s = 'abs_dollar'
+                            THEN (s.snapshot_val - a.anchor_val)
+                          WHEN %s = 'log_return'
+                            THEN LN(NULLIF(s.snapshot_val, 0) / NULLIF(a.anchor_val, 0))
+                          ELSE ((s.snapshot_val / NULLIF(a.anchor_val, 0)) - 1)
                         END) AS score
                 FROM snapshot_rows s
                 JOIN anchor_rows a
                   ON a.symbol_id = s.symbol_id
                  AND a.minute = s.minute - (%s * interval '1 hour')
                 JOIN market.symbols sym ON sym.symbol_id = s.symbol_id
+                WHERE 1=1
+                  {blofin_clause}
             ),
             ranked AS (
                 SELECT day, binance_id,
@@ -958,12 +1000,17 @@ def _load_canonical_futures_1m_frequencies(
             SELECT day, binance_id
             FROM ranked
             WHERE rnk <= %s
-        """, (
+        """
+        params = [
             ts_min, ts_max, anchor_minutes,          # anchor_rows bounds + minute list
             ts_min, ts_max, snapshot_ts,             # snapshot_rows bounds + minute list
-            ranking_metric, INDEX_LOOKBACK,          # scored CASE + lookback interval
-            freq_width,                              # rnk cutoff
-        ))
+            ranking_metric, ranking_metric,          # scored CASE (abs_dollar, log_return)
+            INDEX_LOOKBACK,                          # lookback interval on join
+        ]
+        if blofin_bases:
+            params.append(blofin_bases)              # BloFin filter bound param
+        params.append(freq_width)                    # rnk cutoff (last)
+        cur.execute(sql, params)
         for day, raw_sym in cur.fetchall():
             base = normalize_symbol(raw_sym)
             if base is None:
@@ -976,6 +1023,9 @@ def _load_canonical_futures_1m_frequencies(
         # pattern). Each day: snapshot all bars in the window for the ranked
         # subset, count top-freq_width per bar.
         window_start_hour = DEPLOYMENT_START_HOUR - eff_lookback
+        # BloFin filter clause applied inside the per-bar ranking CTE when
+        # apply_blofin_filter=True — narrows universe before RANK() assignment.
+        bf_freq_clause = "AND sym.base = ANY(%s)" if blofin_bases else ""
 
         cur.execute("SELECT MIN(timestamp_utc)::date, MAX(timestamp_utc)::date FROM market.futures_1m")
         dmin, dmax = cur.fetchone()
@@ -985,7 +1035,8 @@ def _load_canonical_futures_1m_frequencies(
 
         log.info(f"[canonical {ranking_metric} freq] Processing dates "
                  f"{first_processable} → {dmax} "
-                 f"({(dmax - first_processable).days + 1} days)")
+                 f"({(dmax - first_processable).days + 1} days)"
+                 f"{'  [BloFin-filtered]' if blofin_bases else ''}")
 
         d = first_processable
         while d <= dmax:
@@ -998,7 +1049,7 @@ def _load_canonical_futures_1m_frequencies(
             window_start_ts = _dt.datetime.combine(
                 d, _dt.time(window_start_hour % 24, 0, 0), tzinfo=_dt.timezone.utc,
             )
-            cur.execute(f"""
+            freq_sql = f"""
                 WITH anchor_vals AS (
                     SELECT symbol_id, {metric} AS anchor_val
                     FROM market.futures_1m
@@ -1016,9 +1067,12 @@ def _load_canonical_futures_1m_frequencies(
                       AND f.{metric} IS NOT NULL
                 ),
                 scored AS (
-                    SELECT timestamp_utc, symbol_id,
+                    SELECT b.timestamp_utc, b.symbol_id,
                            {_canonical_score_expr_freq(ranking_metric)} AS score
-                    FROM bars
+                    FROM bars b
+                    JOIN market.symbols sym ON sym.symbol_id = b.symbol_id
+                    WHERE 1=1
+                      {bf_freq_clause}
                 ),
                 ranked AS (
                     SELECT timestamp_utc, symbol_id,
@@ -1033,7 +1087,12 @@ def _load_canonical_futures_1m_frequencies(
                 JOIN market.symbols sym USING (symbol_id)
                 WHERE r.rnk <= %s
                 GROUP BY sym.binance_id
-            """, (anchor_ts, window_start_ts, window_end_ts, sample_interval, freq_width))
+            """
+            freq_params = [anchor_ts, window_start_ts, window_end_ts, sample_interval]
+            if blofin_bases:
+                freq_params.append(blofin_bases)
+            freq_params.append(freq_width)
+            cur.execute(freq_sql, freq_params)
             counter: _Counter = _Counter()
             for raw_sym, freq in cur.fetchall():
                 base = normalize_symbol(raw_sym)
@@ -1047,17 +1106,22 @@ def _load_canonical_futures_1m_frequencies(
     cur.close()
     conn.close()
     log.info(f"[canonical {ranking_metric} {mode}] Complete: "
-             f"{len(result)} dates returned for metric={metric}")
+             f"{len(result)} dates returned for metric={metric}"
+             f"{'  [BloFin-filtered]' if blofin_bases else ''}")
     return result
 
 
 def _canonical_score_expr_freq(ranking_metric: str) -> str:
     """SQL fragment computing the per-bar symbol score inside the CTE `scored`
     in the frequency branch of _load_canonical_futures_1m_frequencies. Kept as
-    a helper so the formula choice appears once."""
+    a helper so the formula choice appears once. Supports log_return in
+    addition to pct_change (identical ordering for positive values — both
+    monotonic in now/anchor) and abs_dollar."""
     if ranking_metric == "abs_dollar":
-        return "(now_val - anchor_val)"
-    return "((now_val / NULLIF(anchor_val, 0)) - 1)"
+        return "(b.now_val - b.anchor_val)"
+    if ranking_metric == "log_return":
+        return "LN(NULLIF(b.now_val, 0) / NULLIF(b.anchor_val, 0))"
+    return "((b.now_val / NULLIF(b.anchor_val, 0)) - 1)"
 
 
 # ─────────────────────────────────────────────
@@ -1463,7 +1527,9 @@ def run(min_mcap: float, freq_width: int, marketcap_dir: Path,
         confluence_path: Path = None, drop_unverified: bool = False, max_mcap: float = 0.0,
         force: bool = False, source: str = "parquet",
         live_parity: bool = False,
-        ranking_metric: str = "pct_change",
+        price_ranking_metric: str = "pct_change",
+        oi_ranking_metric: str = "pct_change",
+        apply_blofin_filter: bool = False,
 ):
     mcap_label      = f"{int(min_mcap / 1_000_000)}M"
     marketcap_path  = marketcap_dir / "marketcap_daily.parquet"
@@ -1537,10 +1603,26 @@ def run(min_mcap: float, freq_width: int, marketcap_dir: Path,
     _start_hhmm     = f"{DEPLOYMENT_START_HOUR:02d}00"
     _eff_lookback_run = _resolve_sort_lookback()
     _lookback_hhmm    = f"{(DEPLOYMENT_START_HOUR - _eff_lookback_run):02d}00"
-    # Output label: live-parity has a distinct prefix; non-live-parity abs_dollar
-    # gets an `_absdollar` suffix so artifacts don't collide with canonical
-    # pct_change runs of the same mode.
-    _rm_suffix = "_absdollar" if (ranking_metric == "abs_dollar" and not live_parity) else ""
+    # Output label: live-parity has a distinct prefix; non-live-parity runs
+    # that deviate from (pct_change price, pct_change OI, no BloFin filter)
+    # get a suffix describing the deviation so artifacts don't collide with
+    # canonical default runs of the same mode.
+    _non_canonical_ranking = (
+        price_ranking_metric != "pct_change"
+        or oi_ranking_metric != "pct_change"
+        or apply_blofin_filter
+    )
+    if _non_canonical_ranking:
+        _rm_parts = []
+        if price_ranking_metric != "pct_change":
+            _rm_parts.append(f"p{price_ranking_metric[:4]}")
+        if oi_ranking_metric != "pct_change":
+            _rm_parts.append(f"o{oi_ranking_metric[:4]}")
+        if apply_blofin_filter:
+            _rm_parts.append("bf")
+        _rm_suffix = "_" + "".join(_rm_parts)
+    else:
+        _rm_suffix = ""
     if live_parity:
         mode_label = f"live_parity_{_start_hhmm}"
     else:
@@ -1569,24 +1651,31 @@ def run(min_mcap: float, freq_width: int, marketcap_dir: Path,
             )
             log.info(f"  → {len(price_freq)} dates with price data (live-parity)")
             log.info(f"  → {len(oi_freq)} dates with OI data (live-parity)")
-        elif ranking_metric == "abs_dollar":
-            # Canonical universe, symmetric abs_dollar ranking. Reads raw values
-            # from market.futures_1m and ranks on-the-fly (market.leaderboards
-            # is pct_change-only by construction). Opt-in exploratory axis.
-            log.info(f"[CANONICAL + abs_dollar RANKING] Symmetric (price − anchor, oi − anchor) "
-                     f"ranking on canonical universe (no volume/BloFin filter). mode={mode}.")
+        elif _non_canonical_ranking:
+            # Any non-default ranking axis (log_return/abs_dollar on price OR
+            # abs_dollar on OI OR BloFin filter) reads raw values from
+            # market.futures_1m and ranks on-the-fly (market.leaderboards is
+            # pct_change-only and unfiltered by construction). Opt-in axes
+            # for candidate methodology exploration per spec § 3.1.
+            log.info(f"[CANONICAL + split ranking] price={price_ranking_metric} "
+                     f"oi={oi_ranking_metric} "
+                     f"blofin_filter={apply_blofin_filter} mode={mode}")
             price_freq = _load_canonical_futures_1m_frequencies(
                 metric="close", freq_width=freq_width,
                 sample_interval=sample_interval, mode=mode,
-                ranking_metric="abs_dollar",
+                ranking_metric=price_ranking_metric,
+                apply_blofin_filter=apply_blofin_filter,
             )
-            log.info(f"  → {len(price_freq)} dates with price data (canonical abs_dollar)")
+            log.info(f"  → {len(price_freq)} dates with price data "
+                     f"(ranking={price_ranking_metric})")
             oi_freq = _load_canonical_futures_1m_frequencies(
                 metric="open_interest", freq_width=freq_width,
                 sample_interval=sample_interval, mode=mode,
-                ranking_metric="abs_dollar",
+                ranking_metric=oi_ranking_metric,
+                apply_blofin_filter=apply_blofin_filter,
             )
-            log.info(f"  → {len(oi_freq)} dates with OI data (canonical abs_dollar)")
+            log.info(f"  → {len(oi_freq)} dates with OI data "
+                     f"(ranking={oi_ranking_metric})")
         else:
             log.info("[DB MODE] Computing frequency tables from market.leaderboards...")
             if mode == "snapshot":
@@ -1984,33 +2073,78 @@ if __name__ == "__main__":
                              "Passes --force through to build_intraday_leaderboard.py "
                              "so it bypasses its own DB checkpoint as well.")
     parser.add_argument("--live-parity", dest="live_parity", action="store_true", default=False,
-                        help="OPT-IN: simulate daily_signal.py (live) basket methodology for "
+                        help="OPT-IN: simulate daily_signal.py (live v1) basket methodology for "
                              "comparison audits. When set: universe = top-100 USDT perps by 24h "
                              "USD volume ending 06:00 UTC, filtered to BloFin instrument list; "
                              "ASYMMETRIC ranking (log-return on price, absolute $ delta on OI — "
                              "matches daily_signal.py v1 exactly); freq count over 72 5-min bars. "
-                             "Mutually exclusive with --ranking-metric. Does NOT affect canonical "
-                             "audit output unless explicitly set. Requires --source db.")
-    parser.add_argument("--ranking-metric", dest="ranking_metric", type=str,
+                             "Mutually exclusive with --price-ranking-metric, --oi-ranking-metric, "
+                             "and --apply-blofin-filter. Does NOT affect canonical audit output "
+                             "unless explicitly set. Requires --source db.")
+    # ── Individual ranking-metric knobs (Stream D-medium-split, 2026-04-23) ──
+    # Replaces --ranking-metric (deprecated below). Split into price + OI so
+    # Simulator UI can reproduce live v1 asymmetry (log_return price + abs_dollar OI)
+    # from individual dropdowns, without needing the --live-parity preset.
+    parser.add_argument("--price-ranking-metric", dest="price_ranking_metric", type=str,
+                        default="pct_change", choices=["log_return", "pct_change", "abs_dollar"],
+                        help="OPT-IN (default: pct_change). Ranking formula for PRICE. "
+                             "log_return = LN(close/anchor) (v1 methodology, identical ordering "
+                             "to pct_change for positive prices). pct_change = (close/anchor) − 1 "
+                             "(canonical default). abs_dollar = (close − anchor) (exploratory — "
+                             "tends to dominate with mega-caps on canonical universe).")
+    parser.add_argument("--oi-ranking-metric", dest="oi_ranking_metric", type=str,
                         default="pct_change", choices=["pct_change", "abs_dollar"],
-                        help="OPT-IN (default: pct_change). Ranking formula applied SYMMETRICALLY "
-                             "to both price and OI. pct_change = (value / anchor) − 1 (canonical "
-                             "default, uses market.leaderboards fast path). abs_dollar = "
-                             "(value − anchor) (exploratory, reads raw values from market.futures_1m "
-                             "and ranks on-the-fly on the canonical universe — no volume/BloFin "
-                             "filters). Mutually exclusive with --live-parity. See "
-                             "docs/strategy_specification.md § 4 for the distinction between "
-                             "--live-parity (forensic v1 reproduction) and --ranking-metric "
-                             "(symmetric exploration).")
+                        help="OPT-IN (default: pct_change). Ranking formula for OPEN INTEREST. "
+                             "pct_change = (oi/anchor) − 1 (canonical default). abs_dollar = "
+                             "(oi − anchor) (matches live v1 methodology). log_return is NOT "
+                             "valid for OI — use pct_change if relative OI moves matter.")
+    parser.add_argument("--apply-blofin-filter", dest="apply_blofin_filter",
+                        action="store_true", default=False,
+                        help="OPT-IN (default: off). When set, universe is narrowed to symbols "
+                             "currently listed on BloFin's USDT-swap instrument list BEFORE "
+                             "ranking. Matches live trading universe constraints. Fetched once "
+                             "per audit-run via BloFin REST API.")
+    # ── Deprecated: --ranking-metric (symmetric single knob) ──
+    # Mapped to both --price-ranking-metric and --oi-ranking-metric for one release
+    # of backward compatibility. Emits a deprecation warning when used. Remove in
+    # next cycle once no callers remain.
+    parser.add_argument("--ranking-metric", dest="ranking_metric", type=str,
+                        default=None, choices=["pct_change", "abs_dollar"],
+                        help="DEPRECATED — use --price-ranking-metric and --oi-ranking-metric "
+                             "individually. Kept for one release cycle for backward compat. "
+                             "Maps to both new flags with the same value; emits a deprecation "
+                             "warning.")
     args = parser.parse_args()
 
-    if args.live_parity and args.ranking_metric != "pct_change":
+    # Backward compat: --ranking-metric → both new flags.
+    if args.ranking_metric is not None:
+        log.warning(
+            "[DEPRECATION] --ranking-metric is deprecated and will be removed in a future "
+            "release. Use --price-ranking-metric and --oi-ranking-metric individually. "
+            "Mapping %r to both new flags.", args.ranking_metric
+        )
+        # Only override if the user didn't also set the new flags explicitly.
+        if args.price_ranking_metric == "pct_change":
+            args.price_ranking_metric = args.ranking_metric
+        if args.oi_ranking_metric == "pct_change":
+            args.oi_ranking_metric = args.ranking_metric
+
+    # Mutual exclusion: --live-parity bundles its own ranking + universe setup
+    # internally. Combining with any individual ranking/universe knob creates
+    # ambiguity, so we reject at CLI parse time.
+    if args.live_parity and (
+        args.price_ranking_metric != "pct_change"
+        or args.oi_ranking_metric != "pct_change"
+        or args.apply_blofin_filter
+        or args.ranking_metric is not None
+    ):
         parser.error(
-            "--live-parity is mutually exclusive with --ranking-metric. --live-parity "
-            "reproduces daily_signal.py v1 exactly (asymmetric: log-return on price, "
-            "absolute $ delta on OI). --ranking-metric applies a symmetric ranking across "
-            "both metrics on the canonical universe. Use one or the other per "
-            "docs/strategy_specification.md § 4."
+            "--live-parity is mutually exclusive with --price-ranking-metric, "
+            "--oi-ranking-metric, --apply-blofin-filter, and --ranking-metric. "
+            "--live-parity reproduces daily_signal.py v1 exactly (asymmetric: log-return "
+            "on price, absolute $ delta on OI; top-100 by 24h volume; BloFin-filtered). "
+            "Use the individual knobs OR --live-parity, not both, per "
+            "docs/strategy_specification.md § 3.1."
         )
 
     audit_args = []
@@ -2072,8 +2206,10 @@ if __name__ == "__main__":
         max_mcap        = args.max_mcap,
         force           = args.force,
         source          = args.source,
-        live_parity     = args.live_parity,
-        ranking_metric  = args.ranking_metric,
+        live_parity          = args.live_parity,
+        price_ranking_metric = args.price_ranking_metric,
+        oi_ranking_metric    = args.oi_ranking_metric,
+        apply_blofin_filter  = args.apply_blofin_filter,
     )
 
     elapsed = _time.time() - _start
@@ -2088,9 +2224,14 @@ if __name__ == "__main__":
     log.info(f"  --freq-cutoff        : {args.freq_cutoff}")
     log.info(f"  --sample-interval    : {args.sample_interval}m")
     log.info(f"  --sort-by            : {args.sort_by}")
-    log.info(f"  --mode               : {args.mode}{'  [OVERRIDDEN by --live-parity]' if args.live_parity else ''}")
-    log.info(f"  --live-parity        : {args.live_parity}")
-    log.info(f"  --ranking-metric     : {args.ranking_metric}{'  [IGNORED under --live-parity]' if args.live_parity else ''}")
+    log.info(f"  --mode                      : {args.mode}{'  [OVERRIDDEN by --live-parity]' if args.live_parity else ''}")
+    log.info(f"  --live-parity               : {args.live_parity}")
+    log.info(f"  --price-ranking-metric      : {args.price_ranking_metric}"
+             f"{'  [IGNORED under --live-parity — internally log_return]' if args.live_parity else ''}")
+    log.info(f"  --oi-ranking-metric         : {args.oi_ranking_metric}"
+             f"{'  [IGNORED under --live-parity — internally abs_dollar]' if args.live_parity else ''}")
+    log.info(f"  --apply-blofin-filter       : {args.apply_blofin_filter}"
+             f"{'  [IGNORED under --live-parity — internally True]' if args.live_parity else ''}")
     log.info(f"  --deployment-start-hour : {DEPLOYMENT_START_HOUR:02d}:00 UTC")
     log.info(f"  --index-lookback        : {INDEX_LOOKBACK}h  "
              f"(anchor={_anchor_hhmm()[:2]}:{_anchor_hhmm()[2:]} UTC)")

@@ -73,7 +73,15 @@ class JobRequest(BaseModel):
     leaderboard_index:          int   = 100
     sort_by:                    str   = "price"
     mode:                       str   = "snapshot"
-    ranking_metric:             str   = "pct_change"
+    # D-medium-split (2026-04-23): individual ranking-metric knobs per metric,
+    # plus a BloFin-universe filter toggle. Replaces the earlier symmetric
+    # `ranking_metric` field. Backward-compat: if an old client still sends
+    # `ranking_metric`, overlap_analysis.py maps it onto both new flags + emits
+    # a deprecation warning.
+    price_ranking_metric:       str   = "pct_change"   # log_return | pct_change | abs_dollar
+    oi_ranking_metric:          str   = "pct_change"   # pct_change | abs_dollar (log_return invalid for OI)
+    apply_blofin_filter:        bool  = False          # narrow universe to BloFin listings
+    ranking_metric:             str | None = None      # DEPRECATED — kept for backward-compat
     live_parity:                bool  = False
     freq_width:                 int   = 20
     freq_cutoff:                int   = 20
@@ -247,24 +255,33 @@ class JobRequest(BaseModel):
     build_master_file:          bool  = True
 
     @model_validator(mode="after")
-    def _check_live_parity_ranking_metric_mutex(self) -> "JobRequest":
+    def _check_live_parity_knob_mutex(self) -> "JobRequest":
         """Mirror overlap_analysis.py's argparse mutual-exclusion check at the
-        HTTP boundary. Without this, combining --live-parity with
-        --ranking-metric=abs_dollar queues a Celery job that fails deep inside
-        the subprocess (argparse error), burning worker time and muddying the
+        HTTP boundary. Without this, combining live_parity with any individual
+        ranking/filter knob queues a Celery job that fails deep inside the
+        subprocess (argparse error), burning worker time and muddying the
         job status timeline. 422 at submit time is the correct UX.
 
-        See docs/strategy_specification.md § 3.1 for the distinction between
-        the two flags (live-parity = forensic v1 reproduction; ranking-metric =
-        symmetric methodology exploration)."""
-        if self.live_parity and self.ranking_metric != "pct_change":
+        See docs/strategy_specification.md § 3.1. Updated 2026-04-23 for
+        D-medium-split: live_parity conflicts with price_ranking_metric,
+        oi_ranking_metric, apply_blofin_filter, and the deprecated
+        `ranking_metric` field — live_parity's asymmetric v1-matching setup
+        is already encoded internally and can't be re-parameterized per-knob
+        without contradicting what v1 actually did."""
+        if self.live_parity and (
+            self.price_ranking_metric != "pct_change"
+            or self.oi_ranking_metric != "pct_change"
+            or self.apply_blofin_filter
+            or (self.ranking_metric is not None and self.ranking_metric != "pct_change")
+        ):
             raise ValueError(
-                "live_parity and ranking_metric are mutually exclusive. "
-                "live_parity reproduces daily_signal.py v1 exactly "
-                "(asymmetric: log-return on price, abs-$ on OI). "
-                "ranking_metric applies a symmetric ranking across both "
-                "metrics on the canonical universe. Use one or the other "
-                "per docs/strategy_specification.md § 3.1."
+                "live_parity is mutually exclusive with price_ranking_metric, "
+                "oi_ranking_metric, apply_blofin_filter, and the deprecated "
+                "ranking_metric field. live_parity reproduces daily_signal.py v1 "
+                "exactly (asymmetric: log-return on price, abs-$ on OI; "
+                "top-100 by 24h volume; BloFin-filtered) — its internal "
+                "setup can't be layered with individual knobs. Use one OR "
+                "the other per docs/strategy_specification.md § 3.1."
             )
         return self
 
