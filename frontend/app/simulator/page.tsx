@@ -23,7 +23,12 @@ const DEFAULT_PARAMS: Record<string, unknown> = {
   leaderboard_index: 100,
   sort_by: 'price',
   mode: 'snapshot',
-  ranking_metric: 'pct_change',
+  // D-medium-split (2026-04-23): individual ranking-metric knobs per metric
+  // + BloFin universe filter. Replaces the earlier single ranking_metric
+  // symmetric dropdown. Canonical defaults: pct_change on both, no BloFin.
+  price_ranking_metric: 'pct_change',
+  oi_ranking_metric: 'pct_change',
+  apply_blofin_filter: false,
   freq_width: 20,
   freq_cutoff: 20,
   sample_interval: 5,

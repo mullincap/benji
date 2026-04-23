@@ -27,6 +27,13 @@ const API_BASE = process.env.NEXT_PUBLIC_API_BASE || '';
  *  short-circuits (no meaningful delta). */
 const METHODOLOGY_KEYS = [
   'mode',
+  // D-medium-split (2026-04-23): individual ranking-metric keys per metric
+  // + BloFin filter. `ranking_metric` (deprecated) retained in this list
+  // so an old saved candidate with the legacy single field still
+  // participates in the short-circuit check.
+  'price_ranking_metric',
+  'oi_ranking_metric',
+  'apply_blofin_filter',
   'ranking_metric',
   'leaderboard_index',
   'sort_by',

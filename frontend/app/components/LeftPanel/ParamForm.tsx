@@ -334,14 +334,31 @@ export default function ParamForm({ params, onChange, onSubmit }: ParamFormProps
             ]}
           />
         </Row>
-        <Row label="ranking_metric">
+        <Row label="price_ranking_metric">
           <SelInput
-            value={p.ranking_metric}
-            onChange={(v) => set('ranking_metric', v)}
+            value={p.price_ranking_metric}
+            onChange={(v) => set('price_ranking_metric', v)}
             options={[
               { value: 'pct_change', label: 'pct_change' },
+              { value: 'log_return', label: 'log_return (v1)' },
               { value: 'abs_dollar', label: 'abs_dollar' },
             ]}
+          />
+        </Row>
+        <Row label="oi_ranking_metric">
+          <SelInput
+            value={p.oi_ranking_metric}
+            onChange={(v) => set('oi_ranking_metric', v)}
+            options={[
+              { value: 'pct_change', label: 'pct_change' },
+              { value: 'abs_dollar', label: 'abs_dollar (v1)' },
+            ]}
+          />
+        </Row>
+        <Row label="apply_blofin_filter">
+          <Toggle
+            checked={!!p.apply_blofin_filter}
+            onChange={(v) => set('apply_blofin_filter', v)}
           />
         </Row>
         <Row label="freq_width">
