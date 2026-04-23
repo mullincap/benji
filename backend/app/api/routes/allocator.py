@@ -2245,6 +2245,10 @@ class CapitalEventUpdateRequest(BaseModel):
     kind: str | None = None
     event_at: str | None = None
     notes: str | None = None
+    # Sentinel — set true to explicitly clear allocation_id (send the
+    # row back to Unassigned). None on allocation_id alone means "no
+    # change" because Pydantic can't distinguish omitted vs null.
+    clear_allocation: bool = False
 
 
 def _verify_allocation_owned_by(cur, allocation_id: str, user_id: str) -> None:
@@ -2429,7 +2433,9 @@ def update_capital_event(
 
     updates: list[str] = ["is_manually_overridden = TRUE"]
     params: list = []
-    if body.allocation_id is not None:
+    if body.clear_allocation:
+        updates.append("allocation_id = NULL")
+    elif body.allocation_id is not None:
         # Verify caller owns the target allocation before remap.
         _verify_allocation_owned_by(cur, body.allocation_id, user_id)
         updates.append("allocation_id = %s::uuid")

@@ -703,6 +703,287 @@ function fmtAmount(usd: number, kind: "deposit" | "withdrawal"): string {
   return `${sign}$${usd.toLocaleString("en-US", { maximumFractionDigits: 2 })}`;
 }
 
+// ─── Per-exchange capital-events panel ─────────────────────────────────────
+//
+// Renders one exchange connection: the allocations hanging off it (with
+// principal summaries + Edit-anchor link) followed by a table of the
+// events physically tied to that connection. Each row has a Credit-To
+// dropdown scoped to THAT connection's allocations — you can't credit a
+// BloFin deposit to a Binance allocation, and vice versa.
+
+function ExchangeCapitalGroup({
+  group,
+  pnlByAlloc,
+  onEditAnchor,
+  onUpdateEvent,
+  onDeleteEvent,
+  onCreditChange,
+  allAllocOptions,
+}: {
+  group: {
+    connection_id: string | null;
+    exchange_name: string | null;
+    allocations: { id: string; label: string }[];
+    events: ApiCapitalEvent[];
+  };
+  pnlByAlloc: Record<string, {
+    principal_usd: number;
+    principal_baseline_usd: number;
+    principal_anchor_at: string | null;
+    principal_anchor_explicit: boolean;
+    principal_baseline_explicit: boolean;
+    net_since_anchor_usd: number;
+  }>;
+  onEditAnchor: (allocationId: string) => void;
+  onUpdateEvent: (ev: ApiCapitalEvent) => void;
+  onDeleteEvent: (ev: ApiCapitalEvent) => void;
+  onCreditChange: (eventId: string, allocationId: string | null) => void;
+  allAllocOptions: { id: string; label: string }[];
+}) {
+  const labelById: Record<string, string> = {};
+  for (const a of allAllocOptions) labelById[a.id] = a.label;
+
+  const header = group.exchange_name
+    ? group.exchange_name.toUpperCase()
+    : "UNASSIGNED (no exchange link)";
+
+  return (
+    <div style={{
+      background: "var(--bg1)", border: "1px solid var(--line)",
+      borderRadius: 6, overflow: "hidden",
+    }}>
+      {/* Exchange header */}
+      <div style={{
+        padding: "10px 14px",
+        borderBottom: "1px solid var(--line)",
+        display: "flex", alignItems: "center", justifyContent: "space-between",
+      }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+          <span style={{
+            fontSize: 11, fontWeight: 700, color: "var(--t0)",
+            letterSpacing: "0.05em",
+          }}>{header}</span>
+          <span style={{ fontSize: 9, color: "var(--t3)", letterSpacing: "0.12em", textTransform: "uppercase" }}>
+            {group.allocations.length} alloc · {group.events.length} event{group.events.length === 1 ? "" : "s"}
+          </span>
+        </div>
+      </div>
+
+      {/* Per-allocation principal summary (none = no tracking for this exchange yet) */}
+      {group.allocations.length > 0 ? (
+        <div style={{
+          padding: "10px 14px",
+          borderBottom: "1px solid var(--line)",
+          display: "flex", flexDirection: "column", gap: 6,
+          background: "var(--bg2)",
+        }}>
+          {group.allocations.map(opt => {
+            const p = pnlByAlloc[opt.id];
+            return (
+              <div key={opt.id} style={{
+                display: "flex", alignItems: "center", justifyContent: "space-between",
+                fontSize: 10, fontFamily: FONT_MONO,
+              }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 14, flex: 1 }}>
+                  <span style={{ color: "var(--t1)", fontWeight: 700, minWidth: 180 }}>
+                    {opt.label}
+                  </span>
+                  {p ? (
+                    <>
+                      <span style={{ color: "var(--t3)" }}>PRINCIPAL</span>
+                      <span style={{ color: "var(--t0)", fontWeight: 700 }}>
+                        ${p.principal_usd.toLocaleString("en-US", { maximumFractionDigits: 2 })}
+                      </span>
+                      <span style={{ color: "var(--t3)" }}>
+                        = ${p.principal_baseline_usd.toLocaleString("en-US", { maximumFractionDigits: 2 })}
+                        {" "}
+                        {p.net_since_anchor_usd >= 0 ? "+" : "−"} $
+                        {Math.abs(p.net_since_anchor_usd).toLocaleString("en-US", { maximumFractionDigits: 2 })}
+                      </span>
+                      <span style={{ color: "var(--t3)" }}>
+                        since {p.principal_anchor_at ? p.principal_anchor_at.slice(0, 10) : "—"}
+                        {!p.principal_anchor_explicit && !p.principal_baseline_explicit ? " (default)" : ""}
+                      </span>
+                    </>
+                  ) : (
+                    <span style={{ color: "var(--t3)" }}>Loading…</span>
+                  )}
+                </div>
+                <button
+                  onClick={() => onEditAnchor(opt.id)}
+                  style={{
+                    background: "transparent", border: "none",
+                    color: "var(--t2)", fontSize: 9,
+                    letterSpacing: "0.12em", textTransform: "uppercase",
+                    cursor: "pointer", fontFamily: FONT_MONO,
+                  }}
+                  onMouseEnter={e => (e.currentTarget.style.color = "var(--t0)")}
+                  onMouseLeave={e => (e.currentTarget.style.color = "var(--t2)")}
+                >
+                  Edit anchor
+                </button>
+              </div>
+            );
+          })}
+        </div>
+      ) : group.connection_id ? (
+        <div style={{
+          padding: "10px 14px",
+          borderBottom: "1px solid var(--line)",
+          fontSize: 10, color: "var(--t3)", fontStyle: "italic",
+          background: "var(--bg2)",
+        }}>
+          No active allocations on this exchange — events recorded but not counted toward any principal.
+        </div>
+      ) : null}
+
+      {/* Events table */}
+      {group.events.length === 0 ? (
+        <div style={{ padding: "14px", fontSize: 10, color: "var(--t3)" }}>
+          No capital events recorded for this exchange yet.
+        </div>
+      ) : (
+        <table style={{
+          width: "100%", borderCollapse: "collapse", fontSize: 10,
+          fontFamily: FONT_MONO, tableLayout: "fixed",
+        }}>
+          <colgroup>
+            <col style={{ width: "18%" }} />  {/* date */}
+            <col style={{ width: "10%" }} />  {/* kind */}
+            <col style={{ width: "12%" }} />  {/* amount */}
+            <col style={{ width: "18%" }} />  {/* credit to */}
+            <col />                             {/* notes */}
+            <col style={{ width: "150px" }} />{/* actions */}
+          </colgroup>
+          <thead>
+            <tr style={{ borderBottom: "1px solid var(--line)" }}>
+              {["DATE (UTC)", "KIND", "AMOUNT", "CREDIT TO", "NOTES", ""].map(h => (
+                <th key={h} style={{
+                  padding: "7px 14px", textAlign: "left",
+                  fontSize: 9, color: "var(--t3)", fontWeight: 700,
+                  letterSpacing: "0.12em", textTransform: "uppercase",
+                }}>{h}</th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {group.events.map((ev, idx) => {
+              const amountColor = ev.kind === "deposit" ? "var(--green)" : "var(--amber)";
+              let sourceBg = "var(--bg2)", sourceColor = "var(--t2)", sourceLabel = "MANUAL";
+              if (ev.source === "auto") {
+                sourceBg = "var(--green-dim)"; sourceColor = "var(--green)"; sourceLabel = "AUTO";
+              } else if (ev.source === "auto-anomaly") {
+                sourceBg = "var(--amber-dim)"; sourceColor = "var(--amber)"; sourceLabel = "ANOMALY";
+              }
+              if (ev.is_manually_overridden && ev.source !== "manual") {
+                sourceLabel += "*";
+              }
+              return (
+                <tr key={ev.event_id} style={{
+                  borderBottom: idx < group.events.length - 1 ? "1px solid var(--line)" : "none",
+                }}>
+                  <td style={{ padding: "10px 14px", color: "var(--t1)" }}>
+                    {fmtCapitalDate(ev.event_at)}
+                    <span
+                      title={
+                        ev.source === "manual"
+                          ? "Operator-entered"
+                          : ev.source === "auto-anomaly"
+                            ? "Auto-detected via mid-session equity-jump anomaly"
+                            : "Auto-detected from exchange income API"
+                          + (ev.is_manually_overridden ? " — edited by operator (won't re-sync)" : "")
+                      }
+                      style={{
+                        marginLeft: 8,
+                        display: "inline-block",
+                        fontSize: 8, fontWeight: 700, letterSpacing: "0.08em",
+                        padding: "1px 5px", borderRadius: 2,
+                        background: sourceBg, color: sourceColor,
+                        cursor: "help", verticalAlign: "middle",
+                      }}
+                    >
+                      {sourceLabel}
+                    </span>
+                  </td>
+                  <td style={{
+                    padding: "10px 14px", color: "var(--t2)",
+                    textTransform: "uppercase",
+                  }}>{ev.kind}</td>
+                  <td style={{
+                    padding: "10px 14px", color: amountColor, fontWeight: 700,
+                  }}>{fmtAmount(ev.amount_usd, ev.kind)}</td>
+                  <td style={{ padding: "8px 14px" }}>
+                    <select
+                      value={ev.allocation_id ?? ""}
+                      onChange={e => {
+                        const v = e.target.value;
+                        onCreditChange(ev.event_id, v || null);
+                      }}
+                      disabled={group.allocations.length === 0}
+                      style={{
+                        width: "100%",
+                        background: "var(--bg3)",
+                        border: "1px solid var(--line)",
+                        borderRadius: 3, padding: "4px 8px",
+                        color: ev.allocation_id ? "var(--t0)" : "var(--amber)",
+                        fontSize: 10,
+                        fontFamily: FONT_MONO,
+                        cursor: group.allocations.length === 0 ? "not-allowed" : "pointer",
+                      }}
+                    >
+                      <option value="">— Unassigned —</option>
+                      {group.allocations.map(a => (
+                        <option key={a.id} value={a.id}>{labelById[a.id] ?? a.label}</option>
+                      ))}
+                    </select>
+                  </td>
+                  <td
+                    title={ev.notes ?? ""}
+                    style={{
+                      padding: "10px 14px", color: "var(--t2)",
+                      overflow: "hidden", textOverflow: "ellipsis",
+                      whiteSpace: "nowrap",
+                    }}
+                  >{ev.notes ?? "—"}</td>
+                  <td style={{
+                    padding: "10px 14px", textAlign: "right",
+                    whiteSpace: "nowrap",
+                  }}>
+                    <button
+                      onClick={() => onUpdateEvent(ev)}
+                      style={{
+                        background: "transparent", border: "none",
+                        color: "var(--t1)", fontSize: 9, fontWeight: 700,
+                        letterSpacing: "0.12em", textTransform: "uppercase",
+                        marginRight: 12, cursor: "pointer",
+                        fontFamily: FONT_MONO,
+                      }}
+                      onMouseEnter={e => (e.currentTarget.style.color = "var(--green)")}
+                      onMouseLeave={e => (e.currentTarget.style.color = "var(--t1)")}
+                    >Update</button>
+                    <button
+                      onClick={() => onDeleteEvent(ev)}
+                      style={{
+                        background: "transparent", border: "none",
+                        color: "var(--t3)", fontSize: 9, fontWeight: 700,
+                        letterSpacing: "0.12em", textTransform: "uppercase",
+                        cursor: "pointer", fontFamily: FONT_MONO,
+                      }}
+                      onMouseEnter={e => (e.currentTarget.style.color = "var(--red)")}
+                      onMouseLeave={e => (e.currentTarget.style.color = "var(--t3)")}
+                    >Delete</button>
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      )}
+    </div>
+  );
+}
+
+
 function CapitalEventModal({
   initial,
   allocations,
@@ -901,7 +1182,7 @@ function CapitalEventModal({
 }
 
 function CapitalEventsSection() {
-  const { instances } = useTrader();
+  const { instances, exchanges } = useTrader();
   const [events, setEvents] = useState<ApiCapitalEvent[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [editingEvent, setEditingEvent] = useState<ApiCapitalEvent | null>(null);
@@ -1099,64 +1380,6 @@ function CapitalEventsSection() {
         </div>
       </div>
 
-      {/* Per-allocation principal summaries */}
-      {allocOptions.length > 0 && (
-        <div style={{
-          background: "var(--bg1)", border: "1px solid var(--line)",
-          borderRadius: 6, padding: "10px 14px", marginBottom: 10,
-          display: "flex", flexDirection: "column", gap: 8,
-        }}>
-          {allocOptions.map(opt => {
-            const p = pnlByAlloc[opt.id];
-            return (
-              <div key={opt.id} style={{
-                display: "flex", alignItems: "center", justifyContent: "space-between",
-                fontSize: 10, fontFamily: FONT_MONO,
-              }}>
-                <div style={{ display: "flex", alignItems: "center", gap: 14, flex: 1 }}>
-                  <span style={{ color: "var(--t1)", fontWeight: 700, minWidth: 180 }}>
-                    {opt.label}
-                  </span>
-                  {p ? (
-                    <>
-                      <span style={{ color: "var(--t3)" }}>PRINCIPAL</span>
-                      <span style={{ color: "var(--t0)", fontWeight: 700 }}>
-                        ${p.principal_usd.toLocaleString("en-US", { maximumFractionDigits: 2 })}
-                      </span>
-                      <span style={{ color: "var(--t3)" }}>
-                        = ${p.principal_baseline_usd.toLocaleString("en-US", { maximumFractionDigits: 2 })}
-                        {" "}
-                        {p.net_since_anchor_usd >= 0 ? "+" : "−"} $
-                        {Math.abs(p.net_since_anchor_usd).toLocaleString("en-US", { maximumFractionDigits: 2 })}
-                      </span>
-                      <span style={{ color: "var(--t3)" }}>
-                        since {p.principal_anchor_at ? p.principal_anchor_at.slice(0, 10) : "—"}
-                        {!p.principal_anchor_explicit && !p.principal_baseline_explicit ? " (default)" : ""}
-                      </span>
-                    </>
-                  ) : (
-                    <span style={{ color: "var(--t3)" }}>Loading…</span>
-                  )}
-                </div>
-                <button
-                  onClick={() => setEditingAnchor(opt.id)}
-                  style={{
-                    background: "transparent", border: "none",
-                    color: "var(--t2)", fontSize: 9,
-                    letterSpacing: "0.12em", textTransform: "uppercase",
-                    cursor: "pointer", fontFamily: FONT_MONO,
-                  }}
-                  onMouseEnter={e => (e.currentTarget.style.color = "var(--t0)")}
-                  onMouseLeave={e => (e.currentTarget.style.color = "var(--t2)")}
-                >
-                  Edit anchor
-                </button>
-              </div>
-            );
-          })}
-        </div>
-      )}
-
       {error && (
         <div style={{
           background: "var(--red-dim)", border: "1px solid var(--red)",
@@ -1167,143 +1390,97 @@ function CapitalEventsSection() {
         </div>
       )}
 
-      <div style={{
-        background: "var(--bg1)", border: "1px solid var(--line)",
-        borderRadius: 6, overflow: "hidden",
-      }}>
-        {events === null ? (
-          <div style={{ padding: "16px", fontSize: 10, color: "var(--t2)" }}>
-            Loading…
-          </div>
-        ) : events.length === 0 ? (
-          <div style={{ padding: "16px", fontSize: 10, color: "var(--t2)" }}>
-            No capital events yet. Record deposits or withdrawals here so trading P&L can be measured against principal moves.
-          </div>
-        ) : (
-          <table style={{
-            width: "100%", borderCollapse: "collapse", fontSize: 10,
-            fontFamily: FONT_MONO, tableLayout: "fixed",
-          }}>
-            <colgroup>
-              <col style={{ width: "18%" }} />  {/* date */}
-              <col style={{ width: "18%" }} />  {/* allocation */}
-              <col style={{ width: "10%" }} />  {/* kind */}
-              <col style={{ width: "12%" }} />  {/* amount */}
-              <col />                            {/* notes — takes remaining space */}
-              <col style={{ width: "150px" }} />{/* actions — fixed */}
-            </colgroup>
-            <thead>
-              <tr style={{ borderBottom: "1px solid var(--line)" }}>
-                {["DATE (UTC)", "ALLOCATION", "KIND", "AMOUNT", "NOTES", ""].map(h => (
-                  <th key={h} style={{
-                    padding: "7px 14px", textAlign: "left",
-                    fontSize: 9, color: "var(--t3)", fontWeight: 700,
-                    letterSpacing: "0.12em", textTransform: "uppercase",
-                  }}>{h}</th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {events.map((ev, idx) => {
-                const amountColor = ev.kind === "deposit" ? "var(--green)" : "var(--amber)";
-                const allocCell = ev.allocation_id
-                  ? (allocLabelById[ev.allocation_id] ?? ev.allocation_id.slice(0, 8))
-                  : (
-                    <span style={{ color: "var(--amber)" }}>
-                      Unassigned{ev.exchange_name ? ` (${ev.exchange_name})` : ""}
-                    </span>
-                  );
-                // Source badge: manual = subdued; auto = green; auto-anomaly = amber.
-                let sourceBg = "var(--bg2)", sourceColor = "var(--t2)", sourceLabel = "MANUAL";
-                if (ev.source === "auto") {
-                  sourceBg = "var(--green-dim)"; sourceColor = "var(--green)"; sourceLabel = "AUTO";
-                } else if (ev.source === "auto-anomaly") {
-                  sourceBg = "var(--amber-dim)"; sourceColor = "var(--amber)"; sourceLabel = "ANOMALY";
-                }
-                if (ev.is_manually_overridden && ev.source !== "manual") {
-                  sourceLabel += "*";  // signals operator has edited an auto entry
-                }
-                return (
-                  <tr key={ev.event_id} style={{
-                    borderBottom: idx < events.length - 1 ? "1px solid var(--line)" : "none",
-                  }}>
-                    <td style={{ padding: "10px 14px", color: "var(--t1)" }}>
-                      {fmtCapitalDate(ev.event_at)}
-                      <span
-                        title={
-                          ev.source === "manual"
-                            ? "Operator-entered"
-                            : ev.source === "auto-anomaly"
-                              ? "Auto-detected via mid-session equity-jump anomaly"
-                              : "Auto-detected from exchange income API"
-                            + (ev.is_manually_overridden ? " — edited by operator (won't re-sync)" : "")
-                        }
-                        style={{
-                          marginLeft: 8,
-                          display: "inline-block",
-                          fontSize: 8, fontWeight: 700, letterSpacing: "0.08em",
-                          padding: "1px 5px", borderRadius: 2,
-                          background: sourceBg, color: sourceColor,
-                          cursor: "help", verticalAlign: "middle",
-                        }}
-                      >
-                        {sourceLabel}
-                      </span>
-                    </td>
-                    <td style={{ padding: "10px 14px", color: "var(--t1)" }}>
-                      {allocCell}
-                    </td>
-                    <td style={{ padding: "10px 14px", color: "var(--t2)", textTransform: "uppercase" }}>
-                      {ev.kind}
-                    </td>
-                    <td style={{ padding: "10px 14px", color: amountColor, fontWeight: 700 }}>
-                      {fmtAmount(ev.amount_usd, ev.kind)}
-                    </td>
-                    <td
-                      title={ev.notes ?? ""}
-                      style={{
-                        padding: "10px 14px", color: "var(--t2)",
-                        overflow: "hidden", textOverflow: "ellipsis",
-                        whiteSpace: "nowrap",
-                      }}
-                    >
-                      {ev.notes ?? "—"}
-                    </td>
-                    <td style={{
-                      padding: "10px 14px", textAlign: "right",
-                      whiteSpace: "nowrap",
-                    }}>
-                      <button
-                        onClick={() => setEditingEvent(ev)}
-                        style={{
-                          background: "transparent", border: "none",
-                          color: "var(--t1)", fontSize: 9, fontWeight: 700,
-                          letterSpacing: "0.12em", textTransform: "uppercase",
-                          marginRight: 12, cursor: "pointer",
-                          fontFamily: FONT_MONO,
-                        }}
-                        onMouseEnter={e => (e.currentTarget.style.color = "var(--green)")}
-                        onMouseLeave={e => (e.currentTarget.style.color = "var(--t1)")}
-                      >Update</button>
-                      <button
-                        onClick={() => setConfirmDelete(ev)}
-                        style={{
-                          background: "transparent", border: "none",
-                          color: "var(--t3)", fontSize: 9, fontWeight: 700,
-                          letterSpacing: "0.12em", textTransform: "uppercase",
-                          cursor: "pointer", fontFamily: FONT_MONO,
-                        }}
-                        onMouseEnter={e => (e.currentTarget.style.color = "var(--red)")}
-                        onMouseLeave={e => (e.currentTarget.style.color = "var(--t3)")}
-                      >Delete</button>
-                    </td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
-        )}
-      </div>
+      {/* Exchange-first grouping. Each exchange connection gets its own
+          panel with: the allocations hanging off it (principal summary +
+          Edit anchor), then the events physically tied to that connection
+          (CREDIT TO dropdown lets operator reassign to any allocation on
+          the same connection). Events without a connection_id (legacy
+          manual entries) fall into a "No exchange" bucket at the end. */}
+      {events === null ? (
+        <div style={{
+          background: "var(--bg1)", border: "1px solid var(--line)",
+          borderRadius: 6, padding: "16px", fontSize: 10, color: "var(--t2)",
+        }}>
+          Loading…
+        </div>
+      ) : (
+        (() => {
+          // Build connection-first grouping.
+          type ConnectionGroup = {
+            connection_id: string | null;
+            exchange_name: string | null;  // null if the group has no events linked to a connection
+            allocations: typeof allocOptions;
+            events: ApiCapitalEvent[];
+          };
+          const groups: ConnectionGroup[] = [];
+          const byConn: Record<string, ConnectionGroup> = {};
+          // Seed from exchanges so we always show a panel per linked exchange,
+          // even with zero events. Maps Exchange.id → connection_id (same in
+          // our system — Exchange.id is the connection UUID).
+          for (const ex of exchanges) {
+            const key = ex.id;
+            const group: ConnectionGroup = {
+              connection_id: key,
+              exchange_name: ex.name || ex.exchange,
+              allocations: instances
+                .filter(i => i.id && !i.id.startsWith("temp-") && i.connectionId === key)
+                .map(i => ({
+                  id: i.id,
+                  label: `${i.strategyName}${i.exchangeName ? ` · ${i.exchangeName}` : ""}`,
+                })),
+              events: [],
+            };
+            byConn[key] = group;
+            groups.push(group);
+          }
+          const orphan: ConnectionGroup = {
+            connection_id: null,
+            exchange_name: null,
+            allocations: [],
+            events: [],
+          };
+          for (const ev of events) {
+            if (ev.connection_id && byConn[ev.connection_id]) {
+              byConn[ev.connection_id].events.push(ev);
+            } else {
+              orphan.events.push(ev);
+            }
+          }
+          if (orphan.events.length > 0) groups.push(orphan);
+
+          return (
+            <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+              {groups.map(grp => (
+                <ExchangeCapitalGroup
+                  key={grp.connection_id || "orphan"}
+                  group={grp}
+                  pnlByAlloc={pnlByAlloc}
+                  onEditAnchor={setEditingAnchor}
+                  onUpdateEvent={setEditingEvent}
+                  onDeleteEvent={setConfirmDelete}
+                  onCreditChange={(eventId, allocationId) =>
+                    handleEdit(
+                      eventId,
+                      allocationId
+                        ? { allocation_id: allocationId }
+                        : { clear_allocation: true },
+                    )
+                  }
+                  allAllocOptions={allocOptions}
+                />
+              ))}
+              {groups.length === 0 && (
+                <div style={{
+                  background: "var(--bg1)", border: "1px solid var(--line)",
+                  borderRadius: 6, padding: "16px", fontSize: 10, color: "var(--t2)",
+                }}>
+                  No linked exchanges yet. Capital events appear once you link an exchange above.
+                </div>
+              )}
+            </div>
+          );
+        })()
+      )}
 
       {(showCreate || editingEvent) && (
         <CapitalEventModal

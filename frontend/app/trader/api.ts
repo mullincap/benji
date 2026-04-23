@@ -383,7 +383,14 @@ export const allocatorApi = {
 
   updateCapitalEvent: (
     eventId: string,
-    data: { amount_usd?: number; kind?: "deposit" | "withdrawal"; event_at?: string; notes?: string },
+    data: {
+      allocation_id?: string;
+      amount_usd?: number;
+      kind?: "deposit" | "withdrawal";
+      event_at?: string;
+      notes?: string;
+      clear_allocation?: boolean;   // explicit "send back to Unassigned"
+    },
   ) =>
     apiFetch<{ updated: boolean; event_id: string }>(
       `/api/allocator/capital-events/${eventId}`,

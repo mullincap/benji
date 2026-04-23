@@ -633,7 +633,7 @@ export default function LandingPage() {
         <div className="lp-pricing-grid" style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 1, background: 'var(--line)' }}>
           {[
             {
-              tier: 'Research', price: 'Free', cycle: 'Forever free — no card required', featured: false,
+              tier: 'Retail', price: '$999', priceSub: '/mo', cycle: 'Accounts up to $25,000 — billed monthly', featured: false,
               features: [
                 { on: true, text: 'Simulator (5 audits/month)' },
                 { on: true, text: 'Walk-forward backtesting' },
@@ -647,7 +647,7 @@ export default function LandingPage() {
               cta: 'Get started', ctaHref: '#waitlist',
             },
             {
-              tier: 'Professional', price: '$1,999', priceSub: '/mo', cycle: 'Billed monthly — cancel anytime', featured: true,
+              tier: 'Professional', price: '$9,999', priceSub: '/mo', cycle: 'Billed monthly — cancel anytime', featured: true,
               features: [
                 { on: true, text: 'Unlimited strategy audits' },
                 { on: true, text: 'All 5 platform modules' },

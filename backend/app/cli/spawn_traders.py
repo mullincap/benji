@@ -132,6 +132,99 @@ def fetch_eligible_allocations() -> list[dict]:
     return eligible
 
 
+def _detect_basket_overlaps(allocations: list[dict]) -> set[str]:
+    """Identify allocation_ids that share symbols with another allocation
+    on the SAME exchange connection for today's session.
+
+    BloFin and Binance run in net-position mode per symbol: if two traders
+    on the same connection both open a position on e.g. BTC, the exchange
+    aggregates them, and each trader's per-fill P&L math silently drifts
+    from reality (partial-close uses the aggregated average entry, not
+    the individual trader's entry). The ±5% actual-vs-estimated gap
+    check breaks down in this regime.
+
+    Our policy (decided 2026-04-23): allocations on the same connection
+    MUST trade disjoint symbol sets. If overlap is detected, BOTH
+    conflicting allocations are skipped — the operator has to resolve
+    (move one to a separate connection, or reduce basket overlap via
+    different filter configs) before spawn will succeed.
+
+    Returns set of allocation_ids to exclude from spawn. Empty set when
+    no conflict exists.
+    """
+    by_conn: dict[str, list[dict]] = {}
+    for a in allocations:
+        cid = str(a.get("connection_id") or "")
+        if not cid:
+            continue
+        by_conn.setdefault(cid, []).append(a)
+
+    conn_groups = {cid: allocs for cid, allocs in by_conn.items() if len(allocs) > 1}
+    if not conn_groups:
+        return set()
+
+    today_str = datetime.now(timezone.utc).date().isoformat()
+    sv_ids = [str(a["strategy_version_id"])
+              for allocs in conn_groups.values() for a in allocs]
+
+    conn = _connect()
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            # Pull today's basket per strategy_version_id in scope. Only
+            # non-flat strategies have a basket — flat/filter-failed
+            # strategies trade nothing and can never conflict.
+            cur.execute(
+                """
+                SELECT ds.strategy_version_id::text AS sv_id,
+                       COALESCE(
+                           array_agg(sym.base) FILTER (WHERE dsi.is_selected AND sym.base IS NOT NULL),
+                           '{}'::text[]
+                       ) AS symbols
+                  FROM user_mgmt.daily_signals ds
+                  LEFT JOIN user_mgmt.daily_signal_items dsi
+                         ON dsi.signal_batch_id = ds.signal_batch_id
+                  LEFT JOIN market.symbols sym
+                         ON sym.symbol_id = dsi.symbol_id
+                 WHERE ds.signal_date = %s::date
+                   AND ds.strategy_version_id = ANY(%s::uuid[])
+                   AND ds.sit_flat = FALSE
+                 GROUP BY ds.strategy_version_id
+                """,
+                (today_str, sv_ids),
+            )
+            basket_by_sv: dict[str, set[str]] = {
+                r["sv_id"]: set(r["symbols"] or []) for r in cur.fetchall()
+            }
+    finally:
+        conn.close()
+
+    conflicting: set[str] = set()
+    for cid, allocs in conn_groups.items():
+        for i in range(len(allocs)):
+            for j in range(i + 1, len(allocs)):
+                a, b = allocs[i], allocs[j]
+                sv_a = str(a["strategy_version_id"])
+                sv_b = str(b["strategy_version_id"])
+                basket_a = basket_by_sv.get(sv_a, set())
+                basket_b = basket_by_sv.get(sv_b, set())
+                overlap = basket_a & basket_b
+                if overlap:
+                    a_id = str(a["allocation_id"])
+                    b_id = str(b["allocation_id"])
+                    conflicting.add(a_id)
+                    conflicting.add(b_id)
+                    log.error(
+                        "BASKET OVERLAP on connection %s: allocations "
+                        "%s + %s share %d symbol(s) in today's signal — "
+                        "shared=%s. BOTH will be skipped. Resolve by "
+                        "moving one to a separate connection or "
+                        "diverging the filter configs.",
+                        cid[:8], a_id[:8], b_id[:8],
+                        len(overlap), sorted(overlap),
+                    )
+    return conflicting
+
+
 def spawn_allocation(allocation_id, *, dry_run: bool = False) -> int | None:
     """Spawn one detached subprocess for an allocation.
 
@@ -213,6 +306,25 @@ def main() -> int:
 
     if not allocations:
         log.info("No eligible allocations to spawn. Exiting.")
+        return 0
+
+    # Disjoint-basket enforcement: on shared connections, allocations with
+    # overlapping signal baskets are skipped to prevent net-position-mode
+    # drift. See _detect_basket_overlaps docstring for why.
+    conflicts = _detect_basket_overlaps(allocations)
+    if conflicts:
+        blocked = len(conflicts)
+        allocations = [
+            a for a in allocations
+            if str(a["allocation_id"]) not in conflicts
+        ]
+        log.warning(
+            f"Skipped {blocked} allocation(s) due to basket-overlap conflicts. "
+            f"{len(allocations)} remain eligible."
+        )
+
+    if not allocations:
+        log.info("No eligible allocations to spawn after conflict filter. Exiting.")
         return 0
 
     log.info(f"Found {len(allocations)} eligible allocation(s).")
