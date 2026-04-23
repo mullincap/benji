@@ -582,9 +582,9 @@ class BinanceMarginAdapter(ExchangeAdapter):
             withdraws = []
 
         for row in deposits or []:
-            results.extend(_parse_binance_capital_row(row, "deposit"))
+            results.extend(_parse_binance_capital_row(row, "deposit", self._client))
         for row in withdraws or []:
-            results.extend(_parse_binance_capital_row(row, "withdrawal"))
+            results.extend(_parse_binance_capital_row(row, "withdrawal", self._client))
 
         return results
 
@@ -691,23 +691,79 @@ _STABLECOINS_USD_PARITY = {
 }
 
 
-def _parse_binance_capital_row(row: dict, kind: str) -> list[CapitalEventInfo]:
+def _fetch_binance_historical_usd_price(
+    client, asset: str, ts_ms: int,
+) -> tuple[float | None, str | None]:
+    """Return (price_usd, source_note) for `asset` at `ts_ms` (epoch-ms),
+    using Binance's spot 1-min kline close of {asset}USDT.
+
+    Stablecoins short-circuit at 1:1 with no API call. Non-stablecoins
+    fetch 1 candle with startTime=ts and a 5-minute endTime window,
+    picking the closest-by-time bar to the deposit moment. Returns
+    (None, reason) on any failure so the caller can log + continue.
+    """
+    asset = asset.upper().strip()
+    if asset in _STABLECOINS_USD_PARITY:
+        return 1.0, None
+    symbol = f"{asset}USDT"
+    try:
+        klines = client.get_klines(
+            symbol=symbol,
+            interval="1m",
+            startTime=max(0, ts_ms - 60_000),
+            endTime=ts_ms + 5 * 60_000,
+            limit=5,
+        )
+    except Exception as e:
+        return None, f"price fetch error: {e}"
+
+    if not klines:
+        return None, f"no candle near {ts_ms} for {symbol}"
+
+    # Binance kline: [open_time, open, high, low, close, vol, close_time, ...]
+    best_row = None
+    best_dist = None
+    for r in klines:
+        try:
+            r_ts = int(r[0])
+            dist = abs(r_ts - ts_ms)
+            if best_dist is None or dist < best_dist:
+                best_dist = dist
+                best_row = r
+        except (TypeError, ValueError, IndexError):
+            continue
+    if best_row is None:
+        return None, f"unparseable klines for {symbol}"
+    try:
+        price = float(best_row[4])
+    except (TypeError, ValueError, IndexError):
+        return None, f"unparseable close for {symbol}"
+
+    import datetime as _dt
+    when = _dt.datetime.fromtimestamp(ts_ms / 1000, tz=_dt.timezone.utc)
+    return price, f"valued at ${price:.4f}/{asset} @ {when.strftime('%Y-%m-%d %H:%M UTC')}"
+
+
+def _parse_binance_capital_row(
+    row: dict, kind: str, client,
+) -> list[CapitalEventInfo]:
     """Convert one Binance deposit/withdrawal row into 0-or-1
-    CapitalEventInfo. Skips:
-      - Non-stablecoin assets (no FX source available here)
-      - Failed / cancelled transfers (status != 1 for deposits,
-        status != 6 for withdrawals — the python-binance SDK exposes
-        status codes per Binance docs)
+    CapitalEventInfo. Tracks ALL currencies — non-stablecoins are valued
+    at the historical 1-min USDT close at the deposit timestamp via the
+    python-binance client (passed in to keep the parser pure-ish).
+
+    Skips:
+      - Failed / cancelled transfers (deposit status != 1; withdrawal status != 6)
       - Rows missing amount, timestamp, or the exchange-internal id
+    Failed historical-price fetches still produce a row with amount_usd=0
+    + a note flagging it for manual review.
     """
     asset = (row.get("coin") or row.get("asset") or "").upper().strip()
-    if asset not in _STABLECOINS_USD_PARITY:
+    if not asset:
         return []
 
-    # Status filter: Binance deposit status=1 means SUCCESS; any other value
-    # (0=pending, 6=credited but cannot withdraw, etc.) is excluded.
-    # Withdrawal status=6 means COMPLETED. Filter conservatively — pending
-    # entries get picked up on a later poll once they finalize.
+    # Status filter: Binance deposit status=1 means SUCCESS; withdrawal
+    # status=6 means COMPLETED. Pending rows get picked up on a later poll.
     status = row.get("status")
     if kind == "deposit" and status not in (1, "1"):
         return []
@@ -722,8 +778,6 @@ def _parse_binance_capital_row(row: dict, kind: str) -> list[CapitalEventInfo]:
     if amount <= 0:
         return []
 
-    # Binance returns insertTime (deposits) or applyTime (withdrawals)
-    # in epoch-ms.
     ts_raw = row.get("insertTime") or row.get("applyTime") or 0
     try:
         ts_ms = int(ts_raw)
@@ -732,24 +786,35 @@ def _parse_binance_capital_row(row: dict, kind: str) -> list[CapitalEventInfo]:
     if ts_ms <= 0:
         return []
 
-    # Stable dedup ID. Deposits have `id` (string); withdrawals also have
-    # `id`. Both can be NULL on edge cases (manually-credited rebates etc.)
-    # — fall through to txId then a synthesized hash.
     event_id = str(row.get("id") or row.get("txId") or "")
     if not event_id:
         return []
 
+    price_per_unit, price_note = _fetch_binance_historical_usd_price(
+        client, asset, ts_ms,
+    )
+    if price_per_unit is not None:
+        amount_usd = amount * price_per_unit
+    else:
+        amount_usd = 0.0
+
     notes_parts = []
+    if asset != "USDT":
+        notes_parts.append(f"{amount} {asset}")
     if row.get("network"):
         notes_parts.append(f"network={row['network']}")
     if row.get("txId") and row.get("txId") != event_id:
         notes_parts.append(f"tx={row['txId']}")
+    if price_note:
+        notes_parts.append(price_note)
+    elif price_per_unit is None:
+        notes_parts.append("price fetch failed — set amount manually")
     notes = "; ".join(notes_parts) if notes_parts else None
 
     return [CapitalEventInfo(
         event_id=event_id,
         kind=kind,
-        amount_usd=amount,
+        amount_usd=amount_usd,
         ts_ms=ts_ms,
         asset=asset,
         notes=notes,

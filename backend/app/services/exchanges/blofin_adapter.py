@@ -356,15 +356,20 @@ class BloFinAdapter(ExchangeAdapter):
     ) -> list[CapitalEventInfo]:
         """Pull deposit + withdrawal history from BloFin asset endpoints.
 
-        Stablecoin balances (USDT/USDC/DAI/etc.) are valued 1:1 USD.
-        Volatile assets (BTC/ETH/etc.) are skipped — we don't have an
-        on-the-fly price source here and capital events for non-stablecoin
-        deposits are uncommon enough that the rare case is better surfaced
-        via manual operator entry than mis-valued automatically.
+        ALL currencies are tracked, not just stablecoins:
+          - Stablecoins (USDT/USDC/DAI/etc.) are valued 1:1 USD
+          - Volatile assets (SOL/BTC/ETH/etc.) are valued at the 1-minute
+            close price of {asset}-USDT at the deposit timestamp, fetched
+            via BloFin's /market/candles. The operator's intent at deposit
+            time is the historical USD value, regardless of any later
+            intra-exchange swapping.
 
-        BloFin pagination: `before` is the oldest cursor (we walk backwards
-        from now towards `since_ms`). API caps result count per page at 100.
-        Default lookback when since_ms is None: 90 days (BloFin's documented
+        Failed price fetches surface the row with amount_usd=0 + a note
+        flagging it for manual review — the row is still visible so the
+        operator knows it exists and can correct it.
+
+        BloFin pagination: API caps result count per page at 100. Default
+        lookback when since_ms is None: 90 days (BloFin's documented
         history retention).
         """
         if since_ms is None:
@@ -383,7 +388,7 @@ class BloFinAdapter(ExchangeAdapter):
 
             rows = resp.get("data") or []
             for row in rows:
-                results.extend(_parse_blofin_capital_row(row, kind))
+                results.extend(_parse_blofin_capital_row(row, kind, self._rest))
 
         return results
 
@@ -468,20 +473,82 @@ def _safe_float(val, default):
         return default
 
 
-def _parse_blofin_capital_row(row: dict, kind: str) -> list[CapitalEventInfo]:
+def _fetch_blofin_historical_usd_price(
+    rest, asset: str, ts_ms: int,
+) -> tuple[float | None, str | None]:
+    """Return (price_usd, source_note) for `asset` at `ts_ms` (epoch-ms),
+    using BloFin's /market/candles 1-min close of {asset}-USDT.
+
+    Returns (None, reason) on any failure (no instrument, no candle in
+    window, parse error, network) so the caller can log + continue.
+    Stablecoins short-circuit at 1:1 parity with no API call.
+    """
+    asset = asset.upper().strip()
+    if asset in _STABLECOINS_USD_PARITY:
+        return 1.0, None
+    inst = f"{asset}-USDT"
+    # Fetch a small window AROUND the deposit time (ts to ts+5min) to
+    # tolerate BloFin's bar-alignment edge cases. limit=5 is cheap.
+    try:
+        resp = rest.request("GET", "/api/v1/market/candles", params={
+            "instId": inst,
+            "bar":    "1m",
+            "after":  str(ts_ms - 60_000),     # 1 min before
+            "before": str(ts_ms + 5 * 60_000), # 5 min after
+            "limit":  "5",
+        })
+    except Exception as e:
+        return None, f"price fetch error: {e}"
+
+    code = str(resp.get("code", ""))
+    if code not in ("0", ""):
+        return None, f"klines unavailable for {inst} (code={code})"
+    rows = resp.get("data") or []
+    if not rows:
+        return None, f"no candle near {ts_ms} for {inst}"
+
+    # BloFin candle format: [ts, open, high, low, close, vol, ...].
+    # Pick the candle closest to ts_ms.
+    best_row = None
+    best_dist = None
+    for r in rows:
+        try:
+            r_ts = int(r[0])
+            dist = abs(r_ts - ts_ms)
+            if best_dist is None or dist < best_dist:
+                best_dist = dist
+                best_row = r
+        except (TypeError, ValueError, IndexError):
+            continue
+    if best_row is None:
+        return None, f"unparseable candles for {inst}"
+    try:
+        price = float(best_row[4])  # close
+    except (TypeError, ValueError, IndexError):
+        return None, f"unparseable close for {inst}"
+
+    import datetime as _dt
+    when = _dt.datetime.fromtimestamp(ts_ms / 1000, tz=_dt.timezone.utc)
+    return price, f"valued at ${price:.4f}/{asset} @ {when.strftime('%Y-%m-%d %H:%M UTC')}"
+
+
+def _parse_blofin_capital_row(
+    row: dict, kind: str, rest,
+) -> list[CapitalEventInfo]:
     """Convert one BloFin deposit/withdrawal API row into 0-or-1
-    CapitalEventInfo. Skips:
-      - Non-stablecoin rows (BTC/ETH/etc) — no FX source available here
-      - Rows without a usable timestamp or amount
-      - Rows where the exchange-side status indicates the transfer was
-        cancelled / reversed (BloFin uses string state codes; "1"/"2" are
-        often "in progress" / "completed", but to stay tolerant of code
-        churn we accept any row WITH amount + timestamp + transferId and
-        let the operator delete spurious ones via the UI tombstone path)
-    Returns a list (0 or 1 elements) for ergonomic .extend() at the call site.
+    CapitalEventInfo. Tracks ALL currencies — non-stablecoins are valued
+    at the historical 1-min USDT close price at the deposit timestamp via
+    the rest client (passed in to keep the parser pure-ish).
+
+    Skips:
+      - Rows without amount, timestamp, or exchange_event_id
+      - (Failed status filtering deliberately omitted to stay tolerant of
+        BloFin code churn; spurious rows can be soft-deleted in the UI.)
+    Failed historical-price fetches still produce a row, with amount_usd=0
+    and a "price fetch failed" note so the operator can correct manually.
     """
     asset = (row.get("currency") or row.get("ccy") or "").upper().strip()
-    if asset not in _STABLECOINS_USD_PARITY:
+    if not asset:
         return []
 
     amount_raw = row.get("amount") or row.get("amt") or row.get("size") or 0
@@ -514,18 +581,34 @@ def _parse_blofin_capital_row(row: dict, kind: str) -> list[CapitalEventInfo]:
     if not event_id:
         return []
 
-    # Free-form provenance — BloFin returns chain + tx hash on most rows.
+    # Resolve USD value via stablecoin parity OR historical kline.
+    price_per_unit, price_note = _fetch_blofin_historical_usd_price(
+        rest, asset, ts_ms,
+    )
+    if price_per_unit is not None:
+        amount_usd = amount * price_per_unit
+    else:
+        amount_usd = 0.0  # surface the row but flag for manual review
+
+    # Free-form provenance — BloFin returns chain + tx hash on most rows,
+    # plus the price source for non-stablecoin rows.
     notes_parts = []
+    if asset != "USDT":
+        notes_parts.append(f"{amount} {asset}")
     if row.get("chain"):
         notes_parts.append(f"chain={row['chain']}")
     if row.get("txId") and row.get("txId") != event_id:
         notes_parts.append(f"tx={row['txId']}")
+    if price_note:
+        notes_parts.append(price_note)
+    elif price_per_unit is None:
+        notes_parts.append("price fetch failed — set amount manually")
     notes = "; ".join(notes_parts) if notes_parts else None
 
     return [CapitalEventInfo(
         event_id=event_id,
         kind=kind,
-        amount_usd=amount,
+        amount_usd=amount_usd,
         ts_ms=ts_ms,
         asset=asset,
         notes=notes,
