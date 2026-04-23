@@ -859,7 +859,7 @@ function ExchangeCapitalGroup({
             color: "var(--t3)", letterSpacing: "0.12em",
             textTransform: "uppercase", fontWeight: 700,
           }}>
-            Exchange principal
+            Exchange
           </span>
           <span style={{ display: "flex", gap: 6, alignItems: "baseline" }}>
             <span style={{ color: "var(--t3)" }}>BALANCE</span>
