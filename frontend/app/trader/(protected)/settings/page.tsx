@@ -955,14 +955,15 @@ function ExchangeCapitalGroup({
         }}>
           <colgroup>
             <col style={{ width: "18%" }} />  {/* date */}
-            <col style={{ width: "10%" }} />  {/* kind */}
-            <col style={{ width: "15%" }} />  {/* amount (widened; nowrap keeps sign inline) */}
+            <col style={{ width: "9%" }} />   {/* kind */}
+            <col style={{ width: "13%" }} />  {/* amount */}
+            <col style={{ width: "13%" }} />  {/* principal (running total after this event) */}
             <col />                             {/* notes */}
             <col style={{ width: "150px" }} />{/* actions */}
           </colgroup>
           <thead>
             <tr style={{ borderBottom: "1px solid var(--line)" }}>
-              {["DATE (UTC)", "KIND", "AMOUNT", "NOTES", ""].map(h => (
+              {["DATE (UTC)", "KIND", "AMOUNT", "PRINCIPAL AFTER", "NOTES", ""].map(h => (
                 <th key={h} style={{
                   padding: "7px 14px", textAlign: "left",
                   fontSize: 9, color: "var(--t3)", fontWeight: 700,
@@ -972,7 +973,22 @@ function ExchangeCapitalGroup({
             </tr>
           </thead>
           <tbody>
-            {group.events.map((ev, idx) => {
+            {(() => {
+              // Running principal: walk events oldest→newest, starting from
+              // baseline, adding deposits and subtracting withdrawals. This
+              // gives operators a live preview of what principal would be if
+              // they set the anchor AT each row. Map stored keyed by event_id
+              // for O(1) lookup when rendering in newest-first order below.
+              const byOldest = [...group.events].sort(
+                (a, b) => a.event_at.localeCompare(b.event_at),
+              );
+              const principalAfter: Record<string, number> = {};
+              let running = baseline;
+              for (const ev of byOldest) {
+                running += ev.kind === "deposit" ? ev.amount_usd : -ev.amount_usd;
+                principalAfter[ev.event_id] = running;
+              }
+              return group.events.map((ev, idx) => {
               const amountColor = ev.kind === "deposit" ? "var(--green)" : "var(--amber)";
               let sourceBg = "var(--bg2)", sourceColor = "var(--t2)", sourceLabel = "MANUAL";
               if (ev.source === "auto") {
@@ -1018,6 +1034,13 @@ function ExchangeCapitalGroup({
                     padding: "10px 14px", color: amountColor, fontWeight: 700,
                     whiteSpace: "nowrap",
                   }}>{fmtAmount(ev.amount_usd, ev.kind)}</td>
+                  <td style={{
+                    padding: "10px 14px", color: "var(--t1)",
+                    whiteSpace: "nowrap", fontWeight: 700,
+                  }}>
+                    ${(principalAfter[ev.event_id] ?? 0)
+                      .toLocaleString("en-US", { maximumFractionDigits: 2 })}
+                  </td>
                   <td
                     title={ev.notes ?? ""}
                     style={{
@@ -1056,7 +1079,8 @@ function ExchangeCapitalGroup({
                   </td>
                 </tr>
               );
-            })}
+              });
+            })()}
           </tbody>
         </table>
       )}
