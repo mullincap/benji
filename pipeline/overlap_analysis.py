@@ -986,6 +986,11 @@ def _load_canonical_futures_1m_frequencies(
     # the filter. Skipped when universe_by_day supplies a per-day filter.
     blofin_clause = "AND sym.base = ANY(%s)" if blofin_bases else ""
 
+    # `abs_dollar` on OI means delta in DOLLAR-NOTIONAL OI (OI × close).
+    # See comment in the frequency branch below for the full rationale.
+    # The snapshot branch mirrors the same semantic for consistency.
+    is_oi_dollar = (metric == "open_interest" and ranking_metric == "abs_dollar")
+
     conn = get_conn()
     cur = conn.cursor()
 
@@ -1035,6 +1040,26 @@ def _load_canonical_futures_1m_frequencies(
         else:
             universe_cte = ""
 
+        # is_oi_dollar extras (snapshot branch mirrors the frequency branch).
+        snap_anchor_select = ", a.close AS anchor_close_val" if is_oi_dollar else ""
+        snap_anchor_where  = "AND a.close IS NOT NULL AND a.close > 0" if is_oi_dollar else ""
+        snap_snap_select   = ", n.close AS snapshot_close_val" if is_oi_dollar else ""
+        snap_snap_where    = "AND n.close IS NOT NULL AND n.close > 0" if is_oi_dollar else ""
+        if is_oi_dollar:
+            snap_score_case = (
+                "(s.snapshot_val * s.snapshot_close_val - "
+                "a.anchor_val * a.anchor_close_val)"
+            )
+        else:
+            snap_score_case = (
+                "CASE "
+                "WHEN %s = 'abs_dollar' THEN (s.snapshot_val - a.anchor_val) "
+                "WHEN %s = 'log_return' THEN "
+                "LN(NULLIF(s.snapshot_val, 0) / NULLIF(a.anchor_val, 0)) "
+                "ELSE ((s.snapshot_val / NULLIF(a.anchor_val, 0)) - 1) "
+                "END"
+            )
+
         sql = f"""
             WITH {universe_cte}
             anchor_rows AS (
@@ -1042,11 +1067,13 @@ def _load_canonical_futures_1m_frequencies(
                     a.symbol_id,
                     date_trunc('minute', a.timestamp_utc) AS minute,
                     a.{metric} AS anchor_val
+                    {snap_anchor_select}
                 FROM market.futures_1m a
                 WHERE a.timestamp_utc >= %s
                   AND a.timestamp_utc <  %s
                   AND date_trunc('minute', a.timestamp_utc) = ANY(%s)
                   AND a.{metric} IS NOT NULL AND a.{metric} > 0
+                  {snap_anchor_where}
                 ORDER BY a.symbol_id,
                          date_trunc('minute', a.timestamp_utc),
                          a.timestamp_utc DESC
@@ -1056,11 +1083,13 @@ def _load_canonical_futures_1m_frequencies(
                     n.symbol_id,
                     date_trunc('minute', n.timestamp_utc) AS minute,
                     n.{metric} AS snapshot_val
+                    {snap_snap_select}
                 FROM market.futures_1m n
                 WHERE n.timestamp_utc >= %s
                   AND n.timestamp_utc <  %s
                   AND date_trunc('minute', n.timestamp_utc) = ANY(%s)
                   AND n.{metric} IS NOT NULL
+                  {snap_snap_where}
                 ORDER BY n.symbol_id,
                          date_trunc('minute', n.timestamp_utc),
                          n.timestamp_utc DESC
@@ -1068,13 +1097,7 @@ def _load_canonical_futures_1m_frequencies(
             scored AS (
                 SELECT s.minute::date AS day,
                        sym.binance_id,
-                       (CASE
-                          WHEN %s = 'abs_dollar'
-                            THEN (s.snapshot_val - a.anchor_val)
-                          WHEN %s = 'log_return'
-                            THEN LN(NULLIF(s.snapshot_val, 0) / NULLIF(a.anchor_val, 0))
-                          ELSE ((s.snapshot_val / NULLIF(a.anchor_val, 0)) - 1)
-                        END) AS score
+                       ({snap_score_case}) AS score
                 FROM snapshot_rows s
                 JOIN anchor_rows a
                   ON a.symbol_id = s.symbol_id
@@ -1107,9 +1130,13 @@ def _load_canonical_futures_1m_frequencies(
         params.extend([
             ts_min, ts_max, anchor_minutes,          # anchor_rows bounds + minute list
             ts_min, ts_max, snapshot_ts,             # snapshot_rows bounds + minute list
-            ranking_metric, ranking_metric,          # scored CASE (abs_dollar, log_return)
-            INDEX_LOOKBACK,                          # lookback interval on join
         ])
+        if not is_oi_dollar:
+            # scored CASE has two %s placeholders (abs_dollar, log_return).
+            # Skipped when is_oi_dollar since that branch uses a literal
+            # expression rather than a CASE.
+            params.extend([ranking_metric, ranking_metric])
+        params.append(INDEX_LOOKBACK)                # lookback interval on join
         if blofin_bases:
             params.append(blofin_bases)              # BloFin filter bound param
         params.append(freq_width)                    # rnk cutoff (last)
@@ -1147,6 +1174,43 @@ def _load_canonical_futures_1m_frequencies(
         # any ranking work, rather than filtering post-scan inside `scored`.
         uni_bars_clause = "AND f.symbol_id = ANY(%s)" if universe_by_day else ""
 
+        # `abs_dollar` on OI means delta in DOLLAR-NOTIONAL OI (OI × close),
+        # matching v1's `oi_usd = oi * close` in
+        # _load_live_parity_frequencies_from_db. Raw-OI-contract delta is
+        # barely interpretable cross-symbol (a 1-contract delta on BTC is
+        # not comparable to a 1-contract delta on SHIB). When is_oi_dollar,
+        # we fetch `close` alongside `open_interest` in both anchor_vals
+        # and bars and swap in a dollar-notional scoring expression.
+        # (`is_oi_dollar` is hoisted above the mode branch so snapshot uses
+        # the same semantic.)
+
+        # Anchor walk-forward: v1 scans the first 5 sample-interval bars per
+        # symbol and picks the first non-zero value as anchor. Mirrored in
+        # SQL via DISTINCT ON (symbol_id) over a windowed WHERE clause. Keeps
+        # sparse-data symbols in the ranking pool rather than silently
+        # dropping them, matching v1 behavior byte-for-byte.
+        anchor_walk_bars = 5
+
+        # Score expression (per-bar). Bundles ranking_metric choice +
+        # dollar-notional OI. Referenced in the `scored` CTE.
+        if is_oi_dollar:
+            score_expr = "(b.now_val * b.now_close - b.anchor_val * b.anchor_close)"
+        elif ranking_metric == "abs_dollar":
+            score_expr = "(b.now_val - b.anchor_val)"
+        elif ranking_metric == "log_return":
+            score_expr = "LN(NULLIF(b.now_val, 0) / NULLIF(b.anchor_val, 0))"
+        else:  # pct_change
+            score_expr = "((b.now_val / NULLIF(b.anchor_val, 0)) - 1)"
+
+        # Extra column clauses for is_oi_dollar: anchor_vals/bars fetch close
+        # too, and both the anchor filter and bars filter require close > 0.
+        cand_extra_select   = ", close AS anchor_close" if is_oi_dollar else ""
+        anchor_extra_select = ", anchor_close"         if is_oi_dollar else ""
+        anchor_extra_where  = "AND close IS NOT NULL AND close > 0" if is_oi_dollar else ""
+        bars_extra_select   = ", f.close AS now_close" if is_oi_dollar else ""
+        bars_extra_where    = "AND f.close IS NOT NULL AND f.close > 0" if is_oi_dollar else ""
+        bars_propagate      = ", a.anchor_close"       if is_oi_dollar else ""
+
         d = first_processable
         while d <= dmax:
             # Skip days whose universe is empty (no prior-24h data) when
@@ -1159,6 +1223,9 @@ def _load_canonical_futures_1m_frequencies(
             anchor_ts = _dt.datetime.combine(
                 d, _dt.time(anchor_hour, 0, 0), tzinfo=_dt.timezone.utc,
             )
+            anchor_walk_end = anchor_ts + _dt.timedelta(
+                minutes=(anchor_walk_bars - 1) * sample_interval
+            )
             window_end_ts = _dt.datetime.combine(
                 d, _dt.time(DEPLOYMENT_START_HOUR, 0, 0), tzinfo=_dt.timezone.utc,
             )
@@ -1166,26 +1233,41 @@ def _load_canonical_futures_1m_frequencies(
                 d, _dt.time(window_start_hour % 24, 0, 0), tzinfo=_dt.timezone.utc,
             )
             freq_sql = f"""
-                WITH anchor_vals AS (
-                    SELECT symbol_id, {metric} AS anchor_val
+                WITH anchor_candidates AS (
+                    SELECT symbol_id, timestamp_utc,
+                           {metric} AS v
+                           {cand_extra_select}
                     FROM market.futures_1m
-                    WHERE timestamp_utc = %s
+                    WHERE timestamp_utc >= %s
+                      AND timestamp_utc <= %s
+                      AND MOD(EXTRACT(MINUTE FROM timestamp_utc)::int, %s) = 0
                       AND {metric} IS NOT NULL AND {metric} > 0
+                      {anchor_extra_where}
+                ),
+                anchor_vals AS (
+                    SELECT DISTINCT ON (symbol_id)
+                           symbol_id, v AS anchor_val
+                           {anchor_extra_select}
+                    FROM anchor_candidates
+                    ORDER BY symbol_id, timestamp_utc ASC
                 ),
                 bars AS (
                     SELECT f.timestamp_utc, f.symbol_id, f.{metric} AS now_val,
                            a.anchor_val
+                           {bars_extra_select}
+                           {bars_propagate}
                     FROM market.futures_1m f
                     JOIN anchor_vals a USING (symbol_id)
                     WHERE f.timestamp_utc > %s
                       AND f.timestamp_utc <= %s
                       AND MOD(EXTRACT(MINUTE FROM f.timestamp_utc)::int, %s) = 0
                       AND f.{metric} IS NOT NULL
+                      {bars_extra_where}
                       {uni_bars_clause}
                 ),
                 scored AS (
                     SELECT b.timestamp_utc, b.symbol_id,
-                           {_canonical_score_expr_freq(ranking_metric)} AS score
+                           {score_expr} AS score
                     FROM bars b
                     JOIN market.symbols sym ON sym.symbol_id = b.symbol_id
                     WHERE 1=1
@@ -1205,9 +1287,14 @@ def _load_canonical_futures_1m_frequencies(
                 WHERE r.rnk <= %s
                 GROUP BY sym.binance_id
             """
-            freq_params = [anchor_ts, window_start_ts, window_end_ts, sample_interval]
-            # uni_bars_clause binds first (inside `bars`), bf_freq_clause
-            # binds second (inside `scored`) — must match SQL order.
+            # Param order:
+            #   1. anchor_candidates: anchor_ts (>=), anchor_walk_end (<=), sample_interval
+            #   2. bars:              window_start_ts (>), window_end_ts (<=), sample_interval
+            #   3. uni_bars_clause:   universe_by_day[d] (if present)
+            #   4. bf_freq_clause:    blofin_bases (if present)
+            #   5. final rnk cutoff:  freq_width
+            freq_params = [anchor_ts, anchor_walk_end, sample_interval,
+                           window_start_ts, window_end_ts, sample_interval]
             if universe_by_day:
                 freq_params.append(universe_by_day[d])
             if blofin_bases:
@@ -1230,19 +1317,6 @@ def _load_canonical_futures_1m_frequencies(
              f"{len(result)} dates returned for metric={metric}"
              f"{'  [BloFin-filtered]' if blofin_bases else ''}")
     return result
-
-
-def _canonical_score_expr_freq(ranking_metric: str) -> str:
-    """SQL fragment computing the per-bar symbol score inside the CTE `scored`
-    in the frequency branch of _load_canonical_futures_1m_frequencies. Kept as
-    a helper so the formula choice appears once. Supports log_return in
-    addition to pct_change (identical ordering for positive values — both
-    monotonic in now/anchor) and abs_dollar."""
-    if ranking_metric == "abs_dollar":
-        return "(b.now_val - b.anchor_val)"
-    if ranking_metric == "log_return":
-        return "LN(NULLIF(b.now_val, 0) / NULLIF(b.anchor_val, 0))"
-    return "((b.now_val / NULLIF(b.anchor_val, 0)) - 1)"
 
 
 # ─────────────────────────────────────────────
