@@ -505,28 +505,36 @@ def _fetch_blofin_historical_usd_price(
     if asset in _STABLECOINS_USD_PARITY:
         return 1.0, None
     inst = f"{asset}-USDT"
-    # Fetch a small window AROUND the deposit time (ts to ts+5min) to
-    # tolerate BloFin's bar-alignment edge cases. limit=5 is cheap.
-    try:
-        resp = rest.request("GET", "/api/v1/market/candles", params={
-            "instId": inst,
-            "bar":    "1m",
-            "after":  str(ts_ms - 60_000),     # 1 min before
-            "before": str(ts_ms + 5 * 60_000), # 5 min after
-            "limit":  "5",
-        })
-    except Exception as e:
-        return None, f"price fetch error: {e}"
-
-    code = str(resp.get("code", ""))
-    if code not in ("0", ""):
-        return None, f"klines unavailable for {inst} (code={code})"
-    rows = resp.get("data") or []
-    if not rows:
+    # BloFin /market/candles semantics (verified empirically 2026-04-23):
+    #   - `after=X` → returns bars starting at the bar boundary at-or-just-
+    #     before X, walking newer. First row in response is closest to X.
+    #   - `before=Y` → walks OLDER from Y. Combining `after`+`before` does
+    #     not narrow the window — it returns wrong/empty results.
+    #   - We pass `after=ts_ms - 60_000` (one full bar back so the bar
+    #     CONTAINING ts_ms is returned). The first row's close is our price.
+    # Fall back to 1H, then 1D bars if 1m comes back empty (BloFin retains
+    # only ~7 days of 1m candles; older deposits need coarser granularity).
+    for bar in ("1m", "1H", "1D"):
+        try:
+            resp = rest.request("GET", "/api/v1/market/candles", params={
+                "instId": inst,
+                "bar":    bar,
+                "after":  str(ts_ms - 60_000),
+                "limit":  "5",
+            })
+        except Exception as e:
+            return None, f"price fetch error ({bar}): {e}"
+        code = str(resp.get("code", ""))
+        if code not in ("0", ""):
+            continue  # try next bar size
+        rows = resp.get("data") or []
+        if rows:
+            break
+    else:
         return None, f"no candle near {ts_ms} for {inst}"
 
     # BloFin candle format: [ts, open, high, low, close, vol, ...].
-    # Pick the candle closest to ts_ms.
+    # First row is closest to our target ts.
     best_row = None
     best_dist = None
     for r in rows:
