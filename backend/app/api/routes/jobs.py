@@ -4,7 +4,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
@@ -16,8 +16,19 @@ from app.services.job_store import (
 )
 from app.services.audit.metrics_parser import parse_metrics
 from app.workers.pipeline_worker import run_pipeline
+from .admin import require_admin
 
-router = APIRouter(prefix="/api/jobs", tags=["jobs"])
+# Admin-gated. All 15 routes (job CRUD, cancel, results, folders, report
+# generation, download) are administrative operations — no public routes.
+# Pre-2026-04-23 the router was unauthenticated, which allowed any anonymous
+# POST to queue audit jobs and burn Celery capacity. Discovered + fixed
+# during the Stream D-medium acceptance run — see docs/strategy_specification.md
+# § 11 follow-up.
+router = APIRouter(
+    prefix="/api/jobs",
+    tags=["jobs"],
+    dependencies=[Depends(require_admin)],
+)
 
 
 def _refresh_results_if_needed(job: dict[str, Any]) -> dict[str, Any]:
