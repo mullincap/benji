@@ -141,6 +141,65 @@ def _build_result_row(
 
 # ─── Routes ─────────────────────────────────────────────────────────────────
 
+# Canonical reference strategy for Simulator compare-to-canonical.
+# Alpha Main is the default reference because Sharpe is leverage-invariant
+# across the Alpha Low / Main / Max family (all three show identical Sharpe
+# in the audit), so picking Alpha Main yields the same Sharpe comparison
+# regardless of what leverage tier a candidate is testing. If it's ever
+# absent, the endpoint errors rather than silently falling back — the
+# Simulator's compare feature depends on a stable canonical reference.
+CANONICAL_REFERENCE_STRATEGY = "Alpha Main"
+
+
+@router.get("/canonical-reference")
+def get_canonical_reference(cur=Depends(get_cursor)) -> dict[str, Any]:
+    """Return the currently-canonical published strategy_version's metrics +
+    config for side-by-side comparison against a Simulator candidate.
+
+    Consumed by the Simulator UI's 'Compare to canonical' card (Stream D-small,
+    Option 1 migration). The governance rule in docs/strategy_specification.md §5
+    is applied client-side against the returned numbers.
+
+    Returns:
+        strategy_name, version_label, filter_mode, metrics_data_through,
+        metrics (= audit.strategy_versions.current_metrics),
+        config  (= audit.strategy_versions.config)
+    """
+    cur.execute(
+        """
+        SELECT s.display_name, s.filter_mode,
+               sv.version_label, sv.current_metrics, sv.config,
+               sv.metrics_data_through
+        FROM audit.strategies s
+        JOIN audit.strategy_versions sv USING (strategy_id)
+        WHERE s.is_published = TRUE
+          AND sv.is_active  = TRUE
+          AND s.display_name = %s
+        LIMIT 1
+        """,
+        (CANONICAL_REFERENCE_STRATEGY,),
+    )
+    row = cur.fetchone()
+    if row is None:
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                f"Canonical reference strategy {CANONICAL_REFERENCE_STRATEGY!r} "
+                "not found. Expected one active, published strategy_version row. "
+                "See docs/strategy_specification.md § 7 for migration status."
+            ),
+        )
+    return {
+        "strategy_name":        row["display_name"],
+        "version_label":        row["version_label"],
+        "filter_mode":          row["filter_mode"],
+        "metrics_data_through": row["metrics_data_through"].isoformat()
+                                if row["metrics_data_through"] else None,
+        "metrics":              row["current_metrics"] or {},
+        "config":               row["config"] or {},
+    }
+
+
 @router.post("/audits/{job_id}/promote")
 def promote_audit(
     job_id: str,

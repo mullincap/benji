@@ -6,6 +6,7 @@ import StatusBar from '../components/StatusBar';
 import ParamForm from '../components/LeftPanel/ParamForm';
 import RunningParams from '../components/LeftPanel/RunningParams';
 import ResultsSummary from '../components/LeftPanel/ResultsSummary';
+import CanonicalCompareCard from './CanonicalCompareCard';
 import EmptyState from '../components/RightPanel/EmptyState';
 import RunningView from '../components/RightPanel/RunningView';
 import ResultsView from '../components/RightPanel/ResultsView';
@@ -746,6 +747,9 @@ export default function Home() {
                       startAuditConfigsCollapsed={editingFromResults}
                       hideActionBar={editingFromResults}
                     />
+                    {!editingFromResults && (
+                      <CanonicalCompareCard results={results} params={params} />
+                    )}
                     {editingFromResults && (
                       <div style={{ borderTop: '1px solid var(--line)' }}>
                         <ParamForm params={params} onChange={setParams} onSubmit={handleSubmit} />
