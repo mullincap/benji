@@ -946,7 +946,7 @@ function ExchangeCapitalGroup({
           <colgroup>
             <col style={{ width: "18%" }} />  {/* date */}
             <col style={{ width: "10%" }} />  {/* kind */}
-            <col style={{ width: "12%" }} />  {/* amount */}
+            <col style={{ width: "15%" }} />  {/* amount (widened; nowrap keeps sign inline) */}
             <col />                             {/* notes */}
             <col style={{ width: "150px" }} />{/* actions */}
           </colgroup>
@@ -1006,6 +1006,7 @@ function ExchangeCapitalGroup({
                   }}>{ev.kind === "withdrawal" ? "withdraw" : ev.kind}</td>
                   <td style={{
                     padding: "10px 14px", color: amountColor, fontWeight: 700,
+                    whiteSpace: "nowrap",
                   }}>{fmtAmount(ev.amount_usd, ev.kind)}</td>
                   <td
                     title={ev.notes ?? ""}
