@@ -717,7 +717,6 @@ function ExchangeCapitalGroup({
   exchangeBalance,
   exchangeAnchorAt,
   exchangeBaselineUsd,
-  pnlByAlloc,
   onEditAnchor,
   onUpdateEvent,
   onDeleteEvent,
@@ -737,7 +736,6 @@ function ExchangeCapitalGroup({
   exchangeAnchorAt: string | null;
   /** Operator-set baseline USD (null = no override, treated as 0 for math). */
   exchangeBaselineUsd: number | null;
-  pnlByAlloc: Record<string, ApiPnl>;
   /** Opens the exchange-level anchor modal for this connection. */
   onEditAnchor: (connectionId: string) => void;
   onUpdateEvent: (ev: ApiCapitalEvent) => void;
@@ -898,54 +896,12 @@ function ExchangeCapitalGroup({
         </div>
       )}
 
-      {/* Per-allocation row. Shows cumulative return since the exchange
-          anchor + current capital. Principal is exchange-level (above),
-          not per-allocation — the anchor is a shared-history setting. */}
-      {group.allocations.length > 0 && (
-        <div style={{
-          padding: "10px 14px",
-          borderBottom: "1px solid var(--line)",
-          display: "flex", flexDirection: "column", gap: 6,
-          background: "var(--bg2)",
-        }}>
-          {group.allocations.map(opt => {
-            const p = pnlByAlloc[opt.id];
-            const retColor = p && p.total_return_pct > 0 ? "var(--green)"
-              : p && p.total_return_pct < 0 ? "var(--red)"
-              : "var(--t1)";
-            return (
-              <div key={opt.id} style={{
-                display: "flex", alignItems: "center", gap: 14,
-                fontSize: 10, fontFamily: FONT_MONO,
-              }}>
-                <span style={{ color: "var(--t1)", fontWeight: 700, minWidth: 180 }}>
-                  {opt.label}
-                </span>
-                {p ? (
-                  <>
-                    <span style={{ color: "var(--t3)" }}>CAPITAL</span>
-                    <span style={{ color: "var(--t0)", fontWeight: 700 }}>
-                      ${p.capital_usd.toLocaleString("en-US", { maximumFractionDigits: 2 })}
-                    </span>
-                    <span style={{ color: "var(--t3)" }}>SINCE-ANCHOR RETURN</span>
-                    <span style={{ color: retColor, fontWeight: 700 }}>
-                      {p.total_return_pct >= 0 ? "+" : ""}
-                      {p.total_return_pct.toFixed(2)}%
-                    </span>
-                    <span style={{ color: "var(--t3)" }}>P&amp;L</span>
-                    <span style={{ color: retColor, fontWeight: 700 }}>
-                      {p.total_pnl_usd >= 0 ? "+" : "−"}$
-                      {Math.abs(p.total_pnl_usd).toLocaleString("en-US", { maximumFractionDigits: 2 })}
-                    </span>
-                  </>
-                ) : (
-                  <span style={{ color: "var(--t3)" }}>Loading…</span>
-                )}
-              </div>
-            );
-          })}
-        </div>
-      )}
+      {/* Per-allocation metrics intentionally NOT rendered here. This
+          panel is exchange-scoped bookkeeping; per-allocation performance
+          (capital, cumulative return, P&L) belongs on the Trader card.
+          Mixing the two previously invited confusing apples-to-oranges
+          comparisons (allocation.capital_usd vs exchange.principal are
+          independently correct numbers that aren't expected to match). */}
 
       {/* Events table */}
       {group.events.length === 0 ? (
@@ -1536,7 +1492,6 @@ function CapitalEventsSection() {
                     exchangeBalance={bal}
                     exchangeAnchorAt={ex?.principalAnchorAt ?? null}
                     exchangeBaselineUsd={ex?.principalBaselineUsd ?? null}
-                    pnlByAlloc={pnlByAlloc}
                     onEditAnchor={setEditingAnchor}
                     onUpdateEvent={setEditingEvent}
                     onDeleteEvent={setConfirmDelete}
