@@ -77,6 +77,48 @@ config flows in. Note: this changes the leverage tier from
 Alpha Max (l_high=2.0) to ALTS MAIN (l_high=1.5) — user's capital
 size-drops by ~25% vs current but risk-adjusted return is the bet.
 
+### Gap 5 — Capital Events UI on Allocator Settings page
+Location: `/trader/settings` (the page that currently shows
+LINKED EXCHANGES + ACCOUNT SUMMARY). Add a new section:
+**CAPITAL EVENTS** — table listing rows from
+`user_mgmt.allocation_capital_events` with add / edit / delete
+controls. Per-allocation or aggregated view.
+
+Shape:
+- Section header "CAPITAL EVENTS" under ACCOUNT SUMMARY
+- Table columns: Date (event_at) · Allocation · Kind · Amount · Notes · edit / delete
+- "+ RECORD CAPITAL EVENT" button → modal with allocation dropdown,
+  kind dropdown (deposit/withdrawal), amount input, event_at (default
+  now), optional notes
+- Edit button → same modal pre-filled
+- Delete → confirm dialog
+
+Backend endpoints (admin-gated via `require_admin`):
+- `GET  /api/allocator/capital-events?allocation_id=<uuid>` —
+  list events, optionally filtered. Returns newest-first.
+- `POST /api/allocator/capital-events` — create
+  (body: allocation_id, amount_usd, kind, event_at, notes)
+- `PATCH /api/allocator/capital-events/{event_id}` — partial update
+- `DELETE /api/allocator/capital-events/{event_id}` — remove
+
+API types in `frontend/app/trader/api.ts`:
+- `ApiCapitalEvent { event_id, allocation_id, event_at, amount_usd,
+  kind, notes, created_at }`
+- `allocatorApi.getCapitalEvents / createCapitalEvent / updateCapitalEvent
+  / deleteCapitalEvent`
+
+Scope: ~2-3 hrs (backend endpoints + frontend section + modal +
+tests). Not blocking; direct SQL works until this ships.
+
+Until then: operators edit via direct SQL on mcap, e.g.:
+```
+ssh mcap 'PGPASSWORD=A psql ... -c "INSERT INTO user_mgmt.
+allocation_capital_events (allocation_id, event_at, amount_usd,
+kind, notes) VALUES (...)"'
+```
+SQL templates in `ops/reconcile_session_capital_events.sql` header
+or `docs/session_handoff_2026-04-23.md` (after session wrap).
+
 ### Gap 4 — Capital events reconciliation for tonight's session close
 Tonight's trader (pid=27) will persist `allocation_returns` at
 23:55 UTC with `net_return_pct` inflated by the 09:05 UTC $1,003.75
