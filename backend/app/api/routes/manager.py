@@ -1310,12 +1310,48 @@ def execution_summary(
             date_clause = " AND ar.session_date >= %s"
             params.append(since_date)
 
+        # Capital-events adjustment (compute-on-read, replaces the old
+        # 23:56 reconcile cron). For each (allocation_id, session_date) we
+        # net the deposits/withdrawals on the same UTC date, reconstruct
+        # end_equity from the trader-written net, and re-denominator on the
+        # capital-adjusted baseline:
+        #   end_equity_X    = capital_deployed * (1 + stored_X_pct/100)
+        #   adjusted_X_pct  = (end_equity_X - capital_deployed - ce_net)
+        #                     / (capital_deployed + ce_net) * 100
+        # Skipped (returns stored value) when capital_deployed = 0
+        # (filtered/no_entry rows where dividing makes no sense) or
+        # capital_deployed + ce_net <= 0 (would invert sign of denominator).
         cur.execute(f"""
+            WITH ce AS (
+                SELECT allocation_id,
+                       event_at::date AS session_date,
+                       SUM(CASE kind WHEN 'deposit'    THEN amount_usd
+                                     WHEN 'withdrawal' THEN -amount_usd
+                           END)::numeric AS session_net
+                  FROM user_mgmt.allocation_capital_events
+                 GROUP BY allocation_id, event_at::date
+            )
             SELECT
                 ar.allocation_id,
                 ar.session_date,
-                ar.net_return_pct,
-                ar.gross_return_pct,
+                CASE
+                    WHEN ar.capital_deployed_usd > 0
+                     AND COALESCE(ce.session_net, 0) <> 0
+                     AND (ar.capital_deployed_usd + ce.session_net) > 0
+                    THEN (ar.capital_deployed_usd * (1 + ar.net_return_pct/100)
+                          - ar.capital_deployed_usd - ce.session_net)
+                         / (ar.capital_deployed_usd + ce.session_net) * 100
+                    ELSE ar.net_return_pct
+                END AS net_return_pct,
+                CASE
+                    WHEN ar.capital_deployed_usd > 0
+                     AND COALESCE(ce.session_net, 0) <> 0
+                     AND (ar.capital_deployed_usd + ce.session_net) > 0
+                    THEN (ar.capital_deployed_usd * (1 + ar.gross_return_pct/100)
+                          - ar.capital_deployed_usd - ce.session_net)
+                         / (ar.capital_deployed_usd + ce.session_net) * 100
+                    ELSE ar.gross_return_pct
+                END AS gross_return_pct,
                 ar.exit_reason       AS ar_exit_reason,
                 ar.effective_leverage,
                 ar.capital_deployed_usd,
@@ -1339,6 +1375,9 @@ def execution_summary(
                 s.name               AS strategy_name,
                 a.capital_usd
             FROM user_mgmt.allocation_returns ar
+            LEFT JOIN ce
+                   ON ce.allocation_id = ar.allocation_id
+                  AND ce.session_date  = ar.session_date
             LEFT JOIN user_mgmt.portfolio_sessions ps
                    ON ps.allocation_id = ar.allocation_id
                   AND ps.signal_date   = ar.session_date

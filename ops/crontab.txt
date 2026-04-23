@@ -66,9 +66,11 @@ PATH=/usr/local/sbin:/usr/local/bin:/sbin:/bin:/usr/sbin:/usr/bin
 
 # ── Signal shadow diff — 06:15 UTC (v1 vs v2 vs canonical basket diff) ───────
 15 6 * * * . /mnt/quant-data/credentials/secrets.env && /root/benji/pipeline/.venv/bin/python /root/benji/shadow_diff.py >> /mnt/quant-data/logs/signal/shadow_diff.log 2>&1
-# Reconcile allocation_returns vs allocation_capital_events — 23:56 UTC nightly.
-# Idempotent across all (allocation_id, session_date) rows: gated on
-# capital_events_reconciled_at IS NULL so each row is corrected exactly once.
-# Supersedes the one-shot reconcile_session_capital_events.sql (kept around
-# for manual diagnostic use). Requires migration 004 to have been applied.
-56 23 * * * . /mnt/quant-data/credentials/secrets.env && PGPASSWORD=$DB_PASSWORD psql -h $DB_HOST -U $DB_USER -d $DB_NAME -f /root/benji/ops/reconcile_allocation_returns_nightly.sql >> /mnt/quant-data/logs/trader/capital_events_reconcile.log 2>&1
+# Capital events reconciliation — RETIRED 2026-04-23.
+# Replaced by compute-on-read in manager.py + /pnl endpoint, both of which
+# now subtract allocation_capital_events live each call. Manual edits/
+# adds/deletes propagate everywhere instantly.
+# Old SQL files preserved for history at:
+#   ops/reconcile_session_capital_events.sql (one-shot, hardcoded alloc)
+#   ops/reconcile_allocation_returns_nightly.sql (the nightly that ran one night)
+# Migration 005 drops capital_events_reconciled_at since it's no longer used.
