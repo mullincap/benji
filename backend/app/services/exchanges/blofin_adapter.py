@@ -377,17 +377,35 @@ class BloFinAdapter(ExchangeAdapter):
             import time as _t
             since_ms = int(_t.time() * 1000) - (90 * 86_400_000)
 
+        # NOTE on BloFin pagination: the after/before params on
+        # /asset/{deposit,withdrawal}-history are CURSOR-based (record IDs
+        # in newest-first order), not date filters. Passing after=ts_ms
+        # silently returns empty/wrong-window results. We omit them and
+        # rely on limit=100 to fetch the most-recent N rows; client-side
+        # filter on ts >= since_ms keeps the dataset bounded. For >100
+        # rows of history we'd need to walk via id-cursor, which BloFin
+        # documents but isn't needed at current volumes.
         results: list[CapitalEventInfo] = []
         for kind, fetch in (("deposit",    self._rest.get_deposit_history),
                              ("withdrawal", self._rest.get_withdrawal_history)):
             try:
-                resp = fetch(after_ms=since_ms, limit=100)
+                resp = fetch(limit=100)
             except Exception as e:
                 log.warning(f"BloFin {kind} history fetch failed: {e}")
                 continue
 
             rows = resp.get("data") or []
             for row in rows:
+                # Client-side date filter to honor the since_ms contract.
+                try:
+                    row_ts = int(
+                        row.get("ts") or row.get("createTime")
+                        or row.get("cTime") or row.get("updatedTime") or 0
+                    )
+                except (TypeError, ValueError):
+                    row_ts = 0
+                if row_ts and row_ts < since_ms:
+                    continue
                 results.extend(_parse_blofin_capital_row(row, kind, self._rest))
 
         return results

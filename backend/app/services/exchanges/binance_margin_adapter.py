@@ -564,26 +564,48 @@ class BinanceMarginAdapter(ExchangeAdapter):
         Non-stablecoin assets are skipped — capital events for those are
         rare and better surfaced via manual operator entry than mis-valued.
 
-        Default lookback when since_ms is None: 365 days (Binance retention).
+        Binance API caps each /capital/{deposit,withdraw}/history call at
+        a 90-day window (error -4047 otherwise). Lookback windows longer
+        than 90 days are paginated client-side as consecutive 90-day
+        chunks. Default lookback when since_ms is None: 365 days.
         """
+        now_ms = int(time.time() * 1000)
         if since_ms is None:
-            since_ms = int(time.time() * 1000) - (365 * 86_400_000)
+            since_ms = now_ms - (365 * 86_400_000)
+        # Cap each call at 90 days (Binance limit). Walk the window in
+        # 90-day chunks if the lookback exceeds that.
+        WINDOW_MS = 90 * 86_400_000
+        windows: list[tuple[int, int]] = []
+        cursor = since_ms
+        while cursor < now_ms:
+            end = min(cursor + WINDOW_MS, now_ms)
+            windows.append((cursor, end))
+            cursor = end
 
         results: list[CapitalEventInfo] = []
-        try:
-            deposits = self._client.get_deposit_history(startTime=since_ms)
-        except BinanceAPIException as e:
-            log.warning(f"Binance deposit history fetch failed: {e}")
-            deposits = []
-        try:
-            withdraws = self._client.get_withdraw_history(startTime=since_ms)
-        except BinanceAPIException as e:
-            log.warning(f"Binance withdraw history fetch failed: {e}")
-            withdraws = []
+        deposits: list = []
+        withdraws: list = []
+        for win_start, win_end in windows:
+            try:
+                deposits.extend(self._client.get_deposit_history(
+                    startTime=win_start, endTime=win_end,
+                ) or [])
+            except BinanceAPIException as e:
+                log.warning(
+                    f"Binance deposit history fetch failed [{win_start}–{win_end}]: {e}"
+                )
+            try:
+                withdraws.extend(self._client.get_withdraw_history(
+                    startTime=win_start, endTime=win_end,
+                ) or [])
+            except BinanceAPIException as e:
+                log.warning(
+                    f"Binance withdraw history fetch failed [{win_start}–{win_end}]: {e}"
+                )
 
-        for row in deposits or []:
+        for row in deposits:
             results.extend(_parse_binance_capital_row(row, "deposit", self._client))
-        for row in withdraws or []:
+        for row in withdraws:
             results.extend(_parse_binance_capital_row(row, "withdrawal", self._client))
 
         return results
