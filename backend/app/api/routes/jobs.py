@@ -63,6 +63,7 @@ class JobRequest(BaseModel):
     sort_by:                    str   = "price"
     mode:                       str   = "snapshot"
     ranking_metric:             str   = "pct_change"
+    live_parity:                bool  = False
     freq_width:                 int   = 20
     freq_cutoff:                int   = 20
     sample_interval:            int   = 5
