@@ -10,6 +10,7 @@ import {
   type ExchangePermissions,
   type StoreKeysSuccess,
   type ApiCapitalEvent,
+  type ApiPnl,
 } from "../../api";
 
 const SUPPORTED_EXCHANGES: ExchangeSlug[] = ["binance", "blofin"];
@@ -714,6 +715,8 @@ function fmtAmount(usd: number, kind: "deposit" | "withdrawal"): string {
 function ExchangeCapitalGroup({
   group,
   exchangeBalance,
+  exchangeAnchorAt,
+  exchangeBaselineUsd,
   pnlByAlloc,
   onEditAnchor,
   onUpdateEvent,
@@ -730,15 +733,13 @@ function ExchangeCapitalGroup({
   /** Current total equity on this exchange from Exchange.balance (null if
    * not fetched yet or for the orphan "no connection" bucket). */
   exchangeBalance: number | null;
-  pnlByAlloc: Record<string, {
-    principal_usd: number;
-    principal_baseline_usd: number;
-    principal_anchor_at: string | null;
-    principal_anchor_explicit: boolean;
-    principal_baseline_explicit: boolean;
-    net_since_anchor_usd: number;
-  }>;
-  onEditAnchor: (allocationId: string) => void;
+  /** Operator-set anchor on the connection (null = no override). */
+  exchangeAnchorAt: string | null;
+  /** Operator-set baseline USD (null = no override, treated as 0 for math). */
+  exchangeBaselineUsd: number | null;
+  pnlByAlloc: Record<string, ApiPnl>;
+  /** Opens the exchange-level anchor modal for this connection. */
+  onEditAnchor: (connectionId: string) => void;
   onUpdateEvent: (ev: ApiCapitalEvent) => void;
   onDeleteEvent: (ev: ApiCapitalEvent) => void;
   // Optional — only present on real exchange panels (not the orphan "no
@@ -746,18 +747,19 @@ function ExchangeCapitalGroup({
   onRecordNew?: () => void;
   onReset?: () => void;
 }) {
-  // Exchange-level principal: net capital events across all of this
-  // connection's events (regardless of allocation attribution).
-  //   principal   = SUM(deposits − withdrawals) on the connection
-  //   balance     = current equity on the exchange (from snapshots)
-  //   trading_delta = balance − principal
-  // Shown as a per-connection summary so every linked exchange has a
-  // visible principal bar even when no allocation is attached to it.
-  const netCapital = group.events.reduce((sum, ev) => {
+  // Exchange-level principal math (matches /pnl backend formula):
+  //   principal   = baseline + SUM(deposits − withdrawals since anchor)
+  //   balance     = current equity on the exchange
+  //   trading_Δ   = balance − principal
+  // Events passed in here are already filtered by the parent to those on
+  // or after the anchor, so this SUM is the net-since-anchor.
+  const netSinceAnchor = group.events.reduce((sum, ev) => {
     const signed = ev.kind === "deposit" ? ev.amount_usd : -ev.amount_usd;
     return sum + signed;
   }, 0);
-  const tradingDelta = exchangeBalance !== null ? exchangeBalance - netCapital : null;
+  const baseline = exchangeBaselineUsd ?? 0;
+  const principal = baseline + netSinceAnchor;
+  const tradingDelta = exchangeBalance !== null ? exchangeBalance - principal : null;
 
   const header = group.exchange_name
     ? group.exchange_name.toUpperCase()
@@ -787,8 +789,23 @@ function ExchangeCapitalGroup({
             {group.allocations.length} alloc · {group.events.length} event{group.events.length === 1 ? "" : "s"}
           </span>
         </div>
-        {(onReset || onRecordNew) && (
+        {(onReset || onRecordNew || group.connection_id) && (
           <div style={{ display: "flex", gap: 8, flexShrink: 0 }}>
+            {group.connection_id && (
+              <button
+                onClick={() => onEditAnchor(group.connection_id!)}
+                title="Set this exchange's principal anchor date + baseline"
+                style={{
+                  background: "transparent", border: "1px solid var(--line2)",
+                  borderRadius: 3, color: "var(--t1)",
+                  fontSize: 9, fontWeight: 700, letterSpacing: "0.12em",
+                  textTransform: "uppercase", padding: "5px 12px",
+                  cursor: "pointer", fontFamily: FONT_MONO,
+                }}
+                onMouseEnter={e => (e.currentTarget.style.color = "var(--t0)")}
+                onMouseLeave={e => (e.currentTarget.style.color = "var(--t1)")}
+              >EDIT ANCHOR</button>
+            )}
             {onReset && (
               <button
                 onClick={onReset}
@@ -848,13 +865,15 @@ function ExchangeCapitalGroup({
               ? `$${exchangeBalance.toLocaleString("en-US", { maximumFractionDigits: 2 })}`
               : "—"}
           </span>
-          <span style={{ color: "var(--t3)" }}>NET CAPITAL IN</span>
-          <span style={{
-            color: netCapital >= 0 ? "var(--green)" : "var(--amber)",
-            fontWeight: 700,
-          }}>
-            {netCapital >= 0 ? "+" : "−"}$
-            {Math.abs(netCapital).toLocaleString("en-US", { maximumFractionDigits: 2 })}
+          <span style={{ color: "var(--t3)" }}>PRINCIPAL</span>
+          <span style={{ color: "var(--t0)", fontWeight: 700 }}>
+            ${principal.toLocaleString("en-US", { maximumFractionDigits: 2 })}
+          </span>
+          <span style={{ color: "var(--t3)" }}>
+            = ${baseline.toLocaleString("en-US", { maximumFractionDigits: 2 })}
+            {" "}
+            {netSinceAnchor >= 0 ? "+" : "−"} $
+            {Math.abs(netSinceAnchor).toLocaleString("en-US", { maximumFractionDigits: 2 })}
           </span>
           {tradingDelta !== null && (
             <>
@@ -868,13 +887,16 @@ function ExchangeCapitalGroup({
               </span>
             </>
           )}
+          <span style={{ color: "var(--t3)", marginLeft: "auto" }}>
+            since {exchangeAnchorAt ? exchangeAnchorAt.slice(0, 10) : "—"}
+            {exchangeAnchorAt === null ? " (no anchor set)" : ""}
+          </span>
         </div>
       )}
 
-      {/* Per-allocation principal summary. Listed below the exchange-level
-          bar. When no allocations exist, the exchange-level bar alone
-          represents the operator's capital-event tracking for this
-          exchange. */}
+      {/* Per-allocation row. Shows cumulative return since the exchange
+          anchor + current capital. Principal is exchange-level (above),
+          not per-allocation — the anchor is a shared-history setting. */}
       {group.allocations.length > 0 && (
         <div style={{
           padding: "10px 14px",
@@ -884,49 +906,37 @@ function ExchangeCapitalGroup({
         }}>
           {group.allocations.map(opt => {
             const p = pnlByAlloc[opt.id];
+            const retColor = p && p.total_return_pct > 0 ? "var(--green)"
+              : p && p.total_return_pct < 0 ? "var(--red)"
+              : "var(--t1)";
             return (
               <div key={opt.id} style={{
-                display: "flex", alignItems: "center", justifyContent: "space-between",
+                display: "flex", alignItems: "center", gap: 14,
                 fontSize: 10, fontFamily: FONT_MONO,
               }}>
-                <div style={{ display: "flex", alignItems: "center", gap: 14, flex: 1 }}>
-                  <span style={{ color: "var(--t1)", fontWeight: 700, minWidth: 180 }}>
-                    {opt.label}
-                  </span>
-                  {p ? (
-                    <>
-                      <span style={{ color: "var(--t3)" }}>PRINCIPAL</span>
-                      <span style={{ color: "var(--t0)", fontWeight: 700 }}>
-                        ${p.principal_usd.toLocaleString("en-US", { maximumFractionDigits: 2 })}
-                      </span>
-                      <span style={{ color: "var(--t3)" }}>
-                        = ${p.principal_baseline_usd.toLocaleString("en-US", { maximumFractionDigits: 2 })}
-                        {" "}
-                        {p.net_since_anchor_usd >= 0 ? "+" : "−"} $
-                        {Math.abs(p.net_since_anchor_usd).toLocaleString("en-US", { maximumFractionDigits: 2 })}
-                      </span>
-                      <span style={{ color: "var(--t3)" }}>
-                        since {p.principal_anchor_at ? p.principal_anchor_at.slice(0, 10) : "—"}
-                        {!p.principal_anchor_explicit && !p.principal_baseline_explicit ? " (default)" : ""}
-                      </span>
-                    </>
-                  ) : (
-                    <span style={{ color: "var(--t3)" }}>Loading…</span>
-                  )}
-                </div>
-                <button
-                  onClick={() => onEditAnchor(opt.id)}
-                  style={{
-                    background: "transparent", border: "none",
-                    color: "var(--t2)", fontSize: 9,
-                    letterSpacing: "0.12em", textTransform: "uppercase",
-                    cursor: "pointer", fontFamily: FONT_MONO,
-                  }}
-                  onMouseEnter={e => (e.currentTarget.style.color = "var(--t0)")}
-                  onMouseLeave={e => (e.currentTarget.style.color = "var(--t2)")}
-                >
-                  Edit anchor
-                </button>
+                <span style={{ color: "var(--t1)", fontWeight: 700, minWidth: 180 }}>
+                  {opt.label}
+                </span>
+                {p ? (
+                  <>
+                    <span style={{ color: "var(--t3)" }}>CAPITAL</span>
+                    <span style={{ color: "var(--t0)", fontWeight: 700 }}>
+                      ${p.capital_usd.toLocaleString("en-US", { maximumFractionDigits: 2 })}
+                    </span>
+                    <span style={{ color: "var(--t3)" }}>SINCE-ANCHOR RETURN</span>
+                    <span style={{ color: retColor, fontWeight: 700 }}>
+                      {p.total_return_pct >= 0 ? "+" : ""}
+                      {p.total_return_pct.toFixed(2)}%
+                    </span>
+                    <span style={{ color: "var(--t3)" }}>P&amp;L</span>
+                    <span style={{ color: retColor, fontWeight: 700 }}>
+                      {p.total_pnl_usd >= 0 ? "+" : "−"}$
+                      {Math.abs(p.total_pnl_usd).toLocaleString("en-US", { maximumFractionDigits: 2 })}
+                    </span>
+                  </>
+                ) : (
+                  <span style={{ color: "var(--t3)" }}>Loading…</span>
+                )}
               </div>
             );
           })}
@@ -1253,7 +1263,7 @@ function CapitalEventModal({
 }
 
 function CapitalEventsSection() {
-  const { instances, exchanges } = useTrader();
+  const { instances, exchanges, refresh: traderRefresh } = useTrader();
   const [events, setEvents] = useState<ApiCapitalEvent[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [editingEvent, setEditingEvent] = useState<ApiCapitalEvent | null>(null);
@@ -1267,15 +1277,8 @@ function CapitalEventsSection() {
   // confirmReset holds the connection_id being reset; null = modal closed.
   const [confirmReset, setConfirmReset] = useState<string | null>(null);
   const [editingAnchor, setEditingAnchor] = useState<string | null>(null);
-  // Per-allocation principal cache (allocation_id → ApiPnl). Fed by /pnl.
-  const [pnlByAlloc, setPnlByAlloc] = useState<Record<string, {
-    principal_usd: number;
-    principal_baseline_usd: number;
-    principal_anchor_at: string | null;
-    principal_anchor_explicit: boolean;
-    principal_baseline_explicit: boolean;
-    net_since_anchor_usd: number;
-  }>>({});
+  // Per-allocation /pnl response cache (allocation_id → full ApiPnl).
+  const [pnlByAlloc, setPnlByAlloc] = useState<Record<string, ApiPnl>>({});
 
   const refresh = useCallback(async () => {
     try {
@@ -1288,18 +1291,10 @@ function CapitalEventsSection() {
   }, []);
 
   const refreshPnl = useCallback(async (allocIds: string[]) => {
-    const out: typeof pnlByAlloc = {};
+    const out: Record<string, ApiPnl> = {};
     await Promise.all(allocIds.map(async id => {
       try {
-        const r = await allocatorApi.getPnl(id);
-        out[id] = {
-          principal_usd: r.principal_usd,
-          principal_baseline_usd: r.principal_baseline_usd,
-          principal_anchor_at: r.principal_anchor_at,
-          principal_anchor_explicit: r.principal_anchor_explicit,
-          principal_baseline_explicit: r.principal_baseline_explicit,
-          net_since_anchor_usd: r.net_since_anchor_usd,
-        };
+        out[id] = await allocatorApi.getPnl(id);
       } catch {
         // non-fatal; alloc simply won't render a principal summary
       }
@@ -1383,12 +1378,12 @@ function CapitalEventsSection() {
   }
 
   async function handleAnchorSave(
-    allocationId: string,
+    connectionId: string,
     data: { anchor_at?: string; baseline_usd?: number; reset?: boolean },
   ) {
     setSubmitting(true);
     try {
-      await allocatorApi.updateAllocation(allocationId, data.reset ? {
+      await allocatorApi.updateConnection(connectionId, data.reset ? {
         clear_principal_anchor: true,
         clear_principal_baseline: true,
       } : {
@@ -1396,8 +1391,11 @@ function CapitalEventsSection() {
         principal_baseline_usd: data.baseline_usd,
       });
       setEditingAnchor(null);
-      await refreshPnl(allocOptions.map(a => a.id));
       await refresh();
+      await refreshPnl(allocOptions.map(a => a.id));
+      // Re-fetch exchanges so the Exchange.principalAnchorAt in useTrader
+      // updates across all consumers (Trader card, event filter, etc.).
+      await traderRefresh();
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -1493,11 +1491,23 @@ function CapitalEventsSection() {
                 const bal = ex && ex.balance > 0
                   ? ex.balance
                   : (ex && ex.status === "active" ? 0 : null);
+                // Filter events by the exchange's anchor: events before the
+                // anchor aren't part of the tracked history. When no explicit
+                // anchor set, show all.
+                const anchorMs = ex?.principalAnchorAt
+                  ? new Date(ex.principalAnchorAt).getTime()
+                  : null;
+                const filteredEvents = anchorMs !== null
+                  ? grp.events.filter(e => new Date(e.event_at).getTime() >= anchorMs)
+                  : grp.events;
+                const filteredGroup = { ...grp, events: filteredEvents };
                 return (
                   <ExchangeCapitalGroup
                     key={grp.connection_id || "orphan"}
-                    group={grp}
+                    group={filteredGroup}
                     exchangeBalance={bal}
+                    exchangeAnchorAt={ex?.principalAnchorAt ?? null}
+                    exchangeBaselineUsd={ex?.principalBaselineUsd ?? null}
                     pnlByAlloc={pnlByAlloc}
                     onEditAnchor={setEditingAnchor}
                     onUpdateEvent={setEditingEvent}
@@ -1690,12 +1700,21 @@ function CapitalEventsSection() {
 
       {/* Anchor-edit modal */}
       {editingAnchor && (() => {
-        const existing = pnlByAlloc[editingAnchor];
-        const allocLabel = allocLabelById[editingAnchor] || editingAnchor.slice(0, 8);
+        const ex = exchanges.find(e => e.id === editingAnchor);
+        const exchangeLabel = ex ? (ex.name || ex.exchange) : editingAnchor.slice(0, 8);
+        // Earliest event timestamp on this connection — used for the
+        // "Set to earliest" button. events is already filtered to
+        // deleted_at IS NULL by the list endpoint.
+        const connEvents = (events ?? []).filter(ev => ev.connection_id === editingAnchor);
+        const earliestEventAt = connEvents.length > 0
+          ? connEvents.reduce((min, ev) => ev.event_at < min ? ev.event_at : min, connEvents[0].event_at)
+          : null;
         return (
           <AnchorEditModal
-            allocationLabel={allocLabel}
-            current={existing ?? null}
+            exchangeLabel={exchangeLabel}
+            currentAnchorAt={ex?.principalAnchorAt ?? null}
+            currentBaselineUsd={ex?.principalBaselineUsd ?? null}
+            earliestEventAt={earliestEventAt}
             submitting={submitting}
             onCancel={() => setEditingAnchor(null)}
             onSave={data => handleAnchorSave(editingAnchor, data)}
@@ -1707,36 +1726,32 @@ function CapitalEventsSection() {
 }
 
 function AnchorEditModal({
-  allocationLabel,
-  current,
+  exchangeLabel,
+  currentAnchorAt,
+  currentBaselineUsd,
+  earliestEventAt,
   submitting,
   onCancel,
   onSave,
 }: {
-  allocationLabel: string;
-  current: {
-    principal_usd: number;
-    principal_baseline_usd: number;
-    principal_anchor_at: string | null;
-    principal_anchor_explicit: boolean;
-    principal_baseline_explicit: boolean;
-  } | null;
+  exchangeLabel: string;
+  /** Operator-set anchor, or null to signal default. */
+  currentAnchorAt: string | null;
+  currentBaselineUsd: number | null;
+  /** ISO 8601 of the earliest recorded event on this connection, or null. */
+  earliestEventAt: string | null;
   submitting: boolean;
   onCancel: () => void;
   onSave: (data: { anchor_at?: string; baseline_usd?: number; reset?: boolean }) => void;
 }) {
   const [anchorAt, setAnchorAt] = useState<string>(
-    current?.principal_anchor_at
-      ? current.principal_anchor_at.slice(0, 16)
-      : "",
+    currentAnchorAt ? currentAnchorAt.slice(0, 16) : "",
   );
   const [baseline, setBaseline] = useState<string>(
-    current ? current.principal_baseline_usd.toString() : "",
+    currentBaselineUsd != null ? currentBaselineUsd.toString() : "",
   );
 
-  const hasOverride = !!current && (
-    current.principal_anchor_explicit || current.principal_baseline_explicit
-  );
+  const hasOverride = currentAnchorAt !== null || currentBaselineUsd !== null;
 
   return (
     <div
@@ -1761,13 +1776,14 @@ function AnchorEditModal({
           fontSize: 9, fontWeight: 700, letterSpacing: "0.12em",
           color: "var(--t3)", textTransform: "uppercase", marginBottom: 12,
         }}>
-          Principal anchor — {allocationLabel}
+          Principal anchor — {exchangeLabel}
         </div>
 
         <div style={{ fontSize: 10, color: "var(--t2)", marginBottom: 14, lineHeight: 1.5 }}>
-          Pin the start date of the tracked track record. Events before this date are
-          excluded from principal + session-history calculations. Leaving both blank
-          falls back to the allocation's creation date and initial capital.
+          Pin the official start date for this exchange's tracked history. Events and
+          sessions before this date are excluded from principal math and displayed
+          history. One anchor per exchange — shared across any allocations on the
+          wallet. Leave blank to fall back to the connection creation date.
         </div>
 
         <div style={{ marginBottom: 10 }}>
@@ -1780,6 +1796,30 @@ function AnchorEditModal({
             onFocus={e => (e.target.style.borderColor = "var(--green)")}
             onBlur={e => (e.target.style.borderColor = "var(--line)")}
           />
+          {earliestEventAt && (
+            <button
+              type="button"
+              onClick={() => {
+                // Convert UTC ISO to local datetime-local format (no TZ).
+                const d = new Date(earliestEventAt);
+                const pad = (n: number) => n.toString().padStart(2, "0");
+                setAnchorAt(
+                  `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`
+                  + `T${pad(d.getHours())}:${pad(d.getMinutes())}`
+                );
+              }}
+              style={{
+                marginTop: 6, background: "transparent", border: "none",
+                color: "var(--t2)", fontSize: 9, letterSpacing: "0.08em",
+                textTransform: "uppercase", padding: 0, cursor: "pointer",
+                fontFamily: FONT_MONO,
+              }}
+              onMouseEnter={e => (e.currentTarget.style.color = "var(--green)")}
+              onMouseLeave={e => (e.currentTarget.style.color = "var(--t2)")}
+            >
+              ↻ Set to earliest event date ({earliestEventAt.slice(0, 10)})
+            </button>
+          )}
         </div>
 
         <div style={{ marginBottom: 14 }}>
@@ -1795,6 +1835,9 @@ function AnchorEditModal({
             onFocus={e => (e.target.style.borderColor = "var(--green)")}
             onBlur={e => (e.target.style.borderColor = "var(--line)")}
           />
+          <div style={{ fontSize: 9, color: "var(--t3)", marginTop: 4 }}>
+            Leave at 0 if you want principal = SUM(events since anchor) only.
+          </div>
         </div>
 
         <div style={{ display: "flex", gap: 8, justifyContent: "space-between" }}>
@@ -1803,7 +1846,7 @@ function AnchorEditModal({
             disabled={submitting || !hasOverride}
             onClick={() => onSave({ reset: true })}
             title={hasOverride
-              ? "Clear the override and fall back to default (allocation created_at + capital_usd)"
+              ? "Clear the override and fall back to connection creation date + 0 baseline"
               : "No override to clear"}
             style={{
               background: "transparent", border: "1px solid var(--line2)",
@@ -1831,7 +1874,11 @@ function AnchorEditModal({
             >Cancel</button>
             <button
               type="button"
-              disabled={submitting || !anchorAt || !(parseFloat(baseline) > 0)}
+              disabled={
+                submitting || !anchorAt
+                || Number.isNaN(parseFloat(baseline))
+                || parseFloat(baseline) < 0
+              }
               onClick={() => {
                 try {
                   const iso = anchorAt ? new Date(anchorAt).toISOString() : undefined;
@@ -1842,7 +1889,9 @@ function AnchorEditModal({
                 } catch { /* noop */ }
               }}
               style={
-                (submitting || !anchorAt || !(parseFloat(baseline) > 0))
+                (submitting || !anchorAt
+                 || Number.isNaN(parseFloat(baseline))
+                 || parseFloat(baseline) < 0)
                   ? disabledBtnStyle : primaryBtnStyle
               }
             >{submitting ? "Saving…" : "Save"}</button>

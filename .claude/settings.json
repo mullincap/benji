@@ -28,5 +28,18 @@
     "additionalDirectories": [
       "/Users/johnmullin/Projects/benji3m/frontend/app/trader/[id]"
     ]
+  },
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": ".claude/session-start-checks.sh",
+            "timeout": 15
+          }
+        ]
+      }
+    ]
   }
 }

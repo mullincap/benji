@@ -19,6 +19,9 @@ export interface Exchange {
   lastErrorMsg: string | null;
   permissions: ExchangePermissions | null;  // null for grandfathered rows
   lastValidatedAt: string | null;
+  // Exchange-level principal anchor (migration 010). NULL when unset.
+  principalAnchorAt: string | null;
+  principalBaselineUsd: number | null;
 }
 
 export interface Position {
@@ -217,6 +220,8 @@ function mergeExchange(apiEx: ApiExchange, snap: ApiSnapshot | undefined): Excha
     lastErrorMsg: apiEx.last_error_msg,
     permissions: apiEx.permissions,
     lastValidatedAt: apiEx.last_validated_at,
+    principalAnchorAt: apiEx.principal_anchor_at,
+    principalBaselineUsd: apiEx.principal_baseline_usd,
   };
 }
 

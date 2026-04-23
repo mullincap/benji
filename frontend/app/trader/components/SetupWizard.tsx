@@ -199,6 +199,9 @@ export default function SetupWizard({ strategyName, onActivate, onCancel }: Setu
         lastErrorMsg: null,
         permissions: result.permissions,
         lastValidatedAt: new Date().toISOString(),
+        // Newly-linked connections have no operator-set anchor yet.
+        principalAnchorAt: null,
+        principalBaselineUsd: null,
       };
       addExchange(newEx);
       setSelectedExchangeId(newEx.id);

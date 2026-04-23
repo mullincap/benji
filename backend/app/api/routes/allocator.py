@@ -1152,6 +1152,7 @@ def get_exchanges(user_id: str = Depends(get_current_user), cur=Depends(get_curs
             ec.api_key_enc,
             ec.last_validated_at, ec.last_error_msg, ec.last_permissions,
             ec.created_at,
+            ec.principal_anchor_at, ec.principal_baseline_usd,
             snap.total_equity_usd AS balance
         FROM user_mgmt.exchange_connections ec
         LEFT JOIN LATERAL (
@@ -1180,6 +1181,16 @@ def get_exchanges(user_id: str = Depends(get_current_user), cur=Depends(get_curs
             "permissions":       _extract_public_permissions(r["last_permissions"], r["exchange"]),
             "balance":           float(r["balance"]) if r["balance"] is not None else 0.0,
             "created_at":        r["created_at"].isoformat() if r["created_at"] else None,
+            # Principal anchor (migration 010) — exchange-level fields,
+            # NULL when operator hasn't set explicit values.
+            "principal_anchor_at": (
+                r["principal_anchor_at"].isoformat()
+                if r["principal_anchor_at"] else None
+            ),
+            "principal_baseline_usd": (
+                float(r["principal_baseline_usd"])
+                if r["principal_baseline_usd"] is not None else None
+            ),
         })
 
     return {"exchanges": exchanges}
@@ -1397,6 +1408,51 @@ def remove_exchange(connection_id: str, user_id: str = Depends(get_current_user)
     return {"removed": True, "connection_id": connection_id}
 
 
+@router.patch("/connections/{connection_id}")
+def update_connection(
+    connection_id: str,
+    body: ConnectionUpdateRequest,
+    user_id: str = Depends(get_current_user),
+    cur=Depends(get_cursor),
+) -> dict[str, Any]:
+    """Set / clear the exchange-level principal anchor + baseline
+    (migration 010). Ownership-verified via exchange_connections.user_id.
+    """
+    _verify_connection_owned_by(cur, connection_id, user_id)
+
+    updates: list[str] = []
+    params: list = []
+
+    if body.clear_principal_anchor:
+        updates.append("principal_anchor_at = NULL")
+    elif body.principal_anchor_at is not None:
+        updates.append("principal_anchor_at = %s::timestamptz")
+        params.append(body.principal_anchor_at)
+
+    if body.clear_principal_baseline:
+        updates.append("principal_baseline_usd = NULL")
+    elif body.principal_baseline_usd is not None:
+        if body.principal_baseline_usd < 0:
+            raise HTTPException(
+                status_code=400,
+                detail="principal_baseline_usd cannot be negative",
+            )
+        updates.append("principal_baseline_usd = %s")
+        params.append(body.principal_baseline_usd)
+
+    if not updates:
+        raise HTTPException(status_code=400, detail="No fields to update")
+
+    updates.append("updated_at = NOW()")
+    params.append(connection_id)
+    cur.execute(
+        f"UPDATE user_mgmt.exchange_connections "
+        f"SET {', '.join(updates)} WHERE connection_id = %s::uuid",
+        params,
+    )
+    return {"updated": True, "connection_id": connection_id}
+
+
 # ── Allocations ─────────────────────────────────────────────────────────────
 
 @router.get("/allocations")
@@ -1489,15 +1545,15 @@ class AllocationUpdateRequest(BaseModel):
     capital_usd: float | None = None
     status: str | None = None
     compounding_mode: str | None = None  # 'compound' | 'fixed'
-    # Principal anchor — lets the operator pin the "official start date"
-    # used by /pnl's total_pnl_usd + total_return_pct computation. Setting
-    # to literal NULL (body sends null, not omitted) clears the override
-    # and falls back to created_at + capital_usd.
-    principal_anchor_at: str | None = None     # ISO 8601 or null
+
+
+class ConnectionUpdateRequest(BaseModel):
+    """PATCH payload for /connections/{id}. Today the only mutable
+    exchange-level fields are the principal anchor + baseline (moved
+    from allocations in migration 010)."""
+    principal_anchor_at: str | None = None       # ISO 8601 or null
     principal_baseline_usd: float | None = None
-    # Sentinel flags so caller can explicitly clear (vs leave unchanged).
-    # When true, sets the corresponding column to NULL irrespective of
-    # the accompanying value field.
+    # Sentinel flags — send true to explicitly clear (vs leave unchanged).
     clear_principal_anchor: bool = False
     clear_principal_baseline: bool = False
 
@@ -1550,24 +1606,6 @@ def update_allocation(allocation_id: str, body: AllocationUpdateRequest, user_id
             raise HTTPException(status_code=400, detail="Invalid compounding_mode")
         updates.append("compounding_mode = %s")
         params.append(body.compounding_mode)
-
-    # Principal anchor semantics:
-    #   clear_principal_anchor=True    → SET principal_anchor_at = NULL
-    #   anchor_at provided             → SET to that timestamp
-    #   both omitted                   → no change
-    if body.clear_principal_anchor:
-        updates.append("principal_anchor_at = NULL")
-    elif body.principal_anchor_at is not None:
-        updates.append("principal_anchor_at = %s::timestamptz")
-        params.append(body.principal_anchor_at)
-
-    if body.clear_principal_baseline:
-        updates.append("principal_baseline_usd = NULL")
-    elif body.principal_baseline_usd is not None:
-        if body.principal_baseline_usd <= 0:
-            raise HTTPException(status_code=400, detail="principal_baseline_usd must be positive")
-        updates.append("principal_baseline_usd = %s")
-        params.append(body.principal_baseline_usd)
 
     if not updates:
         raise HTTPException(status_code=400, detail="No fields to update")
@@ -1984,11 +2022,12 @@ def trader_pnl(allocation_id: str, user_id: str = Depends(get_current_user), cur
     docs/open_work_list.md.
     """
     cur.execute("""
-        SELECT capital_usd, user_id, connection_id, runtime_state,
-               created_at,
-               principal_anchor_at, principal_baseline_usd
-        FROM user_mgmt.allocations
-        WHERE allocation_id = %s::uuid
+        SELECT a.capital_usd, a.user_id, a.connection_id, a.runtime_state,
+               a.created_at,
+               ec.principal_anchor_at, ec.principal_baseline_usd
+        FROM user_mgmt.allocations a
+        JOIN user_mgmt.exchange_connections ec ON ec.connection_id = a.connection_id
+        WHERE a.allocation_id = %s::uuid
     """, (allocation_id,))
     alloc = cur.fetchone()
     if not alloc:
@@ -2001,13 +2040,16 @@ def trader_pnl(allocation_id: str, user_id: str = Depends(get_current_user), cur
     runtime_state = alloc["runtime_state"] or {}
     created_at = alloc["created_at"]
 
-    # Principal anchor (migration 007). Defaults back to created_at +
-    # capital_usd when the operator hasn't set an explicit anchor/baseline.
+    # Principal anchor (migration 010). Lives on the EXCHANGE connection
+    # now, shared across all allocations on the wallet. Falls back to the
+    # allocation's created_at when no explicit anchor is set. Baseline
+    # defaults to 0 (no explicit operator declaration → principal =
+    # SUM(capital events since anchor)).
     principal_anchor_at = alloc["principal_anchor_at"] or created_at
     principal_baseline = (
         float(alloc["principal_baseline_usd"])
         if alloc["principal_baseline_usd"] is not None
-        else capital
+        else 0.0
     )
 
     # Current equity: latest exchange_snapshot for this connection.
@@ -2088,46 +2130,58 @@ def trader_pnl(allocation_id: str, user_id: str = Depends(get_current_user), cur
         if initial_row:
             initial_equity = float(initial_row["total_equity_usd"])
 
-    # ── Principal computation (migration 007) ───────────────────────────────
-    # principal_now = principal_baseline + SUM(deposits − withdrawals since
-    #                 principal_anchor_at AND NOT soft-deleted)
-    # Defaults (both anchor + baseline NULL): anchor = allocation.created_at,
-    # baseline = allocation.capital_usd. This reproduces the pre-migration-007
-    # behavior so upgrades don't silently change anyone's displayed numbers.
+    # ── Exchange-level principal (migration 010) ───────────────────────────
+    # Principal is a property of the EXCHANGE wallet, shared across all
+    # allocations on the connection. Events are netted by connection_id
+    # (not allocation_id) since the physical cash flow is at the wallet
+    # level. principal = baseline + SUM(events on connection since anchor).
     cur.execute("""
         SELECT COALESCE(SUM(CASE kind
                               WHEN 'deposit'    THEN amount_usd
                               WHEN 'withdrawal' THEN -amount_usd
                             END), 0)::float AS net_since_anchor
         FROM user_mgmt.allocation_capital_events
-        WHERE allocation_id = %s::uuid
+        WHERE connection_id = %s::uuid
           AND deleted_at IS NULL
           AND event_at >= %s::timestamptz
-    """, (allocation_id, principal_anchor_at))
+    """, (connection_id, principal_anchor_at))
     net_since_anchor = float(cur.fetchone()["net_since_anchor"] or 0)
     principal_now = principal_baseline + net_since_anchor
 
-    # Trading PnL = equity − principal_now. Cleaner than the old baseline-
-    # adjustment math: anchor pins the left edge of the tracked track record,
-    # all subsequent inflows/outflows are principal changes not profit, and
-    # the delta is pure trading outcome.
-    total_pnl_usd = equity - principal_now
-    total_return_pct = (
-        (total_pnl_usd / principal_now * 100) if principal_now > 0 else 0.0
-    )
+    # ── Allocation's cumulative return since anchor ────────────────────────
+    # Compound each session's net_return_pct (from allocation_returns) since
+    # the exchange anchor. Dollar PnL is ADDITIVE sum of (capital_deployed ×
+    # return/100) per session — this approximates the allocation's actual
+    # dollar profit without needing a stored "starting capital" column.
+    cur.execute("""
+        SELECT
+          COALESCE(
+            EXP(SUM(LN(1 + GREATEST(net_return_pct, -99) / 100.0))) - 1,
+            0
+          )::float * 100 AS cum_return_pct,
+          COALESCE(SUM(COALESCE(capital_deployed_usd, 0)
+                       * COALESCE(net_return_pct, 0) / 100), 0)::float
+            AS cum_pnl_usd
+        FROM user_mgmt.allocation_returns
+        WHERE allocation_id = %s::uuid
+          AND session_date >= %s::timestamptz::date
+    """, (allocation_id, principal_anchor_at))
+    row = cur.fetchone()
+    total_pnl_usd = float(row["cum_pnl_usd"] or 0)
+    total_return_pct = float(row["cum_return_pct"] or 0)
 
-    # Legacy "lifetime_capital_net_usd" field is preserved in the response
-    # (subscribers may be rendering it). Scope = lifetime now as before, for
-    # backwards compatibility.
+    # Legacy "lifetime_capital_net_usd" field preserved for older frontend
+    # subscribers. Now scoped to the CONNECTION (exchange) since capital
+    # events are exchange-level after migration 010.
     cur.execute("""
         SELECT COALESCE(SUM(CASE kind
                               WHEN 'deposit'    THEN amount_usd
                               WHEN 'withdrawal' THEN -amount_usd
                             END), 0)::float AS lifetime_net
         FROM user_mgmt.allocation_capital_events
-        WHERE allocation_id = %s::uuid
+        WHERE connection_id = %s::uuid
           AND deleted_at IS NULL
-    """, (allocation_id,))
+    """, (connection_id,))
     lifetime_capital_net = float(cur.fetchone()["lifetime_net"] or 0)
 
     session_capital_net = 0.0
@@ -2143,10 +2197,10 @@ def trader_pnl(allocation_id: str, user_id: str = Depends(get_current_user), cur
                                   WHEN 'withdrawal' THEN -amount_usd
                                 END), 0)::float AS session_net
             FROM user_mgmt.allocation_capital_events
-            WHERE allocation_id = %s::uuid
+            WHERE connection_id = %s::uuid
               AND event_at >= (%s::date)::timestamptz
               AND deleted_at IS NULL
-        """, (allocation_id, session_date))
+        """, (connection_id, session_date))
         session_capital_net = float(cur.fetchone()["session_net"] or 0)
         if session_pnl_usd is not None:
             session_pnl_usd -= session_capital_net

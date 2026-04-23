@@ -1394,7 +1394,7 @@ def execution_summary(
             JOIN user_mgmt.exchange_connections ec ON ec.connection_id = a.connection_id
             WHERE ar.allocation_id = ANY(%s::uuid[])
                   AND ar.session_date >=
-                      (COALESCE(a.principal_anchor_at, a.created_at))::date
+                      (COALESCE(ec.principal_anchor_at, a.created_at))::date
                   {date_clause}
             ORDER BY ar.session_date DESC, ar.allocation_id ASC
         """, tuple(params))

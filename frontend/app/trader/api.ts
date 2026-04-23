@@ -127,6 +127,11 @@ export interface ApiExchange {
   permissions: ExchangePermissions | null;
   balance: number;
   created_at: string | null;
+  // Exchange-level principal anchor (migration 010). NULL when the operator
+  // hasn't set explicit values; UI falls back to "earliest event date" or
+  // connection created_at as the display default.
+  principal_anchor_at: string | null;
+  principal_baseline_usd: number | null;
 }
 
 export interface StoreKeysRequest {
@@ -211,14 +216,21 @@ export interface ApiPnl {
   total_pnl_usd: number;
   total_return_pct: number;
   lifetime_capital_net_usd: number;
-  // Principal anchor (migration 007). When operator hasn't explicitly set
-  // them, anchor defaults to allocation.created_at + baseline to capital_usd.
+  // EXCHANGE-level principal (migration 010). Shared across all
+  // allocations on the same exchange wallet. Anchor defaults to the
+  // allocation's created_at when no explicit override; baseline defaults
+  // to 0 (so principal = SUM(capital events since anchor) when no
+  // baseline is set).
   principal_usd: number;
   principal_baseline_usd: number;
   principal_anchor_at: string | null;       // ISO 8601
-  principal_anchor_explicit: boolean;       // TRUE = operator set it
+  principal_anchor_explicit: boolean;       // TRUE = operator set it on the connection
   principal_baseline_explicit: boolean;
   net_since_anchor_usd: number;
+  // total_pnl_usd + total_return_pct are ALLOCATION-level now: compounded
+  // daily net_return_pct from allocation_returns since the exchange anchor.
+  // Not "equity − principal" anymore, because principal is a property of
+  // the wallet, not of the strategy.
 }
 
 export interface ApiCapitalEvent {
@@ -319,14 +331,26 @@ export const allocatorApi = {
       capital_usd?: number;
       status?: string;
       compounding_mode?: CompoundingMode;
+    },
+  ) =>
+    apiFetch<{ updated: boolean }>(
+      `/api/allocator/allocations/${allocationId}`,
+      { method: "PATCH", body: JSON.stringify(data) },
+    ),
+
+  // Exchange-level principal anchor + baseline (migration 010). One anchor
+  // per exchange wallet, shared by any allocations on the connection.
+  updateConnection: (
+    connectionId: string,
+    data: {
       principal_anchor_at?: string;        // ISO 8601
       principal_baseline_usd?: number;
       clear_principal_anchor?: boolean;    // send true to revert to default
       clear_principal_baseline?: boolean;
     },
   ) =>
-    apiFetch<{ updated: boolean }>(
-      `/api/allocator/allocations/${allocationId}`,
+    apiFetch<{ updated: boolean; connection_id: string }>(
+      `/api/allocator/connections/${connectionId}`,
       { method: "PATCH", body: JSON.stringify(data) },
     ),
 
