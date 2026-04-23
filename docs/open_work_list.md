@@ -132,24 +132,46 @@ expand it inline to show per-symbol breakdown:
   exit_reason (sym_stop / session_close / port_sl / port_tsl /
   early_fill / other) · retries
 
-Data sources that already carry this (writes from trader_blofin.py):
-- `user_mgmt.execution_reports` (most-granular; per-bar + per-symbol)
-- `runtime_state.positions` (live / current session)
-- `fees_tables_by_filter` in the job results (for historical audit
-  rows — not applicable here since Manager reads live allocation
-  data, not Simulator audit jobs)
+**Scope correction (2026-04-23):** the original spec referenced
+`user_mgmt.execution_reports` as a data source, but **that table does
+not exist**. Per-symbol entry/exit fill data is currently persisted
+ONLY to the master `blofin_execution_reports/{date}.json` files
+(host-only, single-account, master cron retired 2026-04-20). For
+allocation paths, per-symbol detail lives transiently in
+`runtime_state.positions` (live during the session, cleared at
+close) and in the per-allocation log files (text only, not
+queryable). The DB has session-level (`portfolio_sessions`) and
+per-bar portfolio-level (`portfolio_bars` with `symbol_returns` JSONB)
+rollups but NOT per-symbol entry/exit fills.
 
-Backend: new endpoint `GET /api/manager/execution-summary/{date}/
-positions?allocation_id=<uuid>` returns per-symbol rows for that
-session.
+To ship Gap 7 as spec'd requires a **new persistence layer**:
 
-Frontend: add expandable state to the Daily Summary table. On row
-click: fetch the endpoint, inline-expand with the per-symbol rows
-styled similarly to the existing session-logs inner table. Match
-the current theme (no new colors).
+1. Schema: new `user_mgmt.allocation_execution_symbols` table keyed
+   on `(allocation_id, session_date, inst_id)` with columns for
+   target_contracts, filled_contracts, fill_pct, est_entry_price,
+   fill_entry_price, entry_slippage_bps, est_exit_price,
+   fill_exit_price, exit_slippage_bps, pnl_usd, pnl_pct, exit_reason,
+   retry_rounds, sym_stopped. ~30 LOC migration.
+2. Trader writer extension in `_run_fresh_session_for_allocation` +
+   `_run_monitoring_loop` to populate this table at session close,
+   mirroring what `write_execution_report()` does for the JSON path.
+   ~80 LOC trader changes.
+3. Backend endpoint `GET /api/manager/execution-summary/{date}/positions
+   ?allocation_id=<uuid>` returning per-symbol rows from the new table.
+   ~30 LOC.
+4. Frontend: expand state on `AllocationDayRow`, fetch on click,
+   inline-render per-symbol table styled like the existing master
+   `SymbolDetails` component. ~60 LOC.
 
-Scope: ~2 hrs. Could pair with Gap 6 since both touch the Daily
-Summary query path.
+**Revised scope: 3-5 hours, not 2.** Schema design, trader writer
+changes, and backend rebuild are the gating items. Worth doing in a
+dedicated session rather than appending to the current Execution-page
+sweep.
+
+**Interim**: per-symbol detail for the CURRENTLY-active allocation
+session is visible in the Session Logs viewer (already rendered on
+the Execution page, fed by per-allocation log files). For historical
+sessions, no per-symbol view today.
 
 ### Gap 6 — Manager Execution "Daily Summary" stale for 2026-04-23
 Observed 2026-04-23 ~05:00 UTC (Thu): the Manager → Execution →

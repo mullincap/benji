@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
 import { useRouter } from "next/navigation";
 import { useTrader, Exchange } from "../../context";
 import {
@@ -9,6 +9,7 @@ import {
   type ExchangeSlug,
   type ExchangePermissions,
   type StoreKeysSuccess,
+  type ApiCapitalEvent,
 } from "../../api";
 
 const SUPPORTED_EXCHANGES: ExchangeSlug[] = ["binance", "blofin"];
@@ -677,6 +678,505 @@ function ConfirmRemoveModal({
   );
 }
 
+// ─── Capital Events section ─────────────────────────────────────────────────
+//
+// Operator-recorded out-of-band capital movements. Subtracted from PnL math
+// in /pnl so trading returns aren't conflated with principal moves. Today
+// these are entered by hand; an exchange income API auto-importer is
+// deferred (see docs/open_work_list.md "Capital change tracking").
+
+const FONT_MONO = "var(--font-space-mono), Space Mono, monospace";
+
+function fmtCapitalDate(iso: string | null): string {
+  if (!iso) return "—";
+  // YYYY-MM-DD HH:MM (UTC), trim seconds
+  const d = new Date(iso);
+  const pad = (n: number) => n.toString().padStart(2, "0");
+  return (
+    `${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())} `
+    + `${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}`
+  );
+}
+
+function fmtAmount(usd: number, kind: "deposit" | "withdrawal"): string {
+  const sign = kind === "deposit" ? "+" : "−";
+  return `${sign}$${usd.toLocaleString("en-US", { maximumFractionDigits: 2 })}`;
+}
+
+function CapitalEventModal({
+  initial,
+  allocations,
+  submitting,
+  onCancel,
+  onSubmit,
+}: {
+  initial: ApiCapitalEvent | null; // null = create, set = edit
+  allocations: { id: string; label: string }[];
+  submitting: boolean;
+  onCancel: () => void;
+  onSubmit: (data: {
+    allocation_id: string;
+    amount_usd: number;
+    kind: "deposit" | "withdrawal";
+    event_at?: string;
+    notes?: string;
+  }) => void;
+}) {
+  // Default event_at to "now" formatted as YYYY-MM-DDTHH:MM (datetime-local).
+  const nowLocal = (() => {
+    const d = new Date();
+    const pad = (n: number) => n.toString().padStart(2, "0");
+    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`
+      + `T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  })();
+
+  const [allocationId, setAllocationId] = useState(
+    initial?.allocation_id ?? (allocations[0]?.id ?? ""),
+  );
+  const [kind, setKind] = useState<"deposit" | "withdrawal">(
+    initial?.kind ?? "deposit",
+  );
+  const [amount, setAmount] = useState<string>(
+    initial ? initial.amount_usd.toString() : "",
+  );
+  // The HTML datetime-local input wants local-time format. Initial values come
+  // in as UTC ISO; convert by trimming the timezone suffix.
+  const [eventAt, setEventAt] = useState<string>(
+    initial
+      ? initial.event_at.slice(0, 16)
+      : nowLocal,
+  );
+  const [notes, setNotes] = useState<string>(initial?.notes ?? "");
+  const [errorText, setErrorText] = useState<string | null>(null);
+
+  const valid = allocationId
+    && parseFloat(amount) > 0
+    && (kind === "deposit" || kind === "withdrawal");
+
+  return (
+    <div
+      role="dialog"
+      aria-modal="true"
+      onClick={() => { if (!submitting) onCancel(); }}
+      style={{
+        position: "fixed", inset: 0, background: "rgba(0,0,0,0.7)",
+        display: "flex", alignItems: "center", justifyContent: "center",
+        zIndex: 1000,
+      }}
+    >
+      <div
+        onClick={e => e.stopPropagation()}
+        style={{
+          background: "var(--bg2)", border: "1px solid var(--line2)",
+          borderRadius: 6, padding: "20px 24px",
+          width: 480, maxWidth: "92vw",
+          fontFamily: FONT_MONO,
+        }}
+      >
+        <div style={{
+          fontSize: 9, fontWeight: 700, letterSpacing: "0.12em",
+          color: "var(--t3)", textTransform: "uppercase", marginBottom: 12,
+        }}>
+          {initial ? "Edit capital event" : "Record capital event"}
+        </div>
+
+        <div style={{ marginBottom: 10 }}>
+          <div style={fieldLabelStyle}>Allocation</div>
+          <select
+            value={allocationId}
+            onChange={e => setAllocationId(e.target.value)}
+            disabled={!!initial}  // immutable on edit (would orphan the row)
+            style={{ ...inputStyle, appearance: "none", paddingRight: 28, cursor: initial ? "not-allowed" : "pointer" }}
+          >
+            {allocations.length === 0 && <option value="">— No allocations —</option>}
+            {allocations.map(a => (
+              <option key={a.id} value={a.id}>{a.label}</option>
+            ))}
+          </select>
+        </div>
+
+        <div style={{ display: "flex", gap: 10, marginBottom: 10 }}>
+          <div style={{ flex: 1 }}>
+            <div style={fieldLabelStyle}>Kind</div>
+            <select
+              value={kind}
+              onChange={e => setKind(e.target.value as "deposit" | "withdrawal")}
+              style={{ ...inputStyle, appearance: "none", paddingRight: 28, cursor: "pointer" }}
+            >
+              <option value="deposit">Deposit</option>
+              <option value="withdrawal">Withdrawal</option>
+            </select>
+          </div>
+          <div style={{ flex: 1 }}>
+            <div style={fieldLabelStyle}>Amount (USD)</div>
+            <input
+              type="number"
+              min="0"
+              step="0.01"
+              placeholder="0.00"
+              value={amount}
+              onChange={e => setAmount(e.target.value)}
+              style={inputStyle}
+              onFocus={e => (e.target.style.borderColor = "var(--green)")}
+              onBlur={e => (e.target.style.borderColor = "var(--line)")}
+            />
+          </div>
+        </div>
+
+        <div style={{ marginBottom: 10 }}>
+          <div style={fieldLabelStyle}>Event time (local)</div>
+          <input
+            type="datetime-local"
+            value={eventAt}
+            onChange={e => setEventAt(e.target.value)}
+            style={inputStyle}
+            onFocus={e => (e.target.style.borderColor = "var(--green)")}
+            onBlur={e => (e.target.style.borderColor = "var(--line)")}
+          />
+        </div>
+
+        <div style={{ marginBottom: 14 }}>
+          <div style={fieldLabelStyle}>Notes (optional)</div>
+          <input
+            type="text"
+            placeholder="e.g. Binance → BloFin transfer"
+            value={notes}
+            onChange={e => setNotes(e.target.value)}
+            style={inputStyle}
+            onFocus={e => (e.target.style.borderColor = "var(--green)")}
+            onBlur={e => (e.target.style.borderColor = "var(--line)")}
+          />
+        </div>
+
+        {errorText && (
+          <div style={{ fontSize: 10, color: "var(--red)", marginBottom: 10 }}>
+            {errorText}
+          </div>
+        )}
+
+        <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
+          <button
+            type="button"
+            disabled={submitting}
+            onClick={onCancel}
+            style={{
+              background: "transparent", border: "1px solid var(--line2)",
+              borderRadius: 4, padding: "8px 16px",
+              fontSize: 9, fontWeight: 700, letterSpacing: "0.12em",
+              textTransform: "uppercase", color: "var(--t2)",
+              cursor: submitting ? "not-allowed" : "pointer",
+              fontFamily: FONT_MONO,
+            }}
+          >
+            Cancel
+          </button>
+          <button
+            type="button"
+            disabled={!valid || submitting}
+            onClick={() => {
+              try {
+                // datetime-local has no timezone — interpret as local, convert to UTC ISO.
+                const eventAtIso = eventAt
+                  ? new Date(eventAt).toISOString()
+                  : undefined;
+                onSubmit({
+                  allocation_id: allocationId,
+                  amount_usd: parseFloat(amount),
+                  kind,
+                  event_at: eventAtIso,
+                  notes: notes.trim() || undefined,
+                });
+              } catch (e) {
+                setErrorText(e instanceof Error ? e.message : String(e));
+              }
+            }}
+            style={(!valid || submitting) ? disabledBtnStyle : primaryBtnStyle}
+          >
+            {submitting ? "Saving…" : (initial ? "Save" : "Record")}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function CapitalEventsSection() {
+  const { instances } = useTrader();
+  const [events, setEvents] = useState<ApiCapitalEvent[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [editingEvent, setEditingEvent] = useState<ApiCapitalEvent | null>(null);
+  const [showCreate, setShowCreate] = useState(false);
+  const [submitting, setSubmitting] = useState(false);
+  const [confirmDelete, setConfirmDelete] = useState<ApiCapitalEvent | null>(null);
+
+  const refresh = useCallback(async () => {
+    try {
+      const r = await allocatorApi.getCapitalEvents();
+      setEvents(r.events);
+      setError(null);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  }, []);
+
+  useEffect(() => { refresh(); }, [refresh]);
+
+  // Build allocation dropdown options from useTrader.instances. Use
+  // strategyName + exchangeName as the user-readable label; id is the
+  // allocation_id the backend expects.
+  const allocOptions = instances
+    .filter(i => i.id && !i.id.startsWith("temp-"))
+    .map(i => ({
+      id: i.id,
+      label: `${i.strategyName}${i.exchangeName ? ` · ${i.exchangeName}` : ""}`,
+    }));
+
+  const allocLabelById: Record<string, string> = {};
+  for (const opt of allocOptions) allocLabelById[opt.id] = opt.label;
+
+  async function handleCreate(data: Parameters<typeof allocatorApi.createCapitalEvent>[0]) {
+    setSubmitting(true);
+    try {
+      await allocatorApi.createCapitalEvent(data);
+      setShowCreate(false);
+      await refresh();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  async function handleEdit(eventId: string, data: Parameters<typeof allocatorApi.updateCapitalEvent>[1]) {
+    setSubmitting(true);
+    try {
+      await allocatorApi.updateCapitalEvent(eventId, data);
+      setEditingEvent(null);
+      await refresh();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  async function handleDelete(eventId: string) {
+    setSubmitting(true);
+    try {
+      await allocatorApi.deleteCapitalEvent(eventId);
+      setConfirmDelete(null);
+      await refresh();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  return (
+    <div style={{ marginTop: 20 }}>
+      <div style={{
+        display: "flex", justifyContent: "space-between", alignItems: "center",
+        marginBottom: 12,
+      }}>
+        <div style={{
+          fontSize: 9, fontWeight: 700, letterSpacing: "0.12em",
+          color: "var(--t3)", textTransform: "uppercase",
+        }}>
+          CAPITAL EVENTS
+        </div>
+        <button
+          onClick={() => setShowCreate(true)}
+          disabled={allocOptions.length === 0}
+          style={{
+            background: "transparent",
+            border: "1px solid var(--line2)",
+            borderRadius: 3,
+            color: allocOptions.length === 0 ? "var(--t3)" : "var(--green)",
+            fontSize: 9, fontWeight: 700, letterSpacing: "0.12em",
+            textTransform: "uppercase",
+            padding: "5px 12px",
+            cursor: allocOptions.length === 0 ? "not-allowed" : "pointer",
+            fontFamily: FONT_MONO,
+          }}
+        >
+          + RECORD CAPITAL EVENT
+        </button>
+      </div>
+
+      {error && (
+        <div style={{
+          background: "var(--red-dim)", border: "1px solid var(--red)",
+          borderRadius: 4, padding: "8px 12px", marginBottom: 8,
+          fontSize: 10, color: "var(--red)",
+        }}>
+          {error}
+        </div>
+      )}
+
+      <div style={{
+        background: "var(--bg1)", border: "1px solid var(--line)",
+        borderRadius: 6, overflow: "hidden",
+      }}>
+        {events === null ? (
+          <div style={{ padding: "16px", fontSize: 10, color: "var(--t2)" }}>
+            Loading…
+          </div>
+        ) : events.length === 0 ? (
+          <div style={{ padding: "16px", fontSize: 10, color: "var(--t2)" }}>
+            No capital events yet. Record deposits or withdrawals here so trading P&L can be measured against principal moves.
+          </div>
+        ) : (
+          <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 10, fontFamily: FONT_MONO }}>
+            <thead>
+              <tr style={{ borderBottom: "1px solid var(--line)" }}>
+                {["DATE (UTC)", "ALLOCATION", "KIND", "AMOUNT", "NOTES", ""].map(h => (
+                  <th key={h} style={{
+                    padding: "7px 14px", textAlign: "left",
+                    fontSize: 9, color: "var(--t3)", fontWeight: 700,
+                    letterSpacing: "0.12em", textTransform: "uppercase",
+                  }}>{h}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {events.map((ev, idx) => {
+                const amountColor = ev.kind === "deposit" ? "var(--green)" : "var(--amber)";
+                return (
+                  <tr key={ev.event_id} style={{
+                    borderBottom: idx < events.length - 1 ? "1px solid var(--line)" : "none",
+                  }}>
+                    <td style={{ padding: "10px 14px", color: "var(--t1)" }}>
+                      {fmtCapitalDate(ev.event_at)}
+                    </td>
+                    <td style={{ padding: "10px 14px", color: "var(--t1)" }}>
+                      {allocLabelById[ev.allocation_id] ?? ev.allocation_id.slice(0, 8)}
+                    </td>
+                    <td style={{ padding: "10px 14px", color: "var(--t2)", textTransform: "uppercase" }}>
+                      {ev.kind}
+                    </td>
+                    <td style={{ padding: "10px 14px", color: amountColor, fontWeight: 700 }}>
+                      {fmtAmount(ev.amount_usd, ev.kind)}
+                    </td>
+                    <td style={{ padding: "10px 14px", color: "var(--t2)" }}>
+                      {ev.notes ?? "—"}
+                    </td>
+                    <td style={{ padding: "10px 14px", textAlign: "right" }}>
+                      <button
+                        onClick={() => setEditingEvent(ev)}
+                        style={{
+                          background: "transparent", border: "none",
+                          color: "var(--t2)", fontSize: 9,
+                          letterSpacing: "0.12em", textTransform: "uppercase",
+                          marginRight: 8, cursor: "pointer",
+                          fontFamily: FONT_MONO,
+                        }}
+                        onMouseEnter={e => (e.currentTarget.style.color = "var(--t0)")}
+                        onMouseLeave={e => (e.currentTarget.style.color = "var(--t2)")}
+                      >Edit</button>
+                      <button
+                        onClick={() => setConfirmDelete(ev)}
+                        style={{
+                          background: "transparent", border: "none",
+                          color: "var(--t3)", fontSize: 9,
+                          letterSpacing: "0.12em", textTransform: "uppercase",
+                          cursor: "pointer", fontFamily: FONT_MONO,
+                        }}
+                        onMouseEnter={e => (e.currentTarget.style.color = "var(--red)")}
+                        onMouseLeave={e => (e.currentTarget.style.color = "var(--t3)")}
+                      >Delete</button>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        )}
+      </div>
+
+      {(showCreate || editingEvent) && (
+        <CapitalEventModal
+          initial={editingEvent}
+          allocations={allocOptions}
+          submitting={submitting}
+          onCancel={() => { setShowCreate(false); setEditingEvent(null); }}
+          onSubmit={data => {
+            if (editingEvent) {
+              handleEdit(editingEvent.event_id, {
+                amount_usd: data.amount_usd,
+                kind: data.kind,
+                event_at: data.event_at,
+                notes: data.notes,
+              });
+            } else {
+              handleCreate(data);
+            }
+          }}
+        />
+      )}
+
+      {confirmDelete && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          onClick={() => { if (!submitting) setConfirmDelete(null); }}
+          style={{
+            position: "fixed", inset: 0, background: "rgba(0,0,0,0.7)",
+            display: "flex", alignItems: "center", justifyContent: "center",
+            zIndex: 1000,
+          }}
+        >
+          <div
+            onClick={e => e.stopPropagation()}
+            style={{
+              background: "var(--bg2)", border: "1px solid var(--line2)",
+              borderRadius: 6, padding: "20px 24px",
+              width: 420, maxWidth: "92vw", fontFamily: FONT_MONO,
+            }}
+          >
+            <div style={{
+              fontSize: 9, fontWeight: 700, letterSpacing: "0.12em",
+              color: "var(--t3)", textTransform: "uppercase", marginBottom: 10,
+            }}>Delete capital event?</div>
+            <div style={{ fontSize: 11, color: "var(--t1)", lineHeight: 1.6, marginBottom: 16 }}>
+              {fmtAmount(confirmDelete.amount_usd, confirmDelete.kind)} on {fmtCapitalDate(confirmDelete.event_at)}.
+              {" "}This will be removed from PnL reconciliation immediately.
+            </div>
+            <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
+              <button
+                type="button"
+                disabled={submitting}
+                onClick={() => setConfirmDelete(null)}
+                style={{
+                  background: "transparent", border: "1px solid var(--line2)",
+                  borderRadius: 4, padding: "8px 16px",
+                  fontSize: 9, fontWeight: 700, letterSpacing: "0.12em",
+                  textTransform: "uppercase", color: "var(--t2)",
+                  cursor: submitting ? "not-allowed" : "pointer",
+                  fontFamily: FONT_MONO,
+                }}
+              >Cancel</button>
+              <button
+                type="button"
+                disabled={submitting}
+                onClick={() => handleDelete(confirmDelete.event_id)}
+                style={{
+                  background: "var(--red-dim)", border: "1px solid var(--red)",
+                  borderRadius: 4, padding: "8px 16px",
+                  fontSize: 9, fontWeight: 700, letterSpacing: "0.12em",
+                  textTransform: "uppercase", color: "var(--red)",
+                  cursor: submitting ? "not-allowed" : "pointer",
+                  fontFamily: FONT_MONO,
+                }}
+              >Delete</button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 export default function SettingsPage() {
   const router = useRouter();
   const { exchanges, instances, removeExchange, loading, refresh } = useTrader();
@@ -913,6 +1413,11 @@ export default function SettingsPage() {
             </div>
           </div>
         )}
+
+        {/* Capital events — operator-recorded deposits/withdrawals.
+            Always rendered (regardless of wizard state) since it's a separate
+            concern from exchange linking. */}
+        {!showWizard && <CapitalEventsSection />}
       </div>
 
       {confirmRemove && (() => {

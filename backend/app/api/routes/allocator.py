@@ -2154,3 +2154,190 @@ def trader_positions(allocation_id: str, user_id: str = Depends(get_current_user
         "snapshot_at": snapshot_at,
         "positions": positions,
     }
+
+
+# ── Capital Events (manual deposits/withdrawals) ────────────────────────────
+# Operator-recorded out-of-band capital movements. Subtracted from PnL math
+# in /pnl so trading returns are isolated from principal moves. Until
+# automated import via exchange income APIs ships, these are entered by hand
+# from /trader/settings.
+
+class CapitalEventCreateRequest(BaseModel):
+    allocation_id: str
+    amount_usd: float
+    kind: str                      # 'deposit' | 'withdrawal'
+    event_at: str | None = None    # ISO 8601; defaults to NOW() server-side
+    notes: str | None = None
+
+
+class CapitalEventUpdateRequest(BaseModel):
+    amount_usd: float | None = None
+    kind: str | None = None
+    event_at: str | None = None
+    notes: str | None = None
+
+
+def _verify_allocation_owned_by(cur, allocation_id: str, user_id: str) -> None:
+    cur.execute(
+        "SELECT user_id FROM user_mgmt.allocations WHERE allocation_id = %s::uuid",
+        (allocation_id,),
+    )
+    row = cur.fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="Allocation not found")
+    if str(row["user_id"]) != user_id:
+        raise HTTPException(status_code=403, detail="Not your allocation")
+
+
+@router.get("/capital-events")
+def list_capital_events(
+    allocation_id: str | None = None,
+    user_id: str = Depends(get_current_user),
+    cur=Depends(get_cursor),
+) -> dict[str, Any]:
+    """List capital events. Restricted to allocations owned by the caller.
+    Optionally filter to one allocation_id (verified-owned)."""
+    if allocation_id:
+        _verify_allocation_owned_by(cur, allocation_id, user_id)
+        cur.execute("""
+            SELECT ce.event_id::text, ce.allocation_id::text, ce.event_at,
+                   ce.amount_usd, ce.kind, ce.notes, ce.created_at
+              FROM user_mgmt.allocation_capital_events ce
+             WHERE ce.allocation_id = %s::uuid
+             ORDER BY ce.event_at DESC, ce.created_at DESC
+        """, (allocation_id,))
+    else:
+        # All events for allocations owned by this user.
+        cur.execute("""
+            SELECT ce.event_id::text, ce.allocation_id::text, ce.event_at,
+                   ce.amount_usd, ce.kind, ce.notes, ce.created_at
+              FROM user_mgmt.allocation_capital_events ce
+              JOIN user_mgmt.allocations a USING (allocation_id)
+             WHERE a.user_id = %s::uuid
+             ORDER BY ce.event_at DESC, ce.created_at DESC
+        """, (user_id,))
+
+    rows = cur.fetchall()
+    events = [
+        {
+            "event_id":      r["event_id"],
+            "allocation_id": r["allocation_id"],
+            "event_at":      r["event_at"].isoformat() if r["event_at"] else None,
+            "amount_usd":    float(r["amount_usd"]),
+            "kind":          r["kind"],
+            "notes":         r["notes"],
+            "created_at":    r["created_at"].isoformat() if r["created_at"] else None,
+        }
+        for r in rows
+    ]
+    return {"events": events}
+
+
+@router.post("/capital-events")
+def create_capital_event(
+    body: CapitalEventCreateRequest,
+    user_id: str = Depends(get_current_user),
+    cur=Depends(get_cursor),
+) -> dict[str, Any]:
+    """Record a new capital event. Owner-gated on allocation_id."""
+    if body.amount_usd <= 0:
+        raise HTTPException(status_code=400, detail="amount_usd must be positive")
+    if body.kind not in ("deposit", "withdrawal"):
+        raise HTTPException(status_code=400, detail="kind must be 'deposit' or 'withdrawal'")
+
+    _verify_allocation_owned_by(cur, body.allocation_id, user_id)
+
+    if body.event_at:
+        cur.execute("""
+            INSERT INTO user_mgmt.allocation_capital_events
+                (allocation_id, event_at, amount_usd, kind, notes)
+            VALUES (%s::uuid, %s::timestamptz, %s, %s, %s)
+            RETURNING event_id::text
+        """, (body.allocation_id, body.event_at, body.amount_usd, body.kind, body.notes))
+    else:
+        cur.execute("""
+            INSERT INTO user_mgmt.allocation_capital_events
+                (allocation_id, event_at, amount_usd, kind, notes)
+            VALUES (%s::uuid, NOW(), %s, %s, %s)
+            RETURNING event_id::text
+        """, (body.allocation_id, body.amount_usd, body.kind, body.notes))
+
+    event_id = cur.fetchone()["event_id"]
+    return {"event_id": event_id, "allocation_id": body.allocation_id}
+
+
+@router.patch("/capital-events/{event_id}")
+def update_capital_event(
+    event_id: str,
+    body: CapitalEventUpdateRequest,
+    user_id: str = Depends(get_current_user),
+    cur=Depends(get_cursor),
+) -> dict[str, Any]:
+    """Partial update. Owner-gated via the event's allocation."""
+    cur.execute("""
+        SELECT ce.event_id::text, a.user_id::text AS owner_user_id
+          FROM user_mgmt.allocation_capital_events ce
+          JOIN user_mgmt.allocations a USING (allocation_id)
+         WHERE ce.event_id = %s::uuid
+    """, (event_id,))
+    row = cur.fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="Capital event not found")
+    if row["owner_user_id"] != user_id:
+        raise HTTPException(status_code=403, detail="Not your capital event")
+
+    updates: list[str] = []
+    params: list = []
+    if body.amount_usd is not None:
+        if body.amount_usd <= 0:
+            raise HTTPException(status_code=400, detail="amount_usd must be positive")
+        updates.append("amount_usd = %s")
+        params.append(body.amount_usd)
+    if body.kind is not None:
+        if body.kind not in ("deposit", "withdrawal"):
+            raise HTTPException(status_code=400, detail="kind must be 'deposit' or 'withdrawal'")
+        updates.append("kind = %s")
+        params.append(body.kind)
+    if body.event_at is not None:
+        updates.append("event_at = %s::timestamptz")
+        params.append(body.event_at)
+    if body.notes is not None:
+        updates.append("notes = %s")
+        params.append(body.notes)
+
+    if not updates:
+        raise HTTPException(status_code=400, detail="No fields to update")
+
+    params.append(event_id)
+    cur.execute(
+        f"UPDATE user_mgmt.allocation_capital_events "
+        f"SET {', '.join(updates)} WHERE event_id = %s::uuid",
+        params,
+    )
+    return {"updated": True, "event_id": event_id}
+
+
+@router.delete("/capital-events/{event_id}")
+def delete_capital_event(
+    event_id: str,
+    user_id: str = Depends(get_current_user),
+    cur=Depends(get_cursor),
+) -> dict[str, Any]:
+    """Hard-delete. Owner-gated via the event's allocation."""
+    cur.execute("""
+        SELECT a.user_id::text AS owner_user_id
+          FROM user_mgmt.allocation_capital_events ce
+          JOIN user_mgmt.allocations a USING (allocation_id)
+         WHERE ce.event_id = %s::uuid
+    """, (event_id,))
+    row = cur.fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="Capital event not found")
+    if row["owner_user_id"] != user_id:
+        raise HTTPException(status_code=403, detail="Not your capital event")
+
+    cur.execute(
+        "DELETE FROM user_mgmt.allocation_capital_events WHERE event_id = %s::uuid",
+        (event_id,),
+    )
+    return {"deleted": True, "event_id": event_id}

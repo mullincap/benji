@@ -622,10 +622,12 @@ export default function ExecutionPage() {
       "Execution telemetry begins with the first session close (~23:55 UTC 2026-04-21).";
   }
 
-  // When a single allocation is selected, hide the ALLOCATION column in the
-  // table — it would be redundant. Hide master rows too since they're not
-  // scoped to a specific allocation.
-  const showAllocCol = allocFilter === "all";
+  // ALLOCATION column always renders so the table matches the original
+  // Session E spec column order (DATE | ALLOCATION | SIGNAL | …) and the
+  // user can always see which allocation each row belongs to even after
+  // the auto-largest-allocation snap selects a specific allocation. Master
+  // rows are still gated on the All-allocations filter.
+  const showAllocCol = true;
   const showMasterRows = includeMaster && allocFilter === "all";
 
   // Unified row list: allocation rows from summary.daily, master rows from

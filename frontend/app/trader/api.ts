@@ -210,6 +210,16 @@ export interface ApiPnl {
   total_return_pct: number;
 }
 
+export interface ApiCapitalEvent {
+  event_id:      string;
+  allocation_id: string;
+  event_at:      string;        // ISO 8601
+  amount_usd:    number;
+  kind:          "deposit" | "withdrawal";
+  notes:         string | null;
+  created_at:    string;
+}
+
 // ── API calls ───────────────────────────────────────────────────────────────
 
 export const allocatorApi = {
@@ -324,5 +334,38 @@ export const allocatorApi = {
   getPositions: (allocationId: string) =>
     apiFetch<{ allocation_id: string; connection_id: string; exchange: string; snapshot_at: string | null; positions: ApiPosition[] }>(
       `/api/allocator/trader/${allocationId}/positions`,
+    ),
+
+  // Capital events (manual deposits/withdrawals — operator-recorded)
+  getCapitalEvents: (allocationId?: string) =>
+    apiFetch<{ events: ApiCapitalEvent[] }>(
+      `/api/allocator/capital-events${allocationId ? `?allocation_id=${allocationId}` : ""}`,
+    ),
+
+  createCapitalEvent: (data: {
+    allocation_id: string;
+    amount_usd: number;
+    kind: "deposit" | "withdrawal";
+    event_at?: string;
+    notes?: string;
+  }) =>
+    apiFetch<{ event_id: string; allocation_id: string }>(
+      "/api/allocator/capital-events",
+      { method: "POST", body: JSON.stringify(data) },
+    ),
+
+  updateCapitalEvent: (
+    eventId: string,
+    data: { amount_usd?: number; kind?: "deposit" | "withdrawal"; event_at?: string; notes?: string },
+  ) =>
+    apiFetch<{ updated: boolean; event_id: string }>(
+      `/api/allocator/capital-events/${eventId}`,
+      { method: "PATCH", body: JSON.stringify(data) },
+    ),
+
+  deleteCapitalEvent: (eventId: string) =>
+    apiFetch<{ deleted: boolean; event_id: string }>(
+      `/api/allocator/capital-events/${eventId}`,
+      { method: "DELETE" },
     ),
 };
