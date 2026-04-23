@@ -1,0 +1,67 @@
+SHELL=/bin/bash
+PATH=/usr/local/sbin:/usr/local/bin:/sbin:/bin:/usr/sbin:/usr/bin
+
+# ── Amberdata ETL — 00:15 UTC ─────────────────────────────────────────────────
+15 0 * * * . /mnt/quant-data/credentials/secrets.env && /root/benji/pipeline/.venv/bin/python /root/benji/pipeline/compiler/metl.py --start $(date -d "yesterday" +\%Y-\%m-\%d) >> /mnt/quant-data/logs/amberdata/cron.log 2>&1
+
+# ── CoinGecko daily snapshot — 00:30 UTC ──────────────────────────────────────
+30 0 * * * . /mnt/quant-data/credentials/secrets.env && /root/benji/pipeline/.venv/bin/python /root/benji/pipeline/compiler/coingecko_marketcap.py --api-key $COINGECKO_API_KEY --mode daily --output-dir /mnt/quant-data/raw/coingecko/ >> /mnt/quant-data/logs/coingecko/cron.log 2>&1
+
+# ── Indexer — 01:00 UTC (rebuild leaderboard from DB for yesterday) ────────
+0 1 * * * . /mnt/quant-data/credentials/secrets.env && /root/benji/pipeline/.venv/bin/python /root/benji/pipeline/indexer/build_intraday_leaderboard.py --metric price --source db --start $(date -d "yesterday" +\%Y-\%m-\%d) --end $(date -d "yesterday" +\%Y-\%m-\%d) --triggered-by scheduler --run-tag nightly >> /mnt/quant-data/logs/indexer/cron.log 2>&1 && /root/benji/pipeline/.venv/bin/python /root/benji/pipeline/indexer/build_intraday_leaderboard.py --metric open_interest --source db --start $(date -d "yesterday" +\%Y-\%m-\%d) --end $(date -d "yesterday" +\%Y-\%m-\%d) --triggered-by scheduler --run-tag nightly >> /mnt/quant-data/logs/indexer/cron.log 2>&1 && /root/benji/pipeline/.venv/bin/python /root/benji/pipeline/indexer/build_intraday_leaderboard.py --metric volume --source db --start $(date -d "yesterday" +\%Y-\%m-\%d) --end $(date -d "yesterday" +\%Y-\%m-\%d) --triggered-by scheduler --run-tag nightly >> /mnt/quant-data/logs/indexer/cron.log 2>&1
+
+# ── Refresh leaderboard cagg — 01:15 UTC (after indexer finishes) ────────────
+15 1 * * * . /mnt/quant-data/credentials/secrets.env && PGPASSWORD=$DB_PASSWORD psql -h $DB_HOST -U $DB_USER -d $DB_NAME -c "CALL refresh_continuous_aggregate('market.leaderboards_daily_count', NOW() - INTERVAL '2 days', NOW());" >> /mnt/quant-data/logs/indexer/cron.log 2>&1
+
+# ── Overlap / deploys regeneration — 01:20 UTC ──────────────────────────────
+20 1 * * * . /mnt/quant-data/credentials/secrets.env && DATA_ROOT=/mnt/quant-data BASE_DATA_DIR=/mnt/quant-data /root/benji/pipeline/.venv/bin/python /root/benji/pipeline/overlap_analysis.py --leaderboard-index 100 --freq-width 20 --freq-cutoff 20 --mode snapshot --deployment-start-hour 6 --sort-lookback 6 --min-mcap 0 >> /mnt/quant-data/logs/overlap/cron.log 2>&1
+
+# ── Object Storage sync — 02:00 UTC ──────────────────────────────────────────
+0 2 * * * cd /root/benji && bash sync-to-storage.sh >> /mnt/quant-data/logs/sync-storage.log 2>&1
+
+# ── Signal generation — 05:58 UTC ────────────────────────────────────────────
+58 5 * * * . /mnt/quant-data/credentials/secrets.env && /root/benji/pipeline/.venv/bin/python /root/benji/daily_signal.py >> /mnt/quant-data/logs/signal/cron.log 2>&1
+
+# ── Trader — 06:00 UTC ────────────────────────────────────────────────────────
+# DISABLED 2026-04-20 — collides with user BloFin allocation 0 6 * * * . /mnt/quant-data/credentials/secrets.env && /root/benji/pipeline/.venv/bin/python /root/benji/trader-blofin.py >> /mnt/quant-data/logs/trader/cron.log 2>&1
+
+#── Certbot — 03:00 UTC ────────────────────────────────────────────────────────
+0 3 * * * certbot renew --quiet --deploy-hook 'docker compose -f /root/benji/docker-compose.yml restart nginx'
+
+# ── BloFin exchange logger — every 5 minutes ──────────────────────────────────
+# DISABLED 2026-04-20 — paired retirement with master trader */5 * * * * . /mnt/quant-data/credentials/secrets.env && /root/benji/pipeline/.venv/bin/python /root/benji/pipeline/allocator/blofin_logger.py >> /mnt/quant-data/logs/exchange/snapshot.log 2>&1
+
+# ── Manager daily briefing — 00:30 UTC ────────────────────────────────────────
+30 0 * * * . /mnt/quant-data/credentials/secrets.env && curl -s -X POST https://mullincap.com/api/manager/briefing -H "X-Internal-Token: $INTERNAL_API_TOKEN" -H "Content-Type: application/json" >> /mnt/quant-data/logs/manager/briefing.log 2>&1
+
+# ── Refresh per-symbol / per-day caggs — 01:17 + 01:18 UTC ───────────────────
+# 30-day window to safeguard against silent materialization gaps (the built-in
+# hourly policy only refreshes the last 7 days). Added 2026-04-17 after an
+# 18-day gap was discovered in symbol_day_counts.
+17 1 * * * . /mnt/quant-data/credentials/secrets.env && PGPASSWORD=$DB_PASSWORD psql -h $DB_HOST -U $DB_USER -d $DB_NAME -c "CALL refresh_continuous_aggregate('market.symbol_day_counts', NOW() - INTERVAL '30 days', NOW());" >> /mnt/quant-data/logs/indexer/cron.log 2>&1
+18 1 * * * . /mnt/quant-data/credentials/secrets.env && PGPASSWORD=$DB_PASSWORD psql -h $DB_HOST -U $DB_USER -d $DB_NAME -c "CALL refresh_continuous_aggregate('market.futures_1m_daily_symbol_count', NOW() - INTERVAL '30 days', NOW());" >> /mnt/quant-data/logs/indexer/cron.log 2>&1
+
+# ── Exchange snapshot sync — every 5 minutes ────────────────────────────────
+*/5 * * * * cd /root/benji && docker compose run --rm -T backend python -m app.cli.sync_exchange_snapshots >> /mnt/quant-data/logs/exchange/sync.log 2>&1
+
+# ── Trader spawner (user allocations) — 06:05 UTC ────────────────────────────
+5 6 * * * cd /root/benji && docker compose -f /root/benji/docker-compose.yml exec -T backend python -m app.cli.spawn_traders >> /mnt/quant-data/logs/trader/spawn.log 2>&1
+
+# Nightly strategy metrics refresh — 01:30 UTC, targets celery (correct BASE_DATA_DIR)
+30 1 * * * cd /root/benji && docker compose -f /root/benji/docker-compose.yml exec -T celery python -m app.cli.refresh_strategy_metrics >> /mnt/quant-data/logs/trader/refresh_metrics.log 2>&1
+
+
+# ── Trader supervisor (resume-stuck pass) — every 5 min ─────────────────────
+# Detects trader subprocesses that have gone silent mid-session and
+# respawns them with two-tick confirmation + backoff + corrupted-state
+# guards. See trader_supervisor.py.
+*/5 * * * * cd /root/benji && docker compose -f /root/benji/docker-compose.yml exec -T backend python -m app.cli.spawn_traders --resume-stuck >> /mnt/quant-data/logs/trader/supervisor.log 2>&1
+
+# ── Allocation returns backfill — 00:10 UTC (safety net for writer misses) ──
+10 0 * * * /root/benji/backend/scripts/nightly_backfill_allocation_returns.sh
+
+# ── Signal v2 SHADOW — 06:02 UTC (canonical methodology, no trader exec) ─────
+2 6 * * * . /mnt/quant-data/credentials/secrets.env && /root/benji/pipeline/.venv/bin/python /root/benji/daily_signal_v2.py >> /mnt/quant-data/logs/signal/v2_cron.log 2>&1
+
+# ── Signal shadow diff — 06:15 UTC (v1 vs v2 vs canonical basket diff) ───────
+15 6 * * * . /mnt/quant-data/credentials/secrets.env && /root/benji/pipeline/.venv/bin/python /root/benji/shadow_diff.py >> /mnt/quant-data/logs/signal/shadow_diff.log 2>&1
