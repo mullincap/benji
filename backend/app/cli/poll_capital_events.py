@@ -167,8 +167,7 @@ def poll_connection(
     events, dedup-inserts. Returns a summary dict for logging.
     """
     cur.execute("""
-        SELECT connection_id, exchange, label, created_at,
-               api_key_enc, api_secret_enc, passphrase_enc
+        SELECT connection_id, exchange, label
           FROM user_mgmt.exchange_connections
          WHERE connection_id = %s::uuid
            AND status = 'active'
@@ -178,13 +177,8 @@ def poll_connection(
         return {"connection_id": connection_id, "skipped": "not_active"}
 
     try:
-        creds = load_credentials(
-            exchange=row["exchange"],
-            api_key_enc=row["api_key_enc"],
-            api_secret_enc=row["api_secret_enc"],
-            passphrase_enc=row["passphrase_enc"],
-        )
-    except CredentialDecryptError as e:
+        creds = load_credentials(connection_id)
+    except (ValueError, CredentialDecryptError) as e:
         return {"connection_id": connection_id, "skipped": f"creds_error: {e}"}
 
     adapter = adapter_for(creds)
