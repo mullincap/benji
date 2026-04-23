@@ -26,23 +26,26 @@ Canonical pipeline (this file):
   3. BloFin filter: drop basket symbols not on BloFin.
   4. Tail Guardrail: BTC prev-day return < -4% OR 5d rvol > 1.4x 60d
      baseline → sit flat.
-  5. Write to live_deploys_signal_v2.csv.
+  5. Write to live_deploys_signal.csv (trader reads this).
+  6. Write to user_mgmt.daily_signals + daily_signal_items DB, one row
+     per published+active strategy_version_id (Alpha Low / Main / Max).
+     The trader at 06:05 UTC reads these DB rows, not the CSV.
 
-SHADOW-RUN NOTE
----------------
-While v1 (daily_signal.py) continues to write the live-trading
-live_deploys_signal.csv and user_mgmt.daily_signals DB rows, v2 writes
-ONLY the CSV — no DB writes, no trader execution. The shadow period
-exists so we can diff v2's baskets against v1's baskets (and against
-audit's recomputed baskets for the same day) for ≥7 consecutive days
-before any cron flip. See docs/strategy_specification.md § Migration.
+CUTOVER STATUS (2026-04-23)
+---------------------------
+v2 is the LIVE signal generator as of 05:58 UTC 2026-04-23, replacing
+daily_signal.py v1. The DB write path (step 6 above) is ported verbatim
+from host-v1 (see archive/daily_signal_v1_host_snapshot_20260423.py) —
+it queries all published+active strategy_version_ids and writes one
+daily_signals row per version, so allocation-keyed queries in manager.py
+and spawn_traders.py find signals matching their strategy_version_id.
 
 NOTE: v2 computes the 06:00 snapshot on-the-fly from market.futures_1m
 rather than reading from market.leaderboards. This is a deliberate
 design choice because the nightly indexer cron (01:00 UTC) populates
 market.leaderboards for day D-1, not day D — so the canonical
 leaderboard row for today's 06:00 snapshot does not exist yet at
-06:02 UTC when v2 runs. The formula and hygiene match the builder
+05:58 UTC when v2 runs. The formula and hygiene match the builder
 (pipeline/indexer/build_intraday_leaderboard.py):
    anchor = futures_1m.(close|open_interest) at 00:00 UTC
    pct_change = value_now / anchor - 1
@@ -50,8 +53,8 @@ leaderboard row for today's 06:00 snapshot does not exist yet at
    rank by pct_change DESC; take top-20.
 
 Usage (cron entry):
-  2 6 * * *  /usr/bin/python3 /root/benji/daily_signal_v2.py >> \\
-             /root/benji/daily_signal_v2.log 2>&1
+  58 5 * * *  /root/benji/pipeline/.venv/bin/python /root/benji/daily_signal_v2.py \\
+              >> /mnt/quant-data/logs/signal/cron.log 2>&1
 """
 
 import csv
@@ -82,8 +85,12 @@ TAIL_VOL_LONG_WINDOW  = 60
 FILTER_NAME           = "Tail Guardrail"
 
 # -- Output paths -----------------------------------------------------------
+# Post-cutover (2026-04-23): v2 writes to the production filename
+# `live_deploys_signal.csv` that trader-blofin.py has historically read.
+# Legacy v1 output file is preserved at live_deploys_signal_v1_archive.csv
+# by the cutover step if needed for rollback reference.
 _SCRIPT_DIR           = Path(__file__).resolve().parent
-DEPLOYS_CSV           = _SCRIPT_DIR / "live_deploys_signal_v2.csv"
+DEPLOYS_CSV           = _SCRIPT_DIR / "live_deploys_signal.csv"
 DEPLOYS_RETAIN_DAYS   = 90
 LOG_FILE              = _SCRIPT_DIR / "daily_signal_v2.log"
 
@@ -410,6 +417,125 @@ def write_deploys_csv(date_str, filter_name, overlap_pool, sit_flat, sit_flat_re
 
 
 # ==========================================================================
+# STEP 6 — WRITE TO DATABASE (ported verbatim from host-v1 / archive/)
+#
+# Writes one row per published+active strategy_version_id to
+# user_mgmt.daily_signals + daily_signal_items. The trader at 06:05 UTC
+# reads these rows (via allocation → strategy_version_id join); without
+# them, allocations find no signal and sit flat.
+#
+# Source: archive/daily_signal_v1_host_snapshot_20260423.py lines 643-745
+# (the production host version, which had this multi-version logic added
+# on 2026-04-20 per commit e1522db but never propagated to the repo).
+# Ported byte-for-byte during the 2026-04-23 cutover to preserve the
+# exact DB-write behavior that the trader has been relying on.
+# ==========================================================================
+
+def write_to_db(date_str, filter_name, overlap_pool, sit_flat, filter_reason):
+    """Insert today's signal into user_mgmt.daily_signals + daily_signal_items.
+
+    Writes one row per published+active strategy_version_id (Alpha Low / Main /
+    Max). Alpha variants are derivative of the shared filter — they use the
+    same overlap_pool / sit_flat / filter_name but need their own signal rows
+    so allocation-keyed queries (manager overview, trader subprocesses) find
+    signals matching their strategy_version_id.
+
+    A DB failure is logged but never fatal (CSV write already succeeded).
+    """
+    try:
+        sys.path.insert(0, str(_SCRIPT_DIR))
+        from pipeline.db.connection import get_conn
+
+        conn = get_conn()
+        cur = conn.cursor()
+
+        # Query all published + active strategy versions. One signal row per
+        # version. Fallback to secrets.env STRATEGY_VERSION_ID if the query
+        # returns nothing (defensive — should never fire in production).
+        cur.execute("""
+            SELECT sv.strategy_version_id::text
+            FROM audit.strategy_versions sv
+            JOIN audit.strategies s ON s.strategy_id = sv.strategy_id
+            WHERE sv.is_active = TRUE AND s.is_published = TRUE
+            ORDER BY sv.strategy_version_id
+        """)
+        version_ids = [r[0] for r in cur.fetchall()]
+
+        if not version_ids:
+            # Legacy fallback: read single STRATEGY_VERSION_ID from secrets.env.
+            secrets_path = Path("/mnt/quant-data/credentials/secrets.env")
+            if secrets_path.exists():
+                for line in secrets_path.read_text().splitlines():
+                    line = line.strip()
+                    if line.startswith("STRATEGY_VERSION_ID="):
+                        version_ids = [line.split("=", 1)[1].strip()]
+                        break
+            if not version_ids:
+                log.warning("No published+active strategy versions and no "
+                            "STRATEGY_VERSION_ID fallback — skipping DB write")
+                conn.close()
+                return
+
+        # Look up symbol_ids once (shared across all strategy versions).
+        sym_map = {}
+        if overlap_pool and not sit_flat:
+            cur.execute(
+                "SELECT base, symbol_id FROM market.symbols WHERE base = ANY(%s)",
+                ([sym for sym in overlap_pool],)
+            )
+            sym_map = dict(cur.fetchall())
+
+        from psycopg2.extras import execute_values
+
+        rows_written = 0
+        for sv_id in version_ids:
+            cur.execute("""
+                INSERT INTO user_mgmt.daily_signals
+                    (signal_date, strategy_version_id, computed_at,
+                     sit_flat, filter_name, filter_reason)
+                VALUES (%s, %s, NOW(), %s, %s, %s)
+                ON CONFLICT (signal_date, strategy_version_id) DO NOTHING
+                RETURNING signal_batch_id
+            """, (date_str, sv_id, sit_flat, filter_name, filter_reason))
+
+            row = cur.fetchone()
+            if row is None:
+                log.info(f"DB write: signal already exists for {sv_id[:8]} "
+                         f"on {date_str} — skipped")
+                continue
+
+            signal_batch_id = row[0]
+            rows_written += 1
+
+            if overlap_pool and not sit_flat and sym_map:
+                item_rows = []
+                for rank, sym in enumerate(overlap_pool, start=1):
+                    sid = sym_map.get(sym)
+                    if sid is None:
+                        continue
+                    item_rows.append((signal_batch_id, sid, rank, None, True))
+
+                if item_rows:
+                    execute_values(
+                        cur,
+                        """INSERT INTO user_mgmt.daily_signal_items
+                               (signal_batch_id, symbol_id, rank, weight, is_selected)
+                           VALUES %s
+                           ON CONFLICT DO NOTHING""",
+                        item_rows,
+                    )
+
+        conn.commit()
+        cur.close()
+        conn.close()
+        log.info(f"DB write: {rows_written}/{len(version_ids)} strategy versions, "
+                 f"{len(overlap_pool)} symbols")
+
+    except Exception as e:
+        log.warning(f"DB write failed (non-fatal): {e}")
+
+
+# ==========================================================================
 # MAIN
 # ==========================================================================
 
@@ -417,7 +543,7 @@ def main():
     t_start = time.time()
     today = _dt.datetime.now(_dt.timezone.utc).date()
     log.info("=" * 65)
-    log.info(f"  DAILY SIGNAL v2 -- {today} (canonical methodology, shadow run)")
+    log.info(f"  DAILY SIGNAL v2 -- {today} (canonical methodology, LIVE)")
     log.info("=" * 65)
 
     # 1. BloFin universe
@@ -444,13 +570,20 @@ def main():
     else:
         log.info(f"TRADE TODAY -- {len(final_basket)} symbols: {final_basket}")
 
-    # 6. Write CSV (shadow: no DB write, no trader execution)
+    # 6. Write CSV (the trader-blofin executable path still reads this file;
+    #    allocator-spawned traders read the DB rows written in step 7).
+    filter_reason = tg_reason or ("pass" if not sit_flat else "")
     write_deploys_csv(today.isoformat(), FILTER_NAME, final_basket,
-                      sit_flat, tg_reason)
+                      sit_flat, filter_reason)
+
+    # 7. Write DB: one row per published+active strategy_version_id.
+    #    Trader spawn at 06:05 UTC reads these — without them, allocations
+    #    find no signal and sit flat.
+    write_to_db(today.isoformat(), FILTER_NAME, final_basket,
+                sit_flat, filter_reason)
 
     elapsed = time.time() - t_start
-    log.info(f"Done. ({elapsed:.1f}s) — shadow output only; "
-             f"live trading still uses daily_signal.py")
+    log.info(f"Done. ({elapsed:.1f}s) — v2 LIVE at 05:58 UTC (post-cutover 2026-04-23)")
     log.info("=" * 65)
 
 

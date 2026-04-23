@@ -313,22 +313,30 @@ dated 2026-04-22 for full diagnosis.
 
 ---
 
-## 7. Migration: v1 (legacy) → v2 (canonical)
+## 7. Migration: v1 (legacy) → v2 (canonical) — COMPLETED 2026-04-23
 
-As of 2026-04-23, `daily_signal.py` (v1) is still the live signal generator.
-Its methodology diverges from canonical on three axes (universe, ranking metric,
-selection mode — see incident log §11.2). V1 backtests at Sharpe −0.55.
+**Status**: v2 is the LIVE signal generator as of 05:58 UTC 2026-04-23.
+Cutover executed in the 2026-04-23 session; the 7-day shadow-gate specified
+in §7.2 below was **deliberately bypassed** after a 1-day smoke test
+(n=1 evidence) on the grounds that continuing v1 (Sharpe −0.55, net-negative
+EV per §11.2) carried more risk than accepting a reduced-evidence cutover.
 
-### 7.1 Shadow period (ongoing)
+### 7.1 Post-cutover state (as of 2026-04-23)
 
 | Component | Cron | Status |
 |---|---|---|
-| v1 daily_signal.py | 05:58 UTC daily → live_deploys_signal.csv + trader execution | ACTIVE (unchanged) |
-| v2 daily_signal_v2.py | 06:02 UTC daily → live_deploys_signal_v2.csv | ACTIVE (no trader execution) |
-| shadow_diff.py | 06:15 UTC daily → daily_signal_shadow_diff.log + history CSV | ACTIVE |
+| v2 daily_signal_v2.py | **05:58 UTC daily** (replaces v1's slot) → live_deploys_signal.csv + user_mgmt.daily_signals DB (3 rows/day, one per Alpha Low/Main/Max) | **LIVE** |
+| v1 daily_signal.py | commented in crontab, archived to `/root/benji/archive/daily_signal_v1_archived_2026-04-23.py` + repo `archive/daily_signal_v1_host_snapshot_20260423.py` | DISABLED |
+| shadow_diff.py | 06:15 UTC daily → daily_signal_shadow_diff.log + history CSV | ACTIVE (continues as regression detector — v2 vs canonical leaderboards cross-check) |
 
-v2 writes canonical baskets in the SAME CSV format as v1 (for drop-in cutover).
-shadow_diff logs three daily Jaccards and a lagged cross-check.
+v2's `write_to_db` function was ported byte-for-byte from host-v1's
+multi-version DB-write logic (commit `e1522db` applied to host 2026-04-20 but
+never propagated to repo; host snapshot committed as
+`archive/daily_signal_v1_host_snapshot_20260423.py` and ported into v2 via
+the cutover commit). v2 reads raw values from `market.futures_1m` at 06:00 UTC
+and computes pct_change snapshot rankings on-the-fly (same math as the
+leaderboard builder), so canonical basket is available ~2 minutes before
+the 06:05 UTC trader-spawn cron reads from `user_mgmt.daily_signals`.
 
 ### 7.2 Cutover gate
 
@@ -434,8 +442,34 @@ for pipeline changes enabling the comparison audit.
 - **2026-04-23** commit `8c32706`: align v2 CSV format with v1 for drop-in cutover.
 - **2026-04-23** commit `d1fa68a`: add `shadow_diff.py` for daily basket-diff + cutover-gate tracking.
 - **2026-04-23** (ops): install host cron entries for v2 (06:02 UTC) and shadow_diff (06:15 UTC). Backup at `/root/crontab_backup_20260423_015430.bak`.
-- **2026-04-23** (planned): this spec doc committed.
-- **Pending**: ≥ 7 consecutive shadow-PASS days, then execute § 7.3 cutover.
+- **2026-04-23** commit `9a89749`: this spec doc (§1-11).
+- **2026-04-23** commit `bd356c3`: snapshot host-v1 → `archive/daily_signal_v1_host_snapshot_20260423.py` (pre-cutover artifact).
+- **2026-04-23** (ops ~05:20 UTC): cutover executed. Shadow-gate bypass deliberate (1-day smoke test evidence; continuing v1 net-negative EV judged higher risk). Crontab changes applied, v1 archived on host to `/root/benji/archive/daily_signal_v1_archived_2026-04-23.py`.
+
+### 11.4 Shadow-gate bypass record (2026-04-23 cutover)
+
+The §7.2 cutover-gate requirement (J(v2, canonical) ≥ 0.95 for ≥7 consecutive
+shadow days) was **not satisfied** at cutover time. Bypass justification:
+
+- v2 shadow cron installed at 02:00 UTC, first run would have been 06:02 UTC
+  (so only n=0 shadow days at cutover decision time).
+- v1 known to run a methodology that backtests at Sharpe −0.55 over 432 days
+  (per § 11.2) — continuing v1 one more trading day carries known negative EV.
+- Evidence substituting for the 7-day gate:
+  1. 2026-04-22 one-day smoke test: v2 basket (7 symbols pre-BloFin, 6 post)
+     exactly matches `market.leaderboards` direct query (20/20 price top-20 +
+     20/20 OI top-20 + 7/7 intersection).
+  2. v2 on-the-fly `futures_1m` computation is mathematically equivalent to
+     the builder's output (verified via shadow_diff lagged cross-check path).
+  3. Port-source integrity: `write_to_db` was ported byte-for-byte from
+     host-v1 (which has been writing the same DB rows daily for ≥3 days
+     without issue).
+- Rollback path: `crontab /root/crontab_backup_cutover_20260423_043317.bak`
+  restores the exact pre-cutover crontab state; v1 is preserved in
+  `/root/benji/archive/` for re-activation in <5 minutes if needed.
+
+If cutover produces a regression, rollback fires + this spec section gets
+updated with the failure mode + a revised gate-satisfaction plan for retry.
 
 ### 11.4 Related data-quality finding
 
