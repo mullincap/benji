@@ -1329,6 +1329,7 @@ def execution_summary(
                                      WHEN 'withdrawal' THEN -amount_usd
                            END)::numeric AS session_net
                   FROM user_mgmt.allocation_capital_events
+                 WHERE deleted_at IS NULL
                  GROUP BY allocation_id, event_at::date
             )
             SELECT

@@ -140,6 +140,79 @@ def _validate_pending(conn, cur, row: dict[str, Any]) -> str:
     return "promoted → active"
 
 
+# Anomaly threshold: a snapshot equity delta exceeding the larger of $50
+# OR 2% of the prior equity triggers an out-of-cycle capital-events poll.
+# Tuned to be liberal — false positives just cost one extra HTTP call per
+# exchange (cheap), false negatives leave a transfer un-recorded until the
+# nightly cron at 01:45 UTC.
+_ANOMALY_USD_FLOOR    = 50.0
+_ANOMALY_PCT_OF_PRIOR = 0.02
+
+
+def _check_capital_anomaly(conn, cur, connection_id: str) -> None:
+    """Compare the two most-recent successful snapshots on this connection.
+    If equity delta exceeds (max($50, 2% of prior equity)) AFTER netting
+    out any auto-detected capital events in that window, fire an
+    out-of-band poll tagged source='auto-anomaly'. Cheap fail: any error
+    just logs and continues — the nightly cron will catch what we miss.
+    """
+    try:
+        cur.execute("""
+            SELECT total_equity_usd::float AS equity, snapshot_at
+              FROM user_mgmt.exchange_snapshots
+             WHERE connection_id = %s::uuid
+               AND fetch_ok = TRUE
+               AND total_equity_usd IS NOT NULL
+             ORDER BY snapshot_at DESC
+             LIMIT 2
+        """, (connection_id,))
+        snaps = cur.fetchall()
+        if len(snaps) < 2:
+            return  # no prior to compare against
+
+        cur_equity, cur_at = snaps[0]["equity"], snaps[0]["snapshot_at"]
+        prv_equity, prv_at = snaps[1]["equity"], snaps[1]["snapshot_at"]
+        delta = cur_equity - prv_equity
+
+        # Subtract any capital events ALREADY recorded in this window so a
+        # legitimate manual entry doesn't trip the anomaly detector again.
+        cur.execute("""
+            SELECT COALESCE(SUM(CASE kind
+                                  WHEN 'deposit'    THEN amount_usd
+                                  WHEN 'withdrawal' THEN -amount_usd
+                                END), 0)::float AS net
+              FROM user_mgmt.allocation_capital_events
+             WHERE connection_id = %s::uuid
+               AND event_at > %s::timestamptz
+               AND event_at <= %s::timestamptz
+               AND deleted_at IS NULL
+        """, (connection_id, prv_at, cur_at))
+        already_recorded = float(cur.fetchone()["net"] or 0)
+        unexplained = delta - already_recorded
+
+        threshold = max(_ANOMALY_USD_FLOOR, _ANOMALY_PCT_OF_PRIOR * prv_equity)
+        if abs(unexplained) < threshold:
+            return  # within normal trading-PnL range
+
+        log.info(
+            "anomaly: connection %s equity %.2f → %.2f (delta %+.2f, "
+            "already_recorded %+.2f, unexplained %+.2f, threshold %.2f) — "
+            "triggering out-of-band capital-events poll",
+            connection_id[:8], prv_equity, cur_equity, delta,
+            already_recorded, unexplained, threshold,
+        )
+        try:
+            from .poll_capital_events import poll_connection
+            summary = poll_connection(
+                conn, cur, connection_id, source="auto-anomaly",
+            )
+            log.info("anomaly poll done: %s", summary)
+        except Exception as e:
+            log.warning("anomaly poll failed for %s: %s", connection_id[:8], e)
+    except Exception as e:
+        log.warning("anomaly check failed for %s: %s", connection_id[:8], e)
+
+
 def _snapshot_active(conn, cur, row: dict[str, Any]) -> str:
     """Fetch a fresh snapshot for an active row. Returns status tag."""
     cid = str(row["connection_id"])
@@ -151,6 +224,10 @@ def _snapshot_active(conn, cur, row: dict[str, Any]) -> str:
         # per-connection dispatch logic here.
         refresh_snapshots(cur, user_id=str(row["user_id"]))
         conn.commit()
+        # Post-snapshot: anomaly check on this specific connection. Runs
+        # AFTER commit so the new snapshot row is visible to the comparison
+        # query.
+        _check_capital_anomaly(conn, cur, cid)
         return "snapshot ok"
     except Exception as e:
         cur.execute(

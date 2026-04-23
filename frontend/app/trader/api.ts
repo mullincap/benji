@@ -211,13 +211,18 @@ export interface ApiPnl {
 }
 
 export interface ApiCapitalEvent {
-  event_id:      string;
-  allocation_id: string;
-  event_at:      string;        // ISO 8601
-  amount_usd:    number;
-  kind:          "deposit" | "withdrawal";
-  notes:         string | null;
-  created_at:    string;
+  event_id:               string;
+  allocation_id:          string | null;   // NULL on unmapped auto events
+  connection_id:          string | null;
+  event_at:               string;          // ISO 8601
+  amount_usd:             number;
+  kind:                   "deposit" | "withdrawal";
+  notes:                  string | null;
+  created_at:             string;
+  source:                 "manual" | "auto" | "auto-anomaly";
+  exchange_event_id:      string | null;   // present when source != 'manual'
+  is_manually_overridden: boolean;         // operator has touched this row
+  exchange_name:          string | null;   // for unmapped events: which exchange surfaced it
 }
 
 // ── API calls ───────────────────────────────────────────────────────────────

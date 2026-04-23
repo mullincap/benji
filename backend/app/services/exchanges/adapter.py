@@ -77,6 +77,22 @@ class FillInfo:
     ts_ms:    int
 
 
+@dataclass(frozen=True)
+class CapitalEventInfo:
+    """One deposit OR withdrawal as reported by an exchange income API.
+
+    The poller writes these into user_mgmt.allocation_capital_events with
+    source='auto' and exchange_event_id=event_id; later polls dedup against
+    (connection_id, exchange_event_id) so a row is inserted at most once.
+    """
+    event_id:    str                # exchange's own ID (BloFin: transferId; Binance: id)
+    kind:        str                # "deposit" | "withdrawal"
+    amount_usd:  float              # positive value; sign comes from `kind`
+    ts_ms:       int                # epoch-ms when the funds settled
+    asset:       str                # "USDT" / "USDC" / etc. (informational)
+    notes:       str | None = None  # free-form (tx hash, network, exchange-internal note)
+
+
 # -- Adapter ABC ---------------------------------------------------------
 
 class ExchangeAdapter(ABC):
@@ -166,6 +182,31 @@ class ExchangeAdapter(ABC):
                         AUTO_REPAY; on NOTIONAL-filter rejection, retry with
                         quoteOrderQty (dust-cleanup pattern).
         """
+
+    # -- Reconciliation ------------------------------------------------
+    # -- Capital flow --------------------------------------------------
+    def get_capital_events(
+        self,
+        since_ms: int | None = None,
+    ) -> list[CapitalEventInfo]:
+        """Recent deposits + withdrawals on this exchange account, in
+        USD-denominated form (stablecoins assumed 1:1; volatile assets are
+        valued at exchange-provided USD value when available, else skipped).
+
+        since_ms: epoch-ms lower bound. None -> adapter-default lookback
+                  (BloFin: ~90 days, Binance: ~365 days, both API-capped).
+
+        Default implementation returns []; concrete adapters MAY override
+        when the underlying exchange exposes the necessary endpoints.
+        Falling back to [] is the safe choice for adapters not yet wired —
+        the auto-poller treats an empty list as "nothing new" rather than
+        an error, so deployment is gradual-rollout-friendly.
+
+        Adapters that DO implement should return ALL events visible in the
+        time window — the poller dedups against (connection_id,
+        exchange_event_id) at insert time.
+        """
+        return []
 
     # -- Reconciliation ------------------------------------------------
     @abstractmethod

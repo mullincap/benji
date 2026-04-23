@@ -2065,6 +2065,7 @@ def trader_pnl(allocation_id: str, user_id: str = Depends(get_current_user), cur
                             END), 0)::float AS lifetime_net
         FROM user_mgmt.allocation_capital_events
         WHERE allocation_id = %s::uuid
+          AND deleted_at IS NULL
     """, (allocation_id,))
     lifetime_capital_net = float(cur.fetchone()["lifetime_net"] or 0)
     total_pnl_usd -= lifetime_capital_net
@@ -2093,6 +2094,7 @@ def trader_pnl(allocation_id: str, user_id: str = Depends(get_current_user), cur
             FROM user_mgmt.allocation_capital_events
             WHERE allocation_id = %s::uuid
               AND event_at >= (%s::date)::timestamptz
+              AND deleted_at IS NULL
         """, (allocation_id, session_date))
         session_capital_net = float(cur.fetchone()["session_net"] or 0)
         if session_pnl_usd is not None:
@@ -2163,7 +2165,13 @@ def trader_positions(allocation_id: str, user_id: str = Depends(get_current_user
 # from /trader/settings.
 
 class CapitalEventCreateRequest(BaseModel):
-    allocation_id: str
+    # allocation_id may be NULL to create an unmapped event tied only to a
+    # connection (e.g., a deposit landing on a connection with multiple
+    # allocations where the operator hasn't yet decided which to credit).
+    # Either allocation_id OR connection_id must be present so ownership
+    # can be verified.
+    allocation_id: str | None = None
+    connection_id: str | None = None
     amount_usd: float
     kind: str                      # 'deposit' | 'withdrawal'
     event_at: str | None = None    # ISO 8601; defaults to NOW() server-side
@@ -2171,6 +2179,7 @@ class CapitalEventCreateRequest(BaseModel):
 
 
 class CapitalEventUpdateRequest(BaseModel):
+    allocation_id: str | None = None  # set to remap an unmapped event
     amount_usd: float | None = None
     kind: str | None = None
     event_at: str | None = None
@@ -2189,44 +2198,107 @@ def _verify_allocation_owned_by(cur, allocation_id: str, user_id: str) -> None:
         raise HTTPException(status_code=403, detail="Not your allocation")
 
 
+def _verify_connection_owned_by(cur, connection_id: str, user_id: str) -> None:
+    cur.execute(
+        "SELECT user_id FROM user_mgmt.exchange_connections "
+        "WHERE connection_id = %s::uuid",
+        (connection_id,),
+    )
+    row = cur.fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="Connection not found")
+    if str(row["user_id"]) != user_id:
+        raise HTTPException(status_code=403, detail="Not your connection")
+
+
+def _verify_capital_event_owned_by(cur, event_id: str, user_id: str) -> dict:
+    """Resolve ownership through whichever path the event has populated:
+    allocation_id (mapped) OR connection_id (unmapped/auto). Returns the
+    row dict with owner_user_id resolved."""
+    cur.execute("""
+        SELECT ce.event_id::text,
+               ce.allocation_id::text,
+               ce.connection_id::text,
+               COALESCE(a.user_id, ec.user_id)::text AS owner_user_id,
+               ce.is_manually_overridden,
+               ce.deleted_at
+          FROM user_mgmt.allocation_capital_events ce
+          LEFT JOIN user_mgmt.allocations a
+                 ON a.allocation_id = ce.allocation_id
+          LEFT JOIN user_mgmt.exchange_connections ec
+                 ON ec.connection_id = ce.connection_id
+         WHERE ce.event_id = %s::uuid
+    """, (event_id,))
+    row = cur.fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="Capital event not found")
+    if row["owner_user_id"] is None or row["owner_user_id"] != user_id:
+        raise HTTPException(status_code=403, detail="Not your capital event")
+    return dict(row)
+
+
 @router.get("/capital-events")
 def list_capital_events(
     allocation_id: str | None = None,
     user_id: str = Depends(get_current_user),
     cur=Depends(get_cursor),
 ) -> dict[str, Any]:
-    """List capital events. Restricted to allocations owned by the caller.
-    Optionally filter to one allocation_id (verified-owned)."""
+    """List capital events. Restricted to events owned by the caller via
+    allocation_id (mapped) OR connection_id (unmapped — auto-poll surfaced
+    a transfer that needs operator-assignment to a specific allocation).
+    Soft-deleted rows are excluded.
+    """
     if allocation_id:
         _verify_allocation_owned_by(cur, allocation_id, user_id)
         cur.execute("""
-            SELECT ce.event_id::text, ce.allocation_id::text, ce.event_at,
-                   ce.amount_usd, ce.kind, ce.notes, ce.created_at
+            SELECT ce.event_id::text, ce.allocation_id::text,
+                   ce.connection_id::text, ce.event_at,
+                   ce.amount_usd, ce.kind, ce.notes, ce.created_at,
+                   ce.source, ce.exchange_event_id, ce.is_manually_overridden,
+                   ec.exchange AS exchange_name
               FROM user_mgmt.allocation_capital_events ce
+              LEFT JOIN user_mgmt.exchange_connections ec
+                     ON ec.connection_id = ce.connection_id
              WHERE ce.allocation_id = %s::uuid
+               AND ce.deleted_at IS NULL
              ORDER BY ce.event_at DESC, ce.created_at DESC
         """, (allocation_id,))
     else:
-        # All events for allocations owned by this user.
+        # All events for allocations OR connections owned by this user.
+        # The COALESCE-on-ownership pattern surfaces unmapped (NULL alloc)
+        # auto-poll events to the connection's owner, so they show up in
+        # the UI for assignment to a specific allocation.
         cur.execute("""
-            SELECT ce.event_id::text, ce.allocation_id::text, ce.event_at,
-                   ce.amount_usd, ce.kind, ce.notes, ce.created_at
+            SELECT ce.event_id::text, ce.allocation_id::text,
+                   ce.connection_id::text, ce.event_at,
+                   ce.amount_usd, ce.kind, ce.notes, ce.created_at,
+                   ce.source, ce.exchange_event_id, ce.is_manually_overridden,
+                   ec.exchange AS exchange_name
               FROM user_mgmt.allocation_capital_events ce
-              JOIN user_mgmt.allocations a USING (allocation_id)
-             WHERE a.user_id = %s::uuid
+              LEFT JOIN user_mgmt.allocations a
+                     ON a.allocation_id = ce.allocation_id
+              LEFT JOIN user_mgmt.exchange_connections ec
+                     ON ec.connection_id = ce.connection_id
+             WHERE COALESCE(a.user_id, ec.user_id) = %s::uuid
+               AND ce.deleted_at IS NULL
              ORDER BY ce.event_at DESC, ce.created_at DESC
         """, (user_id,))
 
     rows = cur.fetchall()
     events = [
         {
-            "event_id":      r["event_id"],
-            "allocation_id": r["allocation_id"],
-            "event_at":      r["event_at"].isoformat() if r["event_at"] else None,
-            "amount_usd":    float(r["amount_usd"]),
-            "kind":          r["kind"],
-            "notes":         r["notes"],
-            "created_at":    r["created_at"].isoformat() if r["created_at"] else None,
+            "event_id":               r["event_id"],
+            "allocation_id":          r["allocation_id"],
+            "connection_id":          r["connection_id"],
+            "event_at":               r["event_at"].isoformat() if r["event_at"] else None,
+            "amount_usd":             float(r["amount_usd"]),
+            "kind":                   r["kind"],
+            "notes":                  r["notes"],
+            "created_at":             r["created_at"].isoformat() if r["created_at"] else None,
+            "source":                 r["source"],
+            "exchange_event_id":      r["exchange_event_id"],
+            "is_manually_overridden": r["is_manually_overridden"],
+            "exchange_name":          r["exchange_name"],
         }
         for r in rows
     ]
@@ -2239,28 +2311,43 @@ def create_capital_event(
     user_id: str = Depends(get_current_user),
     cur=Depends(get_cursor),
 ) -> dict[str, Any]:
-    """Record a new capital event. Owner-gated on allocation_id."""
+    """Record a new capital event. Owner-gated via either allocation_id
+    or connection_id (at least one must be present).
+
+    Manual creation always sets source='manual' + is_manually_overridden=TRUE
+    so the auto-poller will never silently overwrite operator intent.
+    """
     if body.amount_usd <= 0:
         raise HTTPException(status_code=400, detail="amount_usd must be positive")
     if body.kind not in ("deposit", "withdrawal"):
         raise HTTPException(status_code=400, detail="kind must be 'deposit' or 'withdrawal'")
+    if not body.allocation_id and not body.connection_id:
+        raise HTTPException(
+            status_code=400,
+            detail="allocation_id or connection_id required",
+        )
 
-    _verify_allocation_owned_by(cur, body.allocation_id, user_id)
+    if body.allocation_id:
+        _verify_allocation_owned_by(cur, body.allocation_id, user_id)
+    if body.connection_id:
+        _verify_connection_owned_by(cur, body.connection_id, user_id)
 
-    if body.event_at:
-        cur.execute("""
-            INSERT INTO user_mgmt.allocation_capital_events
-                (allocation_id, event_at, amount_usd, kind, notes)
-            VALUES (%s::uuid, %s::timestamptz, %s, %s, %s)
-            RETURNING event_id::text
-        """, (body.allocation_id, body.event_at, body.amount_usd, body.kind, body.notes))
-    else:
-        cur.execute("""
-            INSERT INTO user_mgmt.allocation_capital_events
-                (allocation_id, event_at, amount_usd, kind, notes)
-            VALUES (%s::uuid, NOW(), %s, %s, %s)
-            RETURNING event_id::text
-        """, (body.allocation_id, body.amount_usd, body.kind, body.notes))
+    cur.execute("""
+        INSERT INTO user_mgmt.allocation_capital_events
+            (allocation_id, connection_id, event_at, amount_usd, kind, notes,
+             source, is_manually_overridden)
+        VALUES (
+            %s::uuid, %s::uuid,
+            COALESCE(%s::timestamptz, NOW()),
+            %s, %s, %s,
+            'manual', TRUE
+        )
+        RETURNING event_id::text
+    """, (
+        body.allocation_id, body.connection_id,
+        body.event_at,
+        body.amount_usd, body.kind, body.notes,
+    ))
 
     event_id = cur.fetchone()["event_id"]
     return {"event_id": event_id, "allocation_id": body.allocation_id}
@@ -2273,21 +2360,19 @@ def update_capital_event(
     user_id: str = Depends(get_current_user),
     cur=Depends(get_cursor),
 ) -> dict[str, Any]:
-    """Partial update. Owner-gated via the event's allocation."""
-    cur.execute("""
-        SELECT ce.event_id::text, a.user_id::text AS owner_user_id
-          FROM user_mgmt.allocation_capital_events ce
-          JOIN user_mgmt.allocations a USING (allocation_id)
-         WHERE ce.event_id = %s::uuid
-    """, (event_id,))
-    row = cur.fetchone()
-    if not row:
-        raise HTTPException(status_code=404, detail="Capital event not found")
-    if row["owner_user_id"] != user_id:
-        raise HTTPException(status_code=403, detail="Not your capital event")
+    """Partial update. Sets is_manually_overridden=TRUE so subsequent
+    auto-polls won't overwrite. Allows setting allocation_id to map an
+    auto-detected (allocation_id=NULL) event to a specific allocation.
+    """
+    _verify_capital_event_owned_by(cur, event_id, user_id)
 
-    updates: list[str] = []
+    updates: list[str] = ["is_manually_overridden = TRUE"]
     params: list = []
+    if body.allocation_id is not None:
+        # Verify caller owns the target allocation before remap.
+        _verify_allocation_owned_by(cur, body.allocation_id, user_id)
+        updates.append("allocation_id = %s::uuid")
+        params.append(body.allocation_id)
     if body.amount_usd is not None:
         if body.amount_usd <= 0:
             raise HTTPException(status_code=400, detail="amount_usd must be positive")
@@ -2305,7 +2390,9 @@ def update_capital_event(
         updates.append("notes = %s")
         params.append(body.notes)
 
-    if not updates:
+    if len(updates) == 1:
+        # Only the override marker — no actual field changes — refuse so
+        # callers don't accidentally lock a row by sending an empty patch.
         raise HTTPException(status_code=400, detail="No fields to update")
 
     params.append(event_id)
@@ -2323,21 +2410,15 @@ def delete_capital_event(
     user_id: str = Depends(get_current_user),
     cur=Depends(get_cursor),
 ) -> dict[str, Any]:
-    """Hard-delete. Owner-gated via the event's allocation."""
+    """Soft-delete. Sets deleted_at + is_manually_overridden=TRUE so the
+    row stays present (auto-poller won't re-create it on the next tick)
+    but is excluded from list reads + PnL math (deleted_at IS NULL filter).
+    """
+    _verify_capital_event_owned_by(cur, event_id, user_id)
     cur.execute("""
-        SELECT a.user_id::text AS owner_user_id
-          FROM user_mgmt.allocation_capital_events ce
-          JOIN user_mgmt.allocations a USING (allocation_id)
-         WHERE ce.event_id = %s::uuid
+        UPDATE user_mgmt.allocation_capital_events
+           SET deleted_at = NOW(),
+               is_manually_overridden = TRUE
+         WHERE event_id = %s::uuid
     """, (event_id,))
-    row = cur.fetchone()
-    if not row:
-        raise HTTPException(status_code=404, detail="Capital event not found")
-    if row["owner_user_id"] != user_id:
-        raise HTTPException(status_code=403, detail="Not your capital event")
-
-    cur.execute(
-        "DELETE FROM user_mgmt.allocation_capital_events WHERE event_id = %s::uuid",
-        (event_id,),
-    )
     return {"deleted": True, "event_id": event_id}

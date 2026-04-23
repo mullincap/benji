@@ -29,6 +29,7 @@ from binance.exceptions import BinanceAPIException
 
 from app.services.exchanges.adapter import (
     BalanceInfo,
+    CapitalEventInfo,
     ExchangeAdapter,
     FillInfo,
     InstrumentInfo,
@@ -542,6 +543,51 @@ class BinanceMarginAdapter(ExchangeAdapter):
 
         return results
 
+    # -- Capital flow ------------------------------------------------
+
+    def get_capital_events(
+        self,
+        since_ms: int | None = None,
+    ) -> list[CapitalEventInfo]:
+        """Pull deposit + withdrawal history from Binance SAPI.
+
+        Endpoints used:
+          /sapi/v1/capital/deposit/hisrec   — deposit history
+          /sapi/v1/capital/withdraw/history — withdrawal history
+          /sapi/v1/margin/transfer          — margin in/out (NOT polled here;
+              these are intra-account moves between spot ↔ margin and aren't
+              true capital events for PnL purposes — they don't change the
+              total USD on the exchange, only its sub-account location.
+              Worth revisiting if the strategy switches accounts.)
+
+        Stablecoin amounts (USDT/USDC/etc.) are taken at face value.
+        Non-stablecoin assets are skipped — capital events for those are
+        rare and better surfaced via manual operator entry than mis-valued.
+
+        Default lookback when since_ms is None: 365 days (Binance retention).
+        """
+        if since_ms is None:
+            since_ms = int(time.time() * 1000) - (365 * 86_400_000)
+
+        results: list[CapitalEventInfo] = []
+        try:
+            deposits = self._client.get_deposit_history(startTime=since_ms)
+        except BinanceAPIException as e:
+            log.warning(f"Binance deposit history fetch failed: {e}")
+            deposits = []
+        try:
+            withdraws = self._client.get_withdraw_history(startTime=since_ms)
+        except BinanceAPIException as e:
+            log.warning(f"Binance withdraw history fetch failed: {e}")
+            withdraws = []
+
+        for row in deposits or []:
+            results.extend(_parse_binance_capital_row(row, "deposit"))
+        for row in withdraws or []:
+            results.extend(_parse_binance_capital_row(row, "withdrawal"))
+
+        return results
+
     # -- Internals ---------------------------------------------------
 
     def _margin_pairs(self) -> set[str]:
@@ -635,6 +681,80 @@ class BinanceMarginAdapter(ExchangeAdapter):
 
 
 # -- Module helpers ------------------------------------------------------
+
+# Parallel to BloFin's _STABLECOINS_USD_PARITY — kept inline rather than
+# imported to avoid a cross-adapter coupling for what is conceptually a
+# per-adapter concern (each exchange may add stablecoins independently).
+_STABLECOINS_USD_PARITY = {
+    "USDT", "USDC", "BUSD", "TUSD", "USDP", "FDUSD",
+    "USDS", "USDE", "FRAX", "DAI", "PYUSD", "USD1",
+}
+
+
+def _parse_binance_capital_row(row: dict, kind: str) -> list[CapitalEventInfo]:
+    """Convert one Binance deposit/withdrawal row into 0-or-1
+    CapitalEventInfo. Skips:
+      - Non-stablecoin assets (no FX source available here)
+      - Failed / cancelled transfers (status != 1 for deposits,
+        status != 6 for withdrawals — the python-binance SDK exposes
+        status codes per Binance docs)
+      - Rows missing amount, timestamp, or the exchange-internal id
+    """
+    asset = (row.get("coin") or row.get("asset") or "").upper().strip()
+    if asset not in _STABLECOINS_USD_PARITY:
+        return []
+
+    # Status filter: Binance deposit status=1 means SUCCESS; any other value
+    # (0=pending, 6=credited but cannot withdraw, etc.) is excluded.
+    # Withdrawal status=6 means COMPLETED. Filter conservatively — pending
+    # entries get picked up on a later poll once they finalize.
+    status = row.get("status")
+    if kind == "deposit" and status not in (1, "1"):
+        return []
+    if kind == "withdrawal" and status not in (6, "6"):
+        return []
+
+    amount = 0.0
+    try:
+        amount = float(row.get("amount", 0) or 0)
+    except (TypeError, ValueError):
+        return []
+    if amount <= 0:
+        return []
+
+    # Binance returns insertTime (deposits) or applyTime (withdrawals)
+    # in epoch-ms.
+    ts_raw = row.get("insertTime") or row.get("applyTime") or 0
+    try:
+        ts_ms = int(ts_raw)
+    except (TypeError, ValueError):
+        return []
+    if ts_ms <= 0:
+        return []
+
+    # Stable dedup ID. Deposits have `id` (string); withdrawals also have
+    # `id`. Both can be NULL on edge cases (manually-credited rebates etc.)
+    # — fall through to txId then a synthesized hash.
+    event_id = str(row.get("id") or row.get("txId") or "")
+    if not event_id:
+        return []
+
+    notes_parts = []
+    if row.get("network"):
+        notes_parts.append(f"network={row['network']}")
+    if row.get("txId") and row.get("txId") != event_id:
+        notes_parts.append(f"tx={row['txId']}")
+    notes = "; ".join(notes_parts) if notes_parts else None
+
+    return [CapitalEventInfo(
+        event_id=event_id,
+        kind=kind,
+        amount_usd=amount,
+        ts_ms=ts_ms,
+        asset=asset,
+        notes=notes,
+    )]
+
 
 def _inactive_instrument(inst_id: str) -> InstrumentInfo:
     """Placeholder for symbols we can't fetch info for; state=suspended so

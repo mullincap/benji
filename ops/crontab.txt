@@ -74,3 +74,13 @@ PATH=/usr/local/sbin:/usr/local/bin:/sbin:/bin:/usr/sbin:/usr/bin
 #   ops/reconcile_session_capital_events.sql (one-shot, hardcoded alloc)
 #   ops/reconcile_allocation_returns_nightly.sql (the nightly that ran one night)
 # Migration 005 drops capital_events_reconciled_at since it's no longer used.
+
+# ── Capital events auto-poll — 01:45 UTC nightly ────────────────────────────
+# Pulls deposit + withdrawal history from each active exchange connection's
+# income API (BloFin /asset/deposit-history + /withdrawal-history; Binance
+# /sapi/v1/capital/{deposit/hisrec,withdraw/history}) and dedup-inserts new
+# rows into user_mgmt.allocation_capital_events with source='auto'. Anomaly
+# detection in sync_exchange_snapshots fires out-of-band polls between cron
+# runs when the equity-jump threshold is exceeded — this nightly is the
+# safety net.
+45 1 * * * cd /root/benji && docker compose -f /root/benji/docker-compose.yml exec -T backend python -m app.cli.poll_capital_events >> /mnt/quant-data/logs/trader/poll_capital_events.log 2>&1

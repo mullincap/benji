@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING
 
 from app.services.exchanges.adapter import (
     BalanceInfo,
+    CapitalEventInfo,
     ExchangeAdapter,
     FillInfo,
     InstrumentInfo,
@@ -347,6 +348,45 @@ class BloFinAdapter(ExchangeAdapter):
 
         return results
 
+    # -- Capital flow --------------------------------------------------
+
+    def get_capital_events(
+        self,
+        since_ms: int | None = None,
+    ) -> list[CapitalEventInfo]:
+        """Pull deposit + withdrawal history from BloFin asset endpoints.
+
+        Stablecoin balances (USDT/USDC/DAI/etc.) are valued 1:1 USD.
+        Volatile assets (BTC/ETH/etc.) are skipped — we don't have an
+        on-the-fly price source here and capital events for non-stablecoin
+        deposits are uncommon enough that the rare case is better surfaced
+        via manual operator entry than mis-valued automatically.
+
+        BloFin pagination: `before` is the oldest cursor (we walk backwards
+        from now towards `since_ms`). API caps result count per page at 100.
+        Default lookback when since_ms is None: 90 days (BloFin's documented
+        history retention).
+        """
+        if since_ms is None:
+            # 90 days back, in epoch-ms
+            import time as _t
+            since_ms = int(_t.time() * 1000) - (90 * 86_400_000)
+
+        results: list[CapitalEventInfo] = []
+        for kind, fetch in (("deposit",    self._rest.get_deposit_history),
+                             ("withdrawal", self._rest.get_withdrawal_history)):
+            try:
+                resp = fetch(after_ms=since_ms, limit=100)
+            except Exception as e:
+                log.warning(f"BloFin {kind} history fetch failed: {e}")
+                continue
+
+            rows = resp.get("data") or []
+            for row in rows:
+                results.extend(_parse_blofin_capital_row(row, kind))
+
+        return results
+
     # -- Internals -----------------------------------------------------
 
     def _submit_order(
@@ -409,6 +449,15 @@ class BloFinAdapter(ExchangeAdapter):
 
 # -- Helpers -------------------------------------------------------------
 
+# Stablecoins that can be valued 1:1 USD without an external price source.
+# Mirrors the STABLECOINS set in daily_signal_v2.py / overlap_analysis.py
+# (canonical normalize_symbol semantics).
+_STABLECOINS_USD_PARITY = {
+    "USDT", "USDC", "BUSD", "TUSD", "USDP", "FDUSD",
+    "USDS", "USDE", "FRAX", "DAI", "PYUSD", "USD1",
+}
+
+
 def _safe_float(val, default):
     """Copied from trader_blofin.py -- defensive float parse with default."""
     try:
@@ -417,3 +466,67 @@ def _safe_float(val, default):
         return float(val)
     except (TypeError, ValueError):
         return default
+
+
+def _parse_blofin_capital_row(row: dict, kind: str) -> list[CapitalEventInfo]:
+    """Convert one BloFin deposit/withdrawal API row into 0-or-1
+    CapitalEventInfo. Skips:
+      - Non-stablecoin rows (BTC/ETH/etc) — no FX source available here
+      - Rows without a usable timestamp or amount
+      - Rows where the exchange-side status indicates the transfer was
+        cancelled / reversed (BloFin uses string state codes; "1"/"2" are
+        often "in progress" / "completed", but to stay tolerant of code
+        churn we accept any row WITH amount + timestamp + transferId and
+        let the operator delete spurious ones via the UI tombstone path)
+    Returns a list (0 or 1 elements) for ergonomic .extend() at the call site.
+    """
+    asset = (row.get("currency") or row.get("ccy") or "").upper().strip()
+    if asset not in _STABLECOINS_USD_PARITY:
+        return []
+
+    amount_raw = row.get("amount") or row.get("amt") or row.get("size") or 0
+    amount = _safe_float(amount_raw, 0.0)
+    if amount <= 0:
+        return []
+
+    # BloFin returns ts as epoch-ms string. Field-fallback for both naming
+    # conventions seen across `/asset/deposit-history` and `/withdrawal-history`.
+    ts_raw = (row.get("ts")
+              or row.get("createTime")
+              or row.get("cTime")
+              or row.get("updatedTime")
+              or 0)
+    try:
+        ts_ms = int(ts_raw)
+    except (TypeError, ValueError):
+        return []
+    if ts_ms <= 0:
+        return []
+
+    # Exchange's stable ID for dedup. Different field names per endpoint.
+    event_id = str(
+        row.get("transferId")
+        or row.get("withdrawId")
+        or row.get("depositId")
+        or row.get("txId")
+        or ""
+    )
+    if not event_id:
+        return []
+
+    # Free-form provenance — BloFin returns chain + tx hash on most rows.
+    notes_parts = []
+    if row.get("chain"):
+        notes_parts.append(f"chain={row['chain']}")
+    if row.get("txId") and row.get("txId") != event_id:
+        notes_parts.append(f"tx={row['txId']}")
+    notes = "; ".join(notes_parts) if notes_parts else None
+
+    return [CapitalEventInfo(
+        event_id=event_id,
+        kind=kind,
+        amount_usd=amount,
+        ts_ms=ts_ms,
+        asset=asset,
+        notes=notes,
+    )]

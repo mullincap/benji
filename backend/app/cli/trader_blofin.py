@@ -729,6 +729,43 @@ class BlofinREST:
             "clientOrderId": "",
         })
 
+    def get_deposit_history(
+        self,
+        before_ms: int | None = None,
+        after_ms: int | None = None,
+        limit: int = 100,
+    ) -> dict:
+        """Fetch deposit history. BloFin docs:
+        GET /api/v1/asset/deposit-history
+            ?after=<ms>&before=<ms>&limit=<n>
+        Pagination is by `after`/`before` (epoch-ms cursors); `limit` caps
+        per-page count (max 100). Returns oldest-first within the window.
+        """
+        p: dict = {"limit": str(min(limit, 100))}
+        if before_ms is not None:
+            p["before"] = str(before_ms)
+        if after_ms is not None:
+            p["after"] = str(after_ms)
+        return self.request("GET", "/api/v1/asset/deposit-history", params=p)
+
+    def get_withdrawal_history(
+        self,
+        before_ms: int | None = None,
+        after_ms: int | None = None,
+        limit: int = 100,
+    ) -> dict:
+        """Fetch withdrawal history. BloFin docs:
+        GET /api/v1/asset/withdrawal-history
+            ?after=<ms>&before=<ms>&limit=<n>
+        Same pagination semantics as get_deposit_history.
+        """
+        p: dict = {"limit": str(min(limit, 100))}
+        if before_ms is not None:
+            p["before"] = str(before_ms)
+        if after_ms is not None:
+            p["after"] = str(after_ms)
+        return self.request("GET", "/api/v1/asset/withdrawal-history", params=p)
+
     def get_fills_history(self, inst_type: str = "SWAP") -> dict:
         """
         Fetch recent trade fills. Used to reconcile exit fill prices after

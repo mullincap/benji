@@ -1042,15 +1042,52 @@ function CapitalEventsSection() {
             <tbody>
               {events.map((ev, idx) => {
                 const amountColor = ev.kind === "deposit" ? "var(--green)" : "var(--amber)";
+                const allocCell = ev.allocation_id
+                  ? (allocLabelById[ev.allocation_id] ?? ev.allocation_id.slice(0, 8))
+                  : (
+                    <span style={{ color: "var(--amber)" }}>
+                      Unassigned{ev.exchange_name ? ` (${ev.exchange_name})` : ""}
+                    </span>
+                  );
+                // Source badge: manual = subdued; auto = green; auto-anomaly = amber.
+                let sourceBg = "var(--bg2)", sourceColor = "var(--t2)", sourceLabel = "MANUAL";
+                if (ev.source === "auto") {
+                  sourceBg = "var(--green-dim)"; sourceColor = "var(--green)"; sourceLabel = "AUTO";
+                } else if (ev.source === "auto-anomaly") {
+                  sourceBg = "var(--amber-dim)"; sourceColor = "var(--amber)"; sourceLabel = "ANOMALY";
+                }
+                if (ev.is_manually_overridden && ev.source !== "manual") {
+                  sourceLabel += "*";  // signals operator has edited an auto entry
+                }
                 return (
                   <tr key={ev.event_id} style={{
                     borderBottom: idx < events.length - 1 ? "1px solid var(--line)" : "none",
                   }}>
                     <td style={{ padding: "10px 14px", color: "var(--t1)" }}>
                       {fmtCapitalDate(ev.event_at)}
+                      <span
+                        title={
+                          ev.source === "manual"
+                            ? "Operator-entered"
+                            : ev.source === "auto-anomaly"
+                              ? "Auto-detected via mid-session equity-jump anomaly"
+                              : "Auto-detected from exchange income API"
+                            + (ev.is_manually_overridden ? " — edited by operator (won't re-sync)" : "")
+                        }
+                        style={{
+                          marginLeft: 8,
+                          display: "inline-block",
+                          fontSize: 8, fontWeight: 700, letterSpacing: "0.08em",
+                          padding: "1px 5px", borderRadius: 2,
+                          background: sourceBg, color: sourceColor,
+                          cursor: "help", verticalAlign: "middle",
+                        }}
+                      >
+                        {sourceLabel}
+                      </span>
                     </td>
                     <td style={{ padding: "10px 14px", color: "var(--t1)" }}>
-                      {allocLabelById[ev.allocation_id] ?? ev.allocation_id.slice(0, 8)}
+                      {allocCell}
                     </td>
                     <td style={{ padding: "10px 14px", color: "var(--t2)", textTransform: "uppercase" }}>
                       {ev.kind}
