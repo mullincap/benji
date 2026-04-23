@@ -2053,6 +2053,57 @@ def trader_pnl(allocation_id: str, user_id: str = Depends(get_current_user), cur
     total_pnl_usd = equity - total_baseline
     total_return_pct = (total_pnl_usd / total_baseline * 100) if total_baseline > 0 else 0.0
 
+    # ── Capital-event adjustments (migration 003) ───────────────────────────
+    # Subtract net deposits minus withdrawals so operator-moved principal
+    # doesn't appear as trading P&L. Lifetime sum → Total P&L; session-
+    # window sum → Session P&L. Events recorded in
+    # user_mgmt.allocation_capital_events with kind ∈ {deposit, withdrawal}.
+    cur.execute("""
+        SELECT COALESCE(SUM(CASE kind
+                              WHEN 'deposit'    THEN amount_usd
+                              WHEN 'withdrawal' THEN -amount_usd
+                            END), 0)::float AS lifetime_net
+        FROM user_mgmt.allocation_capital_events
+        WHERE allocation_id = %s::uuid
+    """, (allocation_id,))
+    lifetime_capital_net = float(cur.fetchone()["lifetime_net"] or 0)
+    total_pnl_usd -= lifetime_capital_net
+    # Re-compute total_return_pct against the CAPITAL-ADJUSTED baseline so
+    # the percentage reads "trading return vs net invested principal" — the
+    # intuitive meaning users expect on the Trader card. Adjusted baseline
+    # = original baseline + deposits − withdrawals.
+    adjusted_total_baseline = total_baseline + lifetime_capital_net
+    total_return_pct = (
+        (total_pnl_usd / adjusted_total_baseline * 100)
+        if adjusted_total_baseline > 0 else 0.0
+    )
+
+    session_capital_net = 0.0
+    if session_active and session_start is not None and session_date:
+        # Session open window: session_date at session_start_hour UTC.
+        # Conservative: events on/after today 00:00 UTC. The live trader
+        # runs its session between 06:00 and 23:55 UTC; any capital event
+        # within the session date is assumed to be within the session
+        # window (cross-midnight sessions are out of scope for this v1).
+        cur.execute("""
+            SELECT COALESCE(SUM(CASE kind
+                                  WHEN 'deposit'    THEN amount_usd
+                                  WHEN 'withdrawal' THEN -amount_usd
+                                END), 0)::float AS session_net
+            FROM user_mgmt.allocation_capital_events
+            WHERE allocation_id = %s::uuid
+              AND event_at >= (%s::date)::timestamptz
+        """, (allocation_id, session_date))
+        session_capital_net = float(cur.fetchone()["session_net"] or 0)
+        if session_pnl_usd is not None:
+            session_pnl_usd -= session_capital_net
+            if session_start > 0:
+                session_return_pct = (
+                    session_pnl_usd / (session_start + session_capital_net) * 100
+                    if (session_start + session_capital_net) > 0
+                    else 0.0
+                )
+
     return {
         "allocation_id": allocation_id,
         "capital_usd": round(capital, 2),
@@ -2060,9 +2111,11 @@ def trader_pnl(allocation_id: str, user_id: str = Depends(get_current_user), cur
         "session_start_equity_usd": round(session_start, 2) if session_start is not None else None,
         "session_pnl_usd": round(session_pnl_usd, 2) if session_pnl_usd is not None else None,
         "session_return_pct": round(session_return_pct, 4) if session_return_pct is not None else None,
+        "session_capital_net_usd": round(session_capital_net, 2),
         "initial_equity_usd": round(initial_equity, 2) if initial_equity is not None else None,
         "total_pnl_usd": round(total_pnl_usd, 2),
         "total_return_pct": round(total_return_pct, 4),
+        "lifetime_capital_net_usd": round(lifetime_capital_net, 2),
     }
 
 
