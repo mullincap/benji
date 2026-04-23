@@ -1014,14 +1014,10 @@ function CapitalEventsSection() {
   async function handleReset() {
     setSubmitting(true);
     try {
-      const r = await allocatorApi.resetCapitalEventsToDefaults();
+      await allocatorApi.resetCapitalEventsToDefaults();
       setConfirmReset(false);
       await refresh();
-      setError(
-        r.deleted_overrides === 0
-          ? null
-          : null,  // silent success; the list refresh is confirmation
-      );
+      // Silent success — the list refresh is the visual confirmation.
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -1068,7 +1064,7 @@ function CapitalEventsSection() {
           <button
             onClick={() => setConfirmReset(true)}
             disabled={allocOptions.length === 0}
-            title="Discard all manual edits to auto-detected events and re-sync from the exchange."
+            title="Delete all manual entries + overrides and re-sync from the exchange (exchange truth only)."
             style={{
               background: "transparent",
               border: "1px solid var(--line2)",
@@ -1414,9 +1410,10 @@ function CapitalEventsSection() {
               color: "var(--t3)", textTransform: "uppercase", marginBottom: 10,
             }}>Reset capital events to default?</div>
             <div style={{ fontSize: 11, color: "var(--t1)", lineHeight: 1.6, marginBottom: 16 }}>
-              Discard all manual edits and un-deletions on auto-detected events, then
-              re-sync from the exchange. Your manually-entered events are NOT affected.
-              Principal will recompute from exchange-truth values. This cannot be undone.
+              Delete ALL capital events on your allocations — manual entries you created
+              AND manual overrides on auto-detected rows — then re-sync from the exchange.
+              Only events the exchange reports will remain. Principal recomputes from
+              exchange-truth values. This cannot be undone.
             </div>
             <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
               <button

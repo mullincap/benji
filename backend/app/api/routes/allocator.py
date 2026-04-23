@@ -2490,25 +2490,27 @@ def reset_capital_events_to_defaults(
     user_id: str = Depends(get_current_user),
     cur=Depends(get_cursor),
 ) -> dict[str, Any]:
-    """Discard all manual overrides on auto-detected events and re-sync
-    from the exchange. Manual-entered events (source='manual') are NOT
-    affected — those represent operator-created records, not overrides.
+    """Wipe all operator-authored capital events (manual entries + manual
+    overrides on auto rows) and re-sync from the exchange. Semantic: "show
+    me exchange truth only."
 
     Steps:
-      1. Hard-delete rows where source IN ('auto','auto-anomaly')
-         AND is_manually_overridden=TRUE (destroys edits + tombstones)
+      1. Hard-delete EVERY row owned by the caller, regardless of source:
+         - source='manual'                    (operator-created records)
+         - source IN ('auto','auto-anomaly') (auto-detected — will be
+           re-inserted on step 2 with their original exchange-reported
+           values, minus any edits/deletes the operator had layered on)
       2. Re-poll each affected connection via poll_connection with
-         source='auto'. The now-missing (connection_id, exchange_event_id)
-         pairs re-insert from the live exchange API with their true
-         exchange-reported values.
+         source='auto'. Only auto rows come back; manual entries are gone
+         until the operator re-enters them.
 
-    Scope: caller's own allocations + connections. Connections ambiguously
-    shared across users are blocked at the SELECT below via the user_id
-    join, so one user's reset can never touch another user's auto rows.
+    Scope: caller's own allocations + connections. Ownership resolved
+    through allocation_id → allocation.user_id OR connection_id →
+    exchange_connection.user_id. One user's reset can never touch
+    another user's rows.
     """
-    # Collect the connections whose auto events we need to re-poll AFTER
-    # deletion. We compute this set before DELETE because post-delete the
-    # rows are gone and we'd lose the connection linkage.
+    # Collect connections to re-poll BEFORE deleting (we need the linkage).
+    # Union across all events the user owns (either mapping chain).
     cur.execute("""
         SELECT DISTINCT ce.connection_id::text AS connection_id
           FROM user_mgmt.allocation_capital_events ce
@@ -2516,37 +2518,33 @@ def reset_capital_events_to_defaults(
                  ON a.allocation_id = ce.allocation_id
           LEFT JOIN user_mgmt.exchange_connections ec
                  ON ec.connection_id = ce.connection_id
-         WHERE ce.source IN ('auto', 'auto-anomaly')
-           AND ce.is_manually_overridden = TRUE
-           AND COALESCE(a.user_id, ec.user_id) = %s::uuid
+         WHERE COALESCE(a.user_id, ec.user_id) = %s::uuid
            AND ce.connection_id IS NOT NULL
     """, (user_id,))
     affected_connections = [r["connection_id"] for r in cur.fetchall()]
 
+    # Delete by connection-ownership path.
     cur.execute("""
         DELETE FROM user_mgmt.allocation_capital_events ce
          USING user_mgmt.exchange_connections ec
          WHERE ce.connection_id = ec.connection_id
-           AND ce.source IN ('auto', 'auto-anomaly')
-           AND ce.is_manually_overridden = TRUE
            AND ec.user_id = %s::uuid
     """, (user_id,))
     deleted_count = cur.rowcount
 
-    # Also sweep any auto-rows whose allocation_id-ownership chain says
-    # user-owned, but whose connection_id may be NULL (defensive — should
-    # be zero in practice since auto rows always carry connection_id).
+    # Sweep any remaining rows whose allocation-ownership chain says
+    # user-owned but connection_id was NULL (very rare — only happens if
+    # a manual entry was created with allocation_id only, which the
+    # POST path doesn't explicitly prevent). Covers that edge.
     cur.execute("""
         DELETE FROM user_mgmt.allocation_capital_events ce
          USING user_mgmt.allocations a
          WHERE ce.allocation_id = a.allocation_id
-           AND ce.source IN ('auto', 'auto-anomaly')
-           AND ce.is_manually_overridden = TRUE
            AND a.user_id = %s::uuid
     """, (user_id,))
     deleted_count += cur.rowcount
 
-    # Re-poll each affected connection so the deleted rows re-appear with
+    # Re-poll each affected connection so auto events re-appear with
     # their exchange-reported defaults. Import lazily to avoid a module-
     # import cycle when the route file is imported by the celery worker.
     from app.cli.poll_capital_events import poll_connection
@@ -2562,6 +2560,6 @@ def reset_capital_events_to_defaults(
 
     return {
         "reset": True,
-        "deleted_overrides": deleted_count,
+        "deleted_rows": deleted_count,
         "connections_repolled": repolled,
     }

@@ -396,10 +396,11 @@ export const allocatorApi = {
       { method: "DELETE" },
     ),
 
-  // Discard all manual overrides + tombstones on auto-detected events and
-  // re-sync from the exchange. Manual-entered events are preserved.
+  // Wipe all operator-authored capital events (manual entries + manual
+  // overrides on auto rows) and re-sync from the exchange. "Show me
+  // exchange truth only" — clean slate.
   resetCapitalEventsToDefaults: () =>
-    apiFetch<{ reset: boolean; deleted_overrides: number; connections_repolled: number }>(
+    apiFetch<{ reset: boolean; deleted_rows: number; connections_repolled: number }>(
       `/api/allocator/capital-events/reset-defaults`,
       { method: "POST" },
     ),
