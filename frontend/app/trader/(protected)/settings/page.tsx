@@ -713,6 +713,7 @@ function fmtAmount(usd: number, kind: "deposit" | "withdrawal"): string {
 
 function ExchangeCapitalGroup({
   group,
+  exchangeBalance,
   pnlByAlloc,
   onEditAnchor,
   onUpdateEvent,
@@ -726,6 +727,9 @@ function ExchangeCapitalGroup({
     allocations: { id: string; label: string }[];
     events: ApiCapitalEvent[];
   };
+  /** Current total equity on this exchange from Exchange.balance (null if
+   * not fetched yet or for the orphan "no connection" bucket). */
+  exchangeBalance: number | null;
   pnlByAlloc: Record<string, {
     principal_usd: number;
     principal_baseline_usd: number;
@@ -742,6 +746,18 @@ function ExchangeCapitalGroup({
   onRecordNew?: () => void;
   onReset?: () => void;
 }) {
+  // Exchange-level principal: net capital events across all of this
+  // connection's events (regardless of allocation attribution).
+  //   principal   = SUM(deposits − withdrawals) on the connection
+  //   balance     = current equity on the exchange (from snapshots)
+  //   trading_delta = balance − principal
+  // Shown as a per-connection summary so every linked exchange has a
+  // visible principal bar even when no allocation is attached to it.
+  const netCapital = group.events.reduce((sum, ev) => {
+    const signed = ev.kind === "deposit" ? ev.amount_usd : -ev.amount_usd;
+    return sum + signed;
+  }, 0);
+  const tradingDelta = exchangeBalance !== null ? exchangeBalance - netCapital : null;
 
   const header = group.exchange_name
     ? group.exchange_name.toUpperCase()
@@ -809,8 +825,57 @@ function ExchangeCapitalGroup({
         )}
       </div>
 
-      {/* Per-allocation principal summary (none = no tracking for this exchange yet) */}
-      {group.allocations.length > 0 ? (
+      {/* Exchange-level principal summary. Always renders for real
+          connections so every exchange gets a visible principal bar
+          regardless of whether any allocation is attached yet. */}
+      {group.connection_id && (
+        <div style={{
+          padding: "10px 14px",
+          borderBottom: "1px solid var(--line)",
+          background: "var(--bg2)",
+          display: "flex", alignItems: "center", gap: 14,
+          fontSize: 10, fontFamily: FONT_MONO, flexWrap: "wrap",
+        }}>
+          <span style={{
+            color: "var(--t3)", letterSpacing: "0.12em",
+            textTransform: "uppercase", fontWeight: 700, minWidth: 150,
+          }}>
+            Exchange principal
+          </span>
+          <span style={{ color: "var(--t3)" }}>BALANCE</span>
+          <span style={{ color: "var(--t0)", fontWeight: 700 }}>
+            {exchangeBalance !== null
+              ? `$${exchangeBalance.toLocaleString("en-US", { maximumFractionDigits: 2 })}`
+              : "—"}
+          </span>
+          <span style={{ color: "var(--t3)" }}>NET CAPITAL IN</span>
+          <span style={{
+            color: netCapital >= 0 ? "var(--green)" : "var(--amber)",
+            fontWeight: 700,
+          }}>
+            {netCapital >= 0 ? "+" : "−"}$
+            {Math.abs(netCapital).toLocaleString("en-US", { maximumFractionDigits: 2 })}
+          </span>
+          {tradingDelta !== null && (
+            <>
+              <span style={{ color: "var(--t3)" }}>TRADING Δ</span>
+              <span style={{
+                color: tradingDelta >= 0 ? "var(--green)" : "var(--red)",
+                fontWeight: 700,
+              }}>
+                {tradingDelta >= 0 ? "+" : "−"}$
+                {Math.abs(tradingDelta).toLocaleString("en-US", { maximumFractionDigits: 2 })}
+              </span>
+            </>
+          )}
+        </div>
+      )}
+
+      {/* Per-allocation principal summary. Listed below the exchange-level
+          bar. When no allocations exist, the exchange-level bar alone
+          represents the operator's capital-event tracking for this
+          exchange. */}
+      {group.allocations.length > 0 && (
         <div style={{
           padding: "10px 14px",
           borderBottom: "1px solid var(--line)",
@@ -866,16 +931,7 @@ function ExchangeCapitalGroup({
             );
           })}
         </div>
-      ) : group.connection_id ? (
-        <div style={{
-          padding: "10px 14px",
-          borderBottom: "1px solid var(--line)",
-          fontSize: 10, color: "var(--t3)", fontStyle: "italic",
-          background: "var(--bg2)",
-        }}>
-          No active allocations on this exchange — events recorded but not counted toward any principal.
-        </div>
-      ) : null}
+      )}
 
       {/* Events table */}
       {group.events.length === 0 ? (
@@ -1427,18 +1483,29 @@ function CapitalEventsSection() {
 
           return (
             <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-              {groups.map(grp => (
-                <ExchangeCapitalGroup
-                  key={grp.connection_id || "orphan"}
-                  group={grp}
-                  pnlByAlloc={pnlByAlloc}
-                  onEditAnchor={setEditingAnchor}
-                  onUpdateEvent={setEditingEvent}
-                  onDeleteEvent={setConfirmDelete}
-                  onRecordNew={grp.connection_id ? () => setCreatingForConnection(grp.connection_id!) : undefined}
-                  onReset={grp.connection_id ? () => setConfirmReset(grp.connection_id!) : undefined}
-                />
-              ))}
+              {groups.map(grp => {
+                const ex = grp.connection_id
+                  ? exchanges.find(e => e.id === grp.connection_id)
+                  : undefined;
+                // Exchange.balance is 0 when not yet fetched; treat as null
+                // so the UI shows "—" rather than "$0" during load.
+                const bal = ex && ex.balance > 0
+                  ? ex.balance
+                  : (ex && ex.status === "active" ? 0 : null);
+                return (
+                  <ExchangeCapitalGroup
+                    key={grp.connection_id || "orphan"}
+                    group={grp}
+                    exchangeBalance={bal}
+                    pnlByAlloc={pnlByAlloc}
+                    onEditAnchor={setEditingAnchor}
+                    onUpdateEvent={setEditingEvent}
+                    onDeleteEvent={setConfirmDelete}
+                    onRecordNew={grp.connection_id ? () => setCreatingForConnection(grp.connection_id!) : undefined}
+                    onReset={grp.connection_id ? () => setConfirmReset(grp.connection_id!) : undefined}
+                  />
+                );
+              })}
               {groups.length === 0 && (
                 <div style={{
                   background: "var(--bg1)", border: "1px solid var(--line)",

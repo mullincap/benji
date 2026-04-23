@@ -800,11 +800,27 @@ def _parse_binance_capital_row(
     if amount <= 0:
         return []
 
+    # Binance timestamp quirk: deposit history returns `insertTime` as
+    # epoch-ms (int); withdrawal history returns `applyTime` as a formatted
+    # date string like "2026-04-23 08:42:50" (UTC). Parse both forms.
     ts_raw = row.get("insertTime") or row.get("applyTime") or 0
-    try:
+    ts_ms: int = 0
+    if isinstance(ts_raw, (int, float)):
         ts_ms = int(ts_raw)
-    except (TypeError, ValueError):
-        return []
+    elif isinstance(ts_raw, str) and ts_raw.strip():
+        s = ts_raw.strip()
+        try:
+            # First try straight int (some endpoints return ms as a string).
+            ts_ms = int(s)
+        except (TypeError, ValueError):
+            import datetime as _dt
+            for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S"):
+                try:
+                    dt = _dt.datetime.strptime(s, fmt).replace(tzinfo=_dt.timezone.utc)
+                    ts_ms = int(dt.timestamp() * 1000)
+                    break
+                except (TypeError, ValueError):
+                    continue
     if ts_ms <= 0:
         return []
 
