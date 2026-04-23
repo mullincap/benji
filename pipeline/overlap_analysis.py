@@ -835,6 +835,68 @@ def _load_frequency_from_db(
 # ─────────────────────────────────────────────
 
 
+def _compute_per_day_volume_universe(
+    leaderboard_index: int,
+    blofin_bases: list | None,
+    deployment_start_hour: int,
+) -> dict:
+    """Compute per-day v1-style universe: top-`leaderboard_index` USDT perps by
+    SUM(volume * close) over the prior 24h ending at `deployment_start_hour`
+    UTC, optionally narrowed to BloFin-listed bases.
+
+    This reproduces the universe construction in daily_signal.py
+    (LEADERBOARD_UNIVERSE = 100, BloFin-gated) and in
+    `_load_live_parity_frequencies_from_db` (hardcoded LIMIT 100). Exposed as
+    a shared helper so the Simulator path (apply_blofin_filter=True +
+    leaderboard_index) and --live-parity share the same logic.
+
+    Returns dict[date, list[symbol_id]]. Skips the first day (no prior 24h
+    data) and any day whose universe query returns zero symbols.
+    """
+    import datetime as _dt
+    import sys as _sys
+
+    _sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    from pipeline.db.connection import get_conn
+
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT MIN(timestamp_utc)::date, MAX(timestamp_utc)::date FROM market.futures_1m")
+    dmin, dmax = cur.fetchone()
+    if dmin is None:
+        raise RuntimeError("market.futures_1m is empty")
+    first_processable = dmin + _dt.timedelta(days=1)
+
+    bases_arr = sorted(blofin_bases) if blofin_bases else None
+    result: dict = {}
+    d = first_processable
+    while d <= dmax:
+        deployment_start = _dt.datetime.combine(d, _dt.time(deployment_start_hour, 0, 0),
+                                                tzinfo=_dt.timezone.utc)
+        prior_24h_start = deployment_start - _dt.timedelta(hours=24)
+        cur.execute("""
+            SELECT sym.symbol_id
+            FROM market.futures_1m f
+            JOIN market.symbols sym USING (symbol_id)
+            WHERE f.timestamp_utc > %s AND f.timestamp_utc <= %s
+              AND sym.binance_id LIKE '%%USDT'
+              AND sym.binance_id NOT LIKE '%%\\_%%' ESCAPE '\\'
+              AND (%s::text[] IS NULL OR sym.base = ANY(%s))
+            GROUP BY sym.symbol_id
+            HAVING SUM(f.volume * f.close) > 0
+            ORDER BY SUM(f.volume * f.close) DESC
+            LIMIT %s
+        """, (prior_24h_start, deployment_start, bases_arr, bases_arr, leaderboard_index))
+        sids = [r[0] for r in cur.fetchall()]
+        if sids:
+            result[d] = sids
+        d += _dt.timedelta(days=1)
+
+    cur.close()
+    conn.close()
+    return result
+
+
 def _load_canonical_futures_1m_frequencies(
     metric: str,
     freq_width: int,
@@ -842,10 +904,11 @@ def _load_canonical_futures_1m_frequencies(
     mode: str,
     ranking_metric: str,
     apply_blofin_filter: bool = False,
+    universe_by_day: dict | None = None,
 ) -> dict:
     """Compute per-day top-freq_width frequencies from raw market.futures_1m
     values. Canonical universe by default; optionally narrowed to BloFin
-    instrument list.
+    instrument list and/or a per-day top-N-by-volume universe.
 
     metric         : 'close' (price) or 'open_interest'
     freq_width     : top-N per bar to award +1 frequency
@@ -855,10 +918,16 @@ def _load_canonical_futures_1m_frequencies(
                      log_return: LN(now/anchor)  — PRICE ONLY (matches v1)
                      pct_change: (now/anchor) - 1  — canonical default
                      abs_dollar: (now - anchor)    — v1 OI methodology
-    apply_blofin_filter : when True, restrict the universe to symbols whose
-                     base is in today's BloFin USDT-swap list. Used by
-                     --live-parity and by the Simulator's
-                     apply_blofin_filter checkbox.
+    apply_blofin_filter : when True AND `universe_by_day` is None, restrict
+                     the universe to symbols whose base is in today's BloFin
+                     USDT-swap list (static gate, no volume cap).
+    universe_by_day : optional dict[date, list[symbol_id]]. When provided,
+                     restricts each day's ranking to that day's symbol_id
+                     list — supersedes `apply_blofin_filter` (since the
+                     per-day universe is already narrowed however the caller
+                     constructed it, typically via
+                     _compute_per_day_volume_universe which bundles
+                     top-N-by-volume + BloFin gate).
 
     Returns dict[date, Counter[base, int]]. Keys are normalize_symbol()
     bases so the output shape matches _load_frequency_from_db.
@@ -898,11 +967,12 @@ def _load_canonical_futures_1m_frequencies(
     # an optional text[] (blofin_bases) so psycopg2 parameter substitution
     # is safe.
 
-    # Fetch BloFin instrument list if the universe filter is requested.
-    # Returns {} on fetch failure → we fall back to the canonical unfiltered
-    # universe with a warning, rather than silently producing empty baskets.
+    # Fetch BloFin instrument list if the universe filter is requested AND a
+    # pre-computed per-day universe was not supplied by the caller. When the
+    # caller passes universe_by_day, narrowing is already baked in — the
+    # BloFin fetch + static gate is skipped.
     blofin_bases = None
-    if apply_blofin_filter:
+    if apply_blofin_filter and universe_by_day is None:
         blofin = _fetch_blofin_instruments()
         if blofin:
             blofin_bases = sorted(blofin)
@@ -913,7 +983,7 @@ def _load_canonical_futures_1m_frequencies(
     # Build the optional WHERE clause for the BloFin narrowing.
     # Applied in the `scored` CTE (after anchor+snapshot rows are joined to
     # the symbols table), so ranking happens ONLY over symbols that survive
-    # the filter.
+    # the filter. Skipped when universe_by_day supplies a per-day filter.
     blofin_clause = "AND sym.base = ANY(%s)" if blofin_bases else ""
 
     conn = get_conn()
@@ -943,8 +1013,31 @@ def _load_canonical_futures_1m_frequencies(
         # seeks within remaining chunks via PK index.
         ts_min = min(anchor_minutes[0], snapshot_ts[0])
         ts_max = snapshot_ts[-1] + _dt.timedelta(minutes=1)
+
+        # Per-day universe JOIN (v1-style narrowing). Parallel arrays of
+        # (day, symbol_id) are unnested into a CTE; scored CTE joins on both
+        # so ranking happens only within that day's universe. Supersedes
+        # blofin_clause when supplied.
+        universe_clause = ""
+        if universe_by_day:
+            universe_clause = (
+                "JOIN per_day_universe u "
+                "ON u.day = s.minute::date AND u.symbol_id = s.symbol_id"
+            )
+            universe_cte = (
+                "per_day_universe AS ("
+                "  SELECT day, symbol_id "
+                "  FROM ROWS FROM ("
+                "    unnest(%s::date[]), unnest(%s::int[])"
+                "  ) AS t(day, symbol_id)"
+                "),"
+            )
+        else:
+            universe_cte = ""
+
         sql = f"""
-            WITH anchor_rows AS (
+            WITH {universe_cte}
+            anchor_rows AS (
                 SELECT DISTINCT ON (a.symbol_id, date_trunc('minute', a.timestamp_utc))
                     a.symbol_id,
                     date_trunc('minute', a.timestamp_utc) AS minute,
@@ -987,6 +1080,7 @@ def _load_canonical_futures_1m_frequencies(
                   ON a.symbol_id = s.symbol_id
                  AND a.minute = s.minute - (%s * interval '1 hour')
                 JOIN market.symbols sym ON sym.symbol_id = s.symbol_id
+                {universe_clause}
                 WHERE 1=1
                   {blofin_clause}
             ),
@@ -1001,12 +1095,21 @@ def _load_canonical_futures_1m_frequencies(
             FROM ranked
             WHERE rnk <= %s
         """
-        params = [
+        params = []
+        if universe_by_day:
+            # Flatten dict[date, list[symbol_id]] into two parallel arrays.
+            day_arr: list = []
+            sid_arr: list = []
+            for day, sids in universe_by_day.items():
+                day_arr.extend([day] * len(sids))
+                sid_arr.extend(sids)
+            params.extend([day_arr, sid_arr])
+        params.extend([
             ts_min, ts_max, anchor_minutes,          # anchor_rows bounds + minute list
             ts_min, ts_max, snapshot_ts,             # snapshot_rows bounds + minute list
             ranking_metric, ranking_metric,          # scored CASE (abs_dollar, log_return)
             INDEX_LOOKBACK,                          # lookback interval on join
-        ]
+        ])
         if blofin_bases:
             params.append(blofin_bases)              # BloFin filter bound param
         params.append(freq_width)                    # rnk cutoff (last)
@@ -1036,10 +1139,23 @@ def _load_canonical_futures_1m_frequencies(
         log.info(f"[canonical {ranking_metric} freq] Processing dates "
                  f"{first_processable} → {dmax} "
                  f"({(dmax - first_processable).days + 1} days)"
-                 f"{'  [BloFin-filtered]' if blofin_bases else ''}")
+                 f"{'  [BloFin-filtered]' if blofin_bases else ''}"
+                 f"{'  [per-day universe narrowing]' if universe_by_day else ''}")
+
+        # Per-day universe narrowing clause (supersedes static BloFin gate).
+        # Applied in the `bars` CTE so the hypertable scan is narrowed before
+        # any ranking work, rather than filtering post-scan inside `scored`.
+        uni_bars_clause = "AND f.symbol_id = ANY(%s)" if universe_by_day else ""
 
         d = first_processable
         while d <= dmax:
+            # Skip days whose universe is empty (no prior-24h data) when
+            # universe_by_day narrowing is active — matches the behavior of
+            # _load_live_parity_frequencies_from_db.
+            if universe_by_day is not None and d not in universe_by_day:
+                d += _dt.timedelta(days=1)
+                continue
+
             anchor_ts = _dt.datetime.combine(
                 d, _dt.time(anchor_hour, 0, 0), tzinfo=_dt.timezone.utc,
             )
@@ -1065,6 +1181,7 @@ def _load_canonical_futures_1m_frequencies(
                       AND f.timestamp_utc <= %s
                       AND MOD(EXTRACT(MINUTE FROM f.timestamp_utc)::int, %s) = 0
                       AND f.{metric} IS NOT NULL
+                      {uni_bars_clause}
                 ),
                 scored AS (
                     SELECT b.timestamp_utc, b.symbol_id,
@@ -1089,6 +1206,10 @@ def _load_canonical_futures_1m_frequencies(
                 GROUP BY sym.binance_id
             """
             freq_params = [anchor_ts, window_start_ts, window_end_ts, sample_interval]
+            # uni_bars_clause binds first (inside `bars`), bf_freq_clause
+            # binds second (inside `scored`) — must match SQL order.
+            if universe_by_day:
+                freq_params.append(universe_by_day[d])
             if blofin_bases:
                 freq_params.append(blofin_bases)
             freq_params.append(freq_width)
@@ -1657,14 +1778,42 @@ def run(min_mcap: float, freq_width: int, marketcap_dir: Path,
             # market.futures_1m and ranks on-the-fly (market.leaderboards is
             # pct_change-only and unfiltered by construction). Opt-in axes
             # for candidate methodology exploration per spec § 3.1.
+            #
+            # When apply_blofin_filter=True, we compute the v1-style per-day
+            # universe once (top-`leaderboard_index` by 24h volume, BloFin-
+            # gated) and reuse it for both price and OI rankings. This
+            # bundles the BloFin gate with v1's top-100-by-volume narrowing
+            # so `leaderboard_index=100 + apply_blofin_filter=True + (log_
+            # return price, abs_dollar OI, mode=frequency)` reproduces v1
+            # --live-parity exactly.
             log.info(f"[CANONICAL + split ranking] price={price_ranking_metric} "
                      f"oi={oi_ranking_metric} "
                      f"blofin_filter={apply_blofin_filter} mode={mode}")
+            universe_by_day = None
+            if apply_blofin_filter:
+                blofin = _fetch_blofin_instruments()
+                blofin_bases = sorted(blofin) if blofin else None
+                if blofin_bases is None:
+                    log.warning("[canonical] apply_blofin_filter=True but "
+                                "BloFin fetch returned empty — per-day "
+                                "universe will reflect volume only")
+                universe_by_day = _compute_per_day_volume_universe(
+                    leaderboard_index=leaderboard_index,
+                    blofin_bases=blofin_bases,
+                    deployment_start_hour=DEPLOYMENT_START_HOUR,
+                )
+                _avg = (sum(len(v) for v in universe_by_day.values())
+                        / max(len(universe_by_day), 1))
+                log.info(f"[canonical] Per-day universe (top-{leaderboard_index} "
+                         f"by 24h volume"
+                         f"{', BloFin-gated' if blofin_bases else ''}): "
+                         f"{len(universe_by_day)} days, avg {_avg:.1f} symbols/day")
             price_freq = _load_canonical_futures_1m_frequencies(
                 metric="close", freq_width=freq_width,
                 sample_interval=sample_interval, mode=mode,
                 ranking_metric=price_ranking_metric,
                 apply_blofin_filter=apply_blofin_filter,
+                universe_by_day=universe_by_day,
             )
             log.info(f"  → {len(price_freq)} dates with price data "
                      f"(ranking={price_ranking_metric})")
@@ -1673,6 +1822,7 @@ def run(min_mcap: float, freq_width: int, marketcap_dir: Path,
                 sample_interval=sample_interval, mode=mode,
                 ranking_metric=oi_ranking_metric,
                 apply_blofin_filter=apply_blofin_filter,
+                universe_by_day=universe_by_day,
             )
             log.info(f"  → {len(oi_freq)} dates with OI data "
                      f"(ranking={oi_ranking_metric})")

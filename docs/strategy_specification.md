@@ -184,9 +184,13 @@ All three default to canonical; opt in to deviate.
   `log_return` is NOT valid for OI (semantically questionable and `LN(0)`
   errors on delisted symbols) — rejected at argparse.
 - `--apply-blofin-filter` (store_true, default off). Narrows universe to
-  symbols currently on BloFin's USDT-swap instrument list BEFORE ranking.
-  Matches live's universe constraint without the 24h-volume proxy of
-  `--live-parity` (Gap A from the Part 1b audit).
+  the top-`--leaderboard-index` USDT perps by 24h volume (prior 24h ending
+  at `DEPLOYMENT_START_HOUR` UTC) AND restricts to symbols on BloFin's
+  USDT-swap instrument list. Bundling the volume cap and BloFin gate into
+  one flag matches v1's `get_binance_universe(blofin_syms)` semantics
+  exactly: v1 hardcodes `LEADERBOARD_UNIVERSE = 100` and always pairs it
+  with the BloFin gate. With `leaderboard_index=100`, this reproduces v1's
+  Gap-A universe with no approximation.
 
 **Backward compat**: the previous single `--ranking-metric {pct_change,
 abs_dollar}` flag is deprecated but still accepted for one release cycle.
@@ -493,8 +497,19 @@ Simulator UI alone. After the split, the three dropdowns in ParamForm
 suffice — no CLI or --live-parity preset needed for candidate
 exploration along any of these axes.
 
-Commits: `11a394a` (backend), `749bdab` (frontend), spec update in
-this commit.
+**Bundled semantic for `--apply-blofin-filter`**: the BloFin gate in v1
+is inseparable from the top-100-by-volume narrowing (`get_binance_universe`
+always pairs the BloFin-filter gate with `LEADERBOARD_UNIVERSE = 100`
+truncation). To match v1 from the Simulator UI without introducing a
+fourth knob, `--apply-blofin-filter=True` now also applies a per-day
+top-`--leaderboard-index`-by-24h-volume cap (default 100, matching v1).
+The existing `--leaderboard-index` dropdown in the Simulator supplies
+the cap; no new UI surface needed. v1's exact universe is reproducible
+via `leaderboard_index=100 + apply_blofin_filter=True + price_ranking_
+metric=log_return + oi_ranking_metric=abs_dollar + mode=frequency`.
+
+Commits: `11a394a` (backend knobs), `749bdab` (frontend form),
+TBD (apply_blofin_filter semantic extension + spec update).
 
 ### 11.5 Shadow-gate bypass record (2026-04-23 cutover)
 
