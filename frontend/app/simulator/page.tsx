@@ -23,6 +23,7 @@ const DEFAULT_PARAMS: Record<string, unknown> = {
   leaderboard_index: 100,
   sort_by: 'price',
   mode: 'snapshot',
+  ranking_metric: 'pct_change',
   freq_width: 20,
   freq_cutoff: 20,
   sample_interval: 5,

@@ -27,6 +27,7 @@ const API_BASE = process.env.NEXT_PUBLIC_API_BASE || '';
  *  short-circuits (no meaningful delta). */
 const METHODOLOGY_KEYS = [
   'mode',
+  'ranking_metric',
   'leaderboard_index',
   'sort_by',
   'freq_width',

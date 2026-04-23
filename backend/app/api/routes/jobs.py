@@ -62,6 +62,7 @@ class JobRequest(BaseModel):
     leaderboard_index:          int   = 100
     sort_by:                    str   = "price"
     mode:                       str   = "snapshot"
+    ranking_metric:             str   = "pct_change"
     freq_width:                 int   = 20
     freq_cutoff:                int   = 20
     sample_interval:            int   = 5

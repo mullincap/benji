@@ -334,6 +334,16 @@ export default function ParamForm({ params, onChange, onSubmit }: ParamFormProps
             ]}
           />
         </Row>
+        <Row label="ranking_metric">
+          <SelInput
+            value={p.ranking_metric}
+            onChange={(v) => set('ranking_metric', v)}
+            options={[
+              { value: 'pct_change', label: 'pct_change' },
+              { value: 'abs_dollar', label: 'abs_dollar' },
+            ]}
+          />
+        </Row>
         <Row label="freq_width">
           <NumInput value={p.freq_width} onChange={(v) => set('freq_width', v)} />
         </Row>
