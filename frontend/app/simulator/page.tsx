@@ -2,7 +2,6 @@
 
 import { useState, useEffect, useMemo, useRef } from 'react';
 import Topbar from '../components/Topbar';
-import StatusBar from '../components/StatusBar';
 import ParamForm from '../components/LeftPanel/ParamForm';
 import RunningParams from '../components/LeftPanel/RunningParams';
 import ResultsSummary from '../components/LeftPanel/ResultsSummary';
@@ -920,8 +919,6 @@ export default function Home() {
           />
         </div>
       </div>
-
-      <StatusBar appState={appState} jobData={jobData} elapsedSeconds={elapsedSeconds} />
     </div>
   );
 }
