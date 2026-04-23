@@ -1003,7 +1003,7 @@ function ExchangeCapitalGroup({
                   <td style={{
                     padding: "10px 14px", color: "var(--t2)",
                     textTransform: "uppercase",
-                  }}>{ev.kind}</td>
+                  }}>{ev.kind === "withdrawal" ? "withdraw" : ev.kind}</td>
                   <td style={{
                     padding: "10px 14px", color: amountColor, fontWeight: 700,
                   }}>{fmtAmount(ev.amount_usd, ev.kind)}</td>
