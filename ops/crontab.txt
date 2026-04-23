@@ -66,3 +66,5 @@ PATH=/usr/local/sbin:/usr/local/bin:/sbin:/bin:/usr/sbin:/usr/bin
 
 # ── Signal shadow diff — 06:15 UTC (v1 vs v2 vs canonical basket diff) ───────
 15 6 * * * . /mnt/quant-data/credentials/secrets.env && /root/benji/pipeline/.venv/bin/python /root/benji/shadow_diff.py >> /mnt/quant-data/logs/signal/shadow_diff.log 2>&1
+# Reconcile tonight session capital events — quick-fix interim ; supersede by permanent reconciliation migration per docs/open_work_list.md
+56 23 * * * . /mnt/quant-data/credentials/secrets.env && PGPASSWORD=$DB_PASSWORD psql -h $DB_HOST -U $DB_USER -d $DB_NAME -v alloc_id="'f87fe130-a90c-4e60-908a-14f4065b415c'" -v session_date="'$(date -u +\%Y-\%m-\%d)'" -f /root/benji/ops/reconcile_session_capital_events.sql >> /mnt/quant-data/logs/trader/capital_events_reconcile.log 2>&1
