@@ -819,6 +819,205 @@ def _load_frequency_from_db(
 
 
 # ─────────────────────────────────────────────
+# Symmetric on-the-fly ranking (--ranking-metric abs_dollar)
+#
+# Canonical universe, no volume/BloFin filter. Ranks ALL symbols in
+# market.futures_1m at the anchor + snapshot times, taking top-freq_width
+# per (day, metric). Used only when --ranking-metric abs_dollar is selected
+# and --live-parity is NOT set — the market.leaderboards fast path is
+# pct_change-only by construction, so abs_dollar requires reading raw
+# values and ranking on-the-fly.
+#
+# The pct_change branch of this function exists for symmetry and testing
+# (identical mathematical output to market.leaderboards pct_change) but is
+# NOT used in the default path — canonical pct_change always reads from
+# market.leaderboards for performance.
+# ─────────────────────────────────────────────
+
+
+def _load_canonical_futures_1m_frequencies(
+    metric: str,
+    freq_width: int,
+    sample_interval: int,
+    mode: str,
+    ranking_metric: str,
+) -> dict:
+    """Compute per-day top-freq_width frequencies from raw market.futures_1m
+    values, ranked symmetrically by `ranking_metric`. Canonical universe
+    (no v1-specific volume or BloFin filter).
+
+    metric         : 'close' (price) or 'open_interest'
+    freq_width     : top-N per bar to award +1 frequency
+    sample_interval: minutes between bars (frequency mode only)
+    mode           : 'snapshot' | 'frequency'
+    ranking_metric : 'pct_change' | 'abs_dollar'
+
+    Returns dict[date, Counter[base, int]]. Keys are normalize_symbol()
+    bases so the output shape matches _load_frequency_from_db.
+    """
+    if metric not in ("close", "open_interest"):
+        raise ValueError(f"metric must be 'close' or 'open_interest', got {metric!r}")
+    if mode not in ("snapshot", "frequency"):
+        raise ValueError(f"mode must be 'snapshot' or 'frequency', got {mode!r}")
+    if ranking_metric not in ("pct_change", "abs_dollar"):
+        raise ValueError(f"ranking_metric must be 'pct_change' or 'abs_dollar', got {ranking_metric!r}")
+
+    import sys as _sys
+    import datetime as _dt
+    from collections import Counter as _Counter
+
+    _sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    from pipeline.db.connection import get_conn
+
+    eff_lookback = _resolve_sort_lookback()
+    anchor_hour = (DEPLOYMENT_START_HOUR - INDEX_LOOKBACK) % 24
+    # NOTE: the snapshot is evaluated at DEPLOYMENT_START_HOUR; the electoral
+    # window for frequency mode runs from (DEPLOYMENT_START_HOUR - eff_lookback)
+    # to DEPLOYMENT_START_HOUR at sample_interval minute intervals.
+
+    # Ranking formula — chosen by validated enum, safe to f-string into SQL.
+    if ranking_metric == "abs_dollar":
+        score_expr = f"(n.{metric} - a.{metric})"
+    else:  # pct_change
+        score_expr = f"((n.{metric} / NULLIF(a.{metric}, 0)) - 1)"
+
+    conn = get_conn()
+    cur = conn.cursor()
+
+    result: dict = {}
+
+    if mode == "snapshot":
+        # Single-query path using ANY()+range-bounds for hypertable chunk pruning
+        # (same pattern as _load_frequency_from_db's snapshot branch).
+        snapshot_ts = _snapshot_timestamps_at_hour(DEPLOYMENT_START_HOUR)
+        ts_min, ts_max = snapshot_ts[0], snapshot_ts[-1]
+        # anchor is DEPLOYMENT_START_HOUR - INDEX_LOOKBACK hours before snapshot;
+        # default (6,6) → 0h offset (anchor = midnight of same day).
+        anchor_offset_hours = INDEX_LOOKBACK
+        cur.execute(f"""
+            WITH scored AS (
+                SELECT n.timestamp_utc::date AS day,
+                       sym.binance_id,
+                       {score_expr} AS score
+                FROM market.futures_1m n
+                JOIN market.futures_1m a
+                  ON a.symbol_id = n.symbol_id
+                 AND a.timestamp_utc = n.timestamp_utc - (%s * interval '1 hour')
+                JOIN market.symbols sym ON sym.symbol_id = n.symbol_id
+                WHERE n.timestamp_utc = ANY(%s)
+                  AND n.timestamp_utc >= %s
+                  AND n.timestamp_utc <= %s
+                  AND a.{metric} IS NOT NULL AND a.{metric} > 0
+                  AND n.{metric} IS NOT NULL
+            ),
+            ranked AS (
+                SELECT day, binance_id,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY day ORDER BY score DESC NULLS LAST
+                       ) AS rnk
+                FROM scored
+            )
+            SELECT day, binance_id
+            FROM ranked
+            WHERE rnk <= %s
+        """, (anchor_offset_hours, snapshot_ts, ts_min, ts_max, freq_width))
+        for day, raw_sym in cur.fetchall():
+            base = normalize_symbol(raw_sym)
+            if base is None:
+                continue
+            if day not in result:
+                result[day] = _Counter()
+            result[day][base] += 1
+    else:  # frequency
+        # Per-day loop (simpler + matches _load_live_parity_frequencies_from_db
+        # pattern). Each day: snapshot all bars in the window for the ranked
+        # subset, count top-freq_width per bar.
+        window_start_hour = DEPLOYMENT_START_HOUR - eff_lookback
+
+        cur.execute("SELECT MIN(timestamp_utc)::date, MAX(timestamp_utc)::date FROM market.futures_1m")
+        dmin, dmax = cur.fetchone()
+        if dmin is None:
+            raise RuntimeError("market.futures_1m is empty")
+        first_processable = dmin + _dt.timedelta(days=1)
+
+        log.info(f"[canonical {ranking_metric} freq] Processing dates "
+                 f"{first_processable} → {dmax} "
+                 f"({(dmax - first_processable).days + 1} days)")
+
+        d = first_processable
+        while d <= dmax:
+            anchor_ts = _dt.datetime.combine(
+                d, _dt.time(anchor_hour, 0, 0), tzinfo=_dt.timezone.utc,
+            )
+            window_end_ts = _dt.datetime.combine(
+                d, _dt.time(DEPLOYMENT_START_HOUR, 0, 0), tzinfo=_dt.timezone.utc,
+            )
+            window_start_ts = _dt.datetime.combine(
+                d, _dt.time(window_start_hour % 24, 0, 0), tzinfo=_dt.timezone.utc,
+            )
+            cur.execute(f"""
+                WITH anchor_vals AS (
+                    SELECT symbol_id, {metric} AS anchor_val
+                    FROM market.futures_1m
+                    WHERE timestamp_utc = %s
+                      AND {metric} IS NOT NULL AND {metric} > 0
+                ),
+                bars AS (
+                    SELECT f.timestamp_utc, f.symbol_id, f.{metric} AS now_val,
+                           a.anchor_val
+                    FROM market.futures_1m f
+                    JOIN anchor_vals a USING (symbol_id)
+                    WHERE f.timestamp_utc > %s
+                      AND f.timestamp_utc <= %s
+                      AND MOD(EXTRACT(MINUTE FROM f.timestamp_utc)::int, %s) = 0
+                      AND f.{metric} IS NOT NULL
+                ),
+                scored AS (
+                    SELECT timestamp_utc, symbol_id,
+                           {_canonical_score_expr_freq(ranking_metric)} AS score
+                    FROM bars
+                ),
+                ranked AS (
+                    SELECT timestamp_utc, symbol_id,
+                           ROW_NUMBER() OVER (
+                               PARTITION BY timestamp_utc
+                               ORDER BY score DESC NULLS LAST
+                           ) AS rnk
+                    FROM scored
+                )
+                SELECT sym.binance_id, COUNT(DISTINCT r.timestamp_utc) AS freq
+                FROM ranked r
+                JOIN market.symbols sym USING (symbol_id)
+                WHERE r.rnk <= %s
+                GROUP BY sym.binance_id
+            """, (anchor_ts, window_start_ts, window_end_ts, sample_interval, freq_width))
+            counter: _Counter = _Counter()
+            for raw_sym, freq in cur.fetchall():
+                base = normalize_symbol(raw_sym)
+                if base is None:
+                    continue
+                counter[base] += int(freq)
+            if counter:
+                result[d] = counter
+            d += _dt.timedelta(days=1)
+
+    cur.close()
+    conn.close()
+    log.info(f"[canonical {ranking_metric} {mode}] Complete: "
+             f"{len(result)} dates returned for metric={metric}")
+    return result
+
+
+def _canonical_score_expr_freq(ranking_metric: str) -> str:
+    """SQL fragment computing the per-bar symbol score inside the CTE `scored`
+    in the frequency branch of _load_canonical_futures_1m_frequencies. Kept as
+    a helper so the formula choice appears once."""
+    if ranking_metric == "abs_dollar":
+        return "(now_val - anchor_val)"
+    return "((now_val / NULLIF(anchor_val, 0)) - 1)"
+
+
+# ─────────────────────────────────────────────
 # LIVE-PARITY mode (opt-in, --live-parity)
 #
 # Simulates daily_signal.py's basket-selection methodology against DB historical
@@ -1221,6 +1420,7 @@ def run(min_mcap: float, freq_width: int, marketcap_dir: Path,
         confluence_path: Path = None, drop_unverified: bool = False, max_mcap: float = 0.0,
         force: bool = False, source: str = "parquet",
         live_parity: bool = False,
+        ranking_metric: str = "pct_change",
 ):
     mcap_label      = f"{int(min_mcap / 1_000_000)}M"
     marketcap_path  = marketcap_dir / "marketcap_daily.parquet"
@@ -1294,10 +1494,17 @@ def run(min_mcap: float, freq_width: int, marketcap_dir: Path,
     _start_hhmm     = f"{DEPLOYMENT_START_HOUR:02d}00"
     _eff_lookback_run = _resolve_sort_lookback()
     _lookback_hhmm    = f"{(DEPLOYMENT_START_HOUR - _eff_lookback_run):02d}00"
+    # Output label: live-parity has a distinct prefix; non-live-parity abs_dollar
+    # gets an `_absdollar` suffix so artifacts don't collide with canonical
+    # pct_change runs of the same mode.
+    _rm_suffix = "_absdollar" if (ranking_metric == "abs_dollar" and not live_parity) else ""
     if live_parity:
         mode_label = f"live_parity_{_start_hhmm}"
     else:
-        mode_label = f"snapshot_{_start_hhmm}" if mode == "snapshot" else f"freq_{_lookback_hhmm}_{_start_hhmm}"
+        mode_label = (
+            f"snapshot_{_start_hhmm}{_rm_suffix}" if mode == "snapshot"
+            else f"freq_{_lookback_hhmm}_{_start_hhmm}{_rm_suffix}"
+        )
     overlap_path        = BASE_DIR / f"overlap_{idx_label}_w{freq_width}c{freq_cutoff}_{mode_label}_{mcap_label}{_run_suffix}.csv"
     output_files        = []   # collect all generated output paths for final summary
 
@@ -1310,8 +1517,8 @@ def run(min_mcap: float, freq_width: int, marketcap_dir: Path,
 
         if live_parity:
             log.info("[LIVE-PARITY MODE] Simulating daily_signal.py methodology (top-100 by 24h USD volume "
-                     "ending 06:00 UTC, BloFin-filtered; frequency mode; log-return price / abs-$ OI). "
-                     "Opt-in — canonical audit paths unaffected.")
+                     "ending 06:00 UTC, BloFin-filtered; frequency mode; asymmetric log-return price / "
+                     "abs-$ OI — v1-faithful reproduction). Opt-in — canonical audit paths unaffected.")
             price_freq, oi_freq = _load_live_parity_frequencies_from_db(
                 freq_width=freq_width,
                 sample_interval=sample_interval,
@@ -1319,6 +1526,24 @@ def run(min_mcap: float, freq_width: int, marketcap_dir: Path,
             )
             log.info(f"  → {len(price_freq)} dates with price data (live-parity)")
             log.info(f"  → {len(oi_freq)} dates with OI data (live-parity)")
+        elif ranking_metric == "abs_dollar":
+            # Canonical universe, symmetric abs_dollar ranking. Reads raw values
+            # from market.futures_1m and ranks on-the-fly (market.leaderboards
+            # is pct_change-only by construction). Opt-in exploratory axis.
+            log.info(f"[CANONICAL + abs_dollar RANKING] Symmetric (price − anchor, oi − anchor) "
+                     f"ranking on canonical universe (no volume/BloFin filter). mode={mode}.")
+            price_freq = _load_canonical_futures_1m_frequencies(
+                metric="close", freq_width=freq_width,
+                sample_interval=sample_interval, mode=mode,
+                ranking_metric="abs_dollar",
+            )
+            log.info(f"  → {len(price_freq)} dates with price data (canonical abs_dollar)")
+            oi_freq = _load_canonical_futures_1m_frequencies(
+                metric="open_interest", freq_width=freq_width,
+                sample_interval=sample_interval, mode=mode,
+                ranking_metric="abs_dollar",
+            )
+            log.info(f"  → {len(oi_freq)} dates with OI data (canonical abs_dollar)")
         else:
             log.info("[DB MODE] Computing frequency tables from market.leaderboards...")
             if mode == "snapshot":
@@ -1719,11 +1944,31 @@ if __name__ == "__main__":
                         help="OPT-IN: simulate daily_signal.py (live) basket methodology for "
                              "comparison audits. When set: universe = top-100 USDT perps by 24h "
                              "USD volume ending 06:00 UTC, filtered to BloFin instrument list; "
-                             "ranking metric = log-return (price) and absolute $ delta (OI); "
-                             "freq count over 72 5-min bars. Incompatible with snapshot/frequency "
-                             "modes — this is a separate path. Does NOT affect canonical audit "
-                             "output unless explicitly set. Requires --source db.")
+                             "ASYMMETRIC ranking (log-return on price, absolute $ delta on OI — "
+                             "matches daily_signal.py v1 exactly); freq count over 72 5-min bars. "
+                             "Mutually exclusive with --ranking-metric. Does NOT affect canonical "
+                             "audit output unless explicitly set. Requires --source db.")
+    parser.add_argument("--ranking-metric", dest="ranking_metric", type=str,
+                        default="pct_change", choices=["pct_change", "abs_dollar"],
+                        help="OPT-IN (default: pct_change). Ranking formula applied SYMMETRICALLY "
+                             "to both price and OI. pct_change = (value / anchor) − 1 (canonical "
+                             "default, uses market.leaderboards fast path). abs_dollar = "
+                             "(value − anchor) (exploratory, reads raw values from market.futures_1m "
+                             "and ranks on-the-fly on the canonical universe — no volume/BloFin "
+                             "filters). Mutually exclusive with --live-parity. See "
+                             "docs/strategy_specification.md § 4 for the distinction between "
+                             "--live-parity (forensic v1 reproduction) and --ranking-metric "
+                             "(symmetric exploration).")
     args = parser.parse_args()
+
+    if args.live_parity and args.ranking_metric != "pct_change":
+        parser.error(
+            "--live-parity is mutually exclusive with --ranking-metric. --live-parity "
+            "reproduces daily_signal.py v1 exactly (asymmetric: log-return on price, "
+            "absolute $ delta on OI). --ranking-metric applies a symmetric ranking across "
+            "both metrics on the canonical universe. Use one or the other per "
+            "docs/strategy_specification.md § 4."
+        )
 
     audit_args = []
     if args.quick:
@@ -1785,6 +2030,7 @@ if __name__ == "__main__":
         force           = args.force,
         source          = args.source,
         live_parity     = args.live_parity,
+        ranking_metric  = args.ranking_metric,
     )
 
     elapsed = _time.time() - _start
@@ -1801,6 +2047,7 @@ if __name__ == "__main__":
     log.info(f"  --sort-by            : {args.sort_by}")
     log.info(f"  --mode               : {args.mode}{'  [OVERRIDDEN by --live-parity]' if args.live_parity else ''}")
     log.info(f"  --live-parity        : {args.live_parity}")
+    log.info(f"  --ranking-metric     : {args.ranking_metric}{'  [IGNORED under --live-parity]' if args.live_parity else ''}")
     log.info(f"  --deployment-start-hour : {DEPLOYMENT_START_HOUR:02d}:00 UTC")
     log.info(f"  --index-lookback        : {INDEX_LOOKBACK}h  "
              f"(anchor={_anchor_hhmm()[:2]}:{_anchor_hhmm()[2:]} UTC)")

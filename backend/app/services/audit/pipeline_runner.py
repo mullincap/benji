@@ -59,6 +59,7 @@ def build_cli_args(params: dict) -> list[str]:
         "capital_mode":             "--capital-mode",
         "fixed_notional_cap":       "--fixed-notional-cap",
         "overlap_source":           "--source",
+        "ranking_metric":           "--ranking-metric",
     }
     bool_flags = {
         "end_cross_midnight": "--end-cross-midnight",
