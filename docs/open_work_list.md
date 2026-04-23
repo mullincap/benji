@@ -285,6 +285,38 @@ edit from shifting displayed P&L. The full capital_events table
 subsumes this — once it ships, both formulas should migrate to use
 `max(capital_event_ts, session_start)` as the baseline reference.
 
+**Partial ship** (2026-04-23, commit `ea00d79`): `user_mgmt.
+allocation_capital_events` table shipped (migration 003) with
+schema `(event_id, allocation_id FK, event_at, amount_usd,
+kind ∈ {deposit, withdrawal}, notes, created_at)`. `/pnl` endpoint
+subtracts lifetime net from `total_pnl_usd` and session-scoped net
+(events on/after `session_date`) from `session_pnl_usd`, and
+re-denominators `total_return_pct` against the capital-adjusted
+baseline. Trader card now correctly treats operator-moved principal
+as principal, not profit. Seeded the 2026-04-23 09:05:03 UTC
+Binance→BloFin \$1,003.75 deposit for allocation f87fe130 via direct
+SQL INSERT after verifying the code path end-to-end.
+
+**Remaining (deferred, no urgency)**: automate capital-event
+insertion via exchange income API polling — today an operator has
+to INSERT the row manually. Scope:
+  - Per-exchange adapter method: `get_capital_events(since_ts)` →
+    list of (timestamp, amount, kind). Binance: `GET /sapi/v1/capital/
+    deposit/hisrec` + `/capital/withdraw/history`; BloFin: `GET
+    /api/v1/asset/bills` filtered by billType. Wallet-read permission
+    on existing API keys is sufficient.
+  - New celery periodic task (~5-15 min cadence) iterating active
+    `exchange_connections`, calling the adapter, inserting new events
+    dedupe'd on (connection_id, event_at, amount, kind).
+  - Map exchange-connection events to allocation_id by picking the
+    active allocation on that connection at event_at (or the sole
+    current allocation in simple cases). Flag ambiguous mappings
+    (multiple allocations sharing one connection) for admin review.
+  - ~2 hrs per exchange adapter + ~1 hr cron task + dedupe. Total
+    ~5-6 hrs.
+Gate: defer until next external transfer shows up. The manual SQL
+INSERT pattern works for isolated events.
+
 ## Session F+ follow-up: exchange account-history backfill + net-imports PnL
 
 Surfaced 2026-04-22 while fixing the Max DD scope bug. Two related gaps:
