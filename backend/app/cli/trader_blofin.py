@@ -2056,6 +2056,94 @@ def run_session(dry_run: bool = False, resume: bool = False):
     )
 
 
+def _reconcile_positions_with_exchange(
+    api: ExchangeAdapter,
+    positions: list,
+    inst_ids: list,
+    entry_prices: dict,
+    eff_lev: float,
+    log_prefix: str = "",
+) -> list:
+    """Sync runtime_state.positions[] against live exchange positions.
+
+    At monitoring-loop entry, query the exchange for actual open positions
+    across `inst_ids` (today's basket symbols) and merge any positions that
+    exist on the exchange but are missing from the trader's internal
+    `positions` list. This handles:
+
+      - Manual fills by the operator after the programmatic entry failed
+        (e.g. BloFin low-liquidity rejection → operator fills via UI).
+      - Positions opened during a prior subprocess that crashed before
+        persisting to runtime_state.
+
+    Reconciled positions join the monitoring loop with the same schema as
+    programmatically-placed ones, so the software SL, per-symbol stop, and
+    session-end close logic treat them identically. They're flagged with
+    order_id="RECONCILED_MANUAL" for observability.
+
+    Does NOT remove positions that exist in internal state but are absent on
+    the exchange (already-closed case) — the per-bar loop detects that via
+    its own positions query.
+
+    Returns a new positions list (original is not mutated).
+    """
+    try:
+        live_positions = api.get_positions(inst_ids) if inst_ids else []
+    except Exception as e:
+        log.warning(f"{log_prefix}Reconcile fetch failed ({e}); monitoring "
+                    f"loop starts with runtime_state positions only")
+        return positions
+
+    known_iids = {p["inst_id"] for p in positions}
+    live_by_iid = {p.inst_id: p for p in live_positions if p.contracts > 0}
+
+    added: list = []
+    for iid in inst_ids:
+        if iid in known_iids:
+            continue
+        lp = live_by_iid.get(iid)
+        if lp is None:
+            continue
+        avg = lp.average_price
+        if avg is None or avg <= 0:
+            # Fall back to today's canonical basket anchor price if the
+            # exchange doesn't report averagePrice on this position.
+            avg = entry_prices.get(iid)
+            if avg is None or avg <= 0:
+                log.warning(
+                    f"{log_prefix}Reconcile: {iid} open on exchange "
+                    f"({lp.contracts}ct) but no entry price available — "
+                    f"skipping (monitoring loop would have no basis for "
+                    f"return calculation)"
+                )
+                continue
+        added.append({
+            "inst_id":            iid,
+            "lev_int":            max(1, int(math.ceil(eff_lev))),
+            "order_id":           "RECONCILED_MANUAL",
+            "contracts":          lp.contracts,
+            "marginMode":         MARGIN_MODE,
+            "entry_price":        avg,
+            "positionSide":       POSITION_SIDE,
+            "retry_rounds":       0,
+            "fill_entry_price":   avg,
+            "target_contracts":   lp.contracts,
+            "entry_slippage_bps": 0.0,
+            "reconciled":         True,
+        })
+
+    if added:
+        log.info(
+            f"{log_prefix}Reconcile: picked up {len(added)} live position(s) "
+            f"missing from runtime_state: "
+            f"{[p['inst_id'] for p in added]} "
+            f"— will be managed by the monitoring loop alongside "
+            f"programmatically-placed positions"
+        )
+
+    return list(positions) + added
+
+
 def _run_monitoring_loop(today, today_date, api: ExchangeAdapter, inst_ids,
                          open_prices, entry_prices, entry_1x, eff_lev,
                          peak, positions, dry_run,
@@ -2132,6 +2220,22 @@ def _run_monitoring_loop(today, today_date, api: ExchangeAdapter, inst_ids,
             f"{log_prefix}Rehydrated {len(sym_stopped)} stopped symbol(s) from "
             f"runtime_state: {list(sym_stopped.keys())}"
         )
+
+    # Sync runtime_state.positions[] against live exchange positions before
+    # the monitoring loop starts. Picks up manual fills and any positions
+    # opened out-of-band from the programmatic entry phase, so the software
+    # SL / session-end close logic manages them alongside the rest. Symbols
+    # already stopped in a prior run are excluded to avoid rehydrating
+    # positions that were intentionally closed.
+    positions = _reconcile_positions_with_exchange(
+        api=api,
+        positions=positions,
+        inst_ids=[iid for iid in inst_ids if iid not in sym_stopped],
+        entry_prices=entry_prices,
+        eff_lev=eff_lev,
+        log_prefix=log_prefix,
+    )
+
     active_positions = list(positions)   # shrinks as per-symbol stops fire
     bars_monitored = 0
     # Exit-price snapshots for slippage reconciliation.
