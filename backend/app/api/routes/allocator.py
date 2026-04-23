@@ -761,7 +761,7 @@ def get_strategies(
         cur.execute("""
             SELECT
                 s.strategy_id, s.name, s.display_name, s.description,
-                s.filter_mode, s.capital_cap_usd, s.is_published,
+                s.filter_mode, s.capital_cap_usd, s.is_published, s.is_canonical,
                 sv.strategy_version_id, sv.version_label, sv.is_active
             FROM audit.strategies s
             JOIN audit.strategy_versions sv ON sv.strategy_id = s.strategy_id
@@ -772,7 +772,7 @@ def get_strategies(
         cur.execute("""
             SELECT
                 s.strategy_id, s.name, s.display_name, s.description,
-                s.filter_mode, s.capital_cap_usd, s.is_published,
+                s.filter_mode, s.capital_cap_usd, s.is_published, s.is_canonical,
                 sv.strategy_version_id, sv.version_label, sv.is_active
             FROM audit.strategies s
             JOIN audit.strategy_versions sv ON sv.strategy_id = s.strategy_id
@@ -871,6 +871,7 @@ def get_strategies(
             "capital_cap_usd": s["capital_cap_usd"],
             "version_label": s["version_label"],
             "is_published": bool(s["is_published"]),
+            "is_canonical": bool(s["is_canonical"]),
             "metrics": metrics,
             "metrics_updated_at":   meta["metrics_updated_at"],
             "metrics_data_through": meta["metrics_data_through"],
@@ -1001,6 +1002,95 @@ def rename_strategy(
         "name":         row["name"],
         "display_name": row["display_name"],
         "is_published": row["is_published"],
+    }
+
+
+# ── Strategy promote-canonical (admin-only) ────────────────────────────────
+# Atomically demotes the currently-canonical strategy and promotes the target.
+# The partial unique index `strategies_one_canonical` guarantees at most one
+# row can carry is_canonical=TRUE at any time; running demote+promote in a
+# single transaction keeps the unique invariant holding throughout.
+#
+# Governance: spec §5 requires promotion only after a comparison audit shows
+# the candidate beats the current canonical. That gate is honor-system /
+# client-side today (confirmation modal on the Strategies page). Server-side
+# enforcement (stored comparison audit IDs, admin two-key) is deferred —
+# this endpoint is trust-the-admin for now.
+
+@router.post(
+    "/strategies/{strategy_id}/promote-canonical",
+    dependencies=[Depends(require_admin)],
+)
+def promote_canonical(strategy_id: int, cur=Depends(get_cursor)) -> dict[str, Any]:
+    # Target must exist. Published status required — promoting a retired
+    # strategy to canonical would silently break the Simulator compare card
+    # (the canonical-reference endpoint filters on sv.is_active + the
+    # retired strategy's version would usually be inactive too).
+    cur.execute(
+        """
+        SELECT strategy_id, name, display_name, is_published, is_canonical
+        FROM audit.strategies
+        WHERE strategy_id = %s
+        """,
+        (strategy_id,),
+    )
+    target = cur.fetchone()
+    if target is None:
+        raise HTTPException(status_code=404, detail="Strategy not found")
+    if not target["is_published"]:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": "target_not_published",
+                "message": "Cannot promote a retired strategy to canonical.",
+            },
+        )
+    if target["is_canonical"]:
+        # Idempotent: already canonical, return current state.
+        return {
+            "strategy_id":  target["strategy_id"],
+            "name":         target["name"],
+            "display_name": target["display_name"],
+            "is_canonical": True,
+            "demoted":      None,
+        }
+
+    # Demote current canonical (if any) and promote target in one statement
+    # so the partial unique index never sees two rows with is_canonical=TRUE.
+    # CTE returns the demoted row so we can report it back to the caller.
+    cur.execute(
+        """
+        WITH demoted AS (
+            UPDATE audit.strategies
+               SET is_canonical = FALSE
+             WHERE is_canonical = TRUE
+            RETURNING strategy_id, display_name
+        ),
+        promoted AS (
+            UPDATE audit.strategies
+               SET is_canonical = TRUE
+             WHERE strategy_id = %s
+            RETURNING strategy_id, name, display_name
+        )
+        SELECT
+            (SELECT strategy_id  FROM demoted)  AS demoted_strategy_id,
+            (SELECT display_name FROM demoted)  AS demoted_display_name,
+            (SELECT strategy_id  FROM promoted) AS promoted_strategy_id,
+            (SELECT name         FROM promoted) AS promoted_name,
+            (SELECT display_name FROM promoted) AS promoted_display_name
+        """,
+        (strategy_id,),
+    )
+    row = cur.fetchone()
+    return {
+        "strategy_id":  row["promoted_strategy_id"],
+        "name":         row["promoted_name"],
+        "display_name": row["promoted_display_name"],
+        "is_canonical": True,
+        "demoted": None if row["demoted_strategy_id"] is None else {
+            "strategy_id":  row["demoted_strategy_id"],
+            "display_name": row["demoted_display_name"],
+        },
     }
 
 

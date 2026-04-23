@@ -77,6 +77,7 @@ export interface ApiStrategy {
   capital_cap_usd: number | null;
   version_label: string;
   is_published: boolean;
+  is_canonical: boolean;
   metrics: {
     sharpe: number | null;
     sortino: number | null;
@@ -237,6 +238,18 @@ export const allocatorApi = {
         method: "POST",
         body: JSON.stringify({ display_name: displayName, allow_duplicate: allowDuplicate }),
       },
+    ),
+
+  promoteCanonical: (strategyId: number) =>
+    apiFetch<{
+      strategy_id: number;
+      name: string;
+      display_name: string;
+      is_canonical: boolean;
+      demoted: { strategy_id: number; display_name: string } | null;
+    }>(
+      `/api/allocator/strategies/${strategyId}/promote-canonical`,
+      { method: "POST" },
     ),
 
   // Exchanges

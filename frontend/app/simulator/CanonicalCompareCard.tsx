@@ -3,10 +3,15 @@
 /**
  * CanonicalCompareCard
  * ====================
- * Side-by-side comparison of a Simulator candidate's audit results vs the
- * currently-canonical published strategy (Alpha Main — Sharpe is
- * leverage-invariant across the Alpha family, so Alpha Main is the
- * default reference).
+ * Side-by-side comparison of a Simulator candidate's audit results vs
+ * whichever published strategy is currently flagged canonical in
+ * `audit.strategies.is_canonical` (see migration 002). The card reads
+ * the flag via GET /api/simulator/canonical-reference and renders
+ * whatever row comes back — no strategy name is hardcoded here.
+ *
+ * Seeded default is 'Alpha Main' since Sharpe is leverage-invariant
+ * across the Alpha Low/Main/Max family; admins can promote any other
+ * published strategy via the Strategies page "Make Canonical" action.
  *
  * Governance rule applied per docs/strategy_specification.md § 5:
  *   1. Candidate Sharpe ≥ canonical Sharpe + 0.3

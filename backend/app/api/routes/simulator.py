@@ -141,20 +141,17 @@ def _build_result_row(
 
 # ─── Routes ─────────────────────────────────────────────────────────────────
 
-# Canonical reference strategy for Simulator compare-to-canonical.
-# Alpha Main is the default reference because Sharpe is leverage-invariant
-# across the Alpha Low / Main / Max family (all three show identical Sharpe
-# in the audit), so picking Alpha Main yields the same Sharpe comparison
-# regardless of what leverage tier a candidate is testing. If it's ever
-# absent, the endpoint errors rather than silently falling back — the
-# Simulator's compare feature depends on a stable canonical reference.
-CANONICAL_REFERENCE_STRATEGY = "Alpha Main"
-
-
 @router.get("/canonical-reference")
 def get_canonical_reference(cur=Depends(get_cursor)) -> dict[str, Any]:
     """Return the currently-canonical published strategy_version's metrics +
     config for side-by-side comparison against a Simulator candidate.
+
+    Source of truth: `audit.strategies.is_canonical` flag. Seeded via
+    migration 002 to 'Alpha Main' (Sharpe is leverage-invariant across the
+    Alpha Low/Main/Max family, so any of them gives the same Sharpe
+    comparison regardless of what leverage tier a candidate targets). A
+    partial unique index enforces "at most one row has is_canonical=true".
+    Promoted/demoted via POST /api/allocator/strategies/{id}/promote-canonical.
 
     Consumed by the Simulator UI's 'Compare to canonical' card (Stream D-small,
     Option 1 migration). The governance rule in docs/strategy_specification.md §5
@@ -172,21 +169,20 @@ def get_canonical_reference(cur=Depends(get_cursor)) -> dict[str, Any]:
                sv.metrics_data_through
         FROM audit.strategies s
         JOIN audit.strategy_versions sv USING (strategy_id)
-        WHERE s.is_published = TRUE
-          AND sv.is_active  = TRUE
-          AND s.display_name = %s
+        WHERE s.is_canonical = TRUE
+          AND sv.is_active   = TRUE
         LIMIT 1
         """,
-        (CANONICAL_REFERENCE_STRATEGY,),
     )
     row = cur.fetchone()
     if row is None:
         raise HTTPException(
             status_code=404,
             detail=(
-                f"Canonical reference strategy {CANONICAL_REFERENCE_STRATEGY!r} "
-                "not found. Expected one active, published strategy_version row. "
-                "See docs/strategy_specification.md § 7 for migration status."
+                "No canonical strategy flagged in audit.strategies "
+                "(is_canonical = TRUE). Use POST /api/allocator/strategies/"
+                "{strategy_id}/promote-canonical to set one. See "
+                "docs/strategy_specification.md §5 for the governance rule."
             ),
         )
     return {

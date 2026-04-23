@@ -80,6 +80,7 @@ export interface StrategyCatalogEntry {
   strategyVersionId: string;
   capitalCapUsd: number | null;
   isPublished: boolean;
+  isCanonical: boolean;
 }
 
 export interface CapacityData {
@@ -121,6 +122,7 @@ function mapApiStrategyToCatalog(s: ApiStrategy): StrategyCatalogEntry {
     strategyVersionId: s.strategy_version_id,
     capitalCapUsd: s.capital_cap_usd,
     isPublished: s.is_published,
+    isCanonical: s.is_canonical ?? false,
   };
 }
 
@@ -133,7 +135,7 @@ const FALLBACK_CATALOG: Record<string, StrategyCatalogEntry> = {
     sharpe: 1.84, maxDd: 8.2, winRate: 61, ytd: 14.2, cagr: 18.7,
     profitFactor: 1.88, avg1m: 1.2, activeDays: 312, vol: 6.4,
     simpleReturn: 14.2, compoundedReturn: 18.7, avgWinLoss: 1.42,
-    strategyId: 0, strategyVersionId: "", capitalCapUsd: null, isPublished: true,
+    strategyId: 0, strategyVersionId: "", capitalCapUsd: null, isPublished: true, isCanonical: false,
   },
   "alpha-mid": {
     name: "Alpha Mid", risk: "medium",
@@ -141,7 +143,7 @@ const FALLBACK_CATALOG: Record<string, StrategyCatalogEntry> = {
     sharpe: 2.63, maxDd: 14.6, winRate: 63, ytd: 38.2, cagr: 42.1,
     profitFactor: 2.25, avg1m: 2.4, activeDays: 342, vol: 11.8,
     simpleReturn: 38.2, compoundedReturn: 42.1, avgWinLoss: 1.71,
-    strategyId: 0, strategyVersionId: "", capitalCapUsd: null, isPublished: true,
+    strategyId: 0, strategyVersionId: "", capitalCapUsd: null, isPublished: true, isCanonical: false,
   },
   "alpha-high": {
     name: "Alpha High", risk: "high",
@@ -149,7 +151,7 @@ const FALLBACK_CATALOG: Record<string, StrategyCatalogEntry> = {
     sharpe: 3.90, maxDd: 19.9, winRate: 67, ytd: 91.4, cagr: 187.3,
     profitFactor: 3.09, avg1m: 3.2, activeDays: 358, vol: 18.2,
     simpleReturn: 91.4, compoundedReturn: 187.3, avgWinLoss: 2.34,
-    strategyId: 0, strategyVersionId: "", capitalCapUsd: null, isPublished: true,
+    strategyId: 0, strategyVersionId: "", capitalCapUsd: null, isPublished: true, isCanonical: false,
   },
 };
 

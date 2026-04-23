@@ -287,6 +287,20 @@ Promotion of a candidate to canonical requires:
    strategy receives a notification (in-app toast + email) before promotion
    takes effect in production cron. 24h notice minimum.
 
+**Mechanics of the flag (migration 002):**
+Canonical status is tracked by `audit.strategies.is_canonical` (boolean,
+partial unique index enforces at most one row with value TRUE). The
+Simulator's Compare-to-Canonical card reads whichever row is flagged via
+`GET /api/simulator/canonical-reference`. Admins flip the flag via the
+Strategies page ("Make Canonical" button → confirm modal → `POST
+/api/allocator/strategies/{id}/promote-canonical`, atomic demote+promote
+in one transaction). The endpoint does NOT enforce the §5.2
+performance-criteria gate server-side — promotion is honor-system /
+confirmation-modal today. Server-side enforcement (requiring a stored
+comparison audit ID that satisfies §5.1, admin two-key, or similar) is
+deferred until there's a second admin or a governance workflow that
+demands enforcement.
+
 ### 5.3 Evidence tiers for candidate evaluation
 
 | Tier | Evidence | Implication |

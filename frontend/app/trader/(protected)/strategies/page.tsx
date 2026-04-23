@@ -128,19 +128,57 @@ function RenameButton({
   );
 }
 
+function MakeCanonicalButton({
+  busy, onClick,
+}: {
+  busy: boolean;
+  onClick: (e: React.MouseEvent) => void;
+}) {
+  // Teal styling distinct from the neutral Rename button and the
+  // amber/green Retire/Publish toggle so "Make Canonical" reads as a
+  // separate governance action, not a rename variant.
+  return (
+    <button
+      type="button"
+      disabled={busy}
+      onClick={e => { e.stopPropagation(); onClick(e); }}
+      style={{
+        background: "rgba(0, 200, 200, 0.12)",
+        border: "1px solid rgb(0, 200, 200)",
+        color: "rgb(0, 200, 200)",
+        borderRadius: 3, padding: "3px 8px",
+        fontSize: 9, fontWeight: 700, letterSpacing: "0.12em",
+        textTransform: "uppercase",
+        fontFamily: "var(--font-space-mono), Space Mono, monospace",
+        cursor: busy ? "not-allowed" : "pointer",
+        opacity: busy ? 0.5 : 1,
+      }}
+    >
+      Make Canonical
+    </button>
+  );
+}
+
 function AdminButtons({
-  isPublished, busy, onRename, onToggle,
+  isPublished, isCanonical, busy, onRename, onToggle, onPromoteCanonical,
 }: {
   isPublished: boolean;
+  isCanonical: boolean;
   busy: boolean;
   onRename: (e: React.MouseEvent) => void;
   onToggle: (e: React.MouseEvent) => void;
+  onPromoteCanonical: (e: React.MouseEvent) => void;
 }) {
+  // "Make Canonical" only shown for published non-canonical strategies.
+  // Retired strategies can't be canonical (backend rejects with 409), and
+  // the already-canonical one shows the pill next to the risk tag instead.
+  const showPromote = isPublished && !isCanonical;
   return (
     <div style={{
       position: "absolute", top: 8, right: 8,
       display: "flex", gap: 4, zIndex: 2,
     }}>
+      {showPromote && <MakeCanonicalButton busy={busy} onClick={onPromoteCanonical} />}
       <RenameButton busy={busy} onClick={onRename} />
       <AdminToggleButton isPublished={isPublished} busy={busy} onClick={onToggle} />
     </div>
@@ -157,6 +195,24 @@ function RetiredPill() {
       borderRadius: 3, padding: "3px 8px",
     }}>
       Retired
+    </span>
+  );
+}
+
+function CanonicalPill() {
+  // Teal/cyan so it reads distinctly from the amber "Retired" pill and the
+  // green/amber/red risk tags. Non-actionable — promotion/demotion happens
+  // via the Make Canonical button on the opposing card.
+  return (
+    <span style={{
+      fontSize: 9, fontWeight: 700, letterSpacing: "0.12em",
+      textTransform: "uppercase",
+      color: "rgb(0, 200, 200)",
+      background: "rgba(0, 200, 200, 0.12)",
+      border: "1px solid rgb(0, 200, 200)",
+      borderRadius: 3, padding: "3px 8px",
+    }}>
+      Canonical
     </span>
   );
 }
@@ -236,6 +292,94 @@ function ConfirmRetireModal({
             }}
           >
             Retire
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function ConfirmPromoteCanonicalModal({
+  targetDisplayName, currentCanonicalDisplayName, submitting, onCancel, onConfirm,
+}: {
+  targetDisplayName: string;
+  currentCanonicalDisplayName: string | null;
+  submitting: boolean;
+  onCancel: () => void;
+  onConfirm: () => void;
+}) {
+  return (
+    <div
+      role="dialog"
+      aria-modal="true"
+      onClick={() => { if (!submitting) onCancel(); }}
+      style={{
+        position: "fixed", inset: 0,
+        background: "rgba(0,0,0,0.7)",
+        display: "flex", alignItems: "center", justifyContent: "center",
+        zIndex: 1000,
+      }}
+    >
+      <div
+        onClick={e => e.stopPropagation()}
+        style={{
+          background: "var(--bg2)",
+          border: "1px solid var(--line2)",
+          borderRadius: 6, padding: "20px 24px",
+          width: 520, maxWidth: "92vw",
+          fontFamily: "var(--font-space-mono), Space Mono, monospace",
+        }}
+      >
+        <div style={{
+          fontSize: 9, fontWeight: 700, letterSpacing: "0.12em",
+          color: "var(--t3)", textTransform: "uppercase",
+          marginBottom: 10,
+        }}>
+          Promote to canonical
+        </div>
+        <div style={{ fontSize: 11, color: "var(--t1)", lineHeight: 1.6, marginBottom: 16 }}>
+          Promote <span style={{ color: "var(--t0)" }}>&lsquo;{targetDisplayName}&rsquo;</span> to canonical?
+          {currentCanonicalDisplayName ? (
+            <> This will demote <span style={{ color: "var(--t0)" }}>&lsquo;{currentCanonicalDisplayName}&rsquo;</span> and
+            update the Compare-to-Canonical reference across all Simulator audits going forward.</>
+          ) : (
+            <> This will be the new Compare-to-Canonical reference across all Simulator audits going forward.</>
+          )}
+        </div>
+        <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
+          <button
+            type="button"
+            disabled={submitting}
+            onClick={onCancel}
+            style={{
+              background: "transparent",
+              border: "1px solid var(--line2)",
+              borderRadius: 4, padding: "8px 16px",
+              fontSize: 9, fontWeight: 700, letterSpacing: "0.12em",
+              textTransform: "uppercase",
+              color: "var(--t2)",
+              cursor: submitting ? "not-allowed" : "pointer",
+              fontFamily: "var(--font-space-mono), Space Mono, monospace",
+            }}
+          >
+            Cancel
+          </button>
+          <button
+            type="button"
+            disabled={submitting}
+            onClick={onConfirm}
+            style={{
+              background: "rgba(0, 200, 200, 0.12)",
+              border: "1px solid rgb(0, 200, 200)",
+              borderRadius: 4, padding: "8px 16px",
+              fontSize: 9, fontWeight: 700, letterSpacing: "0.12em",
+              textTransform: "uppercase",
+              color: "rgb(0, 200, 200)",
+              cursor: submitting ? "not-allowed" : "pointer",
+              fontFamily: "var(--font-space-mono), Space Mono, monospace",
+            }}
+          >
+            Promote
           </button>
         </div>
       </div>
@@ -516,6 +660,13 @@ export default function StrategiesPage() {
   const [renameToast, setRenameToast] = useState<
     { newName: string; allocators: number } | null
   >(null);
+  const [promoteTarget, setPromoteTarget] = useState<
+    { strategyId: number; displayName: string } | null
+  >(null);
+  const [promoteSubmitting, setPromoteSubmitting] = useState(false);
+  const [promoteToast, setPromoteToast] = useState<
+    { promotedName: string; demotedName: string | null } | null
+  >(null);
 
   const handleRenameSuccess = useCallback((newDisplayName: string) => {
     const allocators = renameTarget?.allocators ?? 0;
@@ -631,7 +782,48 @@ export default function StrategiesPage() {
     }
   }, [publishOverrides, refresh]);
 
+  const handlePromoteCanonical = useCallback(async () => {
+    if (!promoteTarget) return;
+    setPromoteSubmitting(true);
+    setToggleError(null);
+    try {
+      const resp = await allocatorApi.promoteCanonical(promoteTarget.strategyId);
+      setPromoteTarget(null);
+      setPromoteToast({
+        promotedName: resp.display_name,
+        demotedName: resp.demoted?.display_name ?? null,
+      });
+      refresh();
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      const status = /^API (\d+):/.exec(msg)?.[1];
+      if (status === "401" || status === "403") {
+        setToggleError({ strategyId: promoteTarget.strategyId, message: "Admin access required" });
+      } else if (status === "404") {
+        setToggleError({ strategyId: promoteTarget.strategyId, message: "Strategy not found — may have been deleted." });
+        refresh();
+      } else if (status === "409") {
+        setToggleError({ strategyId: promoteTarget.strategyId, message: "Cannot promote a retired strategy. Publish first." });
+      } else {
+        setToggleError({ strategyId: promoteTarget.strategyId, message: "Promote failed. Try again or check server logs." });
+        console.error("promoteCanonical failed:", err);
+      }
+      setPromoteTarget(null);
+    } finally {
+      setPromoteSubmitting(false);
+    }
+  }, [promoteTarget, refresh]);
+
+  useEffect(() => {
+    if (!promoteToast) return;
+    const t = setTimeout(() => setPromoteToast(null), 4500);
+    return () => clearTimeout(t);
+  }, [promoteToast]);
+
   const CATALOG_ENTRIES = Object.entries(STRATEGY_CATALOG) as [string, StrategyCatalogEntry][];
+
+  // Look up the current canonical's display name for the confirm modal.
+  const currentCanonicalDisplayName = CATALOG_ENTRIES.find(([, c]) => c.isCanonical)?.[1].name ?? null;
 
   function isDominant(index: number) {
     return hoveredIndex === null ? index === 0 : hoveredIndex === index;
@@ -736,9 +928,11 @@ export default function StrategiesPage() {
                   {hasAdminToggle && (
                     <AdminButtons
                       isPublished={effectivePublished}
+                      isCanonical={cat.isCanonical}
                       busy={busy}
                       onRename={() => setRenameTarget({ strategyId, currentDisplayName: cat.name, allocators: CAPACITY_DATA[type]?.allocators ?? 0 })}
                       onToggle={onAdminToggle}
+                      onPromoteCanonical={() => setPromoteTarget({ strategyId, displayName: cat.name })}
                     />
                   )}
                   {/* Top row */}
@@ -751,6 +945,7 @@ export default function StrategiesPage() {
                           color: RISK_COLOR[cat.risk], background: RISK_DIM[cat.risk],
                           borderRadius: 3, padding: "3px 8px",
                         }}>{cat.risk}</span>
+                        {cat.isCanonical && <CanonicalPill />}
                         {!effectivePublished && <RetiredPill />}
                       </div>
                       {cardError && (
@@ -835,9 +1030,11 @@ export default function StrategiesPage() {
                 {hasAdminToggle && (
                   <AdminButtons
                     isPublished={effectivePublished}
+                    isCanonical={cat.isCanonical}
                     busy={busy}
                     onRename={() => setRenameTarget({ strategyId, currentDisplayName: cat.name, allocators: CAPACITY_DATA[type]?.allocators ?? 0 })}
                     onToggle={onAdminToggle}
+                    onPromoteCanonical={() => setPromoteTarget({ strategyId, displayName: cat.name })}
                   />
                 )}
                 {/* Name + badge */}
@@ -848,6 +1045,7 @@ export default function StrategiesPage() {
                     color: RISK_COLOR[cat.risk], background: RISK_DIM[cat.risk],
                     borderRadius: 3, padding: "3px 8px",
                   }}>{cat.risk}</span>
+                  {cat.isCanonical && <CanonicalPill />}
                   {!effectivePublished && <RetiredPill />}
                 </div>
                 {cardError && (
@@ -929,6 +1127,47 @@ export default function StrategiesPage() {
           onCancel={() => setConfirmTarget(null)}
           onConfirm={() => handleRetire(confirmTarget.strategyId)}
         />
+      )}
+      {promoteTarget && (
+        <ConfirmPromoteCanonicalModal
+          targetDisplayName={promoteTarget.displayName}
+          currentCanonicalDisplayName={currentCanonicalDisplayName}
+          submitting={promoteSubmitting}
+          onCancel={() => setPromoteTarget(null)}
+          onConfirm={handlePromoteCanonical}
+        />
+      )}
+      {promoteToast && (
+        <div
+          role="status"
+          style={{
+            position: "fixed",
+            bottom: 24,
+            left: "50%",
+            transform: "translateX(-50%)",
+            background: "var(--bg2)",
+            border: "1px solid rgb(0, 200, 200)",
+            color: "var(--t1)",
+            borderRadius: 4,
+            padding: "10px 16px",
+            fontSize: 10,
+            fontFamily: "var(--font-space-mono), Space Mono, monospace",
+            boxShadow: "0 4px 12px rgba(0,0,0,0.4)",
+            zIndex: 1100,
+            display: "flex",
+            gap: 10,
+            alignItems: "center",
+            maxWidth: "80vw",
+          }}
+        >
+          <span style={{ color: "rgb(0, 200, 200)", fontWeight: 700 }}>✓</span>
+          <span>
+            <span style={{ color: "var(--t0)" }}>&lsquo;{promoteToast.promotedName}&rsquo;</span> is now canonical
+            {promoteToast.demotedName && (
+              <> — <span style={{ color: "var(--t0)" }}>&lsquo;{promoteToast.demotedName}&rsquo;</span> demoted</>
+            )}.
+          </span>
+        </div>
       )}
       {renameToast && (
         <div
