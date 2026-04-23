@@ -123,7 +123,16 @@ POSITION_SIDE = "net"
 # EXCHANGE_SL_PCT is the 1x unleveraged drop from entry price that triggers.
 # Default: -8.5% (wider than PORT_SL_PCT=-6% so the software stop acts first
 # under normal conditions; exchange SL only fires if software stop fails).
-EXCHANGE_SL_ENABLED = True
+#
+# DISABLED 2026-04-23 post-VELVET-fill incident: BloFin rejects atomic-with-
+# entry SL on low-liquidity pairs (msg="Trading for this low-liquidity pair
+# is temporarily unavailable due to risk control restrictions"), blocking
+# the entry fill entirely. Bare market entry without embedded SL clears
+# risk control (verified via manual UI fill on VELVET-USDT 2026-04-23 06:40
+# UTC). Per-symbol software SL via the port_sl/port_tsl monitoring loop
+# remains the primary stop — the exchange SL was always a backstop for
+# connectivity loss. Order filling takes priority over backstop SL.
+EXCHANGE_SL_ENABLED = False
 EXCHANGE_SL_PCT     = -0.085  # -8.5% from entry price (1x, unleveraged)
 
 # -- VOL-Target Leverage Engine (Figure 2.4) -------------------------------
