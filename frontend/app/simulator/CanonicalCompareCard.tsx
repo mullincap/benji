@@ -18,7 +18,7 @@
  * a manual admin action per the spec's § 5.2 governance requirements.
  */
 
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE || '';
 
@@ -170,28 +170,28 @@ export default function CanonicalCompareCard({ results, params }: CanonicalCompa
     }
   };
 
+  // Auto-fetch on mount so the governance comparison is visible the moment
+  // a candidate audit finishes — no extra click. Re-fetch via the refresh
+  // button in the error state. `results` dep is intentional: if the user
+  // re-runs with different params, we keep the same canonical reference
+  // (canonical is per-strategy-version, not per-candidate-run), so no
+  // refetch is needed on `results` change.
+  useEffect(() => {
+    if (!canonical && !loading && !error) {
+      fetchCanonical();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   // ── Initial render (pre-click) ─────────────────────────────────────────
   if (!canonical && !loading && !error) {
+    // Auto-fetch is about to fire on mount; render a slim placeholder.
     return (
       <div style={SECTION_STYLE}>
         <div style={LABEL_STYLE}>GOVERNANCE</div>
-        <div style={{ fontSize: 10, color: 'var(--t2)', marginTop: 8, marginBottom: 10, lineHeight: 1.5 }}>
-          Compare this candidate against the currently-canonical strategy (Alpha Main) to
-          check the promotion rule in docs/strategy_specification.md § 5.
+        <div style={{ fontSize: 10, color: 'var(--t2)', marginTop: 8 }}>
+          Preparing comparison...
         </div>
-        <button
-          onClick={fetchCanonical}
-          style={{
-            width: '100%', height: 32,
-            background: 'transparent', border: '1px solid var(--line2)',
-            borderRadius: 3, color: 'var(--t0)',
-            fontFamily: 'Space Mono, monospace', fontSize: 10,
-            fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.12em',
-            cursor: 'pointer',
-          }}
-        >
-          COMPARE TO CANONICAL
-        </button>
       </div>
     );
   }
@@ -223,6 +223,19 @@ export default function CanonicalCompareCard({ results, params }: CanonicalCompa
         >
           {error}
         </div>
+        <button
+          onClick={fetchCanonical}
+          style={{
+            width: '100%', height: 28, marginTop: 8,
+            background: 'transparent', border: '1px solid var(--line2)',
+            borderRadius: 3, color: 'var(--t0)',
+            fontFamily: 'Space Mono, monospace', fontSize: 9,
+            fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.12em',
+            cursor: 'pointer',
+          }}
+        >
+          RETRY
+        </button>
       </div>
     );
   }
