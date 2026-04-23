@@ -875,11 +875,9 @@ def _load_canonical_futures_1m_frequencies(
     # window for frequency mode runs from (DEPLOYMENT_START_HOUR - eff_lookback)
     # to DEPLOYMENT_START_HOUR at sample_interval minute intervals.
 
-    # Ranking formula — chosen by validated enum, safe to f-string into SQL.
-    if ranking_metric == "abs_dollar":
-        score_expr = f"(n.{metric} - a.{metric})"
-    else:  # pct_change
-        score_expr = f"((n.{metric} / NULLIF(a.{metric}, 0)) - 1)"
+    # Ranking formula is passed as a parameter to the SQL CASE branches below
+    # (snapshot via `%s = 'abs_dollar'`, frequency via _canonical_score_expr_freq).
+    # Kept as a validated-enum string so psycopg2 parameter substitution is safe.
 
     conn = get_conn()
     cur = conn.cursor()
@@ -887,28 +885,68 @@ def _load_canonical_futures_1m_frequencies(
     result: dict = {}
 
     if mode == "snapshot":
-        # Single-query path using ANY()+range-bounds for hypertable chunk pruning
-        # (same pattern as _load_frequency_from_db's snapshot branch).
+        # Single-query path using date_trunc('minute', ...) = ANY(minute_list)
+        # to bucket sub-second timestamps into their target minute, then
+        # DISTINCT ON to pick the latest sub-second row per (symbol, minute).
+        # Mirrors the builder's hygiene at pipeline/indexer/build_intraday_
+        # leaderboard.py:821-832 which uses `df["minute"] = timestamp_utc.dt
+        # .floor("min")` + `groupby(["symbol", "minute"]).last()`.
+        #
+        # HISTORY (d-bug fix, 2026-04-23): the previous version used
+        # `n.timestamp_utc = ANY(exact_HH_00_00_list)` — which requires rows
+        # at exactly HH:00:00.000. market.futures_1m stores sub-second
+        # timestamps (HH:00:00, HH:00:07, HH:00:09, ...) so only ~2 rows
+        # per day matched → 158 of 432 days in the walk-forward silently
+        # dropped (Test 3 acceptance test, 2026-04-23). See
+        # docs/open_work_list.md § D-bug and § 11.4 of the spec for full
+        # detail.
         snapshot_ts = _snapshot_timestamps_at_hour(DEPLOYMENT_START_HOUR)
-        ts_min, ts_max = snapshot_ts[0], snapshot_ts[-1]
-        # anchor is DEPLOYMENT_START_HOUR - INDEX_LOOKBACK hours before snapshot;
-        # default (6,6) → 0h offset (anchor = midnight of same day).
-        anchor_offset_hours = INDEX_LOOKBACK
+        anchor_minutes = [ts - _dt.timedelta(hours=INDEX_LOOKBACK) for ts in snapshot_ts]
+        # Range bounds prune hypertable chunks; `date_trunc` + ANY then
+        # seeks within remaining chunks via PK index.
+        ts_min = min(anchor_minutes[0], snapshot_ts[0])
+        ts_max = snapshot_ts[-1] + _dt.timedelta(minutes=1)
         cur.execute(f"""
-            WITH scored AS (
-                SELECT n.timestamp_utc::date AS day,
-                       sym.binance_id,
-                       {score_expr} AS score
-                FROM market.futures_1m n
-                JOIN market.futures_1m a
-                  ON a.symbol_id = n.symbol_id
-                 AND a.timestamp_utc = n.timestamp_utc - (%s * interval '1 hour')
-                JOIN market.symbols sym ON sym.symbol_id = n.symbol_id
-                WHERE n.timestamp_utc = ANY(%s)
-                  AND n.timestamp_utc >= %s
-                  AND n.timestamp_utc <= %s
+            WITH anchor_rows AS (
+                SELECT DISTINCT ON (a.symbol_id, date_trunc('minute', a.timestamp_utc))
+                    a.symbol_id,
+                    date_trunc('minute', a.timestamp_utc) AS minute,
+                    a.{metric} AS anchor_val
+                FROM market.futures_1m a
+                WHERE a.timestamp_utc >= %s
+                  AND a.timestamp_utc <  %s
+                  AND date_trunc('minute', a.timestamp_utc) = ANY(%s)
                   AND a.{metric} IS NOT NULL AND a.{metric} > 0
+                ORDER BY a.symbol_id,
+                         date_trunc('minute', a.timestamp_utc),
+                         a.timestamp_utc DESC
+            ),
+            snapshot_rows AS (
+                SELECT DISTINCT ON (n.symbol_id, date_trunc('minute', n.timestamp_utc))
+                    n.symbol_id,
+                    date_trunc('minute', n.timestamp_utc) AS minute,
+                    n.{metric} AS snapshot_val
+                FROM market.futures_1m n
+                WHERE n.timestamp_utc >= %s
+                  AND n.timestamp_utc <  %s
+                  AND date_trunc('minute', n.timestamp_utc) = ANY(%s)
                   AND n.{metric} IS NOT NULL
+                ORDER BY n.symbol_id,
+                         date_trunc('minute', n.timestamp_utc),
+                         n.timestamp_utc DESC
+            ),
+            scored AS (
+                SELECT s.minute::date AS day,
+                       sym.binance_id,
+                       (CASE WHEN %s = 'abs_dollar'
+                             THEN (s.snapshot_val - a.anchor_val)
+                             ELSE ((s.snapshot_val / NULLIF(a.anchor_val, 0)) - 1)
+                        END) AS score
+                FROM snapshot_rows s
+                JOIN anchor_rows a
+                  ON a.symbol_id = s.symbol_id
+                 AND a.minute = s.minute - (%s * interval '1 hour')
+                JOIN market.symbols sym ON sym.symbol_id = s.symbol_id
             ),
             ranked AS (
                 SELECT day, binance_id,
@@ -920,7 +958,12 @@ def _load_canonical_futures_1m_frequencies(
             SELECT day, binance_id
             FROM ranked
             WHERE rnk <= %s
-        """, (anchor_offset_hours, snapshot_ts, ts_min, ts_max, freq_width))
+        """, (
+            ts_min, ts_max, anchor_minutes,          # anchor_rows bounds + minute list
+            ts_min, ts_max, snapshot_ts,             # snapshot_rows bounds + minute list
+            ranking_metric, INDEX_LOOKBACK,          # scored CASE + lookback interval
+            freq_width,                              # rnk cutoff
+        ))
         for day, raw_sym in cur.fetchall():
             base = normalize_symbol(raw_sym)
             if base is None:
