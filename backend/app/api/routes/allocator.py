@@ -2566,16 +2566,20 @@ def reset_capital_events_to_defaults(
         """, (user_id,))
         deleted_count += cur.rowcount
 
-    # Re-poll each affected connection so auto events re-appear with
-    # their exchange-reported defaults. Import lazily to avoid a module-
-    # import cycle when the route file is imported by the celery worker.
+    # Re-poll each affected connection in BACKFILL mode so every
+    # available exchange event re-populates. Without backfill=True, the
+    # poll would use the 7-day default lookback (because the DELETEs
+    # above reset the cursor to NULL) and silently truncate everything
+    # older than a week — which is the opposite of what RESET should do.
+    # Import lazily to avoid a module-import cycle when the route file
+    # is imported by the celery worker.
     from app.cli.poll_capital_events import poll_connection
     repolled = 0
     for cid in affected_connections:
         try:
             # poll_connection commits internally so failures on one
             # connection don't block the others.
-            poll_connection(cur.connection, cur, cid, source="auto")
+            poll_connection(cur.connection, cur, cid, source="auto", backfill=True)
             repolled += 1
         except Exception as e:
             log.warning(f"reset: re-poll failed for {cid[:8]}: {e}")
