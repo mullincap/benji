@@ -717,10 +717,8 @@ function ExchangeCapitalGroup({
   onEditAnchor,
   onUpdateEvent,
   onDeleteEvent,
-  onCreditChange,
   onRecordNew,
   onReset,
-  allAllocOptions,
 }: {
   group: {
     connection_id: string | null;
@@ -739,15 +737,11 @@ function ExchangeCapitalGroup({
   onEditAnchor: (allocationId: string) => void;
   onUpdateEvent: (ev: ApiCapitalEvent) => void;
   onDeleteEvent: (ev: ApiCapitalEvent) => void;
-  onCreditChange: (eventId: string, allocationId: string | null) => void;
   // Optional — only present on real exchange panels (not the orphan "no
   // exchange link" bucket, where these actions don't apply).
   onRecordNew?: () => void;
   onReset?: () => void;
-  allAllocOptions: { id: string; label: string }[];
 }) {
-  const labelById: Record<string, string> = {};
-  for (const a of allAllocOptions) labelById[a.id] = a.label;
 
   const header = group.exchange_name
     ? group.exchange_name.toUpperCase()
@@ -897,13 +891,12 @@ function ExchangeCapitalGroup({
             <col style={{ width: "18%" }} />  {/* date */}
             <col style={{ width: "10%" }} />  {/* kind */}
             <col style={{ width: "12%" }} />  {/* amount */}
-            <col style={{ width: "18%" }} />  {/* credit to */}
             <col />                             {/* notes */}
             <col style={{ width: "150px" }} />{/* actions */}
           </colgroup>
           <thead>
             <tr style={{ borderBottom: "1px solid var(--line)" }}>
-              {["DATE (UTC)", "KIND", "AMOUNT", "CREDIT TO", "NOTES", ""].map(h => (
+              {["DATE (UTC)", "KIND", "AMOUNT", "NOTES", ""].map(h => (
                 <th key={h} style={{
                   padding: "7px 14px", textAlign: "left",
                   fontSize: 9, color: "var(--t3)", fontWeight: 700,
@@ -958,31 +951,6 @@ function ExchangeCapitalGroup({
                   <td style={{
                     padding: "10px 14px", color: amountColor, fontWeight: 700,
                   }}>{fmtAmount(ev.amount_usd, ev.kind)}</td>
-                  <td style={{ padding: "8px 14px" }}>
-                    <select
-                      value={ev.allocation_id ?? ""}
-                      onChange={e => {
-                        const v = e.target.value;
-                        onCreditChange(ev.event_id, v || null);
-                      }}
-                      disabled={group.allocations.length === 0}
-                      style={{
-                        width: "100%",
-                        background: "var(--bg3)",
-                        border: "1px solid var(--line)",
-                        borderRadius: 3, padding: "4px 8px",
-                        color: ev.allocation_id ? "var(--t0)" : "var(--amber)",
-                        fontSize: 10,
-                        fontFamily: FONT_MONO,
-                        cursor: group.allocations.length === 0 ? "not-allowed" : "pointer",
-                      }}
-                    >
-                      <option value="">— Unassigned —</option>
-                      {group.allocations.map(a => (
-                        <option key={a.id} value={a.id}>{labelById[a.id] ?? a.label}</option>
-                      ))}
-                    </select>
-                  </td>
                   <td
                     title={ev.notes ?? ""}
                     style={{
@@ -1467,17 +1435,8 @@ function CapitalEventsSection() {
                   onEditAnchor={setEditingAnchor}
                   onUpdateEvent={setEditingEvent}
                   onDeleteEvent={setConfirmDelete}
-                  onCreditChange={(eventId, allocationId) =>
-                    handleEdit(
-                      eventId,
-                      allocationId
-                        ? { allocation_id: allocationId }
-                        : { clear_allocation: true },
-                    )
-                  }
                   onRecordNew={grp.connection_id ? () => setCreatingForConnection(grp.connection_id!) : undefined}
                   onReset={grp.connection_id ? () => setConfirmReset(grp.connection_id!) : undefined}
-                  allAllocOptions={allocOptions}
                 />
               ))}
               {groups.length === 0 && (
