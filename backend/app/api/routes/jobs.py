@@ -290,13 +290,14 @@ class JobRequest(BaseModel):
                 "its internal setup can't be layered with individual knobs. "
                 "Use one OR the other per docs/strategy_specification.md § 3.1."
             )
-        if "volume" in self.overlap_dimensions and self.source != "db":
+        if "volume" in self.overlap_dimensions and self.price_source != "db":
             raise ValueError(
                 f"overlap_dimensions={self.overlap_dimensions!r} requires "
-                f"source='db'; got source={self.source!r}. Volume is not in "
-                f"the pre-built market.leaderboards tables — the three-way "
-                f"overlap must be computed on-the-fly from market.futures_1m. "
-                f"Either set source='db' or use overlap_dimensions='price_oi'."
+                f"price_source='db'; got price_source={self.price_source!r}. "
+                f"Volume is not in the pre-built market.leaderboards tables — "
+                f"the three-way overlap must be computed on-the-fly from "
+                f"market.futures_1m. Either set price_source='db' or use "
+                f"overlap_dimensions='price_oi'."
             )
         return self
 
