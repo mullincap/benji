@@ -77,6 +77,40 @@ config flows in. Note: this changes the leverage tier from
 Alpha Max (l_high=2.0) to ALTS MAIN (l_high=1.5) — user's capital
 size-drops by ~25% vs current but risk-adjusted return is the bet.
 
+### Gap 6 — Manager Execution "Daily Summary" stale for 2026-04-23
+Observed 2026-04-23 ~05:00 UTC (Thu): the Manager → Execution →
+Daily Execution Summary table shows the 2026-04-23 row as
+`Signal=0 / Conviction=FAIL / "Filtered"`, which is the state
+written by the FIRST trader subprocess at 06:05 UTC (before the
+REST-API v2 patch). After recovery at 06:31 UTC we deleted the
+3 empty `user_mgmt.daily_signals` rows, re-ran v2 (wrote 6-symbol
+rows), respawned the trader which ran with `phase=active` and
+6-for-6 reconciled positions for the rest of the session. Yet the
+aggregated row on this Manager view still reflects the early-
+morning filtered state.
+
+Possible causes:
+- The Daily Summary query reads from `portfolio_sessions` (the
+  initial row with exit_reason='filtered' was created at 06:05
+  by the first subprocess and never updated when the respawn at
+  06:31 took over).
+- Or it reads from a materialized view / cache that wasn't
+  refreshed after the recovery.
+- Or it joins `allocation_returns` (not yet written — session
+  still open) and falls through to runtime_state.phase history
+  where an earlier phase='filtered' is latched.
+
+Scope for tomorrow: (a) identify the actual source query backing
+this table row, (b) UPDATE today's row to reflect the active/
+traded state, (c) harden so a mid-session phase transition
+(filtered → active via respawn after capital-events-style
+recovery) is reflected accurately in the aggregated view.
+
+Not blocking: tonight's Gap 4 reconcile cron will write the
+correct `allocation_returns` row at 23:56 UTC — tomorrow when
+the Daily Summary reads that table, it should self-heal. Worth
+verifying as the first check tomorrow.
+
 ### Gap 5 — Capital Events UI on Allocator Settings page
 Location: `/trader/settings` (the page that currently shows
 LINKED EXCHANGES + ACCOUNT SUMMARY). Add a new section:
@@ -140,12 +174,18 @@ close.
 
 ### Execution order tomorrow
 
-1. Gap 4 reconciliation script + cron (fix tonight's row; permanent)
-2. Gap 1 tail_drop_pct config-read change
-3. Gap 3 allocation swap to ALTS MAIN's strategy_version_id
-4. (monitor) Tomorrow's 05:58 UTC signal + 06:05 spawn → verify
-   trader loads ALTS MAIN config + trades new basket
-5. Gap 2 Dispersion filter implementation (Friday)
+1. Gap 6 — verify the 23:56 UTC reconcile cron ran AND that the
+   Manager Execution Daily Summary self-heals for 2026-04-23.
+   If not, dig into the source query and patch.
+2. Gap 4 — promote the one-shot reconcile SQL into a permanent
+   nightly cron that handles any allocation × any session_date.
+3. Gap 1 — `tail_drop_pct` config-read in daily_signal_v2.py.
+4. Gap 3 — swap allocation f87fe130 to ALTS MAIN's strategy_
+   version_id.
+5. (monitor) Tomorrow's 05:58 UTC signal + 06:05 spawn → verify
+   trader loads ALTS MAIN config + trades new basket.
+6. Gap 5 — Capital Events UI (~2-3 hrs).
+7. Gap 2 — Dispersion filter implementation (Friday).
 
 ### Verification checklist after tomorrow's session
 
