@@ -225,19 +225,32 @@ def refresh_one(sv: dict[str, Any], *, dry_run: bool = False) -> dict[str, Any]:
     if fees_table and fees_table[-1].get("date"):
         data_through = fees_table[-1]["date"]
 
-    # ret_net is in percent (e.g. 25.11 = 25.11%); the sibling expects
-    # decimals. Flat-day handling is documented in the function's
-    # docstring — flats ARE included as 0.0.
-    daily_rets = [
-        float(f["ret_net"]) / 100.0
-        for f in fees_table
-        if f.get("ret_net") is not None
-    ]
-    vol_boost = compute_strategy_vol_boost(daily_rets)
-    log.info(
-        f"  [{short_id}] vol_boost={vol_boost:.4f} "
-        f"(from {len(daily_rets)} daily returns)"
-    )
+    # vol_boost is only meaningful when the audit itself ran with
+    # ENABLE_VOL_LEV_SCALING=True. Otherwise the audit simulated static
+    # L_HIGH and applying any boost in the live trader would over-leverage
+    # vs what was tested. Strict audit-match: gate the boost on the same
+    # config flag the audit consumed.
+    enable_vol_lev = bool((sv["config"] or {}).get("enable_vol_lev_scaling", False))
+    if enable_vol_lev:
+        # ret_net is in percent (e.g. 25.11 = 25.11%); the sibling expects
+        # decimals. Flat-day handling is documented in the function's
+        # docstring — flats ARE included as 0.0.
+        daily_rets = [
+            float(f["ret_net"]) / 100.0
+            for f in fees_table
+            if f.get("ret_net") is not None
+        ]
+        vol_boost = compute_strategy_vol_boost(daily_rets)
+        log.info(
+            f"  [{short_id}] vol_boost={vol_boost:.4f} "
+            f"(from {len(daily_rets)} daily returns; vol_lev enabled)"
+        )
+    else:
+        vol_boost = 1.0
+        log.info(
+            f"  [{short_id}] vol_boost=1.0000 "
+            f"(audit ran with vol_lev disabled — strict static-L_HIGH match)"
+        )
 
     conn = get_worker_conn()
     try:

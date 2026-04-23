@@ -82,6 +82,19 @@ TAIL_VOL_MULT         = 1.4
 TAIL_VOL_SHORT_WINDOW = 5
 TAIL_VOL_LONG_WINDOW  = 60
 
+# -- Dispersion filter (matches audit.py build_dispersion_filter) ----------
+# Cross-sectional dispersion of yesterday's daily log-returns across top-N
+# mcap symbols. Low dispersion (alts moving together) = momentum edge
+# suppressed → sit flat today.
+#
+# Lagged by 1 day: yesterday's disp_ratio gates today's trade.
+# Static universe in the live path (top-N mcap *today*) used for the full
+# baseline window — a minor approximation vs the audit's per-day universe.
+DISPERSION_N            = 40
+DISPERSION_BASELINE_WIN = 33
+DISPERSION_THRESHOLD    = 0.66
+DISPERSION_MIN_SYMBOLS  = 20
+
 FILTER_NAME           = "Tail Guardrail"
 
 # -- Output paths -----------------------------------------------------------
@@ -363,24 +376,18 @@ def compute_canonical_basket(ref_date):
 # STEP 3 — TAIL GUARDRAIL (BTC daily returns + rvol from futures_1m)
 # ==========================================================================
 
-def compute_tail_guardrail(ref_date):
-    """Compute Tail Guardrail sit-flat decision from BTC 1-min bars in DB.
+def _fetch_btc_daily_closes(ref_date):
+    """Pull BTC 1d closes for the trailing TAIL_VOL_LONG_WINDOW+5 days.
 
-    Logic matches daily_signal.py (v1):
-      - prev_day_return: BTC close at (ref_date-1) 23:59 / BTC close at
-        (ref_date-1) 00:00 - 1. Fires if < -TAIL_DROP_PCT (=-4%).
-      - 5d rvol / 60d rvol ratio: std of daily log returns over the trailing
-        TAIL_VOL_SHORT_WINDOW days divided by std over the trailing
-        TAIL_VOL_LONG_WINDOW days. Fires if > TAIL_VOL_MULT (=1.4x).
+    Extracted from compute_tail_guardrail so the DB round-trip happens
+    ONCE per daily_signal_v2 run even when multiple strategies (each with
+    their own threshold config) compute Tail Guardrail independently.
 
-    Either gate firing → sit flat. Returns (sit_flat: bool, reason: str|None).
+    Returns a list of float closes in chronological order. Empty list if
+    coverage is insufficient — caller should fail-closed.
     """
-    log.info("Computing Tail Guardrail (BTC prev-day return + 5d/60d rvol)...")
     conn = _get_db_conn()
     cur = conn.cursor()
-
-    # Pull BTC daily closes for the last TAIL_VOL_LONG_WINDOW + 5 days.
-    # Use the last bar of each UTC day (23:59 close, or latest before midnight).
     cur.execute("""
         WITH btc AS (
             SELECT symbol_id FROM market.symbols WHERE binance_id = 'BTCUSDT'
@@ -398,15 +405,50 @@ def compute_tail_guardrail(ref_date):
     rows = cur.fetchall()
     cur.close()
     conn.close()
+    return [float(r[1]) for r in rows]
 
-    if len(rows) < TAIL_VOL_LONG_WINDOW + 1:
+
+def compute_tail_guardrail(
+    ref_date,
+    closes: list | None = None,
+    tail_drop_pct: float | None = None,
+    tail_vol_mult: float | None = None,
+):
+    """Compute Tail Guardrail sit-flat decision for a given set of thresholds.
+
+    Logic matches daily_signal.py (v1):
+      - prev_day_return: BTC close at (ref_date-1) 23:59 / BTC close at
+        (ref_date-1) 00:00 - 1. Fires if < -tail_drop_pct.
+      - 5d rvol / 60d rvol ratio: std of daily log returns over the trailing
+        TAIL_VOL_SHORT_WINDOW days divided by std over the trailing
+        TAIL_VOL_LONG_WINDOW days. Fires if > tail_vol_mult.
+
+    Either gate firing → sit flat. Returns (sit_flat: bool, reason: str|None).
+
+    Thresholds fall through to the module-level defaults when the caller
+    passes None; this preserves the existing canonical-CSV write path
+    (main() uses the canonical strategy's thresholds by default). For
+    per-strategy computation in write_to_db, pass the strategy's config
+    values explicitly.
+
+    `closes` may be pre-fetched (via _fetch_btc_daily_closes) when the
+    caller is computing Tail Guardrail for multiple strategies in one
+    invocation — saves the DB round-trip. When None, fetches on demand.
+    """
+    tdp = tail_drop_pct if tail_drop_pct is not None else TAIL_DROP_PCT
+    tvm = tail_vol_mult if tail_vol_mult is not None else TAIL_VOL_MULT
+
+    log.info(f"Computing Tail Guardrail (drop={tdp*100:.1f}%  vol_mult={tvm}x)...")
+
+    if closes is None:
+        closes = _fetch_btc_daily_closes(ref_date)
+
+    if len(closes) < TAIL_VOL_LONG_WINDOW + 1:
         log.warning(f"Tail Guardrail needs ≥{TAIL_VOL_LONG_WINDOW+1} daily closes "
-                    f"prior to {ref_date}; have {len(rows)}. Forcing sit-flat "
+                    f"prior to {ref_date}; have {len(closes)}. Forcing sit-flat "
                     f"(fail-closed) to avoid trading under uncertain guardrail "
                     f"state.")
         return True, "tail_guardrail_insufficient_history"
-
-    closes = [float(r[1]) for r in rows]
 
     # Log returns (day N close / day N-1 close)
     log_rets = []
@@ -432,10 +474,10 @@ def compute_tail_guardrail(ref_date):
     log.info(f"  BTC prev-day: {prev_day_ret*100:.2f}%  "
              f"5d rvol: {rvol_5d*100:.2f}%  "
              f"60d baseline: {rvol_60d*100:.2f}%  "
-             f"ratio: {ratio:.3f}x  threshold: {TAIL_VOL_MULT}x")
+             f"ratio: {ratio:.3f}x  threshold: {tvm}x")
 
-    crash_fires = prev_day_ret < -TAIL_DROP_PCT
-    vol_fires   = ratio > TAIL_VOL_MULT
+    crash_fires = prev_day_ret < -tdp
+    vol_fires   = ratio > tvm
 
     if crash_fires and vol_fires:
         reason = (f"tail_guardrail_crash_and_vol: prev_day={prev_day_ret*100:.2f}% "
@@ -443,11 +485,11 @@ def compute_tail_guardrail(ref_date):
         log.info(f"  Tail Guardrail: FIRE (both gates) -- SIT FLAT")
         return True, reason
     if crash_fires:
-        reason = f"tail_guardrail_crash: prev_day={prev_day_ret*100:.2f}% < -{TAIL_DROP_PCT*100:.0f}%"
+        reason = f"tail_guardrail_crash: prev_day={prev_day_ret*100:.2f}% < -{tdp*100:.1f}%"
         log.info(f"  Tail Guardrail: FIRE (crash gate) -- SIT FLAT")
         return True, reason
     if vol_fires:
-        reason = f"tail_guardrail_vol: rvol_ratio={ratio:.3f}x > {TAIL_VOL_MULT}x"
+        reason = f"tail_guardrail_vol: rvol_ratio={ratio:.3f}x > {tvm}x"
         log.info(f"  Tail Guardrail: FIRE (vol gate) -- SIT FLAT")
         return True, reason
 
@@ -456,14 +498,187 @@ def compute_tail_guardrail(ref_date):
 
 
 # ==========================================================================
+# STEP 3b — DISPERSION FILTER (matches audit.py build_dispersion_filter)
+# ==========================================================================
+#
+# Live implementation of the cross-sectional dispersion gate. Port of the
+# audit's logic in pipeline/audit.py:2723 (build_dispersion_filter), adapted
+# for live same-day evaluation via Binance REST klines.
+#
+# Semantic (lagged by 1 day):
+#   yesterday_dispersion = std of yesterday's daily log-returns across the
+#                          top-N mcap symbols
+#   baseline             = rolling median over DISPERSION_BASELINE_WIN days
+#                          of dispersion values, ending yesterday
+#   disp_ratio           = yesterday_dispersion / baseline
+#   sit_flat today       if disp_ratio < threshold
+#
+# Approximation vs audit: the audit uses per-day top-N mcap universe. Live
+# uses today's top-N for the full baseline window (simpler + within a few
+# symbols of per-day). Dominant effect is yesterday's dispersion value,
+# which uses yesterday's data directly; the baseline median is more robust
+# to symbol churn.
+#
+# Returns (sit_flat, reason) matching compute_tail_guardrail shape.
+
+
+def compute_dispersion_filter(ref_date,
+                              threshold: float | None = None,
+                              baseline_win: int | None = None,
+                              n_symbols: int | None = None):
+    thr = threshold    if threshold    is not None else DISPERSION_THRESHOLD
+    win = baseline_win if baseline_win is not None else DISPERSION_BASELINE_WIN
+    n   = n_symbols    if n_symbols    is not None else DISPERSION_N
+
+    log.info(f"Computing Dispersion filter (threshold={thr}, baseline_win={win}d, n={n})...")
+
+    # 1. Today's top-N mcap symbols from DB (excludes stablecoins + non-ASCII)
+    conn = _get_db_conn()
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT base
+        FROM market.market_cap_daily
+        WHERE date = %s
+          AND base NOT IN ('USDT','USDC','BUSD','DAI','TUSD','FDUSD','USDE',
+                           'USDS','PYUSD','USD1','FRAX','USDP')
+          AND base !~ '[^A-Z0-9]'
+          AND base NOT IN ('XAU','XAG','XPD','XPT')  -- non-crypto tickers
+        ORDER BY market_cap_usd DESC
+        LIMIT %s
+    """, (ref_date, n))
+    symbols = [r[0] for r in cur.fetchall()]
+    cur.close()
+    conn.close()
+
+    if len(symbols) < DISPERSION_MIN_SYMBOLS:
+        log.warning(f"  Dispersion: only {len(symbols)} eligible mcap symbols "
+                    f"for {ref_date} (< {DISPERSION_MIN_SYMBOLS} min). "
+                    f"Fail-open (not firing).")
+        return False, None
+
+    # 2. Fetch (win + buffer) days of 1d klines per symbol from Binance FAPI
+    from concurrent.futures import ThreadPoolExecutor
+    fetch_days = win + 2
+    end_dt    = _dt.datetime.combine(ref_date, _dt.time(0, 0, 0), tzinfo=_dt.timezone.utc)
+    start_dt  = end_dt - _dt.timedelta(days=fetch_days)
+    start_ms  = int(start_dt.timestamp() * 1000)
+    end_ms    = int(end_dt.timestamp()   * 1000)
+
+    def _fetch_daily(sym):
+        try:
+            r = requests.get(
+                f"{_BINANCE_FAPI}/fapi/v1/klines",
+                params={"symbol": f"{sym}USDT", "interval": "1d",
+                        "startTime": start_ms, "endTime": end_ms,
+                        "limit": fetch_days + 5},
+                timeout=_REST_TIMEOUT,
+            )
+            if r.status_code != 200:
+                return sym, None
+            klines = r.json()
+            if not klines:
+                return sym, None
+            return sym, [(k[0], float(k[4])) for k in klines]  # (open_time_ms, close)
+        except Exception:
+            return sym, None
+
+    log.info(f"  Fetching {fetch_days}d of 1d klines for {len(symbols)} symbols...")
+    results: dict = {}
+    with ThreadPoolExecutor(max_workers=_REST_WORKERS) as pool:
+        for sym, series in pool.map(_fetch_daily, symbols):
+            if series:
+                results[sym] = series
+
+    if len(results) < DISPERSION_MIN_SYMBOLS:
+        log.warning(f"  Dispersion: only {len(results)}/{len(symbols)} symbols "
+                    f"returned klines (< {DISPERSION_MIN_SYMBOLS} min). "
+                    f"Fail-open.")
+        return False, None
+
+    # 3. Build per-symbol {date: close} then compute per-day cross-sectional
+    #    std of log-returns.
+    per_symbol_closes: dict = {}
+    all_dates: set = set()
+    for sym, series in results.items():
+        d_map = {}
+        for ts_ms, close in series:
+            d = _dt.datetime.fromtimestamp(ts_ms / 1000,
+                                           tz=_dt.timezone.utc).date()
+            d_map[d] = close
+            all_dates.add(d)
+        per_symbol_closes[sym] = d_map
+
+    sorted_dates = sorted(all_dates)
+    daily_dispersion: dict = {}
+    for i in range(1, len(sorted_dates)):
+        d = sorted_dates[i]
+        d_prev = sorted_dates[i - 1]
+        rets = []
+        for sym, d_map in per_symbol_closes.items():
+            c = d_map.get(d)
+            c_prev = d_map.get(d_prev)
+            if c is not None and c_prev is not None and c_prev > 0 and c > 0:
+                rets.append(math.log(c / c_prev))
+        if len(rets) >= DISPERSION_MIN_SYMBOLS:
+            m = sum(rets) / len(rets)
+            var = sum((r - m) ** 2 for r in rets) / (len(rets) - 1)
+            daily_dispersion[d] = math.sqrt(var)
+
+    # 4. Yesterday's dispersion + baseline median
+    yesterday = ref_date - _dt.timedelta(days=1)
+    if yesterday not in daily_dispersion:
+        log.warning(f"  Dispersion: no value for yesterday ({yesterday}). "
+                    f"Fail-open.")
+        return False, None
+
+    window_start = yesterday - _dt.timedelta(days=win - 1)
+    baseline_vals = sorted(v for d, v in daily_dispersion.items()
+                           if window_start <= d <= yesterday)
+    min_for_baseline = max(5, win // 2)
+    if len(baseline_vals) < min_for_baseline:
+        log.warning(f"  Dispersion: only {len(baseline_vals)} baseline values "
+                    f"(need ≥ {min_for_baseline}). Fail-open.")
+        return False, None
+
+    n_b = len(baseline_vals)
+    baseline = (baseline_vals[n_b // 2]
+                if n_b % 2 == 1
+                else (baseline_vals[n_b // 2 - 1] + baseline_vals[n_b // 2]) / 2)
+    yesterday_disp = daily_dispersion[yesterday]
+    disp_ratio = (yesterday_disp / baseline) if baseline > 0 else 0.0
+
+    log.info(f"  Dispersion[{yesterday}]={yesterday_disp:.5f}  "
+             f"baseline_median={baseline:.5f}  "
+             f"ratio={disp_ratio:.3f}  threshold={thr}")
+
+    if disp_ratio < thr:
+        reason = f"dispersion_low: ratio={disp_ratio:.3f} < {thr}"
+        log.info(f"  Dispersion: FIRE -- SIT FLAT")
+        return True, reason
+
+    log.info(f"  Dispersion: PASS")
+    return False, None
+
+
+# ==========================================================================
 # STEP 4 — DEPLOYS CSV WRITER (parallel to v1's writer, different output file)
 # ==========================================================================
 
-def write_deploys_csv(date_str, filter_name, overlap_pool, sit_flat, sit_flat_reason):
-    """Write/update live_deploys_signal_v2.csv. Additive: preserves prior rows
-    up to DEPLOYS_RETAIN_DAYS. Format matches live_deploys_signal.csv (v1)
-    exactly (column names + order + sit_flat capitalization) so v2 is a
-    drop-in replacement at cutover time."""
+def write_deploys_csv(date_str, filter_entries, overlap_pool):
+    """Write/update live_deploys_signal.csv.
+
+    `filter_entries` is a list of dicts, one per distinct filter_name used
+    by any published strategy today:
+        [{"filter_name": str, "sit_flat": bool, "filter_reason": str}, ...]
+
+    Writes ONE row per entry (e.g. two rows on days where Alpha Main uses
+    "Tail Guardrail" and ALTS MAIN uses "Tail + Dispersion"). The trader's
+    get_today_symbols() matches on `filter` column against its config's
+    active_filter — so multi-filter days need multi-row CSVs.
+
+    Additive: preserves prior rows up to DEPLOYS_RETAIN_DAYS. Drops any
+    rows with today's date before appending new ones (idempotent re-run).
+    """
     fieldnames = ["date", "filter", "symbols", "sit_flat", "filter_reason"]
 
     # Load existing rows (if file exists) and drop the target date if already present
@@ -481,15 +696,19 @@ def write_deploys_csv(date_str, filter_name, overlap_pool, sit_flat, sit_flat_re
     cutoff = (_dt.date.today() - _dt.timedelta(days=DEPLOYS_RETAIN_DAYS)).isoformat()
     existing = [r for r in existing if r.get("date", "") >= cutoff]
 
-    # Add today's row (column names + order match v1 for drop-in cutover)
-    new_row = {
-        "date":          date_str,
-        "filter":        filter_name,
-        "symbols":       " ".join(overlap_pool) if overlap_pool and not sit_flat else "",
-        "sit_flat":      "True" if sit_flat else "False",
-        "filter_reason": sit_flat_reason or ("pass" if not sit_flat else ""),
-    }
-    rows = existing + [new_row]
+    new_rows = []
+    for entry in filter_entries:
+        fn       = entry["filter_name"]
+        sflat    = entry["sit_flat"]
+        freason  = entry.get("filter_reason") or ("pass" if not sflat else "")
+        new_rows.append({
+            "date":          date_str,
+            "filter":        fn,
+            "symbols":       " ".join(overlap_pool) if overlap_pool and not sflat else "",
+            "sit_flat":      "True" if sflat else "False",
+            "filter_reason": freason,
+        })
+    rows = existing + new_rows
     rows.sort(key=lambda r: r["date"])
 
     with open(DEPLOYS_CSV, "w", newline="") as f:
@@ -499,10 +718,12 @@ def write_deploys_csv(date_str, filter_name, overlap_pool, sit_flat, sit_flat_re
 
     log.info(
         f"Deploys CSV v2 written -> {DEPLOYS_CSV}  "
-        f"(kept {len(existing)} prior rows, pruned before {cutoff})\n"
-        f"  date={date_str}  filter={filter_name}  "
-        f"sit_flat={sit_flat}  symbols={new_row['symbols'] or '(none)'}"
+        f"(kept {len(existing)} prior rows, pruned before {cutoff})"
     )
+    for r in new_rows:
+        log.info(f"  date={r['date']}  filter={r['filter']}  "
+                 f"sit_flat={r['sit_flat']}  "
+                 f"symbols={r['symbols'] or '(none)'}")
 
 
 # ==========================================================================
@@ -520,14 +741,146 @@ def write_deploys_csv(date_str, filter_name, overlap_pool, sit_flat, sit_flat_re
 # exact DB-write behavior that the trader has been relying on.
 # ==========================================================================
 
-def write_to_db(date_str, filter_name, overlap_pool, sit_flat, filter_reason):
+def fetch_published_strategy_configs() -> list:
+    """Query all published+active strategy versions, return list of
+    dicts: [{sv_id, display_name, config}]. Shared by main() (CSV
+    build-up) and write_to_db (DB inserts) to avoid duplicated work.
+    """
+    sys.path.insert(0, str(_SCRIPT_DIR))
+    from pipeline.db.connection import get_conn
+    conn = get_conn()
+    try:
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT sv.strategy_version_id::text, s.display_name, sv.config
+            FROM audit.strategy_versions sv
+            JOIN audit.strategies s ON s.strategy_id = sv.strategy_id
+            WHERE sv.is_active = TRUE AND s.is_published = TRUE
+            ORDER BY sv.strategy_version_id
+        """)
+        out = [{"sv_id": r[0], "display_name": r[1], "config": (r[2] or {})}
+               for r in cur.fetchall()]
+        cur.close()
+    finally:
+        conn.close()
+    return out
+
+
+def compute_per_strategy_decisions(
+    today,
+    strategies: list,
+    btc_closes: list,
+    disp_decision: tuple,
+    canonical_tg_decision: tuple,
+    canonical_filter_reason: str,
+) -> list:
+    """For each strategy, compute the final (sit_flat, reason, filter_label)
+    using the strategy's own TG thresholds + shared Disp decision, resolved
+    via its active_filter.
+
+    Returns list of dicts ready for both the CSV writer and the DB writer:
+        [{sv_id, display_name, config, sit_flat, filter_reason,
+          filter_name, tg_decision}]
+    """
+    out = []
+    fallback = (canonical_tg_decision[0], canonical_filter_reason)
+    for s in strategies:
+        sv_id = s["sv_id"]
+        cfg   = s["config"]
+        name  = s["display_name"]
+
+        # Per-strategy TG (fallback to canonical if thresholds missing)
+        tg_decision = canonical_tg_decision
+        sv_tdp = cfg.get("tail_drop_pct")
+        sv_tvm = cfg.get("tail_vol_mult")
+        if sv_tdp is not None and sv_tvm is not None:
+            try:
+                tg_decision = compute_tail_guardrail(
+                    today, closes=btc_closes,
+                    tail_drop_pct=float(sv_tdp),
+                    tail_vol_mult=float(sv_tvm),
+                )
+            except (TypeError, ValueError):
+                pass
+
+        flat, reason, label = _resolve_strategy_filter(
+            cfg, tg_decision, disp_decision, fallback=fallback,
+        )
+        out.append({
+            "sv_id":          sv_id,
+            "display_name":   name,
+            "config":         cfg,
+            "sit_flat":       flat,
+            "filter_reason":  reason,
+            "filter_name":    label,
+            "tg_decision":    tg_decision,
+        })
+    return out
+
+
+def _resolve_strategy_filter(
+    cfg: dict,
+    tg_decision: tuple,            # (sit_flat, reason) at strategy thresholds
+    disp_decision: tuple,          # (sit_flat, reason), shared across strategies
+    fallback: tuple,               # (sit_flat, reason) if active_filter unhandled
+) -> tuple:
+    """Combine per-strategy filter components into a single (sit_flat,
+    reason, filter_name) decision based on the strategy's active_filter.
+
+    Supported active_filters (matches audit.py's REGIME FILTER COMPARISON
+    labels that live signal can realistically implement):
+        "A - No Filter"           → never sit flat (trade every day)
+        "A - Tail Guardrail"      → TG only
+        "A - Dispersion"          → Dispersion only
+        "A - Tail + Dispersion"   → TG OR Dispersion (either fires → flat)
+
+    Unhandled filters (Calendar, Vol, Tail+Disp+Vol, etc.) fall back to
+    caller's fallback decision — caller should pass TG-only as the safe
+    default.
+    """
+    af = (cfg.get("active_filter") or "").strip()
+    tg_flat, tg_reason = tg_decision
+    dp_flat, dp_reason = disp_decision
+
+    if af == "A - No Filter":
+        return False, "pass", "No Filter"
+    if af == "A - Tail Guardrail":
+        return tg_flat, (tg_reason or "pass"), "Tail Guardrail"
+    if af == "A - Dispersion":
+        return dp_flat, (dp_reason or "pass"), "Dispersion"
+    if af == "A - Tail + Dispersion":
+        # EITHER fires → sit flat
+        if tg_flat and dp_flat:
+            reason = f"tail+disp_both: {tg_reason} | {dp_reason}"
+        elif tg_flat:
+            reason = f"tail+disp_tail_only: {tg_reason}"
+        elif dp_flat:
+            reason = f"tail+disp_disp_only: {dp_reason}"
+        else:
+            reason = "pass"
+        return (tg_flat or dp_flat), reason, "Tail + Dispersion"
+    # Unhandled — fall back to caller's decision
+    fb_flat, fb_reason = fallback
+    return fb_flat, (fb_reason or "pass"), "Tail Guardrail"
+
+
+def write_to_db(date_str, filter_name, overlap_pool, sit_flat, filter_reason,
+                btc_closes: list | None = None, today=None,
+                disp_decision: tuple | None = None):
     """Insert today's signal into user_mgmt.daily_signals + daily_signal_items.
 
-    Writes one row per published+active strategy_version_id (Alpha Low / Main /
-    Max). Alpha variants are derivative of the shared filter — they use the
-    same overlap_pool / sit_flat / filter_name but need their own signal rows
-    so allocation-keyed queries (manager overview, trader subprocesses) find
-    signals matching their strategy_version_id.
+    Writes one row per published+active strategy_version_id. Each strategy's
+    Tail Guardrail decision is computed using THAT strategy's own
+    tail_drop_pct / tail_vol_mult (read from `audit.strategy_versions.config`)
+    — critical for correctness when strategies run with divergent thresholds
+    (e.g. ALTS MAIN's 0.03 vs Alpha Main's 0.04). The caller-supplied
+    `sit_flat` + `filter_reason` are used as FALLBACKS when a strategy's
+    config doesn't specify thresholds or when BTC closes can't be fetched.
+
+    `btc_closes` avoids re-fetching from DB when main() already has the
+    series in hand. Pass today=ref_date (datetime.date) to enable per-
+    strategy compute; omit both to use the caller's sit_flat across all
+    strategies (legacy behavior).
 
     A DB failure is logged but never fatal (CSV write already succeeded).
     """
@@ -538,17 +891,23 @@ def write_to_db(date_str, filter_name, overlap_pool, sit_flat, filter_reason):
         conn = get_conn()
         cur = conn.cursor()
 
-        # Query all published + active strategy versions. One signal row per
-        # version. Fallback to secrets.env STRATEGY_VERSION_ID if the query
-        # returns nothing (defensive — should never fire in production).
+        # Query all published + active strategy versions WITH their config
+        # JSONB so we can pull per-strategy tail_drop_pct / tail_vol_mult.
+        # Fallback to secrets.env STRATEGY_VERSION_ID if the query returns
+        # nothing (defensive — should never fire in production).
         cur.execute("""
-            SELECT sv.strategy_version_id::text
+            SELECT sv.strategy_version_id::text,
+                   sv.config,
+                   s.display_name
             FROM audit.strategy_versions sv
             JOIN audit.strategies s ON s.strategy_id = sv.strategy_id
             WHERE sv.is_active = TRUE AND s.is_published = TRUE
             ORDER BY sv.strategy_version_id
         """)
-        version_ids = [r[0] for r in cur.fetchall()]
+        version_rows = cur.fetchall()
+        version_ids = [r[0] for r in version_rows]
+        version_configs = {r[0]: (r[1] or {}) for r in version_rows}
+        version_names   = {r[0]: r[2] for r in version_rows}
 
         if not version_ids:
             # Legacy fallback: read single STRATEGY_VERSION_ID from secrets.env.
@@ -567,7 +926,7 @@ def write_to_db(date_str, filter_name, overlap_pool, sit_flat, filter_reason):
 
         # Look up symbol_ids once (shared across all strategy versions).
         sym_map = {}
-        if overlap_pool and not sit_flat:
+        if overlap_pool:
             cur.execute(
                 "SELECT base, symbol_id FROM market.symbols WHERE base = ANY(%s)",
                 ([sym for sym in overlap_pool],)
@@ -576,8 +935,52 @@ def write_to_db(date_str, filter_name, overlap_pool, sit_flat, filter_reason):
 
         from psycopg2.extras import execute_values
 
+        # Default Dispersion decision when caller didn't compute it (e.g.
+        # legacy caller path that predates the filter). Treated as
+        # "don't fire" — safe fallback for strategies whose active_filter
+        # references Dispersion; the _resolve_strategy_filter function
+        # handles the absent-Dispersion case by defaulting to Tail-only.
+        disp_fallback = disp_decision if disp_decision is not None else (False, None)
+
         rows_written = 0
         for sv_id in version_ids:
+            cfg = version_configs.get(sv_id, {})
+            sv_name = version_names.get(sv_id, sv_id[:8])
+
+            # Per-strategy Tail Guardrail decision (each strategy's own
+            # tail_drop_pct / tail_vol_mult from config JSONB). Falls back
+            # to caller decision when per-strategy inputs are missing.
+            tg_decision = (sit_flat, filter_reason)
+            sv_tdp = cfg.get("tail_drop_pct")
+            sv_tvm = cfg.get("tail_vol_mult")
+            if (today is not None and btc_closes is not None
+                    and sv_tdp is not None and sv_tvm is not None):
+                try:
+                    tg_decision = compute_tail_guardrail(
+                        today, closes=btc_closes,
+                        tail_drop_pct=float(sv_tdp),
+                        tail_vol_mult=float(sv_tvm),
+                    )
+                    log.info(f"  [per-strategy TG] {sv_name}: "
+                             f"drop={float(sv_tdp)*100:.1f}% "
+                             f"vol_mult={float(sv_tvm)}x "
+                             f"→ sit_flat={tg_decision[0]}")
+                except (TypeError, ValueError) as e:
+                    log.warning(f"  [per-strategy TG] {sv_name}: invalid "
+                                f"thresholds ({e}); fallback to caller")
+
+            # Resolve per-strategy active_filter into final sit_flat decision
+            sv_sit_flat, sv_reason, sv_filter_label = _resolve_strategy_filter(
+                cfg, tg_decision, disp_fallback, fallback=(sit_flat, filter_reason),
+            )
+            log.info(f"  [{sv_name}] active_filter={cfg.get('active_filter')!r} "
+                     f"→ sit_flat={sv_sit_flat}  reason={sv_reason!r}")
+
+            # filter_name column tracks the resolved label (maps 1:1 to the
+            # trader's `active_filter` match path). For canonical strategies
+            # this stays "Tail Guardrail"; ALTS MAIN writes "Tail + Dispersion".
+            sv_filter_name = sv_filter_label
+
             cur.execute("""
                 INSERT INTO user_mgmt.daily_signals
                     (signal_date, strategy_version_id, computed_at,
@@ -585,7 +988,7 @@ def write_to_db(date_str, filter_name, overlap_pool, sit_flat, filter_reason):
                 VALUES (%s, %s, NOW(), %s, %s, %s)
                 ON CONFLICT (signal_date, strategy_version_id) DO NOTHING
                 RETURNING signal_batch_id
-            """, (date_str, sv_id, sit_flat, filter_name, filter_reason))
+            """, (date_str, sv_id, sv_sit_flat, sv_filter_name, sv_reason))
 
             row = cur.fetchone()
             if row is None:
@@ -596,7 +999,7 @@ def write_to_db(date_str, filter_name, overlap_pool, sit_flat, filter_reason):
             signal_batch_id = row[0]
             rows_written += 1
 
-            if overlap_pool and not sit_flat and sym_map:
+            if overlap_pool and not sv_sit_flat and sym_map:
                 item_rows = []
                 for rank, sym in enumerate(overlap_pool, start=1):
                     sid = sym_map.get(sym)
@@ -649,27 +1052,79 @@ def main():
         if dropped:
             log.info(f"BloFin filter dropped {len(dropped)} symbols: {dropped}")
 
-    # 4. Tail Guardrail
-    sit_flat, tg_reason = compute_tail_guardrail(today)
+    # 4a. Tail Guardrail. Fetch BTC closes once, compute with canonical
+    #     defaults for the CSV writer + pass closes to write_to_db so
+    #     each strategy evaluates with its OWN config thresholds (critical
+    #     when ALTS MAIN's 0.03 tail_drop_pct coexists with Alpha Main's
+    #     0.04).
+    btc_closes = _fetch_btc_daily_closes(today)
+    sit_flat, tg_reason = compute_tail_guardrail(today, closes=btc_closes)
 
-    # 5. Final decision
+    # 4b. Dispersion filter. Computed ONCE (shared across strategies since
+    #     DISPERSION_THRESHOLD / DISPERSION_N / DISPERSION_BASELINE_WIN are
+    #     currently uniform across published strategy configs; per-strategy
+    #     override support can be added later by moving the call inside the
+    #     write_to_db loop). Result passed to write_to_db so strategies
+    #     whose active_filter includes Dispersion can combine it with Tail.
+    disp_flat, disp_reason = compute_dispersion_filter(today)
+
+    # 5. Final decision for CSV — CSV writer uses the CANONICAL strategy's
+    #    methodology (Alpha Main = Tail Guardrail only). The DB write path
+    #    handles per-strategy combinations.
     final_basket = [] if sit_flat else basket
     if sit_flat:
-        log.info(f"SIT FLAT TODAY (reason: {tg_reason})")
+        log.info(f"SIT FLAT TODAY — canonical Tail Guardrail fired (reason: {tg_reason})")
     else:
-        log.info(f"TRADE TODAY -- {len(final_basket)} symbols: {final_basket}")
+        log.info(f"TRADE TODAY — canonical TG clear, basket: {final_basket}")
+    if disp_flat:
+        log.info(f"[Dispersion status] FIRED — will sit out strategies with active_filter=Dispersion/Tail+Dispersion  (reason: {disp_reason})")
+    else:
+        log.info(f"[Dispersion status] clear")
 
-    # 6. Write CSV (the trader-blofin executable path still reads this file;
-    #    allocator-spawned traders read the DB rows written in step 7).
+    # 6. Pre-compute per-strategy decisions (used by both CSV writer and DB
+    #    writer). This resolves each published strategy's active_filter into
+    #    a final (sit_flat, reason, filter_label) using that strategy's own
+    #    TG thresholds + the shared Dispersion decision.
     filter_reason = tg_reason or ("pass" if not sit_flat else "")
-    write_deploys_csv(today.isoformat(), FILTER_NAME, final_basket,
-                      sit_flat, filter_reason)
+    strategies   = fetch_published_strategy_configs()
+    decisions    = compute_per_strategy_decisions(
+        today, strategies, btc_closes,
+        disp_decision=(disp_flat, disp_reason),
+        canonical_tg_decision=(sit_flat, tg_reason),
+        canonical_filter_reason=filter_reason,
+    )
 
-    # 7. Write DB: one row per published+active strategy_version_id.
+    # Build filter_entries list, deduped by filter_name. Each unique filter
+    # label gets one CSV row; the trader matches CSV rows to its config's
+    # active_filter by label. If two strategies share a label but disagree
+    # on sit_flat (can't happen with current semantics — same inputs), the
+    # first wins.
+    seen = {}
+    for d in decisions:
+        fn = d["filter_name"]
+        if fn not in seen:
+            seen[fn] = {
+                "filter_name":   fn,
+                "sit_flat":      d["sit_flat"],
+                "filter_reason": d["filter_reason"],
+            }
+    filter_entries = list(seen.values())
+
+    # 7. Write CSV — one row per unique filter_name. Multi-row on days where
+    #    published strategies disagree (e.g. Alpha Main's Tail Guardrail +
+    #    ALTS MAIN's Tail + Dispersion both resolve independently). Pass
+    #    the raw (post-BloFin) basket rather than final_basket; each row's
+    #    sit_flat controls whether symbols are emitted for that filter.
+    write_deploys_csv(today.isoformat(), filter_entries, basket)
+
+    # 8. Write DB: one row per published+active strategy_version_id.
     #    Trader spawn at 06:05 UTC reads these — without them, allocations
-    #    find no signal and sit flat.
+    #    find no signal and sit flat. Per-strategy sit_flat computed inside
+    #    write_to_db by combining TG + Dispersion per active_filter.
     write_to_db(today.isoformat(), FILTER_NAME, final_basket,
-                sit_flat, filter_reason)
+                sit_flat, filter_reason,
+                btc_closes=btc_closes, today=today,
+                disp_decision=(disp_flat, disp_reason))
 
     elapsed = time.time() - t_start
     log.info(f"Done. ({elapsed:.1f}s) — v2 LIVE at 05:58 UTC (post-cutover 2026-04-23)")

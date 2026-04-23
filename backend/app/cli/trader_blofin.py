@@ -33,7 +33,6 @@ Usage:
   python3 trader-blofin.py --dry-run         # simulate, no orders sent
   python3 trader-blofin.py --resume          # resume after crash (restores from state)
   python3 trader-blofin.py --status          # print state file and exit
-  python3 trader-blofin.py --seed-returns FILE  # seed returns log from CSV
 
 Cron (invoked by run_daily.sh at 05:58 UTC after daily_signal.py):
   58 5 * * *  /home/ubuntu/benji3m/run_daily.sh >> /home/ubuntu/benji3m/cron.log 2>&1
@@ -44,7 +43,6 @@ import hashlib
 from contextlib import contextmanager
 from urllib.parse import urlencode
 import numpy as np
-import pandas as pd
 from pathlib import Path
 
 # Vendored BloFin auth — lives in the backend package so the container doesn't
@@ -135,14 +133,6 @@ POSITION_SIDE = "net"
 EXCHANGE_SL_ENABLED = False
 EXCHANGE_SL_PCT     = -0.085  # -8.5% from entry price (1x, unleveraged)
 
-# -- VOL-Target Leverage Engine (Figure 2.4) -------------------------------
-VOL_LEV_TARGET_VOL   = 0.02
-VOL_LEV_WINDOW       = 30
-VOL_LEV_SHARPE_REF   = 3.3
-VOL_LEV_MAX_BOOST    = 2.0     # 1.33x floor to 2.66x ceiling
-VOL_LEV_DD_THRESHOLD = -0.15
-VOL_LEV_DD_SCALE     = 1.0     # inactive (structurally present)
-
 # -- Capital allocation ----------------------------------------------------
 # CAPITAL_MODE = "pct_balance" + CAPITAL_VALUE = 1.0 matches the audit exactly:
 # the audit deploys 100% of compounded equity each session (equity_running * 1.0).
@@ -194,7 +184,6 @@ ALERT_EMAIL = os.environ.get("ALERT_EMAIL", "")
 # the backend container). This is a parallel space to the host script's
 # /root/benji/ artifacts — they coexist without collision.
 STATE_FILE    = _TRADER_DATA_DIR / "blofin_executor_state.json"
-RETURNS_LOG   = _TRADER_DATA_DIR / "blofin_returns_log.csv"
 ALERTS_LOG    = _TRADER_DATA_DIR / "blofin_alerts.log"
 LOCK_FILE     = _TRADER_DATA_DIR / ".trader_session.lock"
 REPORTS_DIR   = _TRADER_DATA_DIR / "blofin_execution_reports"
@@ -937,99 +926,6 @@ def get_actual_positions(
 
 
 # ==========================================================================
-# VOL-TARGET LEVERAGE ENGINE  (Figure 2.4)
-# ==========================================================================
-
-def compute_vol_boost() -> float:
-    """
-    Four-stage VOL-target leverage boost scalar.
-
-    Stage 1: vc = clip(target_vol / realized_vol, 1.0, max_boost)  -- boosts only
-    Stage 2: sc = clip(sharpe_ref / rolling_sharpe, 0.5, 2.0)      -- contrarian
-    Stage 3: dg = DD_SCALE if running_DD < DD_THRESHOLD else 1.0   -- guard (inactive)
-    Stage 4: boost = clip(vc x sc x dg, 1.0, max_boost)
-             effective_lev = L_HIGH x boost  ->  1.33x to 2.66x
-
-    NOTE: returns log records approximate net return (gross x lev, before fees).
-    Over time, the small fee discrepancy has negligible effect on vol estimation.
-    """
-    if not RETURNS_LOG.exists():
-        log.warning("Returns log not found -- boost=1.0 (L_HIGH floor)")
-        return 1.0
-    try:
-        df = pd.read_csv(RETURNS_LOG, parse_dates=["date"])
-        df = df.sort_values("date")
-        rets = df["net_return_pct"].values / 100.0
-
-        window = min(VOL_LEV_WINDOW, len(rets))
-        if window < 5:
-            log.warning(f"Only {window} return days available -- boost=1.0")
-            return 1.0
-        rets_w = rets[-window:]
-
-        realized_vol = max(float(np.std(rets_w)), 1e-8)
-        vc = float(np.clip(VOL_LEV_TARGET_VOL / realized_vol, 1.0, VOL_LEV_MAX_BOOST))
-
-        mean_ret = float(np.mean(rets_w))
-        rolling_sharpe = max(
-            mean_ret / realized_vol * math.sqrt(365) if realized_vol > 0
-            else VOL_LEV_SHARPE_REF,
-            1e-8
-        )
-        sc = float(np.clip(VOL_LEV_SHARPE_REF / rolling_sharpe, 0.5, 2.0))
-
-        equity     = np.cumprod(1.0 + rets)
-        running_dd = float(equity[-1] / np.max(equity) - 1.0)
-        dg = VOL_LEV_DD_SCALE if running_dd < VOL_LEV_DD_THRESHOLD else 1.0
-
-        boost = float(np.clip(vc * sc * dg, 1.0, VOL_LEV_MAX_BOOST))
-        log.info(
-            f"VOL boost: rvol={realized_vol*100:.2f}%  vc={vc:.3f}  "
-            f"sharpe={rolling_sharpe:.2f}  sc={sc:.3f}  dg={dg:.3f}  "
-            f"-> boost={boost:.3f}x  (eff={L_HIGH*boost:.3f}x)"
-        )
-        return boost
-    except Exception as e:
-        log.warning(f"VOL boost failed: {e} -- boost=1.0")
-        return 1.0
-
-def log_daily_return(net_return_pct: float, exit_reason: str,
-                     session_date: str = None, eff_lev: float = 0.0):
-    """
-    Append session return to returns log for VOL boost computation.
-
-    Deducts fees matching audit.py simulate():
-      fee_drag     = TAKER_FEE_PCT * lev_used
-      funding_drag = FUNDING_RATE_DAILY_PCT * lev_used
-      r_net        = r_gross - fee_drag - funding_drag
-
-    This ensures the returns log used by the VOL boost engine reflects
-    the same net-of-fees returns as the audit equity_running series.
-    Flat days (no trade) have no fees deducted -- matches audit behaviour.
-    """
-    if eff_lev > 0 and exit_reason not in ("filtered", "no_entry_conviction",
-                                            "missed_window", "stale_closed",
-                                            "stale_close_failed"):
-        fee_drag     = TAKER_FEE_PCT          * eff_lev
-        funding_drag = FUNDING_RATE_DAILY_PCT * eff_lev
-        net_return_pct = net_return_pct - (fee_drag + funding_drag) * 100
-    row = {
-        "date": session_date or utc_today(),
-        "net_return_pct": round(net_return_pct, 4),
-        "exit_reason": exit_reason,
-    }
-    df_new = pd.DataFrame([row])
-    if RETURNS_LOG.exists():
-        df = pd.read_csv(RETURNS_LOG)
-        df = df[df["date"] != row["date"]]
-        df_out = pd.concat([df, df_new], ignore_index=True)
-    else:
-        df_out = df_new
-    df_out.to_csv(RETURNS_LOG, index=False)
-    log.info(f"Return logged: {net_return_pct:+.4f}% ({exit_reason})")
-
-
-# ==========================================================================
 # PORTFOLIO RETURN HELPERS
 # ==========================================================================
 
@@ -1728,7 +1624,6 @@ def run_session(dry_run: bool = False, resume: bool = False):
     symbols = get_today_symbols(today)
     if not symbols:
         log.info("A -- Filtered: return=0%  fees=none")
-        log_daily_return(0.0, "filtered", session_date=today)
         save_state({"date": today, "phase": "filtered", "positions": []})
         write_execution_report({
             "date": today,
@@ -1849,7 +1744,6 @@ def run_session(dry_run: bool = False, resume: bool = False):
             f"  MISSED WINDOW: roi_x={roi_x*100:.4f}%  conviction={'PASS' if roi_x >= KILL_Y else 'FAIL'}  "
             f"but execution window closed at 06:{35 + CONVICTION_EXEC_BUFFER_MIN:02d} UTC -- no trade"
         )
-        log_daily_return(0.0, "missed_window", session_date=today)
         save_state({"date": today, "phase": "missed_window",
                     "roi_x": round(roi_x, 6), "positions": []})
         write_execution_report({
@@ -1873,7 +1767,6 @@ def run_session(dry_run: bool = False, resume: bool = False):
             f"  B -- No Entry: roi_x={roi_x*100:.4f}% < {KILL_Y*100:.1f}%  "
             f"return=0%  fees=none  sentinel: margin=-1.0"
         )
-        log_daily_return(0.0, "no_entry_conviction", session_date=today)
         save_state({"date": today, "phase": "no_entry",
                     "roi_x": round(roi_x, 6), "positions": []})
         write_execution_report({
@@ -1949,10 +1842,14 @@ def run_session(dry_run: bool = False, resume: bool = False):
     log.info("  Pre-entry check passed -- no existing positions found.")
 
     # ── Phase 3: compute leverage and enter ───────────────────────────────
-    boost   = compute_vol_boost()
+    # DEPRECATED master-account path: vol_boost defaults to 1.0 (L_HIGH floor).
+    # The live per-allocation path reads boost from strategy_version.
+    # current_metrics.vol_boost (populated nightly by refresh_strategy_metrics).
+    boost   = 1.0
     eff_lev = round(L_HIGH * boost, 4)
     lev_int = max(1, int(math.ceil(eff_lev)))
-    log.info(f"Effective leverage: {L_HIGH} x {boost:.3f} = {eff_lev:.3f}x")
+    log.info(f"Effective leverage: {L_HIGH} x {boost:.3f} = {eff_lev:.3f}x "
+             f"(deprecated path — no vol_boost)")
 
     balance = get_account_balance_usdt(api)
     log.info(f"USDT available: ${balance:,.2f}")
@@ -2530,15 +2427,12 @@ def _run_monitoring_loop(today, today_date, api: ExchangeAdapter, inst_ids,
         f"lev={eff_lev:.3f}x  net~{net_pct if not math.isnan(net_pct) else 'nan':+.3f}%"
     )
 
-    # Master path logs the daily return here. Allocation path defers its
-    # _log_allocation_return() call until AFTER reconcile_exit_prices runs
-    # (below, in the allocation-mode close block) so the writer captures
-    # post-reconcile exit_slippage_bps. Prior ordering wrote the row before
-    # reconcile, leaving avg_exit_slip_bps NULL for every live session.
-    if not math.isnan(final_return_1x):
-        if allocation_id is None:
-            log_daily_return(net_pct, exit_reason, session_date=today, eff_lev=eff_lev)
-    else:
+    # Allocation path calls _log_allocation_return() AFTER reconcile_exit_prices
+    # runs (below, in the allocation-mode close block) so the writer captures
+    # post-reconcile exit_slippage_bps. Master-path CSV logging was removed
+    # with the CSV-based compute_vol_boost (now sourced from nightly audit
+    # refresh instead of live returns log).
+    if math.isnan(final_return_1x):
         log.warning(f"{log_prefix}Return not logged (NaN -- price unavailable at close)")
 
     sym_stops_fired = list(sym_stopped.keys())
@@ -2677,9 +2571,9 @@ def _run_monitoring_loop(today, today_date, api: ExchangeAdapter, inst_ids,
             except Exception as e:
                 log.warning(f"{log_prefix}Exit-price reconcile failed: {e}")
 
-        # Now write allocation_returns with reconciled telemetry. Guarded by
-        # NaN-check (same as master's log_daily_return) and wrapped in a
-        # one-retry try/except so a transient DB hiccup doesn't drop the row.
+        # Now write allocation_returns with reconciled telemetry. NaN-guarded
+        # and wrapped in a one-retry try/except so a transient DB hiccup
+        # doesn't drop the row.
         # A WARN fires when positions are non-empty but slip is null — surfaces
         # future reconcile misses before they become silent data gaps.
         if not math.isnan(final_return_1x):
@@ -2779,45 +2673,6 @@ def _run_monitoring_loop(today, today_date, api: ExchangeAdapter, inst_ids,
             "sym_stops_fired": sym_stops_fired,
         })
     log.info("=" * 70)
-
-
-# ==========================================================================
-# RETURNS LOG SEEDING  (--seed-returns)
-# ==========================================================================
-
-def seed_returns_log(filepath: str):
-    """
-    Seed blofin_returns_log.csv from a CSV file containing historical
-    daily returns. Allows the VOL boost engine to calibrate correctly
-    from day 1 instead of warming up over 30 live sessions.
-
-    Expected CSV columns: date (YYYY-MM-DD), net_return_pct (float)
-    Optional column:      exit_reason (string)
-    """
-    src = Path(filepath)
-    if not src.exists():
-        log.error(f"Seed file not found: {src}")
-        sys.exit(1)
-
-    df = pd.read_csv(src)
-    required = {"date", "net_return_pct"}
-    missing  = required - set(df.columns)
-    if missing:
-        log.error(f"Seed file missing required columns: {missing}")
-        sys.exit(1)
-
-    if "exit_reason" not in df.columns:
-        df["exit_reason"] = "seeded"
-
-    df = df[["date", "net_return_pct", "exit_reason"]].copy()
-    df["date"] = pd.to_datetime(df["date"]).dt.strftime("%Y-%m-%d")
-    df = df.sort_values("date").drop_duplicates(subset=["date"], keep="last")
-    df.to_csv(RETURNS_LOG, index=False)
-    log.info(
-        f"Returns log seeded from {src}: {len(df)} rows  "
-        f"({df['date'].iloc[0]} to {df['date'].iloc[-1]})\n"
-        f"  Saved to: {RETURNS_LOG}"
-    )
 
 
 # ==========================================================================
@@ -3154,8 +3009,8 @@ _FLAT_EXIT_REASONS = (
 
 def _log_allocation_return(
     allocation_id: str, session_date: str,
-    net_return_pct: float,                # gross × lev × 100, BEFORE fees (same
-                                          # shape master's log_daily_return takes)
+    net_return_pct: float,                # gross × lev × 100, BEFORE fees
+                                          # (fee + funding drag subtracted below)
     exit_reason: str,
     effective_leverage: float,
     capital_deployed_usd: float,
@@ -3169,12 +3024,9 @@ def _log_allocation_return(
     positions: list[dict] | None = None,  # post-reconcile positions; derives avg slip bps
     alerts_fired: list[str] | None = None, # list of alert strings fired during session (TBD)
 ) -> None:
-    """Mirror of log_daily_return for user allocations — applies the same fee +
-    funding drag internally so net P&L accounting stays identical across master
-    and allocation paths.
+    """Write a daily_allocation_returns row for one user allocation.
 
-    net_return_pct signature intentionally matches master's log_daily_return:
-    caller passes `final_return_1x * effective_leverage * 100` (gross leveraged
+    Caller passes `final_return_1x * effective_leverage * 100` (gross leveraged
     percent before fees). This helper subtracts fee_drag + funding_drag and
     records both gross and net.
 
@@ -3992,8 +3844,6 @@ if __name__ == "__main__":
                         help="Resume monitoring loop from saved state after a crash")
     parser.add_argument("--status",       action="store_true",
                         help="Print current state file and exit")
-    parser.add_argument("--seed-returns", metavar="FILE",
-                        help="Seed returns log from a CSV to warm up VOL boost engine")
     parser.add_argument("--close-all",    action="store_true",
                         help="Force-close all open positions on BloFin and exit")
     parser.add_argument(
@@ -4007,10 +3857,6 @@ if __name__ == "__main__":
 
     if args.status:
         print(json.dumps(load_state(), indent=2, default=str))
-        sys.exit(0)
-
-    if args.seed_returns:
-        seed_returns_log(args.seed_returns)
         sys.exit(0)
 
     if args.close_all:
