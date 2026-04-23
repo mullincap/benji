@@ -1302,6 +1302,12 @@ def execution_summary(
     # ── 4. Pull daily rows ────────────────────────────────────────────────────
     # Even when scope_ids is empty (user filter matched no active allocations)
     # we still return the shape; the frontend renders the empty state.
+    #
+    # Principal anchor (migration 007): sessions before an allocation's
+    # principal_anchor_at are "pre-history" and excluded. Falls back to
+    # allocation.created_at when anchor is NULL (no effective filter). The
+    # per-row filter in the SQL below (ar.session_date >= anchor::date)
+    # handles the fallback uniformly via COALESCE.
     daily: list[dict[str, Any]] = []
     if scope_ids:
         params: list[Any] = [scope_ids]
@@ -1387,6 +1393,8 @@ def execution_summary(
             JOIN audit.strategies s ON s.strategy_id = sv.strategy_id
             JOIN user_mgmt.exchange_connections ec ON ec.connection_id = a.connection_id
             WHERE ar.allocation_id = ANY(%s::uuid[])
+                  AND ar.session_date >=
+                      (COALESCE(a.principal_anchor_at, a.created_at))::date
                   {date_clause}
             ORDER BY ar.session_date DESC, ar.allocation_id ASC
         """, tuple(params))

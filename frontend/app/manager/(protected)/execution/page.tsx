@@ -221,8 +221,12 @@ function exitSlipColor(bps: number | null | undefined): string {
 function pnlGapColor(pct: number | null | undefined): string {
   if (pct === null || pct === undefined) return "var(--t2)";
   const abs = Math.abs(pct);
+  // ≤5% is the data-quality threshold for "principal accounting is correct".
+  // Above 5% means either the estimate is wrong, the capital events are
+  // mis-recorded, or fee/funding drag diverged — worth investigating the row.
   if (abs <= 0.5) return "var(--green)";
   if (abs <= 1.5) return "var(--amber)";
+  if (abs <= 5.0) return "var(--amber)";
   return "var(--red)";
 }
 

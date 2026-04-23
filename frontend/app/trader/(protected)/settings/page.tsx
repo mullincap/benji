@@ -908,6 +908,17 @@ function CapitalEventsSection() {
   const [showCreate, setShowCreate] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState<ApiCapitalEvent | null>(null);
+  const [confirmReset, setConfirmReset] = useState(false);
+  const [editingAnchor, setEditingAnchor] = useState<string | null>(null);
+  // Per-allocation principal cache (allocation_id → ApiPnl). Fed by /pnl.
+  const [pnlByAlloc, setPnlByAlloc] = useState<Record<string, {
+    principal_usd: number;
+    principal_baseline_usd: number;
+    principal_anchor_at: string | null;
+    principal_anchor_explicit: boolean;
+    principal_baseline_explicit: boolean;
+    net_since_anchor_usd: number;
+  }>>({});
 
   const refresh = useCallback(async () => {
     try {
@@ -917,6 +928,26 @@ function CapitalEventsSection() {
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     }
+  }, []);
+
+  const refreshPnl = useCallback(async (allocIds: string[]) => {
+    const out: typeof pnlByAlloc = {};
+    await Promise.all(allocIds.map(async id => {
+      try {
+        const r = await allocatorApi.getPnl(id);
+        out[id] = {
+          principal_usd: r.principal_usd,
+          principal_baseline_usd: r.principal_baseline_usd,
+          principal_anchor_at: r.principal_anchor_at,
+          principal_anchor_explicit: r.principal_anchor_explicit,
+          principal_baseline_explicit: r.principal_baseline_explicit,
+          net_since_anchor_usd: r.net_since_anchor_usd,
+        };
+      } catch {
+        // non-fatal; alloc simply won't render a principal summary
+      }
+    }));
+    setPnlByAlloc(out);
   }, []);
 
   useEffect(() => { refresh(); }, [refresh]);
@@ -933,6 +964,13 @@ function CapitalEventsSection() {
 
   const allocLabelById: Record<string, string> = {};
   for (const opt of allocOptions) allocLabelById[opt.id] = opt.label;
+
+  // Fetch principal summary for each allocation after the picker materializes.
+  // Refreshes on events-list change so edits propagate automatically.
+  useEffect(() => {
+    if (allocOptions.length > 0) refreshPnl(allocOptions.map(a => a.id));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [instances, events]);
 
   async function handleCreate(data: Parameters<typeof allocatorApi.createCapitalEvent>[0]) {
     setSubmitting(true);
@@ -973,6 +1011,47 @@ function CapitalEventsSection() {
     }
   }
 
+  async function handleReset() {
+    setSubmitting(true);
+    try {
+      const r = await allocatorApi.resetCapitalEventsToDefaults();
+      setConfirmReset(false);
+      await refresh();
+      setError(
+        r.deleted_overrides === 0
+          ? null
+          : null,  // silent success; the list refresh is confirmation
+      );
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  async function handleAnchorSave(
+    allocationId: string,
+    data: { anchor_at?: string; baseline_usd?: number; reset?: boolean },
+  ) {
+    setSubmitting(true);
+    try {
+      await allocatorApi.updateAllocation(allocationId, data.reset ? {
+        clear_principal_anchor: true,
+        clear_principal_baseline: true,
+      } : {
+        principal_anchor_at: data.anchor_at,
+        principal_baseline_usd: data.baseline_usd,
+      });
+      setEditingAnchor(null);
+      await refreshPnl(allocOptions.map(a => a.id));
+      await refresh();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
   return (
     <div style={{ marginTop: 20 }}>
       <div style={{
@@ -985,24 +1064,102 @@ function CapitalEventsSection() {
         }}>
           CAPITAL EVENTS
         </div>
-        <button
-          onClick={() => setShowCreate(true)}
-          disabled={allocOptions.length === 0}
-          style={{
-            background: "transparent",
-            border: "1px solid var(--line2)",
-            borderRadius: 3,
-            color: allocOptions.length === 0 ? "var(--t3)" : "var(--green)",
-            fontSize: 9, fontWeight: 700, letterSpacing: "0.12em",
-            textTransform: "uppercase",
-            padding: "5px 12px",
-            cursor: allocOptions.length === 0 ? "not-allowed" : "pointer",
-            fontFamily: FONT_MONO,
-          }}
-        >
-          + RECORD CAPITAL EVENT
-        </button>
+        <div style={{ display: "flex", gap: 8 }}>
+          <button
+            onClick={() => setConfirmReset(true)}
+            disabled={allocOptions.length === 0}
+            title="Discard all manual edits to auto-detected events and re-sync from the exchange."
+            style={{
+              background: "transparent",
+              border: "1px solid var(--line2)",
+              borderRadius: 3,
+              color: allocOptions.length === 0 ? "var(--t3)" : "var(--amber)",
+              fontSize: 9, fontWeight: 700, letterSpacing: "0.12em",
+              textTransform: "uppercase",
+              padding: "5px 12px",
+              cursor: allocOptions.length === 0 ? "not-allowed" : "pointer",
+              fontFamily: FONT_MONO,
+            }}
+          >
+            RESET TO DEFAULT
+          </button>
+          <button
+            onClick={() => setShowCreate(true)}
+            disabled={allocOptions.length === 0}
+            style={{
+              background: "transparent",
+              border: "1px solid var(--line2)",
+              borderRadius: 3,
+              color: allocOptions.length === 0 ? "var(--t3)" : "var(--green)",
+              fontSize: 9, fontWeight: 700, letterSpacing: "0.12em",
+              textTransform: "uppercase",
+              padding: "5px 12px",
+              cursor: allocOptions.length === 0 ? "not-allowed" : "pointer",
+              fontFamily: FONT_MONO,
+            }}
+          >
+            + RECORD CAPITAL EVENT
+          </button>
+        </div>
       </div>
+
+      {/* Per-allocation principal summaries */}
+      {allocOptions.length > 0 && (
+        <div style={{
+          background: "var(--bg1)", border: "1px solid var(--line)",
+          borderRadius: 6, padding: "10px 14px", marginBottom: 10,
+          display: "flex", flexDirection: "column", gap: 8,
+        }}>
+          {allocOptions.map(opt => {
+            const p = pnlByAlloc[opt.id];
+            return (
+              <div key={opt.id} style={{
+                display: "flex", alignItems: "center", justifyContent: "space-between",
+                fontSize: 10, fontFamily: FONT_MONO,
+              }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 14, flex: 1 }}>
+                  <span style={{ color: "var(--t1)", fontWeight: 700, minWidth: 180 }}>
+                    {opt.label}
+                  </span>
+                  {p ? (
+                    <>
+                      <span style={{ color: "var(--t3)" }}>PRINCIPAL</span>
+                      <span style={{ color: "var(--t0)", fontWeight: 700 }}>
+                        ${p.principal_usd.toLocaleString("en-US", { maximumFractionDigits: 2 })}
+                      </span>
+                      <span style={{ color: "var(--t3)" }}>
+                        = ${p.principal_baseline_usd.toLocaleString("en-US", { maximumFractionDigits: 2 })}
+                        {" "}
+                        {p.net_since_anchor_usd >= 0 ? "+" : "−"} $
+                        {Math.abs(p.net_since_anchor_usd).toLocaleString("en-US", { maximumFractionDigits: 2 })}
+                      </span>
+                      <span style={{ color: "var(--t3)" }}>
+                        since {p.principal_anchor_at ? p.principal_anchor_at.slice(0, 10) : "—"}
+                        {!p.principal_anchor_explicit && !p.principal_baseline_explicit ? " (default)" : ""}
+                      </span>
+                    </>
+                  ) : (
+                    <span style={{ color: "var(--t3)" }}>Loading…</span>
+                  )}
+                </div>
+                <button
+                  onClick={() => setEditingAnchor(opt.id)}
+                  style={{
+                    background: "transparent", border: "none",
+                    color: "var(--t2)", fontSize: 9,
+                    letterSpacing: "0.12em", textTransform: "uppercase",
+                    cursor: "pointer", fontFamily: FONT_MONO,
+                  }}
+                  onMouseEnter={e => (e.currentTarget.style.color = "var(--t0)")}
+                  onMouseLeave={e => (e.currentTarget.style.color = "var(--t2)")}
+                >
+                  Edit anchor
+                </button>
+              </div>
+            );
+          })}
+        </div>
+      )}
 
       {error && (
         <div style={{
@@ -1210,6 +1367,229 @@ function CapitalEventsSection() {
           </div>
         </div>
       )}
+
+      {/* Reset-to-default confirm */}
+      {confirmReset && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          onClick={() => { if (!submitting) setConfirmReset(false); }}
+          style={{
+            position: "fixed", inset: 0, background: "rgba(0,0,0,0.7)",
+            display: "flex", alignItems: "center", justifyContent: "center",
+            zIndex: 1000,
+          }}
+        >
+          <div
+            onClick={e => e.stopPropagation()}
+            style={{
+              background: "var(--bg2)", border: "1px solid var(--line2)",
+              borderRadius: 6, padding: "20px 24px",
+              width: 520, maxWidth: "92vw", fontFamily: FONT_MONO,
+            }}
+          >
+            <div style={{
+              fontSize: 9, fontWeight: 700, letterSpacing: "0.12em",
+              color: "var(--t3)", textTransform: "uppercase", marginBottom: 10,
+            }}>Reset capital events to default?</div>
+            <div style={{ fontSize: 11, color: "var(--t1)", lineHeight: 1.6, marginBottom: 16 }}>
+              Discard all manual edits and un-deletions on auto-detected events, then
+              re-sync from the exchange. Your manually-entered events are NOT affected.
+              Principal will recompute from exchange-truth values. This cannot be undone.
+            </div>
+            <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
+              <button
+                type="button"
+                disabled={submitting}
+                onClick={() => setConfirmReset(false)}
+                style={{
+                  background: "transparent", border: "1px solid var(--line2)",
+                  borderRadius: 4, padding: "8px 16px",
+                  fontSize: 9, fontWeight: 700, letterSpacing: "0.12em",
+                  textTransform: "uppercase", color: "var(--t2)",
+                  cursor: submitting ? "not-allowed" : "pointer",
+                  fontFamily: FONT_MONO,
+                }}
+              >Cancel</button>
+              <button
+                type="button"
+                disabled={submitting}
+                onClick={handleReset}
+                style={{
+                  background: "var(--amber-dim)", border: "1px solid var(--amber)",
+                  borderRadius: 4, padding: "8px 16px",
+                  fontSize: 9, fontWeight: 700, letterSpacing: "0.12em",
+                  textTransform: "uppercase", color: "var(--amber)",
+                  cursor: submitting ? "not-allowed" : "pointer",
+                  fontFamily: FONT_MONO,
+                }}
+              >{submitting ? "Resetting…" : "Reset"}</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Anchor-edit modal */}
+      {editingAnchor && (() => {
+        const existing = pnlByAlloc[editingAnchor];
+        const allocLabel = allocLabelById[editingAnchor] || editingAnchor.slice(0, 8);
+        return (
+          <AnchorEditModal
+            allocationLabel={allocLabel}
+            current={existing ?? null}
+            submitting={submitting}
+            onCancel={() => setEditingAnchor(null)}
+            onSave={data => handleAnchorSave(editingAnchor, data)}
+          />
+        );
+      })()}
+    </div>
+  );
+}
+
+function AnchorEditModal({
+  allocationLabel,
+  current,
+  submitting,
+  onCancel,
+  onSave,
+}: {
+  allocationLabel: string;
+  current: {
+    principal_usd: number;
+    principal_baseline_usd: number;
+    principal_anchor_at: string | null;
+    principal_anchor_explicit: boolean;
+    principal_baseline_explicit: boolean;
+  } | null;
+  submitting: boolean;
+  onCancel: () => void;
+  onSave: (data: { anchor_at?: string; baseline_usd?: number; reset?: boolean }) => void;
+}) {
+  const [anchorAt, setAnchorAt] = useState<string>(
+    current?.principal_anchor_at
+      ? current.principal_anchor_at.slice(0, 16)
+      : "",
+  );
+  const [baseline, setBaseline] = useState<string>(
+    current ? current.principal_baseline_usd.toString() : "",
+  );
+
+  const hasOverride = !!current && (
+    current.principal_anchor_explicit || current.principal_baseline_explicit
+  );
+
+  return (
+    <div
+      role="dialog"
+      aria-modal="true"
+      onClick={() => { if (!submitting) onCancel(); }}
+      style={{
+        position: "fixed", inset: 0, background: "rgba(0,0,0,0.7)",
+        display: "flex", alignItems: "center", justifyContent: "center",
+        zIndex: 1000,
+      }}
+    >
+      <div
+        onClick={e => e.stopPropagation()}
+        style={{
+          background: "var(--bg2)", border: "1px solid var(--line2)",
+          borderRadius: 6, padding: "20px 24px",
+          width: 480, maxWidth: "92vw", fontFamily: FONT_MONO,
+        }}
+      >
+        <div style={{
+          fontSize: 9, fontWeight: 700, letterSpacing: "0.12em",
+          color: "var(--t3)", textTransform: "uppercase", marginBottom: 12,
+        }}>
+          Principal anchor — {allocationLabel}
+        </div>
+
+        <div style={{ fontSize: 10, color: "var(--t2)", marginBottom: 14, lineHeight: 1.5 }}>
+          Pin the start date of the tracked track record. Events before this date are
+          excluded from principal + session-history calculations. Leaving both blank
+          falls back to the allocation's creation date and initial capital.
+        </div>
+
+        <div style={{ marginBottom: 10 }}>
+          <div style={fieldLabelStyle}>Anchor date/time (local)</div>
+          <input
+            type="datetime-local"
+            value={anchorAt}
+            onChange={e => setAnchorAt(e.target.value)}
+            style={inputStyle}
+            onFocus={e => (e.target.style.borderColor = "var(--green)")}
+            onBlur={e => (e.target.style.borderColor = "var(--line)")}
+          />
+        </div>
+
+        <div style={{ marginBottom: 14 }}>
+          <div style={fieldLabelStyle}>Baseline USD at anchor</div>
+          <input
+            type="number"
+            min="0"
+            step="0.01"
+            placeholder="e.g. 5000.00"
+            value={baseline}
+            onChange={e => setBaseline(e.target.value)}
+            style={inputStyle}
+            onFocus={e => (e.target.style.borderColor = "var(--green)")}
+            onBlur={e => (e.target.style.borderColor = "var(--line)")}
+          />
+        </div>
+
+        <div style={{ display: "flex", gap: 8, justifyContent: "space-between" }}>
+          <button
+            type="button"
+            disabled={submitting || !hasOverride}
+            onClick={() => onSave({ reset: true })}
+            title={hasOverride
+              ? "Clear the override and fall back to default (allocation created_at + capital_usd)"
+              : "No override to clear"}
+            style={{
+              background: "transparent", border: "1px solid var(--line2)",
+              borderRadius: 4, padding: "8px 14px",
+              fontSize: 9, fontWeight: 700, letterSpacing: "0.12em",
+              textTransform: "uppercase",
+              color: !hasOverride ? "var(--t3)" : "var(--amber)",
+              cursor: (!hasOverride || submitting) ? "not-allowed" : "pointer",
+              fontFamily: FONT_MONO,
+            }}
+          >Use default</button>
+          <div style={{ display: "flex", gap: 8 }}>
+            <button
+              type="button"
+              disabled={submitting}
+              onClick={onCancel}
+              style={{
+                background: "transparent", border: "1px solid var(--line2)",
+                borderRadius: 4, padding: "8px 16px",
+                fontSize: 9, fontWeight: 700, letterSpacing: "0.12em",
+                textTransform: "uppercase", color: "var(--t2)",
+                cursor: submitting ? "not-allowed" : "pointer",
+                fontFamily: FONT_MONO,
+              }}
+            >Cancel</button>
+            <button
+              type="button"
+              disabled={submitting || !anchorAt || !(parseFloat(baseline) > 0)}
+              onClick={() => {
+                try {
+                  const iso = anchorAt ? new Date(anchorAt).toISOString() : undefined;
+                  onSave({
+                    anchor_at: iso,
+                    baseline_usd: parseFloat(baseline),
+                  });
+                } catch { /* noop */ }
+              }}
+              style={
+                (submitting || !anchorAt || !(parseFloat(baseline) > 0))
+                  ? disabledBtnStyle : primaryBtnStyle
+              }
+            >{submitting ? "Saving…" : "Save"}</button>
+          </div>
+        </div>
+      </div>
     </div>
   );
 }

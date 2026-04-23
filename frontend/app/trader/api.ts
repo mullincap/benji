@@ -206,8 +206,19 @@ export interface ApiPnl {
   session_start_equity_usd: number | null;
   session_pnl_usd: number | null;
   session_return_pct: number | null;
+  session_capital_net_usd: number;
+  initial_equity_usd: number | null;
   total_pnl_usd: number;
   total_return_pct: number;
+  lifetime_capital_net_usd: number;
+  // Principal anchor (migration 007). When operator hasn't explicitly set
+  // them, anchor defaults to allocation.created_at + baseline to capital_usd.
+  principal_usd: number;
+  principal_baseline_usd: number;
+  principal_anchor_at: string | null;       // ISO 8601
+  principal_anchor_explicit: boolean;       // TRUE = operator set it
+  principal_baseline_explicit: boolean;
+  net_since_anchor_usd: number;
 }
 
 export interface ApiCapitalEvent {
@@ -302,7 +313,18 @@ export const allocatorApi = {
       { method: "POST", body: JSON.stringify(data) },
     ),
 
-  updateAllocation: (allocationId: string, data: { capital_usd?: number; status?: string; compounding_mode?: CompoundingMode }) =>
+  updateAllocation: (
+    allocationId: string,
+    data: {
+      capital_usd?: number;
+      status?: string;
+      compounding_mode?: CompoundingMode;
+      principal_anchor_at?: string;        // ISO 8601
+      principal_baseline_usd?: number;
+      clear_principal_anchor?: boolean;    // send true to revert to default
+      clear_principal_baseline?: boolean;
+    },
+  ) =>
     apiFetch<{ updated: boolean }>(
       `/api/allocator/allocations/${allocationId}`,
       { method: "PATCH", body: JSON.stringify(data) },
@@ -372,5 +394,13 @@ export const allocatorApi = {
     apiFetch<{ deleted: boolean; event_id: string }>(
       `/api/allocator/capital-events/${eventId}`,
       { method: "DELETE" },
+    ),
+
+  // Discard all manual overrides + tombstones on auto-detected events and
+  // re-sync from the exchange. Manual-entered events are preserved.
+  resetCapitalEventsToDefaults: () =>
+    apiFetch<{ reset: boolean; deleted_overrides: number; connections_repolled: number }>(
+      `/api/allocator/capital-events/reset-defaults`,
+      { method: "POST" },
     ),
 };

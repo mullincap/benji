@@ -444,12 +444,21 @@ function LiveMode({ instanceId }: { instanceId: string }) {
         {/* Metric cards — live equity + allocation + open positions + Session/Total P&L.
             Session + Total cards show USD as the hero number (same styling as Total
             Account Equity) with ROI% + chevron as the secondary subtitle. */}
-        <div style={{ display: "grid", gridTemplateColumns: "1.1fr 1fr 0.9fr 1.1fr 1.1fr", gap: 10, marginBottom: 20 }}>
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr 0.9fr 1fr 1fr", gap: 10, marginBottom: 20 }}>
           <MetricCard
             label="TOTAL ACCOUNT EQUITY"
             value={`$${fmt(pnl?.equity_usd ?? exchanges.find(e => e.name === inst.exchangeName)?.balance ?? 0, 0)}`}
           />
           <MetricCard label="ALLOCATION" value={`$${fmt(inst.allocation ?? 0, 0)}`} />
+          <MetricCard
+            label="PRINCIPAL"
+            value={pnl == null ? "—" : `$${fmt(pnl.principal_usd, 0)}`}
+            subtitle={
+              pnl?.principal_anchor_at
+                ? `since ${pnl.principal_anchor_at.slice(0, 10)}${pnl.principal_anchor_explicit ? "" : " (default)"}`
+                : undefined
+            }
+          />
           <MetricCard label="OPEN POSITIONS" value={positionsLoading && !pnl ? "..." : String(livePositions.length)} />
           <MetricCard
             label="SESSION P&L"

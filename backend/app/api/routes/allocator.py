@@ -1489,6 +1489,17 @@ class AllocationUpdateRequest(BaseModel):
     capital_usd: float | None = None
     status: str | None = None
     compounding_mode: str | None = None  # 'compound' | 'fixed'
+    # Principal anchor — lets the operator pin the "official start date"
+    # used by /pnl's total_pnl_usd + total_return_pct computation. Setting
+    # to literal NULL (body sends null, not omitted) clears the override
+    # and falls back to created_at + capital_usd.
+    principal_anchor_at: str | None = None     # ISO 8601 or null
+    principal_baseline_usd: float | None = None
+    # Sentinel flags so caller can explicitly clear (vs leave unchanged).
+    # When true, sets the corresponding column to NULL irrespective of
+    # the accompanying value field.
+    clear_principal_anchor: bool = False
+    clear_principal_baseline: bool = False
 
 
 @router.patch("/allocations/{allocation_id}")
@@ -1539,6 +1550,24 @@ def update_allocation(allocation_id: str, body: AllocationUpdateRequest, user_id
             raise HTTPException(status_code=400, detail="Invalid compounding_mode")
         updates.append("compounding_mode = %s")
         params.append(body.compounding_mode)
+
+    # Principal anchor semantics:
+    #   clear_principal_anchor=True    → SET principal_anchor_at = NULL
+    #   anchor_at provided             → SET to that timestamp
+    #   both omitted                   → no change
+    if body.clear_principal_anchor:
+        updates.append("principal_anchor_at = NULL")
+    elif body.principal_anchor_at is not None:
+        updates.append("principal_anchor_at = %s::timestamptz")
+        params.append(body.principal_anchor_at)
+
+    if body.clear_principal_baseline:
+        updates.append("principal_baseline_usd = NULL")
+    elif body.principal_baseline_usd is not None:
+        if body.principal_baseline_usd <= 0:
+            raise HTTPException(status_code=400, detail="principal_baseline_usd must be positive")
+        updates.append("principal_baseline_usd = %s")
+        params.append(body.principal_baseline_usd)
 
     if not updates:
         raise HTTPException(status_code=400, detail="No fields to update")
@@ -1956,7 +1985,8 @@ def trader_pnl(allocation_id: str, user_id: str = Depends(get_current_user), cur
     """
     cur.execute("""
         SELECT capital_usd, user_id, connection_id, runtime_state,
-               created_at
+               created_at,
+               principal_anchor_at, principal_baseline_usd
         FROM user_mgmt.allocations
         WHERE allocation_id = %s::uuid
     """, (allocation_id,))
@@ -1970,6 +2000,15 @@ def trader_pnl(allocation_id: str, user_id: str = Depends(get_current_user), cur
     connection_id = alloc["connection_id"]
     runtime_state = alloc["runtime_state"] or {}
     created_at = alloc["created_at"]
+
+    # Principal anchor (migration 007). Defaults back to created_at +
+    # capital_usd when the operator hasn't set an explicit anchor/baseline.
+    principal_anchor_at = alloc["principal_anchor_at"] or created_at
+    principal_baseline = (
+        float(alloc["principal_baseline_usd"])
+        if alloc["principal_baseline_usd"] is not None
+        else capital
+    )
 
     # Current equity: latest exchange_snapshot for this connection.
     cur.execute("""
@@ -2049,15 +2088,37 @@ def trader_pnl(allocation_id: str, user_id: str = Depends(get_current_user), cur
         if initial_row:
             initial_equity = float(initial_row["total_equity_usd"])
 
-    total_baseline = initial_equity if initial_equity is not None else capital
-    total_pnl_usd = equity - total_baseline
-    total_return_pct = (total_pnl_usd / total_baseline * 100) if total_baseline > 0 else 0.0
+    # ── Principal computation (migration 007) ───────────────────────────────
+    # principal_now = principal_baseline + SUM(deposits − withdrawals since
+    #                 principal_anchor_at AND NOT soft-deleted)
+    # Defaults (both anchor + baseline NULL): anchor = allocation.created_at,
+    # baseline = allocation.capital_usd. This reproduces the pre-migration-007
+    # behavior so upgrades don't silently change anyone's displayed numbers.
+    cur.execute("""
+        SELECT COALESCE(SUM(CASE kind
+                              WHEN 'deposit'    THEN amount_usd
+                              WHEN 'withdrawal' THEN -amount_usd
+                            END), 0)::float AS net_since_anchor
+        FROM user_mgmt.allocation_capital_events
+        WHERE allocation_id = %s::uuid
+          AND deleted_at IS NULL
+          AND event_at >= %s::timestamptz
+    """, (allocation_id, principal_anchor_at))
+    net_since_anchor = float(cur.fetchone()["net_since_anchor"] or 0)
+    principal_now = principal_baseline + net_since_anchor
 
-    # ── Capital-event adjustments (migration 003) ───────────────────────────
-    # Subtract net deposits minus withdrawals so operator-moved principal
-    # doesn't appear as trading P&L. Lifetime sum → Total P&L; session-
-    # window sum → Session P&L. Events recorded in
-    # user_mgmt.allocation_capital_events with kind ∈ {deposit, withdrawal}.
+    # Trading PnL = equity − principal_now. Cleaner than the old baseline-
+    # adjustment math: anchor pins the left edge of the tracked track record,
+    # all subsequent inflows/outflows are principal changes not profit, and
+    # the delta is pure trading outcome.
+    total_pnl_usd = equity - principal_now
+    total_return_pct = (
+        (total_pnl_usd / principal_now * 100) if principal_now > 0 else 0.0
+    )
+
+    # Legacy "lifetime_capital_net_usd" field is preserved in the response
+    # (subscribers may be rendering it). Scope = lifetime now as before, for
+    # backwards compatibility.
     cur.execute("""
         SELECT COALESCE(SUM(CASE kind
                               WHEN 'deposit'    THEN amount_usd
@@ -2068,16 +2129,6 @@ def trader_pnl(allocation_id: str, user_id: str = Depends(get_current_user), cur
           AND deleted_at IS NULL
     """, (allocation_id,))
     lifetime_capital_net = float(cur.fetchone()["lifetime_net"] or 0)
-    total_pnl_usd -= lifetime_capital_net
-    # Re-compute total_return_pct against the CAPITAL-ADJUSTED baseline so
-    # the percentage reads "trading return vs net invested principal" — the
-    # intuitive meaning users expect on the Trader card. Adjusted baseline
-    # = original baseline + deposits − withdrawals.
-    adjusted_total_baseline = total_baseline + lifetime_capital_net
-    total_return_pct = (
-        (total_pnl_usd / adjusted_total_baseline * 100)
-        if adjusted_total_baseline > 0 else 0.0
-    )
 
     session_capital_net = 0.0
     if session_active and session_start is not None and session_date:
@@ -2118,6 +2169,16 @@ def trader_pnl(allocation_id: str, user_id: str = Depends(get_current_user), cur
         "total_pnl_usd": round(total_pnl_usd, 2),
         "total_return_pct": round(total_return_pct, 4),
         "lifetime_capital_net_usd": round(lifetime_capital_net, 2),
+        # Principal anchor (migration 007)
+        "principal_usd":          round(principal_now, 2),
+        "principal_baseline_usd": round(principal_baseline, 2),
+        "principal_anchor_at":    (
+            principal_anchor_at.isoformat()
+            if principal_anchor_at else None
+        ),
+        "principal_anchor_explicit": alloc["principal_anchor_at"] is not None,
+        "principal_baseline_explicit": alloc["principal_baseline_usd"] is not None,
+        "net_since_anchor_usd":   round(net_since_anchor, 2),
     }
 
 
@@ -2422,3 +2483,85 @@ def delete_capital_event(
          WHERE event_id = %s::uuid
     """, (event_id,))
     return {"deleted": True, "event_id": event_id}
+
+
+@router.post("/capital-events/reset-defaults")
+def reset_capital_events_to_defaults(
+    user_id: str = Depends(get_current_user),
+    cur=Depends(get_cursor),
+) -> dict[str, Any]:
+    """Discard all manual overrides on auto-detected events and re-sync
+    from the exchange. Manual-entered events (source='manual') are NOT
+    affected — those represent operator-created records, not overrides.
+
+    Steps:
+      1. Hard-delete rows where source IN ('auto','auto-anomaly')
+         AND is_manually_overridden=TRUE (destroys edits + tombstones)
+      2. Re-poll each affected connection via poll_connection with
+         source='auto'. The now-missing (connection_id, exchange_event_id)
+         pairs re-insert from the live exchange API with their true
+         exchange-reported values.
+
+    Scope: caller's own allocations + connections. Connections ambiguously
+    shared across users are blocked at the SELECT below via the user_id
+    join, so one user's reset can never touch another user's auto rows.
+    """
+    # Collect the connections whose auto events we need to re-poll AFTER
+    # deletion. We compute this set before DELETE because post-delete the
+    # rows are gone and we'd lose the connection linkage.
+    cur.execute("""
+        SELECT DISTINCT ce.connection_id::text AS connection_id
+          FROM user_mgmt.allocation_capital_events ce
+          LEFT JOIN user_mgmt.allocations a
+                 ON a.allocation_id = ce.allocation_id
+          LEFT JOIN user_mgmt.exchange_connections ec
+                 ON ec.connection_id = ce.connection_id
+         WHERE ce.source IN ('auto', 'auto-anomaly')
+           AND ce.is_manually_overridden = TRUE
+           AND COALESCE(a.user_id, ec.user_id) = %s::uuid
+           AND ce.connection_id IS NOT NULL
+    """, (user_id,))
+    affected_connections = [r["connection_id"] for r in cur.fetchall()]
+
+    cur.execute("""
+        DELETE FROM user_mgmt.allocation_capital_events ce
+         USING user_mgmt.exchange_connections ec
+         WHERE ce.connection_id = ec.connection_id
+           AND ce.source IN ('auto', 'auto-anomaly')
+           AND ce.is_manually_overridden = TRUE
+           AND ec.user_id = %s::uuid
+    """, (user_id,))
+    deleted_count = cur.rowcount
+
+    # Also sweep any auto-rows whose allocation_id-ownership chain says
+    # user-owned, but whose connection_id may be NULL (defensive — should
+    # be zero in practice since auto rows always carry connection_id).
+    cur.execute("""
+        DELETE FROM user_mgmt.allocation_capital_events ce
+         USING user_mgmt.allocations a
+         WHERE ce.allocation_id = a.allocation_id
+           AND ce.source IN ('auto', 'auto-anomaly')
+           AND ce.is_manually_overridden = TRUE
+           AND a.user_id = %s::uuid
+    """, (user_id,))
+    deleted_count += cur.rowcount
+
+    # Re-poll each affected connection so the deleted rows re-appear with
+    # their exchange-reported defaults. Import lazily to avoid a module-
+    # import cycle when the route file is imported by the celery worker.
+    from app.cli.poll_capital_events import poll_connection
+    repolled = 0
+    for cid in affected_connections:
+        try:
+            # poll_connection commits internally so failures on one
+            # connection don't block the others.
+            poll_connection(cur.connection, cur, cid, source="auto")
+            repolled += 1
+        except Exception as e:
+            log.warning(f"reset: re-poll failed for {cid[:8]}: {e}")
+
+    return {
+        "reset": True,
+        "deleted_overrides": deleted_count,
+        "connections_repolled": repolled,
+    }
