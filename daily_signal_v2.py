@@ -54,12 +54,10 @@ Usage (cron entry):
              /root/benji/daily_signal_v2.log 2>&1
 """
 
-import calendar
 import csv
 import datetime as _dt
 import logging
 import math
-import os
 import re
 import sys
 import time
@@ -310,9 +308,8 @@ def compute_tail_guardrail(ref_date):
                     f"prior to {ref_date}; have {len(rows)}. Forcing sit-flat "
                     f"(fail-closed) to avoid trading under uncertain guardrail "
                     f"state.")
-        return True, f"tail_guardrail_insufficient_history"
+        return True, "tail_guardrail_insufficient_history"
 
-    days = [r[0] for r in rows]
     closes = [float(r[1]) for r in rows]
 
     # Log returns (day N close / day N-1 close)
@@ -368,9 +365,10 @@ def compute_tail_guardrail(ref_date):
 
 def write_deploys_csv(date_str, filter_name, overlap_pool, sit_flat, sit_flat_reason):
     """Write/update live_deploys_signal_v2.csv. Additive: preserves prior rows
-    up to DEPLOYS_RETAIN_DAYS. Format matches v1's CSV for easy diffing."""
-    fieldnames = ["timestamp_utc", "date", "filter", "sit_flat", "sit_flat_reason",
-                  "symbols"]
+    up to DEPLOYS_RETAIN_DAYS. Format matches live_deploys_signal.csv (v1)
+    exactly (column names + order + sit_flat capitalization) so v2 is a
+    drop-in replacement at cutover time."""
+    fieldnames = ["date", "filter", "symbols", "sit_flat", "filter_reason"]
 
     # Load existing rows (if file exists) and drop the target date if already present
     existing = []
@@ -387,15 +385,13 @@ def write_deploys_csv(date_str, filter_name, overlap_pool, sit_flat, sit_flat_re
     cutoff = (_dt.date.today() - _dt.timedelta(days=DEPLOYS_RETAIN_DAYS)).isoformat()
     existing = [r for r in existing if r.get("date", "") >= cutoff]
 
-    # Add today's row
-    ts_utc = _dt.datetime.now(_dt.timezone.utc).replace(microsecond=0).isoformat()
+    # Add today's row (column names + order match v1 for drop-in cutover)
     new_row = {
-        "timestamp_utc":   ts_utc,
-        "date":            date_str,
-        "filter":          filter_name,
-        "sit_flat":        str(sit_flat).lower(),
-        "sit_flat_reason": sit_flat_reason or "",
-        "symbols":         " ".join(overlap_pool) if overlap_pool and not sit_flat else "",
+        "date":          date_str,
+        "filter":        filter_name,
+        "symbols":       " ".join(overlap_pool) if overlap_pool and not sit_flat else "",
+        "sit_flat":      "True" if sit_flat else "False",
+        "filter_reason": sit_flat_reason or ("pass" if not sit_flat else ""),
     }
     rows = existing + [new_row]
     rows.sort(key=lambda r: r["date"])
