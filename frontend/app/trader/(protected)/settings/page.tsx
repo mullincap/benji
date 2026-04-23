@@ -842,41 +842,41 @@ function ExchangeCapitalGroup({
         )}
       </div>
 
-      {/* Exchange-level principal summary. Always renders for real
-          connections so every exchange gets a visible principal bar
-          regardless of whether any allocation is attached yet. */}
+      {/* Exchange-level principal summary. Kept to a single line — the
+          per-event PRINCIPAL AFTER column already exposes the baseline +
+          net-since-anchor breakdown row-by-row, so this bar just shows
+          the headline numbers. */}
       {group.connection_id && (
         <div style={{
           padding: "10px 14px",
           borderBottom: "1px solid var(--line)",
           background: "var(--bg2)",
-          display: "flex", alignItems: "center", gap: 14,
-          fontSize: 10, fontFamily: FONT_MONO, flexWrap: "wrap",
+          display: "flex", alignItems: "center", gap: 18,
+          fontSize: 10, fontFamily: FONT_MONO,
+          whiteSpace: "nowrap", overflow: "hidden",
         }}>
           <span style={{
             color: "var(--t3)", letterSpacing: "0.12em",
-            textTransform: "uppercase", fontWeight: 700, minWidth: 150,
+            textTransform: "uppercase", fontWeight: 700,
           }}>
             Exchange principal
           </span>
-          <span style={{ color: "var(--t3)" }}>BALANCE</span>
-          <span style={{ color: "var(--t0)", fontWeight: 700 }}>
-            {exchangeBalance !== null
-              ? `$${exchangeBalance.toLocaleString("en-US", { maximumFractionDigits: 2 })}`
-              : "—"}
+          <span style={{ display: "flex", gap: 6, alignItems: "baseline" }}>
+            <span style={{ color: "var(--t3)" }}>BALANCE</span>
+            <span style={{ color: "var(--t0)", fontWeight: 700 }}>
+              {exchangeBalance !== null
+                ? `$${exchangeBalance.toLocaleString("en-US", { maximumFractionDigits: 2 })}`
+                : "—"}
+            </span>
           </span>
-          <span style={{ color: "var(--t3)" }}>PRINCIPAL</span>
-          <span style={{ color: "var(--t0)", fontWeight: 700 }}>
-            ${principal.toLocaleString("en-US", { maximumFractionDigits: 2 })}
-          </span>
-          <span style={{ color: "var(--t3)" }}>
-            = ${baseline.toLocaleString("en-US", { maximumFractionDigits: 2 })}
-            {" "}
-            {netSinceAnchor >= 0 ? "+" : "−"} $
-            {Math.abs(netSinceAnchor).toLocaleString("en-US", { maximumFractionDigits: 2 })}
+          <span style={{ display: "flex", gap: 6, alignItems: "baseline" }}>
+            <span style={{ color: "var(--t3)" }}>PRINCIPAL</span>
+            <span style={{ color: "var(--t0)", fontWeight: 700 }}>
+              ${principal.toLocaleString("en-US", { maximumFractionDigits: 2 })}
+            </span>
           </span>
           {tradingDelta !== null && (
-            <>
+            <span style={{ display: "flex", gap: 6, alignItems: "baseline" }}>
               <span style={{ color: "var(--t3)" }}>TRADING Δ</span>
               <span style={{
                 color: tradingDelta >= 0 ? "var(--green)" : "var(--red)",
@@ -885,11 +885,15 @@ function ExchangeCapitalGroup({
                 {tradingDelta >= 0 ? "+" : "−"}$
                 {Math.abs(tradingDelta).toLocaleString("en-US", { maximumFractionDigits: 2 })}
               </span>
-            </>
+            </span>
           )}
-          <span style={{ color: "var(--t3)", marginLeft: "auto" }}>
-            since {exchangeAnchorAt ? exchangeAnchorAt.slice(0, 10) : "—"}
-            {exchangeAnchorAt === null ? " (no anchor set)" : ""}
+          <span style={{
+            color: "var(--t3)", marginLeft: "auto",
+            fontStyle: exchangeAnchorAt ? "normal" : "italic",
+          }}>
+            {exchangeAnchorAt
+              ? `since ${exchangeAnchorAt.slice(0, 10)}`
+              : "no anchor set"}
           </span>
         </div>
       )}
