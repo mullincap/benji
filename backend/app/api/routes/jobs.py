@@ -6,7 +6,7 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import FileResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, model_validator
 
 from app.core.config import settings
 from app.db import get_worker_conn
@@ -245,6 +245,28 @@ class JobRequest(BaseModel):
     bar_minutes:                int   = 5
     save_daily_files:           bool  = False
     build_master_file:          bool  = True
+
+    @model_validator(mode="after")
+    def _check_live_parity_ranking_metric_mutex(self) -> "JobRequest":
+        """Mirror overlap_analysis.py's argparse mutual-exclusion check at the
+        HTTP boundary. Without this, combining --live-parity with
+        --ranking-metric=abs_dollar queues a Celery job that fails deep inside
+        the subprocess (argparse error), burning worker time and muddying the
+        job status timeline. 422 at submit time is the correct UX.
+
+        See docs/strategy_specification.md § 3.1 for the distinction between
+        the two flags (live-parity = forensic v1 reproduction; ranking-metric =
+        symmetric methodology exploration)."""
+        if self.live_parity and self.ranking_metric != "pct_change":
+            raise ValueError(
+                "live_parity and ranking_metric are mutually exclusive. "
+                "live_parity reproduces daily_signal.py v1 exactly "
+                "(asymmetric: log-return on price, abs-$ on OI). "
+                "ranking_metric applies a symmetric ranking across both "
+                "metrics on the canonical universe. Use one or the other "
+                "per docs/strategy_specification.md § 3.1."
+            )
+        return self
 
 
 # ---------------------------------------------------------------------------
