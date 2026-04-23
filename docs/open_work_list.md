@@ -1,5 +1,124 @@
 # Open Work List
 
+## 🔴 Tomorrow (2026-04-24) — ALTS MAIN live promotion
+
+Context: ALTS MAIN strategy (strategy_id=5, version_id=
+`5cb04dc8-053e-4808-aaf8-c14a451c06af`, filter_mode="A - Tail +
+Dispersion", l_high=1.5) created in DB on 2026-04-23 after Diag #2
+proved the 8-knob config lifts canonical Sharpe 3.519 → 4.046 on
+identical 428-day prod data. is_published=TRUE, is_canonical=FALSE
+(Alpha Main still canonical). No capital on ALTS MAIN yet. User
+wants "all capital running on this new version".
+
+Three gaps between audit methodology and live trading that must
+close before tomorrow's 06:05 UTC trader spawn picks up the full
+4.05 Sharpe methodology:
+
+### Gap 1 — `tail_drop_pct` is hardcoded in daily_signal_v2.py
+`daily_signal_v2.py` lines 82-83:
+```
+TAIL_DROP_PCT  = 0.04   # module constant, ignores strategy config
+TAIL_VOL_MULT  = 1.4
+```
+ALTS MAIN's config has `tail_drop_pct=0.03` — won't flow to live
+without reading from strategy_version.config at signal time.
+
+Fix: ~15 min. In `main()`, query the active allocation's
+`audit.strategy_versions.config` (or use a default if ambiguous which
+allocation — probably fine to use the canonical strategy's config
+since daily_signal is strategy-agnostic at the universe level).
+Replace module constants with config-derived values.
+
+Ambiguity note: signal output is single-basket, not per-allocation.
+If multiple published strategies exist with different
+`tail_drop_pct`, need to decide: (a) emit per-strategy signal rows
+with that strategy's threshold applied, or (b) use canonical's
+threshold globally. Current write path already handles (a) —
+`write_to_db` inserts one daily_signals row per published+active
+strategy. Extending to per-strategy threshold means running the Tail
+Guardrail calc N times (once per strategy's `tail_drop_pct`). Cheap
+— BTC daily close fetch is the same across all N runs.
+
+### Gap 2 — Dispersion filter not implemented in daily_signal_v2.py
+ALTS MAIN's winning filter is "A - Tail + Dispersion": sit flat if
+EITHER Tail Guardrail fires OR Dispersion filter fires. Dispersion
+filter is implemented in `audit.py`'s simulation (knobs:
+`dispersion_n=40`, `dispersion_baseline_win=33`,
+`dispersion_threshold=0.66`) but has no counterpart in the live
+signal path.
+
+Fix: ~2-3 hrs. New function `compute_dispersion_filter(ref_date,
+config)` in daily_signal_v2.py that:
+  1. Pulls top-N symbols' 1d returns over the prior
+     `dispersion_baseline_win` days (from Binance FAPI klines — same
+     source as existing `compute_canonical_basket`).
+  2. Computes cross-sectional dispersion stat (spec says: stdev of
+     daily returns across the dispersion_n symbols, ratio to
+     baseline window).
+  3. Returns (sit_flat: bool, reason: str) matching the existing
+     `compute_tail_guardrail` return shape.
+  4. main() calls both; composite "sit flat if either fires" logic.
+
+Defer-until-ready: user accepts tomorrow's session trades with
+Gap-1-only methodology (Tail Guardrail at 0.03 threshold, Sharpe
+expected ~3.58 not 4.05). Full 4.05 methodology unlocks Friday
+when Gap 2 ships.
+
+### Gap 3 — Active allocation still points at Alpha Max's version_id
+Allocation `f87fe130-a90c-4e60-908a-14f4065b415c` currently points
+at Alpha Max's strategy_version. Switch to ALTS MAIN's:
+```sql
+UPDATE user_mgmt.allocations
+   SET strategy_version_id = '5cb04dc8-053e-4808-aaf8-c14a451c06af'::uuid
+ WHERE allocation_id = 'f87fe130-a90c-4e60-908a-14f4065b415c'::uuid;
+```
+Tomorrow's trader spawn reads the updated strategy_version; live
+config flows in. Note: this changes the leverage tier from
+Alpha Max (l_high=2.0) to ALTS MAIN (l_high=1.5) — user's capital
+size-drops by ~25% vs current but risk-adjusted return is the bet.
+
+### Gap 4 — Capital events reconciliation for tonight's session close
+Tonight's trader (pid=27) will persist `allocation_returns` at
+23:55 UTC with `net_return_pct` inflated by the 09:05 UTC $1,003.75
+Binance→BloFin deposit (session_start_equity_usdt was captured at
+06:35 UTC, pre-deposit). Need to either:
+  (a) Run a one-shot SQL UPDATE at 23:56 UTC to subtract session-
+      scoped capital events from net/gross_return_pct for today's
+      row, OR
+  (b) Ship a permanent reconciliation script + nightly cron that
+      fixes any session where capital events landed mid-session.
+
+Per the /pnl endpoint precedent (commit `ea00d79`): session-scoped
+net = SUM(kind='deposit' amount - kind='withdrawal' amount) WHERE
+event_at::date = session_date. Subtract from `equity - session_start`
+before dividing by `session_start + session_net`.
+
+Recommendation: (b). ~30 min. Schedule as 23:56 cron after trader
+close.
+
+### Execution order tomorrow
+
+1. Gap 4 reconciliation script + cron (fix tonight's row; permanent)
+2. Gap 1 tail_drop_pct config-read change
+3. Gap 3 allocation swap to ALTS MAIN's strategy_version_id
+4. (monitor) Tomorrow's 05:58 UTC signal + 06:05 spawn → verify
+   trader loads ALTS MAIN config + trades new basket
+5. Gap 2 Dispersion filter implementation (Friday)
+
+### Verification checklist after tomorrow's session
+
+- [ ] allocation_returns row for 2026-04-24 shows non-inflated
+      net_return_pct (Gap 4 cron worked on today's row if applied
+      to history)
+- [ ] Tomorrow's trader log shows `tail_drop_pct: 0.03` or similar
+      evidence the config override reached the signal (Gap 1)
+- [ ] Allocation pointing at ALTS MAIN; position sizing uses
+      l_high=1.5 (Gap 3)
+- [ ] (Friday) Dispersion filter emits "PASS" / "FIRE" log line
+      matching config threshold (Gap 2)
+
+---
+
 ## 🔴 Follow-up from Stream D-medium (2026-04-23)
 
 ### D-perf — precomputed abs_dollar leaderboards
