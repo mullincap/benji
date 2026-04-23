@@ -818,6 +818,214 @@ def _load_frequency_from_db(
     return result
 
 
+# ─────────────────────────────────────────────
+# LIVE-PARITY mode (opt-in, --live-parity)
+#
+# Simulates daily_signal.py's basket-selection methodology against DB historical
+# data for the purpose of comparison audits vs the canonical (snapshot, pct_change,
+# leaderboard-index-100) path. DOES NOT affect any existing audit output — the new
+# path is gated behind --live-parity (default off).
+#
+# Approximations to live (accepted under 1b-A scope):
+#   Gap A: DB has no 24h quoteVolume column. Proxy = SUM(volume * close) over
+#          trailing 24h. Structurally equivalent; ~1-5 symbol/day drift at the
+#          rank-100 boundary.
+#   Gap B: BloFin instrument list is today's snapshot, used as static historical
+#          filter. <2-3 symbol/day lookback error.
+#   Gap C: live pulls Binance REST at 05:58; DB bar boundary is 06:00. Likely
+#          immaterial.
+# ─────────────────────────────────────────────
+
+import functools as _functools
+import urllib.request as _urllib_request
+import json as _json
+
+
+@_functools.lru_cache(maxsize=1)
+def _fetch_blofin_instruments() -> set:
+    """Fetch current BloFin USDT perp universe for the static historical filter.
+    Cached per-process. Returns empty set on failure (falls through to no filter —
+    universe will be slightly wider than live's)."""
+    url = "https://openapi.blofin.com/api/v1/market/instruments?instType=SWAP"
+    try:
+        with _urllib_request.urlopen(url, timeout=15) as r:
+            data = _json.load(r)
+        syms = {
+            inst["instId"].replace("-USDT", "").upper()
+            for inst in (data.get("data") or [])
+            if inst.get("instId", "").endswith("-USDT")
+        }
+        log.info(f"[LIVE-PARITY] BloFin universe: {len(syms)} USDT-swap instruments (static snapshot)")
+        return syms
+    except Exception as e:
+        log.warning(f"[LIVE-PARITY] BloFin fetch failed ({e}); proceeding without BloFin filter")
+        return set()
+
+
+def _load_live_parity_frequencies_from_db(
+    freq_width: int = 20,
+    sample_interval: int = 5,
+    deployment_start_hour: int = 6,
+) -> tuple:
+    """Simulate live (daily_signal.py) basket selection against DB historical data.
+
+    Live methodology (verbatim from daily_signal.py):
+      - Universe: top-100 USDT perps by 24h quoteVolume, filtered to BloFin.
+      - Price ranking per bar: log(close_now / close_anchor) from midnight anchor.
+      - OI ranking per bar: oi_usd_now - oi_usd_anchor (absolute $ delta, midnight anchor).
+      - Freq count: symbols earning +1 for each bar where rank ≤ freq_width among universe.
+      - Basket: top-freq_width-by-price-freq ∩ top-freq_width-by-OI-freq.
+
+    Defensive anchor: walk forward up to 5 bars if anchor value is 0 or None
+    (matches builder's replace(0, pd.NA) hygiene; uses imputation rather than drop
+    so the symbol isn't silently excluded from the 100-universe competition).
+
+    Returns:
+        (price_freq_by_date, oi_freq_by_date) where each is dict[date, Counter[base, int]].
+    """
+    import sys as _sys
+    import math as _math
+    import datetime as _dt
+    from collections import Counter as _Counter
+
+    _sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    from pipeline.db.connection import get_conn
+
+    blofin = _fetch_blofin_instruments()
+    blofin_arr = sorted(blofin) if blofin else None
+
+    conn = get_conn()
+    cur = conn.cursor()
+
+    # Discover date range from futures_1m (matches canonical overlap_analysis
+    # behaviour of processing every date with leaderboard data).
+    cur.execute("SELECT MIN(timestamp_utc)::date, MAX(timestamp_utc)::date FROM market.futures_1m")
+    dmin, dmax = cur.fetchone()
+    if dmin is None:
+        raise RuntimeError("market.futures_1m is empty")
+    # Skip first day: need prior 24h of data for the volume universe.
+    first_processable = dmin + _dt.timedelta(days=1)
+    log.info(f"[LIVE-PARITY] Processing dates {first_processable} → {dmax} "
+             f"({(dmax - first_processable).days + 1} days)")
+
+    price_freq_by_date: dict = {}
+    oi_freq_by_date: dict = {}
+
+    d = first_processable
+    while d <= dmax:
+        deployment_start = _dt.datetime.combine(d, _dt.time(deployment_start_hour, 0, 0),
+                                                tzinfo=_dt.timezone.utc)
+        anchor_ts = _dt.datetime.combine(d, _dt.time(0, 0, 0), tzinfo=_dt.timezone.utc)
+        prior_24h_start = deployment_start - _dt.timedelta(hours=24)
+
+        # 1. Universe: top-100 USDT perps by SUM(volume * close) over 24h ending
+        #    deployment_start. Apply BloFin static filter.
+        cur.execute("""
+            SELECT sym.symbol_id, sym.binance_id, sym.base,
+                   SUM(f.volume * f.close) AS vol24h
+            FROM market.futures_1m f
+            JOIN market.symbols sym USING (symbol_id)
+            WHERE f.timestamp_utc > %s AND f.timestamp_utc <= %s
+              AND sym.binance_id LIKE '%%USDT'
+              AND sym.binance_id NOT LIKE '%%\\_%%' ESCAPE '\\'
+              AND (%s::text[] IS NULL OR sym.base = ANY(%s))
+            GROUP BY sym.symbol_id, sym.binance_id, sym.base
+            HAVING SUM(f.volume * f.close) > 0
+            ORDER BY vol24h DESC
+            LIMIT 100
+        """, (prior_24h_start, deployment_start, blofin_arr, blofin_arr))
+        universe = cur.fetchall()
+        if not universe:
+            d += _dt.timedelta(days=1)
+            continue
+
+        uni_sids = [r[0] for r in universe]
+        uni_bids = {r[0]: r[1] for r in universe}
+
+        # 2. Fetch 5-min bars for electoral window [00:00, deployment_start].
+        cur.execute("""
+            SELECT f.timestamp_utc, f.symbol_id, f.close, f.open_interest
+            FROM market.futures_1m f
+            WHERE f.timestamp_utc >= %s AND f.timestamp_utc <= %s
+              AND f.symbol_id = ANY(%s)
+              AND MOD(EXTRACT(MINUTE FROM f.timestamp_utc)::int, %s) = 0
+            ORDER BY f.symbol_id, f.timestamp_utc
+        """, (anchor_ts, deployment_start, uni_sids, sample_interval))
+        rows = cur.fetchall()
+
+        # per_sym_ordered[sid] -> sorted list of (ts_ms, close, oi_usd) for walk-forward anchor.
+        # per_sym_map[sid][ts_ms] -> (close, oi_usd) for O(1) per-bar lookup.
+        per_sym_ordered: dict = {sid: [] for sid in uni_sids}
+        per_sym_map: dict = {sid: {} for sid in uni_sids}
+        for ts, sid, close, oi in rows:
+            ts_ms = int(ts.timestamp() * 1000)
+            oi_usd = (oi * close) if (oi is not None and close is not None) else None
+            per_sym_ordered[sid].append((ts_ms, close, oi_usd))
+            per_sym_map[sid][ts_ms] = (close, oi_usd)
+        for sid in uni_sids:
+            per_sym_ordered[sid].sort()
+
+        # 3. Walk-forward anchor resolution. First non-zero positive value in bars 0..4.
+        def _resolve(series, idx):
+            for i in range(min(5, len(series))):
+                v = series[i][idx]
+                if v is not None and v > 0:
+                    return v
+            return None
+
+        anchor_price = {sid: _resolve(per_sym_ordered[sid], 1) for sid in uni_sids}
+        anchor_oi    = {sid: _resolve(per_sym_ordered[sid], 2) for sid in uni_sids}
+
+        # 4. Scoring bars = all present timestamps EXCEPT anchor ts at 00:00.
+        all_ts = sorted({t for series in per_sym_ordered.values() for t, _, _ in series})
+        if not all_ts:
+            d += _dt.timedelta(days=1)
+            continue
+        anchor_ts_ms = all_ts[0]
+        bar_ts_list = [t for t in all_ts if t != anchor_ts_ms]
+
+        # 5. Per-bar ranking, top-freq_width → +1. Keys normalized to base symbol.
+        price_freq = _Counter()
+        oi_freq = _Counter()
+        for ts in bar_ts_list:
+            p_scores: dict = {}
+            o_scores: dict = {}
+            for sid in uni_sids:
+                cell = per_sym_map[sid].get(ts)
+                if cell is None:
+                    continue
+                close, oi_usd = cell
+                ap = anchor_price.get(sid)
+                ao = anchor_oi.get(sid)
+                if close is not None and ap is not None and ap > 0:
+                    try:
+                        p_scores[sid] = _math.log(close / ap)
+                    except (ValueError, ZeroDivisionError):
+                        pass
+                if oi_usd is not None and ao is not None:
+                    o_scores[sid] = oi_usd - ao
+            for sid in sorted(p_scores, key=p_scores.get, reverse=True)[:freq_width]:
+                base = normalize_symbol(uni_bids[sid])
+                if base:
+                    price_freq[base] += 1
+            for sid in sorted(o_scores, key=o_scores.get, reverse=True)[:freq_width]:
+                base = normalize_symbol(uni_bids[sid])
+                if base:
+                    oi_freq[base] += 1
+
+        price_freq_by_date[d] = price_freq
+        oi_freq_by_date[d] = oi_freq
+        if (d - first_processable).days % 30 == 0:
+            log.info(f"[LIVE-PARITY]   processed through {d} ({len(price_freq_by_date)} days done)")
+        d += _dt.timedelta(days=1)
+
+    cur.close()
+    conn.close()
+    log.info(f"[LIVE-PARITY] Complete: {len(price_freq_by_date)} dates with price freq, "
+             f"{len(oi_freq_by_date)} dates with OI freq")
+    return price_freq_by_date, oi_freq_by_date
+
+
 def auth_gspread():
     """
     Authenticate with Google Sheets using OAuth token.
@@ -1012,6 +1220,7 @@ def run(min_mcap: float, freq_width: int, marketcap_dir: Path,
         audit: bool = False, audit_script: Path = None, audit_args: list = None,
         confluence_path: Path = None, drop_unverified: bool = False, max_mcap: float = 0.0,
         force: bool = False, source: str = "parquet",
+        live_parity: bool = False,
 ):
     mcap_label      = f"{int(min_mcap / 1_000_000)}M"
     marketcap_path  = marketcap_dir / "marketcap_daily.parquet"
@@ -1085,41 +1294,56 @@ def run(min_mcap: float, freq_width: int, marketcap_dir: Path,
     _start_hhmm     = f"{DEPLOYMENT_START_HOUR:02d}00"
     _eff_lookback_run = _resolve_sort_lookback()
     _lookback_hhmm    = f"{(DEPLOYMENT_START_HOUR - _eff_lookback_run):02d}00"
-    mode_label      = f"snapshot_{_start_hhmm}" if mode == "snapshot" else f"freq_{_lookback_hhmm}_{_start_hhmm}"
+    if live_parity:
+        mode_label = f"live_parity_{_start_hhmm}"
+    else:
+        mode_label = f"snapshot_{_start_hhmm}" if mode == "snapshot" else f"freq_{_lookback_hhmm}_{_start_hhmm}"
     overlap_path        = BASE_DIR / f"overlap_{idx_label}_w{freq_width}c{freq_cutoff}_{mode_label}_{mcap_label}{_run_suffix}.csv"
     output_files        = []   # collect all generated output paths for final summary
 
     # ── Step 1+2: DB mode — bypass parquet load/filter/downsample entirely ──
     if source == "db":
         from collections import Counter as _Counter
-        log.info("[DB MODE] Computing frequency tables from market.leaderboards...")
         _raw_lookback = DEPLOYMENT_START_HOUR if SORT_LOOKBACK == "daily" else int(SORT_LOOKBACK)
         _cap_note     = f", internal from {_raw_lookback}h" if _eff_lookback_run < _raw_lookback else ""
         _window_label = f"{_lookback_hhmm[:2]}:00-{DEPLOYMENT_START_HOUR:02d}:00 ({_eff_lookback_run}h{_cap_note})"
 
-        if mode == "snapshot":
-            log.info(f"Computing price snapshot from DB at {DEPLOYMENT_START_HOUR:02d}:00 (freq_width={freq_width})...")
+        if live_parity:
+            log.info("[LIVE-PARITY MODE] Simulating daily_signal.py methodology (top-100 by 24h USD volume "
+                     "ending 06:00 UTC, BloFin-filtered; frequency mode; log-return price / abs-$ OI). "
+                     "Opt-in — canonical audit paths unaffected.")
+            price_freq, oi_freq = _load_live_parity_frequencies_from_db(
+                freq_width=freq_width,
+                sample_interval=sample_interval,
+                deployment_start_hour=DEPLOYMENT_START_HOUR,
+            )
+            log.info(f"  → {len(price_freq)} dates with price data (live-parity)")
+            log.info(f"  → {len(oi_freq)} dates with OI data (live-parity)")
         else:
-            log.info(f"Computing price frequency from DB (freq_width={freq_width}, {_window_label})...")
-        price_freq = _load_frequency_from_db(
-            metric="price", freq_width=freq_width,
-            sample_interval=sample_interval, mode=mode,
-            min_mcap=min_mcap, max_mcap=max_mcap,
-            drop_unverified=drop_unverified,
-        )
-        log.info(f"  → {len(price_freq)} dates with price data")
+            log.info("[DB MODE] Computing frequency tables from market.leaderboards...")
+            if mode == "snapshot":
+                log.info(f"Computing price snapshot from DB at {DEPLOYMENT_START_HOUR:02d}:00 (freq_width={freq_width})...")
+            else:
+                log.info(f"Computing price frequency from DB (freq_width={freq_width}, {_window_label})...")
+            price_freq = _load_frequency_from_db(
+                metric="price", freq_width=freq_width,
+                sample_interval=sample_interval, mode=mode,
+                min_mcap=min_mcap, max_mcap=max_mcap,
+                drop_unverified=drop_unverified,
+            )
+            log.info(f"  → {len(price_freq)} dates with price data")
 
-        if mode == "snapshot":
-            log.info(f"Computing OI snapshot from DB at {DEPLOYMENT_START_HOUR:02d}:00 (freq_width={freq_width})...")
-        else:
-            log.info(f"Computing OI frequency from DB (freq_width={freq_width}, {_window_label})...")
-        oi_freq = _load_frequency_from_db(
-            metric="open_interest", freq_width=freq_width,
-            sample_interval=sample_interval, mode=mode,
-            min_mcap=min_mcap, max_mcap=max_mcap,
-            drop_unverified=drop_unverified,
-        )
-        log.info(f"  → {len(oi_freq)} dates with OI data")
+            if mode == "snapshot":
+                log.info(f"Computing OI snapshot from DB at {DEPLOYMENT_START_HOUR:02d}:00 (freq_width={freq_width})...")
+            else:
+                log.info(f"Computing OI frequency from DB (freq_width={freq_width}, {_window_label})...")
+            oi_freq = _load_frequency_from_db(
+                metric="open_interest", freq_width=freq_width,
+                sample_interval=sample_interval, mode=mode,
+                min_mcap=min_mcap, max_mcap=max_mcap,
+                drop_unverified=drop_unverified,
+            )
+            log.info(f"  → {len(oi_freq)} dates with OI data")
 
         # Export freq tables (same as parquet path)
         freq_label = f"{idx_label}_w{freq_width}_{mode_label}_{mcap_label}{_run_suffix}"
@@ -1491,6 +1715,14 @@ if __name__ == "__main__":
                         help="Force a leaderboard rebuild even if the parquet exists. "
                              "Passes --force through to build_intraday_leaderboard.py "
                              "so it bypasses its own DB checkpoint as well.")
+    parser.add_argument("--live-parity", dest="live_parity", action="store_true", default=False,
+                        help="OPT-IN: simulate daily_signal.py (live) basket methodology for "
+                             "comparison audits. When set: universe = top-100 USDT perps by 24h "
+                             "USD volume ending 06:00 UTC, filtered to BloFin instrument list; "
+                             "ranking metric = log-return (price) and absolute $ delta (OI); "
+                             "freq count over 72 5-min bars. Incompatible with snapshot/frequency "
+                             "modes — this is a separate path. Does NOT affect canonical audit "
+                             "output unless explicitly set. Requires --source db.")
     args = parser.parse_args()
 
     audit_args = []
@@ -1531,6 +1763,10 @@ if __name__ == "__main__":
     _start = _time.time()
     log.info(f"Starting overlap_analysis.py at {__import__('datetime').datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 
+    if args.live_parity and args.source != "db":
+        log.warning("[LIVE-PARITY] --live-parity requires --source db; overriding source=db")
+        args.source = "db"
+
     run(
         min_mcap      = args.min_mcap,
         freq_width    = args.freq_width,
@@ -1548,6 +1784,7 @@ if __name__ == "__main__":
         max_mcap        = args.max_mcap,
         force           = args.force,
         source          = args.source,
+        live_parity     = args.live_parity,
     )
 
     elapsed = _time.time() - _start
@@ -1562,7 +1799,8 @@ if __name__ == "__main__":
     log.info(f"  --freq-cutoff        : {args.freq_cutoff}")
     log.info(f"  --sample-interval    : {args.sample_interval}m")
     log.info(f"  --sort-by            : {args.sort_by}")
-    log.info(f"  --mode               : {args.mode}")
+    log.info(f"  --mode               : {args.mode}{'  [OVERRIDDEN by --live-parity]' if args.live_parity else ''}")
+    log.info(f"  --live-parity        : {args.live_parity}")
     log.info(f"  --deployment-start-hour : {DEPLOYMENT_START_HOUR:02d}:00 UTC")
     log.info(f"  --index-lookback        : {INDEX_LOOKBACK}h  "
              f"(anchor={_anchor_hhmm()[:2]}:{_anchor_hhmm()[2:]} UTC)")
