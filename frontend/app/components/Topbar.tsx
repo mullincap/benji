@@ -462,22 +462,14 @@ export default function Topbar() {
         {/* Total exchange equity — only when authed */}
         {equity != null && (
           <>
-            <div
+            <span
               title="Total equity across connected exchanges"
               style={{
-                display: 'inline-flex', alignItems: 'baseline', gap: 6,
                 marginRight: 8, padding: '0 6px',
                 fontFamily: 'var(--font-space-mono), Space Mono, monospace',
+                fontSize: 11, color: 'var(--t0)', fontWeight: 400,
               }}
-            >
-              <span style={{
-                fontSize: 8, color: 'var(--t3)',
-                letterSpacing: '0.08em', textTransform: 'uppercase', fontWeight: 700,
-              }}>EQUITY</span>
-              <span style={{
-                fontSize: 11, color: 'var(--t0)', fontWeight: 700,
-              }}>${Math.round(equity).toLocaleString('en-US')}</span>
-            </div>
+            >${Math.round(equity).toLocaleString('en-US')}</span>
             <Divider />
           </>
         )}
