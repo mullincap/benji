@@ -72,9 +72,13 @@ function getReturnColor(ret: number | null): string {
 
 function getReturnTextColor(ret: number | null): string {
   if (ret === null) return "var(--t3)";
-  if (ret > 0.5) return "var(--green)";
-  if (ret < -0.5) return "var(--red)";
-  return "var(--t2)";
+  // Saturated bg cells (ret > 2 = solid green, ret < -2 = solid red) need
+  // dark text for contrast — same-color text is invisible against the fill.
+  if (ret > 2)    return "var(--bg0)";
+  if (ret > 0.5)  return "var(--t0)";
+  if (ret > -0.5) return "var(--t1)";
+  if (ret > -2)   return "var(--t0)";
+  return "var(--bg0)";
 }
 
 function CalendarHeatmap({
@@ -158,8 +162,9 @@ function CalendarHeatmap({
                           width: 20, height: 20, borderRadius: 2,
                           background: cell ? (cell.future ? "var(--bg3)" : getReturnColor(cell.ret)) : "transparent",
                           display: "flex", alignItems: "center", justifyContent: "center",
-                          fontSize: 7, color: cell ? (cell.future ? "var(--t3)" : getReturnTextColor(cell.ret)) : "transparent",
-                          opacity: cell?.future ? 0.4 : 0.6,
+                          fontSize: 8, fontWeight: 700,
+                          color: cell ? (cell.future ? "var(--t3)" : getReturnTextColor(cell.ret)) : "transparent",
+                          opacity: cell?.future ? 0.4 : 1,
                         }}
                       >
                         {cell ? cell.day : ""}
