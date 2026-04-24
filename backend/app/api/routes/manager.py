@@ -1718,7 +1718,8 @@ def execution_summary_positions(
                target_contracts, filled_contracts, fill_pct,
                est_entry_price, fill_entry_price, entry_slippage_bps,
                est_exit_price, fill_exit_price, exit_slippage_bps,
-               pnl_usd, pnl_pct, exit_reason, retry_rounds, sym_stopped
+               pnl_usd, pnl_pct, exit_reason, retry_rounds, sym_stopped,
+               ctval
           FROM user_mgmt.allocation_execution_symbols
          WHERE allocation_id = %s::uuid
            AND session_date  = %s::date
@@ -1729,15 +1730,19 @@ def execution_summary_positions(
 
     rows = []
     for r in cur.fetchall():
-        # Notional USD computed at read time from filled_contracts × fill_entry_price.
-        # Falls back to est_entry_price when fill is missing (target-still-open
-        # symbols rendered with their estimated commitment).
+        # Notional USD = filled_contracts × fill_entry_price × ctval.
+        # ctval is critical for symbols whose contract_value ≠ 1 (e.g. INX=100,
+        # KAT=10, SKR=100 on BloFin) — omitting it under-reports notional by
+        # the contract_value multiple. Falls back to 1.0 only when the row
+        # predates migration 013 (ctval column added); new rows always
+        # populate it from the trader writer.
         contracts = r["filled_contracts"] or r["target_contracts"]
         price = r["fill_entry_price"] or r["est_entry_price"]
+        ctval = r["ctval"] if r["ctval"] is not None else 1.0
         notional_usd = None
         try:
             if contracts is not None and price is not None:
-                notional_usd = float(contracts) * float(price)
+                notional_usd = float(contracts) * float(price) * float(ctval)
         except (TypeError, ValueError):
             pass
 

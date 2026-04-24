@@ -1188,6 +1188,7 @@ def enter_positions(api: ExchangeAdapter, inst_ids, entry_prices,
                 "positionSide": POSITION_SIDE,
                 "target_contracts": contracts,
                 "retry_rounds": 0,
+                "ctval": ctval,
             }
             symbol_status[inst_id]["filled_contracts"] = contracts
             symbol_status[inst_id]["fill_pct"] = 100.0
@@ -1309,6 +1310,7 @@ def enter_positions(api: ExchangeAdapter, inst_ids, entry_prices,
                         "positionSide": POSITION_SIDE,
                         "target_contracts": symbol_status[inst_id]["target_contracts"],
                         "retry_rounds": retry_round,
+                        "ctval": ctval,
                     }
                 symbol_status[inst_id]["filled_contracts"] += filled_total
                 symbol_status[inst_id]["retry_rounds"] = retry_round
@@ -2123,6 +2125,15 @@ def _reconcile_positions_with_exchange(
                     f"return calculation)"
                 )
                 continue
+        # Fetch contract_value so downstream pnl_usd math works (the
+        # reconcile-add path previously omitted ctval, leaving pnl_usd
+        # NULL in allocation_execution_symbols for reconciled symbols).
+        try:
+            _info = api.get_instrument_info(iid)
+            _ctval = float(_info.contract_value) if _info.contract_value else None
+        except Exception as _e:
+            log.warning(f"{log_prefix}Reconcile: get_instrument_info({iid}) failed ({_e}); ctval unavailable")
+            _ctval = None
         added.append({
             "inst_id":            iid,
             "lev_int":            max(1, int(math.ceil(eff_lev))),
@@ -2132,10 +2143,16 @@ def _reconcile_positions_with_exchange(
             "entry_price":        avg,
             "positionSide":       POSITION_SIDE,
             "retry_rounds":       0,
-            "fill_entry_price":   avg,
+            # Round to match reconcile_fill_prices (6 decimals) so UI doesn't
+            # render the raw 18-decimal float from the exchange response.
+            "fill_entry_price":   round(float(avg), 6),
             "target_contracts":   lp.contracts,
-            "entry_slippage_bps": 0.0,
+            # Null rather than 0.0 — we didn't place a programmatic order
+            # with an estimated price, so there's no meaningful slippage
+            # to report. 0.0 would wrongly factor into avg_entry_slip_bps.
+            "entry_slippage_bps": None,
             "reconciled":         True,
+            "ctval":              _ctval,
         })
 
     if added:
@@ -2543,6 +2560,12 @@ def _run_monitoring_loop(today, today_date, api: ExchangeAdapter, inst_ids,
             _state["session_id"] = session_id
             _state["symbols"] = list(inst_ids)
             _state["capital_deployed_usd"] = float(capital_deployed_usd)
+            # Preserve fill_report so a mid-session respawn (and the final
+            # close-time _log_allocation_return write) still sees it. Per-bar
+            # state writes otherwise replace the whole JSONB blob, dropping
+            # the session-start fill_report key.
+            if fill_report is not None:
+                _state["fill_report"] = fill_report
             _mark_runtime_state(allocation_id, _state)
 
     # ── Phase 5: Exit ─────────────────────────────────────────────────────
@@ -3504,6 +3527,7 @@ def _log_allocation_execution_symbols(
             exit_reason,
             retry_rounds,
             iid in sym_stops_set,
+            ctval,
         ))
 
     if not rows:
@@ -3518,9 +3542,10 @@ def _log_allocation_execution_symbols(
                      target_contracts, filled_contracts, fill_pct,
                      est_entry_price, fill_entry_price, entry_slippage_bps,
                      est_exit_price, fill_exit_price, exit_slippage_bps,
-                     pnl_usd, pnl_pct, exit_reason, retry_rounds, sym_stopped)
+                     pnl_usd, pnl_pct, exit_reason, retry_rounds, sym_stopped,
+                     ctval)
                 VALUES (%s::uuid, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                        %s, %s, %s, %s, %s, %s, %s, %s)
+                        %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 ON CONFLICT (allocation_id, session_date, inst_id) DO UPDATE SET
                     side                = EXCLUDED.side,
                     target_contracts    = EXCLUDED.target_contracts,
@@ -3536,6 +3561,7 @@ def _log_allocation_execution_symbols(
                     pnl_pct             = EXCLUDED.pnl_pct,
                     exit_reason         = EXCLUDED.exit_reason,
                     retry_rounds        = EXCLUDED.retry_rounds,
+                    ctval               = COALESCE(EXCLUDED.ctval, allocation_execution_symbols.ctval),
                     sym_stopped         = EXCLUDED.sym_stopped,
                     updated_at          = NOW()
                 """,
@@ -3959,6 +3985,11 @@ def _run_fresh_session_for_allocation(
     log.info(f"Allocation {allocation_id}: portfolio_session_id={session_id}")
 
     # ── Phase 7: mark runtime_state=active, handoff to monitoring loop ───
+    # fill_report persisted so a mid-session subprocess respawn (SIGTERM
+    # from docker rebuild, crash, etc.) keeps fill_rate + retries_used
+    # intact for the eventual _log_allocation_return() write at close.
+    # Without this, a respawned trader reaches close with fill_report=None
+    # and those columns come up NULL in allocation_returns.
     _mark_runtime_state(allocation_id, {
         "phase": "active",
         "session_id": session_id,
@@ -3970,6 +4001,7 @@ def _run_fresh_session_for_allocation(
         "positions": positions,
         "symbols": list(inst_ids),
         "capital_deployed_usd": capital_deployed_usd,
+        "fill_report": fill_report,
     })
 
     # ── Phase 8: monitoring loop — parameterized shared function ─────────
@@ -4206,6 +4238,11 @@ def run_session_for_allocation(allocation_id: str, dry_run: bool = False) -> Non
                 session_id=state.get("session_id"),
                 capital_deployed_usd=float(state.get("capital_deployed_usd", 0.0)),
                 resume_sym_stopped=list(_resume_stopped),
+                # Rehydrate fill_report from runtime_state so fill_rate +
+                # retries_used survive a subprocess respawn. Pre-fix
+                # sessions won't have this key; .get() returns None which
+                # matches the old behavior (NULL in DB).
+                fill_report=state.get("fill_report"),
             )
             return
 
