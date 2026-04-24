@@ -307,13 +307,6 @@ def prestage_parquet(
     """
     if params.get("price_source") != "db":
         return
-    if os.environ.get("SKIP_PRESTAGE") == "1":
-        # Escape hatch for out-of-band refreshes that only need the audit
-        # pipeline (not a full leaderboard rebuild). Caller is responsible
-        # for ensuring parquets are sufficiently fresh. Used by the
-        # equity_curves backfill where the nightly 01:00 cron already
-        # produced parquets that cover the backtest window.
-        return
 
     import pyarrow.parquet as _pq
     # Climb from backend/app/services/audit/pipeline_runner.py up to /app
