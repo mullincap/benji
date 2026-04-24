@@ -447,6 +447,24 @@ class BloFinAdapter(ExchangeAdapter):
         inner_code = str(inner.get("code", ""))
         inner_msg  = inner.get("msg", "") or ""
 
+        # For any non-success response, log the ENTIRE raw payload so we
+        # can diagnose opaque rejections (2026-04-24 ZEREBRO risk-control
+        # event: "code=1, All operations failed" with no visibility into
+        # why a 1800 USDT manual fill succeeded but a 1540 USDT API fill
+        # didn't). Truncated to 800 chars to keep log noise bounded; the
+        # fields that matter (code, msg, inner data) always fit.
+        if top_code not in ("0", "") or inner_code not in ("0", ""):
+            import json as _json
+            try:
+                _raw = _json.dumps(resp)[:800]
+            except Exception:
+                _raw = str(resp)[:800]
+            log.warning(
+                f"BloFin order reject raw: inst={inst_id} side={side} size={size} "
+                f"reduce_only={reduce_only} top_code={top_code} inner_code={inner_code} "
+                f"raw_payload={_raw}"
+            )
+
         # Surface 102015 regardless of where BloFin placed it.
         if top_code == "102015" or inner_code == "102015":
             return OrderResult(

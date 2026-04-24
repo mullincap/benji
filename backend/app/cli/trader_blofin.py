@@ -2259,14 +2259,14 @@ def _run_monitoring_loop(today, today_date, api: ExchangeAdapter, inst_ids,
     if session_start_equity_usdt is None:
         session_start_equity_usdt = 0.0
 
-    # Periodic reconcile cadence: every N bars, re-query the exchange for
-    # positions missing from active_positions. Picks up post-entry manual
-    # fills (e.g. operator filling a symbol the trader couldn't place due
-    # to BloFin risk control) so the monitoring loop manages them from
-    # then on. 12 bars × 5min = ~1h, which is aggressive enough to bound
-    # "unmanaged window" after a manual fill without hammering the
-    # positions endpoint.
-    RECONCILE_BAR_INTERVAL = 12
+    # Periodic reconcile cadence: every bar. Re-query the exchange for
+    # positions missing from active_positions so operator mid-session
+    # fills (e.g. BloFin risk-control rejection → manual mobile-app fill)
+    # are adopted within ~5 min. One extra get_positions call per 5-min
+    # bar is cheap; the near-immediate adoption is the difference between
+    # "sym_stop protected for the full remaining session" and "unmanaged
+    # for up to an hour."
+    RECONCILE_BAR_INTERVAL = 1
 
     while utcnow() < session_close_dt:
         sleep_until_next_bar()
