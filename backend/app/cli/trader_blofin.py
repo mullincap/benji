@@ -2750,6 +2750,64 @@ def _run_monitoring_loop(today, today_date, api: ExchangeAdapter, inst_ids,
 
 # ─── Helpers ────────────────────────────────────────────────────────────────
 
+# Globally-tracked "I currently hold this allocation's lock" reference. Read
+# by the SIGTERM handler + atexit hook below so a graceful container shutdown
+# (SIGTERM from `docker compose up --force-recreate`) releases the lock before
+# the process dies. Prevents next-morning's spawn from bouncing off a
+# stale-but-recent lock (see 2026-04-24 06:05 UTC incident).
+_HELD_ALLOCATION_LOCK: str | None = None
+
+
+def _release_held_lock_on_shutdown() -> None:
+    """Best-effort lock release on Python process exit.
+
+    Fires from two paths:
+      1. SIGTERM / SIGINT signal handler (below)
+      2. atexit — any normal or SystemExit termination
+
+    SIGKILL doesn't run either path — the supervisor's orphan-PID detection
+    (follow-up) is the belt-and-suspenders defense for that case. Most
+    container rebuilds use SIGTERM with a 10s grace period, which this
+    catches.
+    """
+    global _HELD_ALLOCATION_LOCK
+    aid = _HELD_ALLOCATION_LOCK
+    if aid:
+        try:
+            _release_allocation_lock(aid)
+            log.info(f"Shutdown handler: released allocation lock {aid[:8]}")
+        except Exception as e:
+            log.warning(f"Shutdown handler lock release failed for {aid[:8]}: {e}")
+        _HELD_ALLOCATION_LOCK = None
+
+
+def _sigterm_handler(signum, _frame):
+    """Graceful shutdown: release lock, then exit."""
+    import signal as _sig
+    name = {_sig.SIGTERM: "SIGTERM", _sig.SIGINT: "SIGINT"}.get(signum, f"signal {signum}")
+    log.warning(f"Received {name} — releasing allocation lock and exiting")
+    _release_held_lock_on_shutdown()
+    sys.exit(0)
+
+
+# Wire up handlers once at module import. atexit covers normal exits;
+# signal handlers cover SIGTERM/SIGINT (which otherwise bypass finally
+# blocks in long sleep/IO). Only register signal handlers in the main
+# thread — non-main threads can't install them. Wrapped in try/except
+# so unexpected platform issues can't block trader startup.
+try:
+    import atexit as _atexit
+    import signal as _signal
+    import threading as _threading
+    if _threading.current_thread() is _threading.main_thread():
+        _signal.signal(_signal.SIGTERM, _sigterm_handler)
+        _signal.signal(_signal.SIGINT, _sigterm_handler)
+    _atexit.register(_release_held_lock_on_shutdown)
+except Exception as _sig_init_err:
+    # log may not exist yet at import time in some call paths
+    print(f"[WARN] trader signal handler registration failed: {_sig_init_err}", flush=True)
+
+
 def _acquire_allocation_lock(allocation_id: str) -> bool:
     """Atomic CAS on allocations.lock_acquired_at.
 
@@ -2774,6 +2832,11 @@ def _acquire_allocation_lock(allocation_id: str) -> bool:
             )
             got_lock = cur.fetchone() is not None
         conn.commit()
+        if got_lock:
+            # Track the acquired lock so the shutdown handlers can release
+            # it even if the main code path is interrupted by SIGTERM.
+            global _HELD_ALLOCATION_LOCK
+            _HELD_ALLOCATION_LOCK = allocation_id
         return got_lock
     finally:
         conn.close()
@@ -2793,6 +2856,10 @@ def _release_allocation_lock(allocation_id: str) -> None:
                 (allocation_id,),
             )
         conn.commit()
+        # Clear the global so atexit doesn't double-release on normal exit.
+        global _HELD_ALLOCATION_LOCK
+        if _HELD_ALLOCATION_LOCK == allocation_id:
+            _HELD_ALLOCATION_LOCK = None
     except Exception as e:
         log.warning(f"  Could not release allocation lock {allocation_id}: {e}")
     finally:
