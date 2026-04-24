@@ -1414,10 +1414,18 @@ import json as _json
 def _fetch_blofin_instruments() -> set:
     """Fetch current BloFin USDT perp universe for the static historical filter.
     Cached per-process. Returns empty set on failure (falls through to no filter —
-    universe will be slightly wider than live's)."""
+    universe will be slightly wider than live's).
+
+    Uses a User-Agent header — Cloudflare in front of openapi.blofin.com blocks
+    urllib's default 'Python-urllib/3.x' as a bot signature, returning 403.
+    """
     url = "https://openapi.blofin.com/api/v1/market/instruments?instType=SWAP"
     try:
-        with _urllib_request.urlopen(url, timeout=15) as r:
+        req = _urllib_request.Request(
+            url,
+            headers={"User-Agent": "Mozilla/5.0 (compatible; benji-audit/1.0)"},
+        )
+        with _urllib_request.urlopen(req, timeout=15) as r:
             data = _json.load(r)
         syms = {
             inst["instId"].replace("-USDT", "").upper()
