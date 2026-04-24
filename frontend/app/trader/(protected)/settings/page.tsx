@@ -688,6 +688,11 @@ function ConfirmRemoveModal({
 
 const FONT_MONO = "var(--font-space-mono), Space Mono, monospace";
 
+// Max events rendered per panel by default. Walk of ~36 rows per exchange is
+// noisy; showing recent 10 is enough for at-a-glance diagnosis. Full list
+// available via the "Show all N" toggle at the bottom.
+const CAPITAL_EVENTS_DEFAULT_LIMIT = 10;
+
 function fmtCapitalDate(iso: string | null): string {
   if (!iso) return "—";
   // YYYY-MM-DD HH:MM (UTC), trim seconds
@@ -702,6 +707,35 @@ function fmtCapitalDate(iso: string | null): string {
 function fmtAmount(usd: number, kind: "deposit" | "withdrawal"): string {
   const sign = kind === "deposit" ? "+" : "−";
   return `${sign}$${usd.toLocaleString("en-US", { maximumFractionDigits: 2 })}`;
+}
+
+/**
+ * Abbreviate a capital-event notes string for in-row display. Full text
+ * remains on a hover tooltip. Rules:
+ *  - Notes starting with "<number> <ASSET>" → non-stablecoin deposit, show
+ *    just the amount rounded to 5 decimals + asset (e.g., "14.53774 SOL").
+ *  - Otherwise → look for chain=X or network=X and show the value (e.g.,
+ *    "Polygon POS" or "MATIC").
+ *  - Fallback: first 30 characters of the notes.
+ *  - Empty/null → em-dash.
+ */
+function abbreviateNotes(notes: string | null): string {
+  if (!notes) return "—";
+  // Non-stablecoin pattern: first segment is "<amount> <ASSET>".
+  const firstSeg = notes.split(";")[0].trim();
+  const tokenMatch = firstSeg.match(/^([\d.]+)\s+([A-Z]{2,10})$/);
+  if (tokenMatch) {
+    const amt = parseFloat(tokenMatch[1]);
+    const asset = tokenMatch[2];
+    if (!Number.isNaN(amt)) {
+      return `${amt.toFixed(5)} ${asset}`;
+    }
+  }
+  // Stablecoin pattern: find chain=... or network=...
+  const chainMatch = notes.match(/(?:chain|network)=([^;]+)/);
+  if (chainMatch) return chainMatch[1].trim();
+  // Fallback.
+  return notes.length > 30 ? notes.slice(0, 30) + "…" : notes;
 }
 
 // ─── Per-exchange capital-events panel ─────────────────────────────────────
@@ -759,6 +793,18 @@ function ExchangeCapitalGroup({
   const principal = baseline + netSinceAnchor;
   const tradingDelta = exchangeBalance !== null ? exchangeBalance - principal : null;
 
+  // Expansion state: default COLLAPSED so the at-a-glance principal bar is
+  // what you see first; click the header chevron to reveal the events table.
+  const [expanded, setExpanded] = useState<boolean>(false);
+  // Within expanded state, optionally show all events (default truncated
+  // to CAPITAL_EVENTS_DEFAULT_LIMIT most recent).
+  const [showAllEvents, setShowAllEvents] = useState<boolean>(false);
+  const totalEvents = group.events.length;
+  const truncated = !showAllEvents && totalEvents > CAPITAL_EVENTS_DEFAULT_LIMIT;
+  const visibleEvents = truncated
+    ? group.events.slice(0, CAPITAL_EVENTS_DEFAULT_LIMIT)
+    : group.events;
+
   const header = group.exchange_name
     ? group.exchange_name.toUpperCase()
     : "UNASSIGNED (no exchange link)";
@@ -775,7 +821,20 @@ function ExchangeCapitalGroup({
         display: "flex", alignItems: "center", justifyContent: "space-between",
         gap: 12,
       }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 12, minWidth: 0 }}>
+        <div
+          onClick={() => setExpanded(v => !v)}
+          style={{
+            display: "flex", alignItems: "center", gap: 12, minWidth: 0,
+            cursor: "pointer", userSelect: "none", flex: 1,
+          }}
+          title={expanded ? "Collapse events table" : "Expand to show events"}
+        >
+          <span style={{
+            color: "var(--t2)", fontSize: 10, width: 12,
+            display: "inline-block", textAlign: "center",
+          }}>
+            {expanded ? "▾" : "▸"}
+          </span>
           <span style={{
             fontSize: 11, fontWeight: 700, color: "var(--t0)",
             letterSpacing: "0.05em",
@@ -916,12 +975,16 @@ function ExchangeCapitalGroup({
           comparisons (allocation.capital_usd vs exchange.principal are
           independently correct numbers that aren't expected to match). */}
 
-      {/* Events table */}
-      {group.events.length === 0 ? (
+      {/* Events table — hidden by default (panel collapsed); click the
+          header chevron to expand. Within expanded state, events are
+          truncated to CAPITAL_EVENTS_DEFAULT_LIMIT with a "Show all"
+          toggle at the bottom. */}
+      {expanded && (group.events.length === 0 ? (
         <div style={{ padding: "14px", fontSize: 10, color: "var(--t3)" }}>
           No capital events recorded for this exchange yet.
         </div>
       ) : (
+        <>
         <table style={{
           width: "100%", borderCollapse: "collapse", fontSize: 10,
           fontFamily: FONT_MONO, tableLayout: "fixed",
@@ -947,11 +1010,9 @@ function ExchangeCapitalGroup({
           </thead>
           <tbody>
             {(() => {
-              // Running principal: walk events oldest→newest, starting from
-              // baseline, adding deposits and subtracting withdrawals. This
-              // gives operators a live preview of what principal would be if
-              // they set the anchor AT each row. Map stored keyed by event_id
-              // for O(1) lookup when rendering in newest-first order below.
+              // Running principal walk uses the FULL event list (not the
+              // visible-limit slice) so 'PRINCIPAL AFTER' is accurate even
+              // when we're only rendering the most-recent N rows.
               const byOldest = [...group.events].sort(
                 (a, b) => a.event_at.localeCompare(b.event_at),
               );
@@ -961,7 +1022,7 @@ function ExchangeCapitalGroup({
                 running += ev.kind === "deposit" ? ev.amount_usd : -ev.amount_usd;
                 principalAfter[ev.event_id] = running;
               }
-              return group.events.map((ev, idx) => {
+              return visibleEvents.map((ev, idx) => {
               const amountColor = ev.kind === "deposit" ? "var(--green)" : "var(--amber)";
               let sourceBg = "var(--bg2)", sourceColor = "var(--t2)", sourceLabel = "MANUAL";
               if (ev.source === "auto") {
@@ -974,7 +1035,7 @@ function ExchangeCapitalGroup({
               }
               return (
                 <tr key={ev.event_id} style={{
-                  borderBottom: idx < group.events.length - 1 ? "1px solid var(--line)" : "none",
+                  borderBottom: idx < visibleEvents.length - 1 ? "1px solid var(--line)" : "none",
                 }}>
                   <td style={{ padding: "10px 14px", color: "var(--t1)" }}>
                     {fmtCapitalDate(ev.event_at)}
@@ -1020,8 +1081,9 @@ function ExchangeCapitalGroup({
                       padding: "10px 14px", color: "var(--t2)",
                       overflow: "hidden", textOverflow: "ellipsis",
                       whiteSpace: "nowrap",
+                      cursor: ev.notes ? "help" : "default",
                     }}
-                  >{ev.notes ?? "—"}</td>
+                  >{abbreviateNotes(ev.notes)}</td>
                   <td style={{
                     padding: "10px 14px", textAlign: "right",
                     whiteSpace: "nowrap",
@@ -1056,7 +1118,30 @@ function ExchangeCapitalGroup({
             })()}
           </tbody>
         </table>
-      )}
+        {totalEvents > CAPITAL_EVENTS_DEFAULT_LIMIT && (
+          <div style={{
+            padding: "8px 14px", borderTop: "1px solid var(--line)",
+            display: "flex", justifyContent: "center",
+          }}>
+            <button
+              onClick={() => setShowAllEvents(v => !v)}
+              style={{
+                background: "transparent", border: "none",
+                color: "var(--t2)", fontSize: 9, fontWeight: 700,
+                letterSpacing: "0.12em", textTransform: "uppercase",
+                cursor: "pointer", fontFamily: FONT_MONO,
+              }}
+              onMouseEnter={e => (e.currentTarget.style.color = "var(--green)")}
+              onMouseLeave={e => (e.currentTarget.style.color = "var(--t2)")}
+            >
+              {showAllEvents
+                ? `Show only ${CAPITAL_EVENTS_DEFAULT_LIMIT} most recent`
+                : `Show all ${totalEvents} events`}
+            </button>
+          </div>
+        )}
+        </>
+      ))}
     </div>
   );
 }
