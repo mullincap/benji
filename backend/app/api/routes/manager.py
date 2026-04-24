@@ -134,7 +134,24 @@ def _fetch_portfolio_context(cur) -> dict[str, Any]:
     """)
     historical_rows = cur.fetchall()
     historical_alloc_ids = [r["allocation_id"] for r in historical_rows]
-    historical_connection_uuids = list({r["connection_id"] for r in historical_rows})
+    # For Max DD / historical-series calculations, further restrict to
+    # connections that have a snapshot within the last 48h. Prevents a
+    # retired/superseded connection_id from contributing a phantom cliff
+    # when its snapshot stream ended (observed 2026-04-24: two Binance
+    # connection_ids in history, retired one ended 2026-04-18 and
+    # created a fake -$4,456 drawdown in the SUM-across-connections
+    # bucket query).
+    cur.execute("""
+        SELECT DISTINCT connection_id
+          FROM user_mgmt.exchange_snapshots
+         WHERE fetch_ok = TRUE
+           AND snapshot_at >= NOW() - INTERVAL '48 hours'
+    """)
+    _live_conn_uuids = {r["connection_id"] for r in cur.fetchall()}
+    historical_connection_uuids = [
+        cid for cid in {r["connection_id"] for r in historical_rows}
+        if cid in _live_conn_uuids
+    ]
 
     # ── Performance daily (last 30 days per allocation) ──────────────────
     perf_by_alloc: dict[str, list[dict]] = {}
@@ -170,10 +187,19 @@ def _fetch_portfolio_context(cur) -> dict[str, Any]:
                 drawdown_by_alloc[aid] = dd
 
     # ── Fallback: compute daily performance from exchange_snapshots ──────
-    # When performance_daily is empty (no pipeline populates it yet),
-    # build per-day equity + returns from the last exchange snapshot per day.
+    # When performance_daily is empty OR when today's row is missing
+    # (common mid-session — writer only fires at close with equity_usd
+    # non-None), build per-day equity + returns from the last exchange
+    # snapshot per day. The per-alloc perf_by_alloc dict is left intact
+    # where it already has rows; only gaps are filled.
     # Same historical-scope rule as the primary path above.
-    if not perf_by_alloc and historical_alloc_ids:
+    _today_iso = today.isoformat()
+    _has_today_row = any(
+        p.get("date") == _today_iso
+        for plist in perf_by_alloc.values()
+        for p in plist
+    )
+    if (not perf_by_alloc or not _has_today_row) and historical_alloc_ids:
         cur.execute("""
             SELECT DISTINCT ON (a.allocation_id, date_trunc('day', es.snapshot_at))
                 a.allocation_id,
@@ -195,6 +221,11 @@ def _fetch_portfolio_context(cur) -> dict[str, Any]:
             )
         for aid, snaps in snap_by_alloc.items():
             snaps.sort()
+            # Skip dates already populated by performance_daily (the
+            # primary path). Only fill gaps — avoids duplicating a row
+            # when both tables cover the same date with slightly
+            # different values (perf_daily is authoritative).
+            _existing_dates = {p["date"] for p in perf_by_alloc.get(aid, [])}
             peak = 0.0
             prev_eq = None
             for d, eq in snaps:
@@ -202,6 +233,8 @@ def _fetch_portfolio_context(cur) -> dict[str, Any]:
                 peak = max(peak, eq)
                 dd = ((eq / peak - 1) * 100) if peak > 0 else 0.0
                 prev_eq = eq
+                if d in _existing_dates:
+                    continue
                 perf_by_alloc.setdefault(aid, []).append({
                     "date": d,
                     "equity_usd": eq,

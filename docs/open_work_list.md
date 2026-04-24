@@ -14,6 +14,109 @@ git log + commit messages are the historical record._
 
 ---
 
+## 🔴 TOP PRIORITY — Manager Overview KPI baselines + audit/live parity
+
+### Manager Overview regression — Today P&L, Max DD, Total AUM subvalue
+
+Diagnosed 2026-04-24. Three symptoms, three distinct causes, one
+underlying theme: the Manager Overview uses implicit / opportunistic
+baselines that silently break when the underlying data shape changes.
+
+**A. Today P&L = 0%** (should reflect intraday equity rise)
+
+`manager.py:166` matches `if row["date"] == today` against
+`user_mgmt.performance_daily`. That table is populated ONLY on session
+close with a non-None `equity_usd` — no-entry/filtered/errored sessions
+skip the write. Today's session is still running; no 04-22, 04-23, or
+04-24 row exists. `today_return_by_alloc` stays empty → Today = 0%.
+
+The fallback at `manager.py:176` gates on `if not perf_by_alloc`, but
+`perf_by_alloc` has the 2026-04-21 row, so fallback is skipped entirely.
+
+**Fix:** change fallback gate from "is perf_by_alloc empty" to "does
+perf_by_alloc have a row for `today` specifically." If missing today's
+row, derive Today P&L from `exchange_snapshots` first-of-day vs latest.
+
+**B. Max DD = -15.9% — phantom connection ID**
+
+`historical_connection_uuids` at `manager.py:137` DISTINCTs over every
+allocation_id + connection_id ever recorded. Binance has TWO connection
+UUIDs in the history:
+  - `4c084387` — current connection (min $1.21, last snapshot today)
+  - `f428458f` — RETIRED (max $4,456, last snapshot 2026-04-18)
+
+The 5-min bucket `SUM(equity)` across connections picks up both. When
+the retired connection's snapshot stream ended at 04-18, the summed
+total equity has an artificial `-$4,456` cliff that the DD calc
+attributes to drawdown. That is the "double counting."
+
+**Fix:** filter `historical_connection_uuids` to connections with a
+snapshot in the last N days (e.g. 48h) — retired connections don't
+contribute to the current-account drawdown narrative. Preserves the
+existing "include paused allocations" semantic while excluding
+connection IDs that have been decommissioned.
+
+**C. Total AUM subvalue +$854 ≠ Allocator's +$1,623.95**
+
+Manager's subvalue math: `total_aum - performance_daily_row_0.equity_usd`
+= $4,272.40 - $3,418.06 (the only row in `performance_daily` for this
+allocation, from 04-21) = **$854.34**.
+
+Allocator's capital-events-adjusted PnL: current balance vs
+capital-events-derived principal = $4,297.27 − $2,673.32 (BloFin) +
+($1.22 − $1.22) ≈ **$1,623.95**. Different baseline methodology.
+
+**Fix:** change Manager's Total AUM subvalue to use the SAME principal
+derivation the Allocator uses — `connection.principal_baseline_usd`
+per connection (auto-derived from anchor date if NULL), plus
+capital-events net adjustment. One baseline across both UI surfaces.
+
+**Scope:** ~40 LOC in `backend/app/api/routes/manager.py`. Three edits
+(A, B, C) are independent but share the same query path; ship together.
+Frontend renders whatever values the endpoint returns, no TS changes.
+
+### Audit basket vs live basket — 04-23 TAC-vs-GENIUS
+
+Observed 2026-04-24: audit for 04-23 reported
+`BIO/SPK/STRK/TAC/TAKE/VELVET`; live traded
+`BIO/GENIUS/SPK/STRK/TAKE/VELVET` — audit had TAC where live had GENIUS.
+
+**Root cause:** the audit that generated the 04-23 basket was run
+**without `live_parity=True`**. Two different universe sources:
+  - Audit default: `market.leaderboards` nightly parquet (snapshot at
+    ~01:00 UTC from the prior day's build)
+  - Live: Binance REST `/fapi/v1/ticker/24hr` at 05:58 UTC
+
+The `--live-parity` knob SHIPPED (commits `c8768fc`, `89d8e5c`,
+`fcb88be`, `392094f`) addresses this when explicitly enabled. The
+audit producing TAC for 04-23 evidently did not pass the flag, so
+the audit's top-100-by-quoteVolume snapshot at 01:00 UTC disagreed
+with live's 05:58 UTC snapshot — normal 5-hour-of-rank-shuffle drift,
+TAC in audit's cut, GENIUS in live's cut.
+
+Also worth noting: `market.symbols` has `blofin_id=NULL` for GENIUS,
+but the trader successfully entered GENIUS on BloFin. The table is
+stale — BloFin listed GENIUS between our last universe refresh and
+today's session. Doesn't affect today's issue but signals the symbol
+registry needs a refresh job.
+
+**Fix:**
+1. Make `live_parity=True` the **default** for any Simulator audit
+   submission that's benchmarked against live trading. UI toggle stays
+   for deliberate exploration of the non-parity universe.
+2. Add a header/label in the audit output that explicitly states
+   "live-parity: on|off" so mismatches like this are visible.
+3. Add a nightly symbol-registry refresh job to re-populate
+   `market.symbols.binance_id` / `blofin_id` from each exchange's
+   `/instruments` endpoint. Prevents "GENIUS trades live but our
+   table says it's not on BloFin" divergences.
+
+**Scope:** ~60 LOC backend (default flip + label + refresh job) + ~10
+LOC frontend (label render). Not blocking — workaround is "always pass
+live_parity=True" when evaluating live performance.
+
+---
+
 ## 🟡 Active — when ready
 
 ### Account-history backfill + net-imports PnL (Session F+)
