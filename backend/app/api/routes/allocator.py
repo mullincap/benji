@@ -1461,9 +1461,18 @@ def update_connection(
     if not updates:
         raise HTTPException(status_code=400, detail="No fields to update")
 
-    # Auto-derive baseline from snapshots when operator set an anchor but
-    # didn't provide an explicit baseline. Snapshot closest to anchor_at
-    # from below represents "wallet equity at the moment of the anchor."
+    # Auto-derive baseline when operator set an anchor but didn't provide
+    # an explicit baseline. Two-tier fallback:
+    #   1. Latest exchange_snapshot with snapshot_at <= anchor_at → true
+    #      wallet equity at the anchor moment (includes pre-anchor
+    #      trading gains). Best answer when we have snapshot history.
+    #   2. SUM(capital events before anchor) → net operator-deposited
+    #      capital at the anchor moment (does NOT include pre-anchor
+    #      trading gains). Fallback when our snapshot history doesn't
+    #      reach back to the anchor (e.g., snapshots started after the
+    #      anchor date). Trading Δ in this case includes both pre-anchor
+    #      trading and post-anchor trading — acceptable approximation.
+    #   3. Zero if neither source has data.
     if (
         body.principal_anchor_at is not None
         and not body.clear_principal_anchor
@@ -1480,7 +1489,21 @@ def update_connection(
              LIMIT 1
         """, (connection_id, body.principal_anchor_at))
         snap_row = cur.fetchone()
-        derived_baseline = float(snap_row["equity"]) if snap_row else 0.0
+        if snap_row is not None:
+            derived_baseline = float(snap_row["equity"])
+        else:
+            # Fallback to net capital events before anchor.
+            cur.execute("""
+                SELECT COALESCE(SUM(CASE kind
+                                      WHEN 'deposit'    THEN amount_usd
+                                      WHEN 'withdrawal' THEN -amount_usd
+                                    END), 0)::float AS pre_anchor_net
+                  FROM user_mgmt.allocation_capital_events
+                 WHERE connection_id = %s::uuid
+                   AND deleted_at IS NULL
+                   AND event_at < %s::timestamptz
+            """, (connection_id, body.principal_anchor_at))
+            derived_baseline = float(cur.fetchone()["pre_anchor_net"] or 0)
         updates.append("principal_baseline_usd = %s")
         params.append(derived_baseline)
 
