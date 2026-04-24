@@ -931,6 +931,8 @@ interface ExecPositionRow {
   exit_slippage_bps: number | null;
   pnl_usd: number | null;
   pnl_pct: number | null;
+  est_pnl_pct: number | null;
+  pnl_gap_pct: number | null;
   exit_reason: string | null;
   retry_rounds: number | null;
   sym_stopped: boolean;
@@ -1125,7 +1127,8 @@ function PositionsSubRow({
                     "SYMBOL", "SIDE", "SIZE", "NOTIONAL", "LEV",
                     "ENTRY EST", "ENTRY FILL", "ENTRY SLIP",
                     "EXIT EST", "EXIT FILL", "EXIT SLIP",
-                    "PNL USD", "PNL %", "EXIT", "RETRIES",
+                    "EST PNL %", "PNL %", "PNL GAP", "PNL USD",
+                    "EXIT", "RETRIES",
                   ].map((h) => (
                     <th key={h} style={{ ...thStyle, fontSize: 8 }}>{h}</th>
                   ))}
@@ -1157,11 +1160,17 @@ function PositionsSubRow({
                     <td style={{ ...tdStyle, color: exitSlipColor(p.exit_slippage_bps) }}>
                       {fmtBps(p.exit_slippage_bps)}
                     </td>
-                    <td style={{ ...tdStyle, color: (p.pnl_usd ?? 0) >= 0 ? "var(--green)" : "var(--red)" }}>
-                      {p.pnl_usd === null ? "—" : `${p.pnl_usd >= 0 ? "+" : ""}$${p.pnl_usd.toFixed(2)}`}
+                    <td style={{ ...tdStyle, color: (p.est_pnl_pct ?? 0) >= 0 ? "var(--green)" : "var(--red)" }}>
+                      {fmtPct(p.est_pnl_pct)}
                     </td>
                     <td style={{ ...tdStyle, color: (p.pnl_pct ?? 0) >= 0 ? "var(--green)" : "var(--red)" }}>
                       {fmtPct(p.pnl_pct)}
+                    </td>
+                    <td style={{ ...tdStyle, color: pnlGapColor(p.pnl_gap_pct) }}>
+                      {fmtPct(p.pnl_gap_pct)}
+                    </td>
+                    <td style={{ ...tdStyle, color: (p.pnl_usd ?? 0) >= 0 ? "var(--green)" : "var(--red)" }}>
+                      {p.pnl_usd === null ? "—" : `${p.pnl_usd >= 0 ? "+" : ""}$${p.pnl_usd.toFixed(2)}`}
                     </td>
                     <td style={{ ...tdStyle, color: p.sym_stopped ? "var(--amber)" : "var(--t2)" }}>
                       {p.exit_reason ?? "—"}

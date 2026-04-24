@@ -1560,12 +1560,17 @@ def execution_summary(
                 and len(entered_arr) > 0
             )
 
-            # Leveraged estimated return proxy: final_portfolio_return is 1x,
-            # so scale by lev_int × 100 to get pre-fee leveraged %.
+            # Leveraged estimated return proxy: final_portfolio_return is 1x.
+            # Scale by effective_leverage × 100 (NOT lev_int — the integer
+            # exchange-leverage ceiling). Using lev_int=3 when eff_lev=2.14
+            # over-states est by 40% and made the gap-vs-actual look like a
+            # 9-point miss when it's really a 1-point fee+slippage drag.
             fpr = _dec(r["final_portfolio_return"])
+            eff_lev_dec = _dec(r["effective_leverage"])
             lev_int = int(r["lev_int"]) if r["lev_int"] is not None else None
             est_return_pct = (
-                fpr * lev_int * 100 if fpr is not None and lev_int is not None else None
+                fpr * eff_lev_dec * 100 if fpr is not None and eff_lev_dec is not None
+                else (fpr * lev_int * 100 if fpr is not None and lev_int is not None else None)
             )
 
             if ar_is_stale_filtered:
@@ -1596,9 +1601,16 @@ def execution_summary(
                 net_ret = _dec(r["net_return_pct"])
                 gross_ret = _dec(r["gross_return_pct"])
 
+            # PnL Gap = estimated leveraged return − actual realized return.
+            # Captures the total drag from idealized-pricing estimate to what
+            # was actually delivered (fees + funding + entry/exit slippage +
+            # any timing divergence). Previously this column held just the
+            # fee-drag (gross − net) which never matched what users reading
+            # "EST RET vs ACTUAL RET" expected. ~1% on a typical session is
+            # the fee+slippage floor; >5% means something model-side is off.
             pnl_gap_pct_from_gross = (
-                gross_ret - net_ret
-                if gross_ret is not None and net_ret is not None
+                est_return_pct - net_ret
+                if est_return_pct is not None and net_ret is not None
                 else None
             )
 
@@ -1769,6 +1781,29 @@ def execution_summary_positions(
         except (TypeError, ValueError):
             pass
 
+        # Per-symbol estimated raw return (1x): (est_exit / est_entry - 1) ×
+        # 100. Mirrors the existing pnl_pct column (which is the actual 1x
+        # raw return); gap = actual − est captures per-symbol fee + slippage
+        # drag at 1x. Reconcile-add symbols (operator manual fills) have
+        # est_entry NULL → est_pnl_pct stays NULL, gap also NULL.
+        est_pnl_pct = None
+        est_entry = r["est_entry_price"]
+        est_exit = r["est_exit_price"]
+        try:
+            if est_entry is not None and est_exit is not None and float(est_entry) > 0:
+                est_pnl_pct = (float(est_exit) - float(est_entry)) / float(est_entry) * 100.0
+                if r["side"] == "short":
+                    est_pnl_pct = -est_pnl_pct
+        except (TypeError, ValueError):
+            pass
+
+        actual_pnl_pct = _dec(r["pnl_pct"])
+        pnl_gap_pct = (
+            float(est_pnl_pct) - float(actual_pnl_pct)
+            if est_pnl_pct is not None and actual_pnl_pct is not None
+            else None
+        )
+
         rows.append({
             "inst_id":            r["inst_id"],
             "side":               r["side"],
@@ -1782,7 +1817,9 @@ def execution_summary_positions(
             "fill_exit_price":    _dec(r["fill_exit_price"]),
             "exit_slippage_bps":  _dec(r["exit_slippage_bps"]),
             "pnl_usd":            _dec(r["pnl_usd"]),
-            "pnl_pct":            _dec(r["pnl_pct"]),
+            "pnl_pct":            actual_pnl_pct,
+            "est_pnl_pct":        est_pnl_pct,
+            "pnl_gap_pct":        pnl_gap_pct,
             "exit_reason":        r["exit_reason"],
             "retry_rounds":       r["retry_rounds"],
             "sym_stopped":        r["sym_stopped"],
