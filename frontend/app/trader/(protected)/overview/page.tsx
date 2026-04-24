@@ -41,8 +41,8 @@ function MetricCard({ label, value, color }: { label: string; value: string; col
 
 // ─── Dashboard content ───────────────────────────────────────────────────────
 
-function DashboardContent({ equity, dailyPnl, allTimePnl, sharpe, allocated, activeCount, totalAvailable, positions, showCurve, showAggregate, chartContainerHeight = 400, chartEquityHeight = 250, exchanges, instances }: {
-  equity: number; dailyPnl: number; allTimePnl: number; sharpe: number;
+function DashboardContent({ equity, weeklyPnl, allTimePnl, sharpe, allocated, activeCount, totalAvailable, positions, showCurve, showAggregate, chartContainerHeight = 400, chartEquityHeight = 250, exchanges, instances }: {
+  equity: number; weeklyPnl: number; allTimePnl: number; sharpe: number;
   allocated: number; activeCount: number; totalAvailable: number;
   positions: (Position & { strategy: string; exchange: string })[];
   showCurve?: boolean;
@@ -59,7 +59,7 @@ function DashboardContent({ equity, dailyPnl, allTimePnl, sharpe, allocated, act
       <div style={{ display: "grid", gridTemplateColumns: "repeat(5, 1fr)", gap: 10, marginBottom: 10 }}>
         <MetricCard label="TOTAL EQUITY" value={`$${fmt(equity, 0)}`} />
         <MetricCard label="ALL-TIME P&L" value={allTimePnl === 0 ? "\u2014" : `${allTimePnl >= 0 ? "+" : ""}$${fmt(allTimePnl, 0)}`} color={allTimePnl === 0 ? "var(--t2)" : allTimePnl > 0 ? "var(--green)" : "var(--red)"} />
-        <MetricCard label="DAILY P&L" value={dailyPnl === 0 ? "\u2014" : `${dailyPnl >= 0 ? "+" : ""}$${fmt(dailyPnl, 0)}`} color={dailyPnl === 0 ? "var(--t2)" : dailyPnl > 0 ? "var(--green)" : "var(--red)"} />
+        <MetricCard label="WEEKLY P&L" value={weeklyPnl === 0 ? "\u2014" : `${weeklyPnl >= 0 ? "+" : ""}$${fmt(weeklyPnl, 0)}`} color={weeklyPnl === 0 ? "var(--t2)" : weeklyPnl > 0 ? "var(--green)" : "var(--red)"} />
         <MetricCard label="SHARPE" value={sharpe > 0 ? fmt(sharpe, 2) : "\u2014"} color={sharpe > 0 ? "var(--t0)" : "var(--t2)"} />
         <MetricCard label="ACTIVE TRADERS" value={String(activeCount)} />
       </div>
@@ -146,20 +146,20 @@ export default function OverviewPage() {
   // sum(allocation.capital_usd) — means editing an allocation's size
   // doesn't shift the displayed P&L. Mirrors the trader-detail fix.
   const [accountMetrics, setAccountMetrics] = useState<{
-    dailyPnl: number; sharpe: number; allTimePnl: number | null;
-  }>({ dailyPnl: 0, sharpe: 0, allTimePnl: null });
+    weeklyPnl: number; sharpe: number; allTimePnl: number | null;
+  }>({ weeklyPnl: 0, sharpe: 0, allTimePnl: null });
   useEffect(() => {
     if (empty) return;
     let cancelled = false;
     (async () => {
       try {
-        const [oneDay, all] = await Promise.all([
-          allocatorApi.getAccountBalanceSeries("1D"),
+        const [oneWeek, all] = await Promise.all([
+          allocatorApi.getAccountBalanceSeries("1W"),
           allocatorApi.getAccountBalanceSeries("ALL"),
         ]);
         if (cancelled) return;
-        const eq1d = oneDay.history.map(h => h.equity_usd);
-        const dpnl = eq1d.length >= 2 ? eq1d[eq1d.length - 1] - eq1d[0] : 0;
+        const eq1w = oneWeek.history.map(h => h.equity_usd);
+        const wpnl = eq1w.length >= 2 ? eq1w[eq1w.length - 1] - eq1w[0] : 0;
         const eqAll = all.history.map(h => h.equity_usd);
 
         // All-time P&L = current wallet equity − earliest recorded wallet
@@ -181,12 +181,12 @@ export default function OverviewPage() {
           const std = Math.sqrt(variance);
           if (std > 0) sharpe = (mean / std) * Math.sqrt(252);
         }
-        setAccountMetrics({ dailyPnl: dpnl, sharpe, allTimePnl: atpnl });
+        setAccountMetrics({ weeklyPnl: wpnl, sharpe, allTimePnl: atpnl });
       } catch { /* leave defaults; KPIs render em-dash */ }
     })();
     return () => { cancelled = true; };
   }, [empty, instances.length]);
-  const dailyPnl = accountMetrics.dailyPnl;
+  const weeklyPnl = accountMetrics.weeklyPnl;
   const sharpe = accountMetrics.sharpe;
   // Fallback to capital-based approximation only for brand-new accounts
   // where the aggregate history hasn't landed yet; otherwise use the
@@ -225,11 +225,11 @@ export default function OverviewPage() {
 
           <div style={empty ? { filter: "blur(3.5px) brightness(0.75)", pointerEvents: "none" } : undefined}>
             {empty ? (
-              <DashboardContent equity={293593} dailyPnl={14092} allTimePnl={62847} sharpe={2.41} allocated={94000} activeCount={3} totalAvailable={totalAvailable} positions={GHOST_POSITIONS} showCurve />
+              <DashboardContent equity={293593} weeklyPnl={14092} allTimePnl={62847} sharpe={2.41} allocated={94000} activeCount={3} totalAvailable={totalAvailable} positions={GHOST_POSITIONS} showCurve />
             ) : (
               <DashboardContent
                 equity={totalEquity}
-                dailyPnl={dailyPnl}
+                weeklyPnl={weeklyPnl}
                 allTimePnl={allTimePnl}
                 sharpe={sharpe}
                 allocated={totalAllocated}

@@ -282,7 +282,7 @@ function LiveMode({ instanceId }: { instanceId: string }) {
   const [snapshotAt, setSnapshotAt] = useState<string | null>(null);
   const [syncedAgo, setSyncedAgo] = useState<string>("never synced");
   const [pnl, setPnl] = useState<ApiPnl | null>(null);
-  const [positionsOpen, setPositionsOpen] = useState(true);
+  const [positionsOpen, setPositionsOpen] = useState(inst.positions.length > 0);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [editing, setEditing] = useState(false);
   const [editAllocation, setEditAllocation] = useState("");
@@ -444,12 +444,21 @@ function LiveMode({ instanceId }: { instanceId: string }) {
         {/* Metric cards — live equity + allocation + open positions + Session/Total P&L.
             Session + Total cards show USD as the hero number (same styling as Total
             Account Equity) with ROI% + chevron as the secondary subtitle. */}
+        {(() => {
+          const totalEquity = pnl?.equity_usd ?? exchanges.find(e => e.name === inst.exchangeName)?.balance ?? 0;
+          const allocPct = totalEquity > 0 ? ((inst.allocation ?? 0) / totalEquity) * 100 : 0;
+          return (
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr 0.9fr 1fr 1fr", gap: 10, marginBottom: 20 }}>
           <MetricCard
-            label="TOTAL ACCOUNT EQUITY"
-            value={`$${fmt(pnl?.equity_usd ?? exchanges.find(e => e.name === inst.exchangeName)?.balance ?? 0, 0)}`}
+            label="TOTAL EQUITY"
+            value={`$${fmt(totalEquity, 0)}`}
           />
-          <MetricCard label="ALLOCATION" value={`$${fmt(inst.allocation ?? 0, 0)}`} />
+          <MetricCard
+            label="ALLOCATION"
+            value={`$${fmt(inst.allocation ?? 0, 0)}`}
+            subtitle={totalEquity > 0 ? `${fmt(allocPct, 1)}% of Total` : undefined}
+            subtitleColor="var(--t3)"
+          />
           <MetricCard
             label="PRINCIPAL"
             value={pnl == null ? "—" : `$${fmt(pnl.principal_usd, 0)}`}
@@ -458,6 +467,7 @@ function LiveMode({ instanceId }: { instanceId: string }) {
                 ? `since ${pnl.principal_anchor_at.slice(0, 10)}${pnl.principal_anchor_explicit ? "" : " (default)"}`
                 : undefined
             }
+            subtitleColor="var(--t3)"
           />
           <MetricCard label="OPEN POSITIONS" value={positionsLoading && !pnl ? "..." : String(livePositions.length)} />
           <MetricCard
@@ -475,6 +485,8 @@ function LiveMode({ instanceId }: { instanceId: string }) {
             subtitleColor={pnlColor(pnl?.total_return_pct)}
           />
         </div>
+          );
+        })()}
 
         {/* Performance chart */}
         <PerformanceChart instanceId={instanceId} />
@@ -488,7 +500,7 @@ function LiveMode({ instanceId }: { instanceId: string }) {
               borderBottom: positionsOpen ? "1px solid var(--line)" : "none",
               display: "flex", alignItems: "center", justifyContent: "space-between",
               cursor: "pointer",
-              background: positionsOpen ? "transparent" : "var(--bg2)",
+              background: "transparent",
             }}
           >
             <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
@@ -669,7 +681,7 @@ function LiveMode({ instanceId }: { instanceId: string }) {
               borderBottom: settingsOpen ? "1px solid var(--line)" : "none",
               display: "flex", alignItems: "center", justifyContent: "space-between",
               cursor: "pointer",
-              background: settingsOpen ? "transparent" : "var(--bg2)",
+              background: "transparent",
             }}
           >
             <span onClick={() => setSettingsOpen(v => !v)} style={{ flex: 1, fontSize: 9, color: "var(--t3)", letterSpacing: "0.12em", fontWeight: 700, textTransform: "uppercase" }}>SETTINGS</span>
