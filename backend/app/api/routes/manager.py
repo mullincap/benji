@@ -186,20 +186,14 @@ def _fetch_portfolio_context(cur) -> dict[str, Any]:
             if dd < drawdown_by_alloc.get(aid, 0):
                 drawdown_by_alloc[aid] = dd
 
-    # ── Fallback: compute daily performance from exchange_snapshots ──────
-    # When performance_daily is empty OR when today's row is missing
-    # (common mid-session — writer only fires at close with equity_usd
-    # non-None), build per-day equity + returns from the last exchange
-    # snapshot per day. The per-alloc perf_by_alloc dict is left intact
-    # where it already has rows; only gaps are filled.
-    # Same historical-scope rule as the primary path above.
-    _today_iso = today.isoformat()
-    _has_today_row = any(
-        p.get("date") == _today_iso
-        for plist in perf_by_alloc.values()
-        for p in plist
-    )
-    if (not perf_by_alloc or not _has_today_row) and historical_alloc_ids:
+    # ── Fallback 1: full 30-day rebuild from exchange_snapshots ─────────
+    # Only when performance_daily is entirely empty for this scope.
+    # Intentionally NOT triggered when perf_daily has rows but today is
+    # missing — that case goes through the today-only fallback below,
+    # which avoids polluting WTD/MTD with 30 days of snapshot-derived
+    # "daily returns" that actually include capital-in/out events
+    # (operator transfers, anchor-date backfills) as false profits.
+    if not perf_by_alloc and historical_alloc_ids:
         cur.execute("""
             SELECT DISTINCT ON (a.allocation_id, date_trunc('day', es.snapshot_at))
                 a.allocation_id,
@@ -212,7 +206,6 @@ def _fetch_portfolio_context(cur) -> dict[str, Any]:
               AND es.snapshot_at >= NOW() - INTERVAL '30 days'
             ORDER BY a.allocation_id, date_trunc('day', es.snapshot_at), es.snapshot_at DESC
         """, (historical_alloc_ids,))
-        # Group by allocation
         snap_by_alloc: dict[str, list[tuple]] = {}
         for row in cur.fetchall():
             aid = str(row["allocation_id"])
@@ -221,11 +214,6 @@ def _fetch_portfolio_context(cur) -> dict[str, Any]:
             )
         for aid, snaps in snap_by_alloc.items():
             snaps.sort()
-            # Skip dates already populated by performance_daily (the
-            # primary path). Only fill gaps — avoids duplicating a row
-            # when both tables cover the same date with slightly
-            # different values (perf_daily is authoritative).
-            _existing_dates = {p["date"] for p in perf_by_alloc.get(aid, [])}
             peak = 0.0
             prev_eq = None
             for d, eq in snaps:
@@ -233,8 +221,6 @@ def _fetch_portfolio_context(cur) -> dict[str, Any]:
                 peak = max(peak, eq)
                 dd = ((eq / peak - 1) * 100) if peak > 0 else 0.0
                 prev_eq = eq
-                if d in _existing_dates:
-                    continue
                 perf_by_alloc.setdefault(aid, []).append({
                     "date": d,
                     "equity_usd": eq,
@@ -245,6 +231,54 @@ def _fetch_portfolio_context(cur) -> dict[str, Any]:
                     today_return_by_alloc[aid] = daily_ret
                 if dd < drawdown_by_alloc.get(aid, 0):
                     drawdown_by_alloc[aid] = dd
+
+    # ── Fallback 2: today-only from snapshots ────────────────────────────
+    # When perf_daily has historical rows but TODAY is missing (common
+    # mid-session — writer fires at close with equity_usd non-None, so
+    # no-entry/filtered/errored days skip the write and today's running
+    # session hasn't closed yet). Compute today's return as
+    # (current - first-of-today) / first-of-today.
+    #
+    # Does NOT write to perf_by_alloc (keeps WTD/MTD aggregates reading
+    # only authoritative perf_daily rows). Only populates
+    # today_return_by_alloc so the Today P&L KPI renders correctly.
+    _today_iso = today.isoformat()
+    _has_today_row = any(
+        p.get("date") == _today_iso
+        for plist in perf_by_alloc.values()
+        for p in plist
+    )
+    if perf_by_alloc and not _has_today_row and historical_alloc_ids:
+        cur.execute("""
+            WITH today_first AS (
+              SELECT DISTINCT ON (connection_id)
+                     connection_id, total_equity_usd AS first_eq
+                FROM user_mgmt.exchange_snapshots
+               WHERE fetch_ok = TRUE
+                 AND snapshot_at >= %s::date
+                 AND snapshot_at <  (%s::date + INTERVAL '1 day')
+               ORDER BY connection_id, snapshot_at ASC
+            ),
+            latest AS (
+              SELECT DISTINCT ON (connection_id)
+                     connection_id, total_equity_usd AS last_eq
+                FROM user_mgmt.exchange_snapshots
+               WHERE fetch_ok = TRUE
+               ORDER BY connection_id, snapshot_at DESC
+            )
+            SELECT a.allocation_id::text AS aid,
+                   tf.first_eq, l.last_eq
+              FROM user_mgmt.allocations a
+              JOIN today_first tf ON tf.connection_id = a.connection_id
+              JOIN latest      l  ON l.connection_id  = a.connection_id
+             WHERE a.allocation_id = ANY(%s::uuid[])
+        """, (today, today, historical_alloc_ids))
+        for r in cur.fetchall():
+            aid = r["aid"]
+            first_eq = float(r["first_eq"] or 0)
+            last_eq  = float(r["last_eq"]  or 0)
+            if first_eq > 0:
+                today_return_by_alloc[aid] = (last_eq / first_eq - 1) * 100.0
 
     # ── Sharpe per strategy version (most recent audit result) ───────────
     sharpe_by_version: dict[str, float | None] = {}
