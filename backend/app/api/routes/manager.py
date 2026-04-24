@@ -657,15 +657,62 @@ def _fetch_portfolio_context(cur) -> dict[str, Any]:
     wtd_usd   = _usd_from_pct(wtd_pct,   usd_base)
     mtd_usd   = _usd_from_pct(mtd_pct,   usd_base)
 
-    # Total P&L since first recorded day. Uses the earliest equity in the
-    # portfolio_equity_30d series as the baseline — same anchor the chart
-    # visually starts from, so the card value is consistent with the curve
-    # above it.
-    initial_equity = portfolio_equity[0]["equity_usd"] if portfolio_equity else 0.0
-    total_pnl_usd = (usd_base - initial_equity) if initial_equity else 0.0
-    total_pnl_pct = (
-        (total_pnl_usd / initial_equity * 100) if initial_equity else 0.0
-    )
+    # Total P&L — aligned with Allocator's `/trader/{id}/pnl` baseline so
+    # Manager's Total AUM subvalue matches the per-allocation PnL cards.
+    # principal_per_connection = principal_baseline_usd (default 0) +
+    # SUM(capital_events since principal_anchor_at). Sum across all
+    # connections that have at least one active allocation. total_pnl =
+    # total_live_equity - sum_principal. Matches Allocator's
+    # (equity_usd - principal_usd) field-pair semantics.
+    #
+    # Falls back to the first-recorded-equity anchor when no principal
+    # baseline is derivable (brand-new install with no capital events and
+    # no connection-level anchor). Keeps the pre-fix card rendering path
+    # alive for bootstrap / test scenarios.
+    active_connection_uuids = [
+        cid for cid in {a["connection_id"] for a in alloc_list}
+    ] if alloc_list else []
+    sum_principal = 0.0
+    if active_connection_uuids:
+        cur.execute("""
+            SELECT ec.connection_id,
+                   COALESCE(ec.principal_anchor_at, MIN(a.created_at))
+                       AS anchor_at,
+                   COALESCE(ec.principal_baseline_usd::float, 0.0)
+                       AS baseline_usd
+              FROM user_mgmt.exchange_connections ec
+              JOIN user_mgmt.allocations a ON a.connection_id = ec.connection_id
+             WHERE ec.connection_id = ANY(%s::uuid[])
+               AND a.status = 'active'
+          GROUP BY ec.connection_id, ec.principal_anchor_at,
+                   ec.principal_baseline_usd
+        """, (active_connection_uuids,))
+        anchor_rows = cur.fetchall()
+        for r in anchor_rows:
+            cur.execute("""
+                SELECT COALESCE(SUM(CASE kind
+                                      WHEN 'deposit'    THEN amount_usd
+                                      WHEN 'withdrawal' THEN -amount_usd
+                                    END), 0)::float AS net_since_anchor
+                  FROM user_mgmt.allocation_capital_events
+                 WHERE connection_id = %s::uuid
+                   AND deleted_at IS NULL
+                   AND event_at >= %s::timestamptz
+            """, (r["connection_id"], r["anchor_at"]))
+            net = float(cur.fetchone()["net_since_anchor"] or 0)
+            sum_principal += float(r["baseline_usd"] or 0) + net
+
+    if sum_principal > 0:
+        total_pnl_usd = usd_base - sum_principal
+        total_pnl_pct = total_pnl_usd / sum_principal * 100
+    else:
+        # Bootstrap fallback: preserve pre-principal-anchor behaviour for
+        # fresh installs with no capital events and no baseline set.
+        initial_equity = portfolio_equity[0]["equity_usd"] if portfolio_equity else 0.0
+        total_pnl_usd = (usd_base - initial_equity) if initial_equity else 0.0
+        total_pnl_pct = (
+            (total_pnl_usd / initial_equity * 100) if initial_equity else 0.0
+        )
 
     return {
         "allocations": alloc_list,
