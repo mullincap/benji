@@ -121,6 +121,7 @@ interface SummaryKpis {
   avg_fill_rate:      number | null;
   avg_entry_slip_bps: number | null;
   avg_exit_slip_bps:  number | null;
+  avg_total_slip_bps: number | null;
   avg_pnl_gap:        number | null;
   retries_needed:     number;
   sessions_traded:    number;
@@ -140,6 +141,7 @@ interface SummaryDaily {
   fill_rate: number | null;
   entry_slip_bps: number | null;
   exit_slip_bps: number | null;
+  total_slip_bps: number | null;
   est_return_pct: number | null;
   actual_return_pct: number | null;
   pnl_gap_pct_from_gross: number | null;
@@ -230,16 +232,25 @@ function exitSlipColor(bps: number | null | undefined): string {
   return "var(--red)";
 }
 
+/** Total round-trip slip (entry + exit) — symmetric magnitude scale.
+ *  Net favourable execution → green, near zero (typical fee floor) → amber,
+ *  meaningfully adverse → red. */
+function totalSlipColor(bps: number | null | undefined): string {
+  if (bps === null || bps === undefined) return "var(--t2)";
+  if (bps <= 0) return "var(--green)";
+  if (bps <= 20) return "var(--amber)";
+  return "var(--red)";
+}
+
 function pnlGapColor(pct: number | null | undefined): string {
   if (pct === null || pct === undefined) return "var(--t2)";
-  const abs = Math.abs(pct);
-  // ≤5% is the data-quality threshold for "principal accounting is correct".
-  // Above 5% means either the estimate is wrong, the capital events are
-  // mis-recorded, or fee/funding drag diverged — worth investigating the row.
-  if (abs <= 0.5) return "var(--green)";
-  if (abs <= 1.5) return "var(--amber)";
-  if (abs <= 5.0) return "var(--amber)";
-  return "var(--red)";
+  // Sign convention: pct = actual − est. Positive = beat the model
+  // (favourable execution net of drag) → green. Negative = underperformed
+  // → red. Within ±0.25% the drag is essentially fee floor + small
+  // slippage, so render amber to signal "near zero, normal range".
+  if (pct > 0.25) return "var(--green)";
+  if (pct < -0.25) return "var(--red)";
+  return "var(--amber)";
 }
 
 function fillRateColor(pct: number | null | undefined): string {
@@ -600,6 +611,7 @@ export default function ExecutionPage() {
     avg_fill_rate:      null,
     avg_entry_slip_bps: null,
     avg_exit_slip_bps:  null,
+    avg_total_slip_bps: null,
     avg_pnl_gap:        null,
     retries_needed:     0,
     sessions_traded:    0,
@@ -702,6 +714,11 @@ export default function ExecutionPage() {
           label="Avg Exit Slip"
           value={fmtBps(kpis.avg_exit_slip_bps)}
           color={exitSlipColor(kpis.avg_exit_slip_bps)}
+        />
+        <KpiCard
+          label="Avg Total Slip"
+          value={fmtBps(kpis.avg_total_slip_bps)}
+          color={totalSlipColor(kpis.avg_total_slip_bps)}
         />
         <KpiCard
           label="Avg PnL Gap"
@@ -862,6 +879,7 @@ export default function ExecutionPage() {
                   "Fill Rate",
                   "Entry Slip",
                   "Exit Slip",
+                  "Total Slip",
                   "Est Ret",
                   "Actual Ret",
                   "PnL Gap",
@@ -933,6 +951,7 @@ interface ExecPositionRow {
   pnl_pct: number | null;
   est_pnl_pct: number | null;
   pnl_gap_pct: number | null;
+  total_slip_bps: number | null;
   exit_reason: string | null;
   retry_rounds: number | null;
   sym_stopped: boolean;
@@ -997,7 +1016,7 @@ function AllocationDayRow({
     return () => { cancelled = true; };
   }, [expanded, positions, row.date, row.allocation_id]);
 
-  const totalCols = (showAllocCol ? 16 : 15);
+  const totalCols = (showAllocCol ? 17 : 16);
 
   const allocCell = showAllocCol ? (
     <td style={{ ...tdStyle, color: "var(--t1)" }}>
@@ -1031,7 +1050,7 @@ function AllocationDayRow({
           <td style={tdStyle}>{row.signal_count ?? "—"}</td>
           <td style={tdStyle}>{convBadge}</td>
           <td
-            colSpan={showAllocCol ? 11 : 11}
+            colSpan={showAllocCol ? 12 : 12}
             style={{ ...tdStyle, color: "var(--t2)", fontStyle: "italic" }}
           >
             {prettyReason(exitReason)}
@@ -1068,6 +1087,9 @@ function AllocationDayRow({
         </td>
         <td style={{ ...tdStyle, color: exitSlipColor(row.exit_slip_bps) }}>
           {fmtBps(row.exit_slip_bps)}
+        </td>
+        <td style={{ ...tdStyle, color: totalSlipColor(row.total_slip_bps) }}>
+          {fmtBps(row.total_slip_bps)}
         </td>
         <td style={tdStyle}>{fmtPct(row.est_return_pct)}</td>
         <td style={tdStyle}>{fmtPct(row.actual_return_pct)}</td>
@@ -1126,7 +1148,7 @@ function PositionsSubRow({
                   {[
                     "SYMBOL", "SIDE", "SIZE", "NOTIONAL", "LEV",
                     "ENTRY EST", "ENTRY FILL", "ENTRY SLIP",
-                    "EXIT EST", "EXIT FILL", "EXIT SLIP",
+                    "EXIT EST", "EXIT FILL", "EXIT SLIP", "TOTAL SLIP",
                     "EST PNL %", "PNL %", "PNL GAP", "PNL USD",
                     "EXIT", "RETRIES",
                   ].map((h) => (
@@ -1159,6 +1181,9 @@ function PositionsSubRow({
                     <td style={tdStyle}>{fmtPriceBare(p.fill_exit_price)}</td>
                     <td style={{ ...tdStyle, color: exitSlipColor(p.exit_slippage_bps) }}>
                       {fmtBps(p.exit_slippage_bps)}
+                    </td>
+                    <td style={{ ...tdStyle, color: totalSlipColor(p.total_slip_bps) }}>
+                      {fmtBps(p.total_slip_bps)}
                     </td>
                     <td style={{ ...tdStyle, color: (p.est_pnl_pct ?? 0) >= 0 ? "var(--green)" : "var(--red)" }}>
                       {fmtPct(p.est_pnl_pct)}

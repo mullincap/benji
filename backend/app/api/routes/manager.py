@@ -1601,15 +1601,13 @@ def execution_summary(
                 net_ret = _dec(r["net_return_pct"])
                 gross_ret = _dec(r["gross_return_pct"])
 
-            # PnL Gap = estimated leveraged return − actual realized return.
-            # Captures the total drag from idealized-pricing estimate to what
-            # was actually delivered (fees + funding + entry/exit slippage +
-            # any timing divergence). Previously this column held just the
-            # fee-drag (gross − net) which never matched what users reading
-            # "EST RET vs ACTUAL RET" expected. ~1% on a typical session is
-            # the fee+slippage floor; >5% means something model-side is off.
+            # PnL Gap = actual realized return − estimated leveraged return.
+            # Sign convention: positive = beat the model (favourable execution
+            # net of drag), negative = underperformed. Magnitude is the total
+            # delivery drag/lift vs the idealized-pricing estimate. ~1% under
+            # is the typical fee+slippage floor on a session.
             pnl_gap_pct_from_gross = (
-                est_return_pct - net_ret
+                net_ret - est_return_pct
                 if est_return_pct is not None and net_ret is not None
                 else None
             )
@@ -1656,6 +1654,14 @@ def execution_summary(
                 # et al. to allocation_returns). Null for pre-writer rows.
                 "retried":          int(r["retries_used"]) if r["retries_used"] is not None else None,
                 "fill_rate":        fill_rate,
+                # Total round-trip slip = entry + exit (sign-preserving).
+                # Captures the full transaction-cost drag in one number; null
+                # when either leg is missing.
+                "total_slip_bps": (
+                    float(_dec(r["avg_entry_slip_bps"])) + float(_dec(r["avg_exit_slip_bps"]))
+                    if r["avg_entry_slip_bps"] is not None and r["avg_exit_slip_bps"] is not None
+                    else None
+                ),
                 "entry_slip_bps":   _dec(r["avg_entry_slip_bps"]),
                 "exit_slip_bps":    _dec(r["avg_exit_slip_bps"]),
                 "alerts":           len(alerts_list) if alerts_list else None,
@@ -1696,6 +1702,7 @@ def execution_summary(
         "avg_fill_rate":      _weighted_avg("fill_rate"),
         "avg_entry_slip_bps": _weighted_avg("entry_slip_bps"),
         "avg_exit_slip_bps":  _weighted_avg("exit_slip_bps"),
+        "avg_total_slip_bps": _weighted_avg("total_slip_bps"),
         "avg_pnl_gap":        _weighted_avg("pnl_gap_pct_from_gross"),
         "retries_needed":     retries_needed,
         "sessions_traded":    sessions_traded,
@@ -1798,9 +1805,21 @@ def execution_summary_positions(
             pass
 
         actual_pnl_pct = _dec(r["pnl_pct"])
+        # gap = actual − est (positive = beat the model). Matches daily-row
+        # pnl_gap_pct_from_gross sign convention.
         pnl_gap_pct = (
-            float(est_pnl_pct) - float(actual_pnl_pct)
+            float(actual_pnl_pct) - float(est_pnl_pct)
             if est_pnl_pct is not None and actual_pnl_pct is not None
+            else None
+        )
+
+        # Total round-trip slippage = entry + exit (sign-preserving). Negative
+        # = both legs favourable; positive = both adverse; mixed cancels out.
+        ent_slip = _dec(r["entry_slippage_bps"])
+        ext_slip = _dec(r["exit_slippage_bps"])
+        total_slip_bps = (
+            float(ent_slip) + float(ext_slip)
+            if ent_slip is not None and ext_slip is not None
             else None
         )
 
@@ -1820,6 +1839,7 @@ def execution_summary_positions(
             "pnl_pct":            actual_pnl_pct,
             "est_pnl_pct":        est_pnl_pct,
             "pnl_gap_pct":        pnl_gap_pct,
+            "total_slip_bps":     total_slip_bps,
             "exit_reason":        r["exit_reason"],
             "retry_rounds":       r["retry_rounds"],
             "sym_stopped":        r["sym_stopped"],
