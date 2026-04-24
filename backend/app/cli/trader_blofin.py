@@ -2862,10 +2862,23 @@ def _run_monitoring_loop(today, today_date, api: ExchangeAdapter, inst_ids,
 # the process dies. Prevents next-morning's spawn from bouncing off a
 # stale-but-recent lock (see 2026-04-24 06:05 UTC incident).
 _HELD_ALLOCATION_LOCK: str | None = None
+# Mirror of the active portfolio_session row owned by this process. Set when
+# the INSERT (fresh) or state-read (resume) hands us a session_id; cleared on
+# normal close. On SIGTERM the shutdown handler closes it with
+# exit_reason='subprocess_died' so the Portfolios tab doesn't render a phantom
+# LIVE row after a container rebuild mid-session (2026-04-23 incident).
+_HELD_PORTFOLIO_SESSION_ID: str | None = None
+
+
+def _track_active_portfolio_session(session_id: str | None) -> None:
+    """Record the session this process currently owns so shutdown can close it."""
+    global _HELD_PORTFOLIO_SESSION_ID
+    if session_id:
+        _HELD_PORTFOLIO_SESSION_ID = str(session_id)
 
 
 def _release_held_lock_on_shutdown() -> None:
-    """Best-effort lock release on Python process exit.
+    """Best-effort lock release + portfolio-session close on Python process exit.
 
     Fires from two paths:
       1. SIGTERM / SIGINT signal handler (below)
@@ -2876,7 +2889,32 @@ def _release_held_lock_on_shutdown() -> None:
     container rebuilds use SIGTERM with a 10s grace period, which this
     catches.
     """
-    global _HELD_ALLOCATION_LOCK
+    global _HELD_ALLOCATION_LOCK, _HELD_PORTFOLIO_SESSION_ID
+    sid = _HELD_PORTFOLIO_SESSION_ID
+    if sid:
+        try:
+            conn = _trader_db_connect()
+            try:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        UPDATE user_mgmt.portfolio_sessions
+                           SET status        = 'closed',
+                               exit_reason   = 'subprocess_died',
+                               exit_time_utc = NOW(),
+                               updated_at    = NOW()
+                         WHERE portfolio_session_id = %s::uuid
+                           AND status = 'active'
+                        """,
+                        (sid,),
+                    )
+                conn.commit()
+            finally:
+                conn.close()
+            log.info(f"Shutdown handler: closed portfolio_session {sid[:8]} as subprocess_died")
+        except Exception as e:
+            log.warning(f"Shutdown handler session close failed for {sid[:8]}: {e}")
+        _HELD_PORTFOLIO_SESSION_ID = None
     aid = _HELD_ALLOCATION_LOCK
     if aid:
         try:
@@ -3552,6 +3590,7 @@ def _init_portfolio_session_for_allocation_inline(
             )
             session_id = cur.fetchone()[0]
         conn.commit()
+        _track_active_portfolio_session(str(session_id))
         return str(session_id)
     finally:
         conn.close()
@@ -4050,6 +4089,9 @@ def _close_portfolio_session_for_allocation(
             conn.commit()
         finally:
             conn.close()
+        global _HELD_PORTFOLIO_SESSION_ID
+        if _HELD_PORTFOLIO_SESSION_ID == str(session_id):
+            _HELD_PORTFOLIO_SESSION_ID = None
     except Exception as e:
         log.warning(f"  Could not close portfolio session {session_id}: {e}")
 
@@ -4149,6 +4191,7 @@ def run_session_for_allocation(allocation_id: str, dry_run: bool = False) -> Non
             _resume_stopped = state.get("sym_stopped") or []
             if not isinstance(_resume_stopped, list):
                 _resume_stopped = []
+            _track_active_portfolio_session(state.get("session_id"))
             _run_monitoring_loop(
                 today, _today_date, api, _inst_ids,
                 _open_prices, _entry_prices,

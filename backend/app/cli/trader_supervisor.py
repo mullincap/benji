@@ -354,6 +354,13 @@ def supervisor_pass() -> int:
         # back to life organically.
         _clear_self_healed(conn)
 
+        # Belt-and-suspenders: close portfolio_sessions rows left LIVE by a
+        # SIGKILL (where the SIGTERM handler couldn't run) or any prior
+        # mid-session death.
+        swept = _sweep_orphaned_portfolio_sessions(conn)
+        if swept:
+            log.info(f"supervisor: swept {swept} orphan portfolio_session row(s)")
+
         log.info("supervisor: pass complete")
         return 0
     finally:
@@ -385,6 +392,13 @@ def startup_recovery() -> int:
             for row in orphans:
                 _attempt_respawn(conn, row, source="startup")
 
+            # Close portfolio_sessions rows left LIVE by the prior process's
+            # SIGKILL / hard kill, so the Portfolios tab reflects reality on
+            # container boot.
+            swept = _sweep_orphaned_portfolio_sessions(conn)
+            if swept:
+                log.info(f"startup_recovery: swept {swept} orphan portfolio_session row(s)")
+
             log.info("startup_recovery: complete")
             return 0
         finally:
@@ -393,6 +407,57 @@ def startup_recovery() -> int:
         # Never block container startup on supervisor error.
         log.exception(f"startup_recovery: failed (non-blocking): {e!r}")
         return 1
+
+
+# ── Orphaned portfolio_session sweep ────────────────────────────────────────
+
+def _sweep_orphaned_portfolio_sessions(conn) -> int:
+    """Close portfolio_sessions rows left as status='active' with no live trader.
+
+    Two orphan classes:
+      1. signal_date < today — trader moved past this day without a graceful
+         close. Always orphan (the day is over; no trader is still writing).
+      2. signal_date = today — runtime_state is stale (>15m) AND phase is not
+         'active'. Catches SIGKILL + crash-after-finalize cases where the
+         SIGTERM handler couldn't run.
+
+    Matches the SIGTERM handler's exit_reason so both paths write the same
+    label. Idempotent (WHERE status='active' guards re-runs).
+    """
+    with conn.cursor(cursor_factory=RealDictCursor) as cur:
+        cur.execute(
+            """
+            UPDATE user_mgmt.portfolio_sessions ps
+               SET status        = 'closed',
+                   exit_reason   = 'subprocess_died',
+                   exit_time_utc = NOW(),
+                   updated_at    = NOW()
+              FROM user_mgmt.allocations a
+             WHERE ps.allocation_id = a.allocation_id
+               AND ps.status        = 'active'
+               AND (
+                     ps.signal_date < CURRENT_DATE
+                  OR (
+                       ps.signal_date = CURRENT_DATE
+                       AND (a.runtime_state->>'phase') IS DISTINCT FROM 'active'
+                       AND (NOW() - COALESCE((a.runtime_state->>'updated_at')::timestamptz, ps.session_start_utc))
+                           > make_interval(mins => %s)
+                     )
+               )
+          RETURNING ps.portfolio_session_id::text AS sid,
+                    ps.signal_date,
+                    ps.allocation_id::text        AS aid
+            """,
+            (STALE_THRESHOLD_MIN,),
+        )
+        closed = cur.fetchall()
+    conn.commit()
+    for r in closed:
+        log.warning(
+            f"  [sweep] closed orphan portfolio_session {r['sid'][:8]} "
+            f"allocation={r['aid'][:8]} signal_date={r['signal_date']}"
+        )
+    return len(closed)
 
 
 # ── Self-heal helper ────────────────────────────────────────────────────────
