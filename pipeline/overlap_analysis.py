@@ -1378,21 +1378,31 @@ def _load_canonical_futures_1m_frequencies(
 
 
 # ─────────────────────────────────────────────
-# LIVE-PARITY mode (opt-in, --live-parity)
+# LIVE-PARITY mode (default-on, --live-parity / --no-live-parity)
 #
-# Simulates daily_signal.py's basket-selection methodology against DB historical
-# data for the purpose of comparison audits vs the canonical (snapshot, pct_change,
-# leaderboard-index-100) path. DOES NOT affect any existing audit output — the new
-# path is gated behind --live-parity (default off).
+# Reproduces daily_signal_v2.py basket selection on historical DB data so the
+# audit's per-day basket matches what the live trader would have picked. v1
+# methodology (top-100-by-volume + log_return price + abs_dollar OI + freq
+# aggregation across the day) is retired — v2 is the canonical signal as of
+# the 2026-04-23 cutover.
 #
-# Approximations to live (accepted under 1b-A scope):
-#   Gap A: DB has no 24h quoteVolume column. Proxy = SUM(volume * close) over
-#          trailing 24h. Structurally equivalent; ~1-5 symbol/day drift at the
-#          rank-100 boundary.
-#   Gap B: BloFin instrument list is today's snapshot, used as static historical
-#          filter. <2-3 symbol/day lookback error.
-#   Gap C: live pulls Binance REST at 05:58; DB bar boundary is 06:00. Likely
-#          immaterial.
+# v2 methodology applied here:
+#   - Universe: ALL USDT perps in market.futures_1m (no quoteVolume cutoff).
+#   - Anchor: 00:00 UTC bar (walk-forward up to 5m if exact bar missing).
+#   - Snapshot: deployment_start_hour bar (06:00 UTC default).
+#   - Price ranking: pct_change = (snap_close / anchor_close) - 1.
+#   - OI ranking:    pct_change = (snap_oi / anchor_oi) - 1.
+#   - Top-20 each by pct_change DESC, normalize_symbol.
+#   - BloFin filter applied AFTER ranking.
+#   - Counter[base] = 1 per chosen symbol so the downstream freq_cutoff
+#     filter keeps the snapshot-mode picks intact.
+#
+# Approximations to live (immaterial drift):
+#   Gap A: BloFin instrument list is today's snapshot, used as static
+#          historical filter. <2-3 symbol/day lookback error.
+#   Gap B: live cron pulls Binance REST at 05:58 (close of 05:55 5m bar);
+#          this loader uses the 06:00 1m bar's close. ~1-5min off, basket
+#          stable across that window in practice.
 # ─────────────────────────────────────────────
 
 import functools as _functools
@@ -1423,27 +1433,29 @@ def _fetch_blofin_instruments() -> set:
 
 def _load_live_parity_frequencies_from_db(
     freq_width: int = 20,
-    sample_interval: int = 5,
+    sample_interval: int = 5,  # unused — kept for signature compat
     deployment_start_hour: int = 6,
 ) -> tuple:
-    """Simulate live (daily_signal.py) basket selection against DB historical data.
+    """Reproduce daily_signal_v2.py basket selection on historical DB data.
 
-    Live methodology (verbatim from daily_signal.py):
-      - Universe: top-100 USDT perps by 24h quoteVolume, filtered to BloFin.
-      - Price ranking per bar: log(close_now / close_anchor) from midnight anchor.
-      - OI ranking per bar: oi_usd_now - oi_usd_anchor (absolute $ delta, midnight anchor).
-      - Freq count: symbols earning +1 for each bar where rank ≤ freq_width among universe.
-      - Basket: top-freq_width-by-price-freq ∩ top-freq_width-by-OI-freq.
-
-    Defensive anchor: walk forward up to 5 bars if anchor value is 0 or None
-    (matches builder's replace(0, pd.NA) hygiene; uses imputation rather than drop
-    so the symbol isn't silently excluded from the 100-universe competition).
+    v2 methodology (matches daily_signal_v2.compute_canonical_basket):
+      - Universe: ALL USDT perps in market.futures_1m (no top-100 cutoff).
+      - Anchor:    00:00 UTC bar (walk-forward to first available within 5m).
+      - Snapshot:  deployment_start_hour UTC bar (default 06:00).
+      - Price ranking: pct_change = (snap_close / anchor_close) - 1.
+      - OI ranking:    pct_change = (snap_oi    / anchor_oi)    - 1.
+      - Top-`freq_width` each by pct_change DESC, normalize_symbol.
+      - BloFin filter applied AFTER ranking (drop top-N picks not on BloFin).
+      - Single snapshot per day; Counter[base] = 1 for each chosen symbol so
+        the downstream freq_cutoff filter (default = freq_width = 20) keeps
+        them all in `_top_n`. Rank within the chosen set is irrelevant for
+        the intersection; ties on count don't matter.
 
     Returns:
-        (price_freq_by_date, oi_freq_by_date) where each is dict[date, Counter[base, int]].
+        (price_freq_by_date, oi_freq_by_date) where each is
+        dict[date, Counter[base, int]].
     """
     import sys as _sys
-    import math as _math
     import datetime as _dt
     from collections import Counter as _Counter
 
@@ -1451,137 +1463,120 @@ def _load_live_parity_frequencies_from_db(
     from pipeline.db.connection import get_conn
 
     blofin = _fetch_blofin_instruments()
-    blofin_arr = sorted(blofin) if blofin else None
+    blofin_set = set(blofin) if blofin else None
 
     conn = get_conn()
     cur = conn.cursor()
 
-    # Discover date range from futures_1m (matches canonical overlap_analysis
-    # behaviour of processing every date with leaderboard data).
+    # Discover date range from futures_1m. Both anchor (00:00) and snapshot
+    # (deployment_start_hour) bars must be present for a date to be scored.
     cur.execute("SELECT MIN(timestamp_utc)::date, MAX(timestamp_utc)::date FROM market.futures_1m")
     dmin, dmax = cur.fetchone()
     if dmin is None:
         raise RuntimeError("market.futures_1m is empty")
-    # Skip first day: need prior 24h of data for the volume universe.
-    first_processable = dmin + _dt.timedelta(days=1)
-    log.info(f"[LIVE-PARITY] Processing dates {first_processable} → {dmax} "
-             f"({(dmax - first_processable).days + 1} days)")
+    log.info(f"[LIVE-PARITY v2] Processing dates {dmin} → {dmax} "
+             f"({(dmax - dmin).days + 1} days)")
 
     price_freq_by_date: dict = {}
     oi_freq_by_date: dict = {}
 
-    d = first_processable
+    d = dmin
     while d <= dmax:
-        deployment_start = _dt.datetime.combine(d, _dt.time(deployment_start_hour, 0, 0),
-                                                tzinfo=_dt.timezone.utc)
         anchor_ts = _dt.datetime.combine(d, _dt.time(0, 0, 0), tzinfo=_dt.timezone.utc)
-        prior_24h_start = deployment_start - _dt.timedelta(hours=24)
+        snap_ts   = _dt.datetime.combine(d, _dt.time(deployment_start_hour, 0, 0),
+                                         tzinfo=_dt.timezone.utc)
 
-        # 1. Universe: top-100 USDT perps by SUM(volume * close) over 24h ending
-        #    deployment_start. Apply BloFin static filter.
+        # Single SQL pass: walk-forward 5-minute anchor + snapshot per symbol,
+        # filter to USDT linear perps (drop BTC_*, ETH_*, etc. extension
+        # quotes via NOT LIKE '%\_%'), require both bars to have non-null/
+        # non-zero close and open_interest. Server-side INNER JOIN drops any
+        # symbol missing either side.
         cur.execute("""
-            SELECT sym.symbol_id, sym.binance_id, sym.base,
-                   SUM(f.volume * f.close) AS vol24h
-            FROM market.futures_1m f
-            JOIN market.symbols sym USING (symbol_id)
-            WHERE f.timestamp_utc > %s AND f.timestamp_utc <= %s
-              AND sym.binance_id LIKE '%%USDT'
-              AND sym.binance_id NOT LIKE '%%\\_%%' ESCAPE '\\'
-              AND (%s::text[] IS NULL OR sym.base = ANY(%s))
-            GROUP BY sym.symbol_id, sym.binance_id, sym.base
-            HAVING SUM(f.volume * f.close) > 0
-            ORDER BY vol24h DESC
-            LIMIT 100
-        """, (prior_24h_start, deployment_start, blofin_arr, blofin_arr))
-        universe = cur.fetchall()
-        if not universe:
-            d += _dt.timedelta(days=1)
-            continue
-
-        uni_sids = [r[0] for r in universe]
-        uni_bids = {r[0]: r[1] for r in universe}
-
-        # 2. Fetch 5-min bars for electoral window [00:00, deployment_start].
-        cur.execute("""
-            SELECT f.timestamp_utc, f.symbol_id, f.close, f.open_interest
-            FROM market.futures_1m f
-            WHERE f.timestamp_utc >= %s AND f.timestamp_utc <= %s
-              AND f.symbol_id = ANY(%s)
-              AND MOD(EXTRACT(MINUTE FROM f.timestamp_utc)::int, %s) = 0
-            ORDER BY f.symbol_id, f.timestamp_utc
-        """, (anchor_ts, deployment_start, uni_sids, sample_interval))
+            WITH anchor_bars AS (
+              SELECT DISTINCT ON (f.symbol_id)
+                     f.symbol_id, f.close AS a_close, f.open_interest AS a_oi
+                FROM market.futures_1m f
+                JOIN market.symbols sym USING (symbol_id)
+               WHERE sym.binance_id LIKE %s
+                 AND sym.binance_id NOT LIKE %s ESCAPE '\\'
+                 AND f.timestamp_utc >= %s
+                 AND f.timestamp_utc <  %s
+                 AND f.close IS NOT NULL AND f.close > 0
+                 AND f.open_interest IS NOT NULL AND f.open_interest > 0
+               ORDER BY f.symbol_id, f.timestamp_utc
+            ),
+            snap_bars AS (
+              SELECT DISTINCT ON (f.symbol_id)
+                     f.symbol_id, f.close AS s_close, f.open_interest AS s_oi
+                FROM market.futures_1m f
+                JOIN market.symbols sym USING (symbol_id)
+               WHERE sym.binance_id LIKE %s
+                 AND sym.binance_id NOT LIKE %s ESCAPE '\\'
+                 AND f.timestamp_utc >= %s
+                 AND f.timestamp_utc <  %s
+                 AND f.close IS NOT NULL AND f.close > 0
+                 AND f.open_interest IS NOT NULL AND f.open_interest > 0
+               ORDER BY f.symbol_id, f.timestamp_utc
+            )
+            SELECT sym.binance_id,
+                   a.a_close, a.a_oi,
+                   s.s_close, s.s_oi
+              FROM anchor_bars a
+              JOIN snap_bars   s ON s.symbol_id = a.symbol_id
+              JOIN market.symbols sym ON sym.symbol_id = a.symbol_id
+        """, (
+            "%USDT", r"%\_%",
+            anchor_ts, anchor_ts + _dt.timedelta(minutes=5),
+            "%USDT", r"%\_%",
+            snap_ts,   snap_ts   + _dt.timedelta(minutes=5),
+        ))
         rows = cur.fetchall()
 
-        # per_sym_ordered[sid] -> sorted list of (ts_ms, close, oi_usd) for walk-forward anchor.
-        # per_sym_map[sid][ts_ms] -> (close, oi_usd) for O(1) per-bar lookup.
-        per_sym_ordered: dict = {sid: [] for sid in uni_sids}
-        per_sym_map: dict = {sid: {} for sid in uni_sids}
-        for ts, sid, close, oi in rows:
-            ts_ms = int(ts.timestamp() * 1000)
-            oi_usd = (oi * close) if (oi is not None and close is not None) else None
-            per_sym_ordered[sid].append((ts_ms, close, oi_usd))
-            per_sym_map[sid][ts_ms] = (close, oi_usd)
-        for sid in uni_sids:
-            per_sym_ordered[sid].sort()
-
-        # 3. Walk-forward anchor resolution. First non-zero positive value in bars 0..4.
-        def _resolve(series, idx):
-            for i in range(min(5, len(series))):
-                v = series[i][idx]
-                if v is not None and v > 0:
-                    return v
-            return None
-
-        anchor_price = {sid: _resolve(per_sym_ordered[sid], 1) for sid in uni_sids}
-        anchor_oi    = {sid: _resolve(per_sym_ordered[sid], 2) for sid in uni_sids}
-
-        # 4. Scoring bars = all present timestamps EXCEPT anchor ts at 00:00.
-        all_ts = sorted({t for series in per_sym_ordered.values() for t, _, _ in series})
-        if not all_ts:
+        if not rows:
             d += _dt.timedelta(days=1)
             continue
-        anchor_ts_ms = all_ts[0]
-        bar_ts_list = [t for t in all_ts if t != anchor_ts_ms]
 
-        # 5. Per-bar ranking, top-freq_width → +1. Keys normalized to base symbol.
+        price_ranks = []
+        oi_ranks    = []
+        for binance_id, a_close, a_oi, s_close, s_oi in rows:
+            base_norm = normalize_symbol(binance_id)
+            if not base_norm:
+                continue
+            price_pct = (float(s_close) / float(a_close)) - 1.0
+            oi_pct    = (float(s_oi)    / float(a_oi))    - 1.0
+            price_ranks.append((base_norm, price_pct))
+            oi_ranks.append((base_norm, oi_pct))
+
+        # Top-N by pct_change DESC.
+        price_top = sorted(price_ranks, key=lambda x: x[1], reverse=True)[:freq_width]
+        oi_top    = sorted(oi_ranks,    key=lambda x: x[1], reverse=True)[:freq_width]
+
+        # BloFin filter applied AFTER ranking — matches v2's
+        # `basket = [s for s in basket if s in blofin]` ordering. Skipped
+        # silently when the BloFin fetch failed (universe stays slightly
+        # wider than live).
+        if blofin_set is not None:
+            price_top = [(b, p) for b, p in price_top if b in blofin_set]
+            oi_top    = [(b, p) for b, p in oi_top    if b in blofin_set]
+
         price_freq = _Counter()
-        oi_freq = _Counter()
-        for ts in bar_ts_list:
-            p_scores: dict = {}
-            o_scores: dict = {}
-            for sid in uni_sids:
-                cell = per_sym_map[sid].get(ts)
-                if cell is None:
-                    continue
-                close, oi_usd = cell
-                ap = anchor_price.get(sid)
-                ao = anchor_oi.get(sid)
-                if close is not None and ap is not None and ap > 0:
-                    try:
-                        p_scores[sid] = _math.log(close / ap)
-                    except (ValueError, ZeroDivisionError):
-                        pass
-                if oi_usd is not None and ao is not None:
-                    o_scores[sid] = oi_usd - ao
-            for sid in sorted(p_scores, key=p_scores.get, reverse=True)[:freq_width]:
-                base = normalize_symbol(uni_bids[sid])
-                if base:
-                    price_freq[base] += 1
-            for sid in sorted(o_scores, key=o_scores.get, reverse=True)[:freq_width]:
-                base = normalize_symbol(uni_bids[sid])
-                if base:
-                    oi_freq[base] += 1
+        oi_freq    = _Counter()
+        for base, _ in price_top:
+            price_freq[base] = 1
+        for base, _ in oi_top:
+            oi_freq[base] = 1
 
         price_freq_by_date[d] = price_freq
-        oi_freq_by_date[d] = oi_freq
-        if (d - first_processable).days % 30 == 0:
-            log.info(f"[LIVE-PARITY]   processed through {d} ({len(price_freq_by_date)} days done)")
+        oi_freq_by_date[d]    = oi_freq
+
+        if (d - dmin).days % 30 == 0:
+            log.info(f"[LIVE-PARITY v2]   processed through {d} ({len(price_freq_by_date)} days done)")
         d += _dt.timedelta(days=1)
 
     cur.close()
     conn.close()
-    log.info(f"[LIVE-PARITY] Complete: {len(price_freq_by_date)} dates with price freq, "
-             f"{len(oi_freq_by_date)} dates with OI freq")
+    log.info(f"[LIVE-PARITY v2] Complete: {len(price_freq_by_date)} dates with price snapshot, "
+             f"{len(oi_freq_by_date)} dates with OI snapshot")
     return price_freq_by_date, oi_freq_by_date
 
 
@@ -1895,16 +1890,17 @@ def run(min_mcap: float, freq_width: int, marketcap_dir: Path,
         _window_label = f"{_lookback_hhmm[:2]}:00-{DEPLOYMENT_START_HOUR:02d}:00 ({_eff_lookback_run}h{_cap_note})"
 
         if live_parity:
-            log.info("[LIVE-PARITY MODE] Simulating daily_signal.py methodology (top-100 by 24h USD volume "
-                     "ending 06:00 UTC, BloFin-filtered; frequency mode; asymmetric log-return price / "
-                     "abs-$ OI — v1-faithful reproduction). Opt-in — canonical audit paths unaffected.")
+            log.info("[LIVE-PARITY MODE] Reproducing daily_signal_v2 basket selection on historical DB data "
+                     "(unfiltered universe, pct_change ranking on both price + OI, "
+                     "single 06:00 UTC snapshot, BloFin filter applied AFTER ranking). "
+                     "Audits using this flag pick the basket the live trader would have picked each day.")
             price_freq, oi_freq = _load_live_parity_frequencies_from_db(
                 freq_width=freq_width,
                 sample_interval=sample_interval,
                 deployment_start_hour=DEPLOYMENT_START_HOUR,
             )
-            log.info(f"  → {len(price_freq)} dates with price data (live-parity)")
-            log.info(f"  → {len(oi_freq)} dates with OI data (live-parity)")
+            log.info(f"  → {len(price_freq)} dates with price snapshot (live-parity v2)")
+            log.info(f"  → {len(oi_freq)} dates with OI snapshot (live-parity v2)")
         elif _non_canonical_ranking:
             # Any non-default ranking axis (log_return/abs_dollar on price OR
             # abs_dollar on OI OR BloFin filter) reads raw values from
@@ -2533,8 +2529,7 @@ if __name__ == "__main__":
     # (observed 2026-04-23 TAC-vs-GENIUS) were invisible without this.
     log.info("=" * 60)
     log.info(f"LIVE-PARITY: {'ON' if args.live_parity else 'OFF'}"
-             f"  (universe = "
-             f"{'live trader basket (top-100 by 24h USD vol at 06:00 UTC, BloFin-filtered)' if args.live_parity else 'market.leaderboards fast path'})")
+             f"  ({'daily_signal_v2 reproduction — unfiltered universe, pct_change rank on price + OI, 06:00 UTC snapshot, BloFin AFTER' if args.live_parity else 'market.leaderboards fast path'})")
     log.info("=" * 60)
 
     if args.live_parity and args.source != "db":
