@@ -201,6 +201,18 @@ function fmtPrice(v: number | null | undefined): string {
   return `$${v.toFixed(6)}`;
 }
 
+/** Bare price (no $ prefix) for the per-symbol expand columns. Defensive
+ *  against unrounded floats that slip through the trader writer (e.g. a
+ *  reconcile-add symbol whose raw exchange average_price wasn't rounded
+ *  before the persistence fix landed). */
+function fmtPriceBare(v: number | string | null | undefined): string {
+  if (v === null || v === undefined) return "—";
+  const n = typeof v === "string" ? Number(v) : v;
+  if (!Number.isFinite(n)) return "—";
+  if (n >= 1) return n.toFixed(4);
+  return n.toFixed(6);
+}
+
 // Color thresholds ----------------------------------------------------------
 
 function entrySlipColor(bps: number | null | undefined): string {
@@ -1135,13 +1147,13 @@ function PositionsSubRow({
                     <td style={tdStyle}>
                       {p.leverage === null ? "—" : `${p.leverage.toFixed(2)}x`}
                     </td>
-                    <td style={tdStyle}>{p.est_entry_price?.toString() ?? "—"}</td>
-                    <td style={tdStyle}>{p.fill_entry_price?.toString() ?? "—"}</td>
+                    <td style={tdStyle}>{fmtPriceBare(p.est_entry_price)}</td>
+                    <td style={tdStyle}>{fmtPriceBare(p.fill_entry_price)}</td>
                     <td style={{ ...tdStyle, color: entrySlipColor(p.entry_slippage_bps) }}>
                       {fmtBps(p.entry_slippage_bps)}
                     </td>
-                    <td style={tdStyle}>{p.est_exit_price?.toString() ?? "—"}</td>
-                    <td style={tdStyle}>{p.fill_exit_price?.toString() ?? "—"}</td>
+                    <td style={tdStyle}>{fmtPriceBare(p.est_exit_price)}</td>
+                    <td style={tdStyle}>{fmtPriceBare(p.fill_exit_price)}</td>
                     <td style={{ ...tdStyle, color: exitSlipColor(p.exit_slippage_bps) }}>
                       {fmtBps(p.exit_slippage_bps)}
                     </td>

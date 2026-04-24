@@ -3488,15 +3488,23 @@ def _log_allocation_execution_symbols(
         contracts  = p.get("filled_contracts") or p.get("contracts")
         ctval      = p.get("ctval") or p.get("ct_val")
 
+        # PnL fallback: reconcile-add symbols (operator manual fills picked up
+        # by the per-bar monitoring loop) often don't get a sell fill back from
+        # api.get_recent_fills at session close, so fill_exit_price is NULL on
+        # those rows. Fall back to est_exit_price so pnl_pct + pnl_usd still
+        # render — the est is the per-bar mark price snapshot at exit time, a
+        # close-enough proxy when the actual fill record is missing. Doesn't
+        # affect normally-filled symbols (fill_exit is populated for those).
+        exit_for_pnl = fill_exit if fill_exit is not None else est_exit_price
         pnl_pct = None
         pnl_usd = None
         try:
-            if fill_entry is not None and fill_exit is not None and float(fill_entry) > 0:
-                raw = (float(fill_exit) - float(fill_entry)) / float(fill_entry) * 100.0
+            if fill_entry is not None and exit_for_pnl is not None and float(fill_entry) > 0:
+                raw = (float(exit_for_pnl) - float(fill_entry)) / float(fill_entry) * 100.0
                 # strategy is long-only; negate for shorts in the future.
                 pnl_pct = -raw if side == "short" else raw
                 if contracts and ctval:
-                    pnl_usd = (float(fill_exit) - float(fill_entry)) * float(contracts) * float(ctval)
+                    pnl_usd = (float(exit_for_pnl) - float(fill_entry)) * float(contracts) * float(ctval)
                     if side == "short":
                         pnl_usd = -pnl_usd
         except (TypeError, ValueError):
@@ -3510,13 +3518,18 @@ def _log_allocation_execution_symbols(
                     retry_rounds = int(s.get("retry_rounds") or 0)
                     break
 
+        # est_entry_price column reads `entry_price` as a fallback because
+        # position dicts built by enter_positions store the canonical anchor
+        # price under the `entry_price` key, never `est_entry_price`.
+        # Without the fallback, every symbol writes NULL for est_entry_price
+        # and the Manager Execution per-symbol expand renders ENTRY EST as —.
         rows.append((
             allocation_id, session_date, iid,
             side,
             p.get("target_contracts"),
             p.get("filled_contracts") or p.get("contracts"),
             p.get("fill_pct"),
-            p.get("est_entry_price"),
+            p.get("est_entry_price") or p.get("entry_price"),
             p.get("fill_entry_price"),
             p.get("entry_slippage_bps"),
             est_exit_price,
