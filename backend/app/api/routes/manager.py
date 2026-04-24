@@ -1400,16 +1400,31 @@ def execution_summary(
         """, tuple(params))
 
         for r in cur.fetchall():
-            # Conviction derivation: exit_reason NOT IN _FLAT_EXIT_REASONS
-            # is a proxy for "conviction passed + entered". portfolio_sessions
-            # `entered` array confirms whether positions actually opened.
             er = r["ar_exit_reason"]
             entered_arr = r["entered"] or []
+            symbols_arr = r["symbols"] or []
             filled = len(entered_arr) > 0
-            conviction_passed = er not in (
-                "filtered", "no_entry_conviction", "missed_window",
-                "stale_close_failed", "no_entry", "errored", "entry_failed",
+
+            # When portfolio_sessions shows a real session (entered positions
+            # present) but allocation_returns carries an early 'filtered'/
+            # 'no_entry_conviction' label, the `ar` row is stale — written by
+            # the first-subprocess crash handler before the recovered trader
+            # took over. Trust portfolio_sessions in that case: the session
+            # actually traded. Common on sessions that were respawned mid-
+            # morning (Gap 6 case — 2026-04-23 spawn recovery).
+            ar_is_stale_filtered = (
+                er in ("filtered", "no_entry_conviction")
+                and len(entered_arr) > 0
             )
+            if ar_is_stale_filtered:
+                er_effective = None  # mid-session / recovered, not yet closed
+                conviction_passed = True
+            else:
+                er_effective = er
+                conviction_passed = er not in (
+                    "filtered", "no_entry_conviction", "missed_window",
+                    "stale_close_failed", "no_entry", "errored", "entry_failed",
+                )
 
             # Leveraged estimated return proxy: final_portfolio_return is 1x,
             # so scale by lev_int × 100 to get pre-fee leveraged %.
@@ -1419,12 +1434,15 @@ def execution_summary(
                 fpr * lev_int * 100 if fpr is not None and lev_int is not None else None
             )
 
-            net_ret = _dec(r["net_return_pct"])
-            gross_ret = _dec(r["gross_return_pct"])
-            # Gross-to-net drag: fee + funding subtracted inside
-            # _log_allocation_return. Not the same semantic as master's
-            # pnl_vs_est_pct (which compared ideal-fill est vs realized),
-            # but the best proxy until the writer extension lands.
+            # For a stale-filtered row the ar net/gross are zero (wrote-before-
+            # trading snapshot) — don't surface them as "actual return 0%".
+            # The true actual_return is only known after session close.
+            if ar_is_stale_filtered:
+                net_ret = None
+                gross_ret = None
+            else:
+                net_ret = _dec(r["net_return_pct"])
+                gross_ret = _dec(r["gross_return_pct"])
             pnl_gap_pct_from_gross = (
                 gross_ret - net_ret
                 if gross_ret is not None and net_ret is not None
@@ -1432,16 +1450,18 @@ def execution_summary(
             )
 
             sym_stops_arr = r["sym_stops"] or []
-            symbols_arr = r["symbols"] or []
 
-            # signal_count: prefer the writer-persisted value (captures pre-
-            # filter survivors correctly); fall back to portfolio_sessions.symbols
-            # length for legacy rows written before the writer extension.
+            # signal_count: prefer the writer-persisted value EXCEPT when the
+            # ar row is stale-filtered — in that case ar.signal_count is 0 but
+            # portfolio_sessions.symbols has the real count.
             ar_sig = r["ar_signal_count"]
-            signal_count = (
-                int(ar_sig) if ar_sig is not None
-                else (len(symbols_arr) if symbols_arr else None)
-            )
+            if ar_is_stale_filtered and symbols_arr:
+                signal_count = len(symbols_arr)
+            else:
+                signal_count = (
+                    int(ar_sig) if ar_sig is not None
+                    else (len(symbols_arr) if symbols_arr else None)
+                )
             # conviction_roi_x is now persisted; use it when available.
             roi_x = _dec(r["conviction_roi_x"])
             alerts_list = r["alerts_fired"] or []
@@ -1475,7 +1495,7 @@ def execution_summary(
                 "peak_portfolio_return":      _dec(r["peak_portfolio_return"]),
                 "max_dd_from_peak":           _dec(r["max_dd_from_peak"]),
                 "capital_deployed_usd":       _dec(r["capital_deployed_usd"]),
-                "exit_reason":                er,
+                "exit_reason":                er_effective,
             })
 
     # ── 5. KPIs — capital-weighted where averaged, plain sum/count where counted ─
