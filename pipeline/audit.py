@@ -9309,6 +9309,35 @@ def _overwrite_equity_chart(outdir, label, daily_with_zeros, col_dates,
     ath    = np.maximum.accumulate(eq)          # all-time high
     dd_pct = (eq - ath) / ath * 100             # running drawdown %
 
+    # Persist the daily equity series to CSV when AUDIT_DAILY_EQUITY_DIR is set.
+    # Consumed by backend/app/cli/backfill_equity_curves.py to populate
+    # audit.equity_curves for the strategy view. One file per filter label
+    # (e.g. equity_tail.csv, equity_dispersion.csv) so the caller can read
+    # whichever label matches the strategy's picked filter_mode.
+    # Columns: date (YYYY-MM-DD), equity (USD), daily_return (fractional),
+    # drawdown_pct. One row per trading day in col_dates order.
+    _equity_csv_dir = os.environ.get("AUDIT_DAILY_EQUITY_DIR")
+    if _equity_csv_dir:
+        try:
+            import csv as _csv
+            _safe = "".join(c if c.isalnum() or c in "-_." else "_" for c in str(label))
+            _path = os.path.join(_equity_csv_dir, f"equity_{_safe}.csv")
+            with open(_path, "w", newline="") as _fh:
+                _w = _csv.writer(_fh)
+                _w.writerow(["date", "equity", "daily_return", "drawdown_pct"])
+                for i, _d in enumerate(col_dates or []):
+                    if _d is None or i >= len(eq):
+                        continue
+                    _w.writerow([
+                        str(_d)[:10],
+                        float(eq[i]),
+                        float(r_plot[i]),
+                        float(dd_pct[i]),
+                    ])
+            print(f"[INFO] wrote daily equity CSV → {_path} ({len(eq)} rows)", flush=True)
+        except Exception as _e:
+            print(f"[WARN] AUDIT_DAILY_EQUITY_DIR write failed: {_e}", flush=True)
+
     # Rolling avg max-DD bands: 30-day rolling window of min DD
     win = 30
     rolling_min_dd = np.full_like(dd_pct, np.nan)

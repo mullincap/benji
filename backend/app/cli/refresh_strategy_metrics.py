@@ -144,25 +144,38 @@ def _run_audit_for_version(sv: dict[str, Any]) -> tuple[dict, Path, str]:
 
     Returns (metrics, audit_output_path, job_id). Caller writes DB rows.
     Raises if the audit subprocess fails.
+
+    Side effect: sets AUDIT_DAILY_EQUITY_DIR env var so audit.py dumps a
+    per-filter CSV of the daily equity series to `<job_dir>/equity_<label>.csv`.
+    The caller reads the CSV for the picked filter and inserts into
+    audit.equity_curves keyed on the new result_id. See audit.py
+    `_overwrite_equity_chart` for the write.
     """
+    import os as _os
     short_id = str(sv["strategy_version_id"])[:8]
     job_id = str(uuid.uuid4())
     params = dict(sv["config"] or {})
 
-    # Scratch dir for this run's stdout. Audit trail is in audit.jobs/results,
-    # not the raw log — tempdir is acceptable.
+    # Scratch dir for this run's stdout AND the per-filter equity CSVs.
+    # Audit trail is in audit.jobs/results, not the raw log — tempdir is
+    # acceptable. The equity CSVs are read once after the audit completes
+    # then discarded.
     job_dir = Path(tempfile.mkdtemp(prefix=f"nightly_refresh_{short_id}_"))
     audit_output_path = job_dir / "audit_output.txt"
 
     log.info(f"  [{short_id}] job_id={job_id}  output={audit_output_path}")
 
-    metrics = run_audit(
-        params,
-        output_path=audit_output_path,
-        on_rebuild_start=lambda: log.info(
-            f"  [{short_id}] leaderboard parquets stale; rebuilding"
-        ),
-    )
+    _os.environ["AUDIT_DAILY_EQUITY_DIR"] = str(job_dir)
+    try:
+        metrics = run_audit(
+            params,
+            output_path=audit_output_path,
+            on_rebuild_start=lambda: log.info(
+                f"  [{short_id}] leaderboard parquets stale; rebuilding"
+            ),
+        )
+    finally:
+        _os.environ.pop("AUDIT_DAILY_EQUITY_DIR", None)
     return metrics, audit_output_path, job_id
 
 
@@ -278,6 +291,47 @@ def refresh_one(sv: dict[str, Any], *, dry_run: bool = False) -> dict[str, Any]:
                 values,
             )
             result_id = str(cur.fetchone()[0])
+
+            # Load the per-day equity CSV written by audit.py (see
+            # _overwrite_equity_chart) and persist to audit.equity_curves
+            # keyed on this result_id. Consumed by the strategy view's
+            # /api/allocator/strategies/{id}/returns endpoint.
+            _equity_rows = 0
+            try:
+                _equity_csv = audit_output_path.parent / f"equity_{picked_filter_name}.csv"
+                if _equity_csv.exists():
+                    import csv as _csv
+                    with open(_equity_csv) as _fh:
+                        _reader = _csv.DictReader(_fh)
+                        _batch = []
+                        for _r in _reader:
+                            try:
+                                _dr = float(_r["daily_return"])
+                                _batch.append((
+                                    result_id,
+                                    _r["date"],
+                                    float(_r["equity"]),
+                                    _dr,
+                                    float(_r["drawdown_pct"]),
+                                    abs(_dr) > 1e-12,
+                                ))
+                            except (ValueError, KeyError):
+                                continue
+                    if _batch:
+                        cur.executemany(
+                            """
+                            INSERT INTO audit.equity_curves
+                                (result_id, date, equity, daily_return, drawdown, is_active)
+                            VALUES (%s::uuid, %s::date, %s, %s, %s, %s)
+                            """,
+                            _batch,
+                        )
+                        _equity_rows = len(_batch)
+                        log.info(f"  [{short_id}] equity_curves: inserted {_equity_rows} rows")
+                else:
+                    log.warning(f"  [{short_id}] equity CSV missing: {_equity_csv}")
+            except Exception as _e:
+                log.warning(f"  [{short_id}] equity_curves load skipped: {_e}")
 
             current_metrics = build_current_metrics(result_row)
             current_metrics["vol_boost"] = round(vol_boost, 4)
