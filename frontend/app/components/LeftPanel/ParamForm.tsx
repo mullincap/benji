@@ -507,6 +507,10 @@ export default function ParamForm({ params, onChange, onSubmit }: ParamFormProps
 
       {/* ── EXECUTION CONFIG ── */}
       <CollapsibleSection title="EXECUTION CONFIG" open={isOpen('execution')} onToggle={() => toggleSection('execution')}>
+        <div style={subSectionLabel}>UNIVERSE PARITY</div>
+        <Row label="live_parity" help="True: universe matches the live trader (top-100 by 24h USD vol at 06:00 UTC, BloFin-filtered, log-return price / abs-$ OI). False: market.leaderboards fast path (symmetric ranking)">
+          <Toggle checked={p.live_parity !== false} onChange={(v) => set('live_parity', v)} />
+        </Row>
       <div
         style={{
           background: 'var(--bg0)',

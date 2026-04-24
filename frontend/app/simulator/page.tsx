@@ -61,6 +61,9 @@ const DEFAULT_PARAMS: Record<string, unknown> = {
   taker_fee_pct: 0.0008,
   funding_rate_daily_pct: 0.0002,
   // Execution config
+  // live_parity: match the live trader's universe-selection pipeline. Default
+  // True so Simulator audits are directly comparable to live session baskets.
+  live_parity: true,
   early_kill_x: 5,
   early_kill_y: -999,
   early_instill_y: -999,
