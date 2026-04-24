@@ -1550,6 +1550,26 @@ def execution_summary_positions(
     Pre-trader-extension sessions have no rows — response returns an empty
     list and the frontend renders a "no per-symbol data" notice.
     """
+    # Pull session-level leverage from portfolio_sessions (or
+    # allocation_returns as a fallback) so each per-symbol row can render
+    # the leverage applied that day. Session-level value duplicated per
+    # row keeps the table self-contained without an extra header.
+    cur.execute(
+        """
+        SELECT COALESCE(ps.lev_int, ar.effective_leverage) AS leverage
+          FROM user_mgmt.allocation_returns ar
+          LEFT JOIN user_mgmt.portfolio_sessions ps
+                 ON ps.allocation_id = ar.allocation_id
+                AND ps.signal_date   = ar.session_date
+         WHERE ar.allocation_id = %s::uuid
+           AND ar.session_date  = %s::date
+         LIMIT 1
+        """,
+        (allocation_id, session_date),
+    )
+    lev_row = cur.fetchone()
+    session_lev = _dec(lev_row["leverage"]) if lev_row else None
+
     cur.execute(
         """
         SELECT inst_id, side,
@@ -1564,8 +1584,22 @@ def execution_summary_positions(
         """,
         (allocation_id, session_date),
     )
-    rows = [
-        {
+
+    rows = []
+    for r in cur.fetchall():
+        # Notional USD computed at read time from filled_contracts × fill_entry_price.
+        # Falls back to est_entry_price when fill is missing (target-still-open
+        # symbols rendered with their estimated commitment).
+        contracts = r["filled_contracts"] or r["target_contracts"]
+        price = r["fill_entry_price"] or r["est_entry_price"]
+        notional_usd = None
+        try:
+            if contracts is not None and price is not None:
+                notional_usd = float(contracts) * float(price)
+        except (TypeError, ValueError):
+            pass
+
+        rows.append({
             "inst_id":            r["inst_id"],
             "side":               r["side"],
             "target_contracts":   _dec(r["target_contracts"]),
@@ -1582,9 +1616,9 @@ def execution_summary_positions(
             "exit_reason":        r["exit_reason"],
             "retry_rounds":       r["retry_rounds"],
             "sym_stopped":        r["sym_stopped"],
-        }
-        for r in cur.fetchall()
-    ]
+            "notional_usd":       notional_usd,
+            "leverage":           session_lev,
+        })
     return {
         "allocation_id": allocation_id,
         "session_date":  session_date,

@@ -922,6 +922,8 @@ interface ExecPositionRow {
   exit_reason: string | null;
   retry_rounds: number | null;
   sym_stopped: boolean;
+  notional_usd: number | null;
+  leverage: number | null;
 }
 
 function AllocationDayRow({
@@ -1108,8 +1110,9 @@ function PositionsSubRow({
               <thead>
                 <tr>
                   {[
-                    "SYMBOL", "SIDE", "SIZE", "ENTRY EST", "ENTRY FILL",
-                    "ENTRY SLIP", "EXIT EST", "EXIT FILL", "EXIT SLIP",
+                    "SYMBOL", "SIDE", "SIZE", "NOTIONAL", "LEV",
+                    "ENTRY EST", "ENTRY FILL", "ENTRY SLIP",
+                    "EXIT EST", "EXIT FILL", "EXIT SLIP",
                     "PNL USD", "PNL %", "EXIT", "RETRIES",
                   ].map((h) => (
                     <th key={h} style={{ ...thStyle, fontSize: 8 }}>{h}</th>
@@ -1124,6 +1127,14 @@ function PositionsSubRow({
                     </td>
                     <td style={{ ...tdStyle, color: "var(--t2)" }}>{p.side ?? "—"}</td>
                     <td style={tdStyle}>{p.filled_contracts ?? "—"}</td>
+                    <td style={tdStyle}>
+                      {p.notional_usd === null
+                        ? "—"
+                        : `$${p.notional_usd.toLocaleString("en-US", { maximumFractionDigits: 0 })}`}
+                    </td>
+                    <td style={tdStyle}>
+                      {p.leverage === null ? "—" : `${p.leverage.toFixed(2)}x`}
+                    </td>
                     <td style={tdStyle}>{p.est_entry_price?.toString() ?? "—"}</td>
                     <td style={tdStyle}>{p.fill_entry_price?.toString() ?? "—"}</td>
                     <td style={{ ...tdStyle, color: entrySlipColor(p.entry_slippage_bps) }}>
