@@ -347,8 +347,8 @@ export default function OverviewPage() {
                 exchanges={exchanges}
                 instances={instances}
                 showAggregate
-                chartContainerHeight={530}
-                chartEquityHeight={380}
+                chartContainerHeight={570}
+                chartEquityHeight={420}
               />
             )}
           </div>
