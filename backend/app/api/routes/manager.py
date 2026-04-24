@@ -1589,6 +1589,13 @@ def execution_summary(
                 if fpr is not None and lev_int is not None:
                     gross_ret = float(fpr) * lev_int * 100
                     net_ret = gross_ret
+                    # Override est_return_pct to match actual for stale-filtered
+                    # rows. The default est calc uses ar.effective_leverage
+                    # which is 0 on stale rows (written pre-trading), making
+                    # est=0 while actual=-8% and the gap falsely read -8%.
+                    # Both numbers are proxies of the same fpr × lev — make
+                    # them equal so gap=0 signals "no separate measurement".
+                    est_return_pct = gross_ret
                 else:
                     gross_ret = None
                     net_ret = None
