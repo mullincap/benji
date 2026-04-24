@@ -330,51 +330,79 @@ def _fetch_portfolio_context(cur) -> dict[str, Any]:
     wtd_pct = (wtd_dollar / total_aum_f * 100) if total_aum_f > 0 else 0.0
     mtd_pct = (mtd_dollar / total_aum_f * 100) if total_aum_f > 0 else 0.0
 
-    # Lifetime account-wide max drawdown, computed from 5-min bucketed wallet
-    # equity summed across connections. Intraday cadence is required so the
-    # metric captures peak-to-trough losses that happen WITHIN a session and
-    # recover before close — daily-close buckets would mask them entirely.
-    # USD magnitude is the dollar gap at the worst-percentage moment.
+    # Lifetime account-wide max drawdown — realised trading drawdown only.
     #
-    # Historical metric — scope is all-ever connections. Pausing or closing
-    # an allocation must NOT silently redefine the historical denominator.
-    # Using historical_connection_uuids (connections that have ever held
-    # strategy capital) instead of the active-only set fixes a 2026-04-22
-    # bug where pausing Alpha Main made Max DD jump from -9.9% → -13.0%
-    # because the calc silently switched from BloFin+Binance combined to
-    # BloFin-only.
+    # Scope fix (2026-04-24 late): the previous 5-min bucketed series was
+    # picking up two distortions:
+    #   1. Transient unrealized MTM mid-session (e.g. 2026-04-23 intraday
+    #      dipped to $3,775.85 but closed at $4,022.81 — a session that
+    #      ultimately gained +17% was being labelled a -15.9% drawdown).
+    #   2. Operator capital movements (e.g. 2026-04-20 Binance→BloFin
+    #      $1,022 transfer settling across exchanges in different 5-min
+    #      buckets creates a phantom trough).
+    #
+    # Corrected metric: daily-close equity summed across connections, with
+    # cumulative capital events netted out. Matches Allocator's per-alloc
+    # drawdown semantics and the industry-standard "portfolio drawdown" a
+    # user expects to see on a KPI card.
     connection_uuids = historical_connection_uuids
     max_dd = 0.0
     max_dd_usd = 0.0
     if connection_uuids:
         cur.execute("""
-            WITH bucketed AS (
-              SELECT connection_id,
-                     snapshot_at,
-                     to_timestamp(
-                       floor(extract(epoch from snapshot_at) / 300) * 300
-                     ) AS bucket,
-                     total_equity_usd AS equity
-              FROM user_mgmt.exchange_snapshots
-              WHERE connection_id = ANY(%s::uuid[])
-                AND fetch_ok = TRUE
-                AND total_equity_usd IS NOT NULL
+            WITH daily_last AS (
+              SELECT DISTINCT ON (es.connection_id,
+                                  (es.snapshot_at AT TIME ZONE 'UTC')::date)
+                     es.connection_id,
+                     (es.snapshot_at AT TIME ZONE 'UTC')::date AS day,
+                     es.total_equity_usd::float              AS eq
+                FROM user_mgmt.exchange_snapshots es
+               WHERE es.connection_id = ANY(%s::uuid[])
+                 AND es.fetch_ok = TRUE
+                 AND es.total_equity_usd IS NOT NULL
+              ORDER BY es.connection_id,
+                       (es.snapshot_at AT TIME ZONE 'UTC')::date,
+                       es.snapshot_at DESC
             ),
-            latest_per_conn AS (
-              SELECT DISTINCT ON (connection_id, bucket)
-                     connection_id, bucket, equity
-              FROM bucketed
-              ORDER BY connection_id, bucket, snapshot_at DESC
+            daily_total AS (
+              SELECT day, SUM(eq)::float AS raw_eq
+                FROM daily_last
+               GROUP BY day
             )
-            SELECT bucket, SUM(equity) AS total_equity
-            FROM latest_per_conn
-            GROUP BY bucket
-            ORDER BY bucket
-        """, (connection_uuids,))
-        intraday_equity_series = [float(r["total_equity"]) for r in cur.fetchall()]
-        if intraday_equity_series:
-            peak = intraday_equity_series[0]
-            for eq in intraday_equity_series:
+            -- Correlated cumulative-events subquery against the raw events
+            -- stream (not a join on day) so same-day events always line up
+            -- with the same-day snapshot, and event-only days (no snapshot)
+            -- still contribute to cum_event for all subsequent snapshot
+            -- days. Anchoring cum_event at the first snapshot day keeps the
+            -- adjusted series peak-consistent.
+            SELECT dt.day,
+                   dt.raw_eq,
+                   COALESCE((
+                     SELECT SUM(CASE kind
+                                  WHEN 'deposit'    THEN amount_usd
+                                  WHEN 'withdrawal' THEN -amount_usd
+                                END)::float
+                       FROM user_mgmt.allocation_capital_events ce
+                      WHERE ce.connection_id = ANY(%s::uuid[])
+                        AND ce.deleted_at IS NULL
+                        AND (ce.event_at AT TIME ZONE 'UTC')::date <= dt.day
+                        AND (ce.event_at AT TIME ZONE 'UTC')::date
+                            >= (SELECT MIN(day) FROM daily_total)
+                   ), 0) AS cum_event
+              FROM daily_total dt
+             ORDER BY dt.day
+        """, (connection_uuids, connection_uuids))
+        # Adjusted series: raw_eq - cumulative capital events since first day
+        # (anchor = first day in range, since cum_event at that row includes
+        # any same-day event — subtracting holds adjusted(first) = raw(first)
+        # - events(first), which stays consistent as the walk progresses).
+        adj_series = [
+            (r["day"], float(r["raw_eq"]) - float(r["cum_event"] or 0))
+            for r in cur.fetchall()
+        ]
+        if adj_series:
+            peak = adj_series[0][1]
+            for _, eq in adj_series:
                 peak = max(peak, eq)
                 if peak > 0:
                     dd_pct = (eq - peak) / peak * 100.0
