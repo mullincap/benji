@@ -257,6 +257,18 @@ export const allocatorApi = {
       `/api/allocator/strategies${opts?.includeRetired ? "?include_retired=true" : ""}`,
     ),
 
+  // Daily equity curve + returns for a strategy_version. Backs the equity
+  // chart + calendar heatmap on /trader/strategies/[id]. Returns empty rows
+  // if audit.equity_curves hasn't been populated yet (ie. pre-backfill).
+  getStrategyReturns: (strategyVersionId: string, days?: number) =>
+    apiFetch<{
+      strategy_version_id: string;
+      result_id: string | null;
+      rows: Array<{ date: string; equity: number; daily_return: number; drawdown: number }>;
+    }>(
+      `/api/allocator/strategies/${strategyVersionId}/returns${days ? `?days=${days}` : ""}`,
+    ),
+
   publishStrategy: (strategyId: number) =>
     apiFetch<{ strategy_id: number; name: string; display_name: string; is_published: boolean }>(
       `/api/allocator/strategies/${strategyId}/publish`,

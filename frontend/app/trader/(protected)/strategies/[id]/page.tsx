@@ -22,34 +22,44 @@ function MetricCard({ label, value, color }: { label: string; value: string; col
 
 interface DayData { date: string; day: number; dow: number; ret: number | null; future?: boolean; }
 
-// TODO: replace with real backtest daily returns from backend
-function generateMockCalendarData(): Record<string, DayData[]> {
+// Build the month → day[] map from the strategy's real daily-return series.
+// `returns` comes from GET /api/allocator/strategies/{id}/returns; each row
+// is one TRADING day (flat days included with daily_return=0, inactive
+// days simply absent). For months that have any real data we fill every
+// calendar day — days missing from the audit are shown as null (no
+// trading that day). Future days beyond today are stubbed as `future=true`.
+function buildCalendarFromReturns(
+  returns: { date: string; daily_return: number }[] | null,
+): Record<string, DayData[]> {
+  if (!returns || returns.length === 0) return {};
+  const byDate = new Map<string, number>();
+  for (const r of returns) byDate.set(r.date, r.daily_return * 100);  // → percent
   const months: Record<string, DayData[]> = {};
+  const firstDate = new Date(returns[0].date + "T00:00:00Z");
+  const lastDate = new Date(returns[returns.length - 1].date + "T00:00:00Z");
   const now = new Date();
-  // Go back 11 months from current month, plus current month = 12 months
-  for (let m = 11; m >= 0; m--) {
-    const d0 = new Date(now.getFullYear(), now.getMonth() - m, 1);
-    const year = d0.getFullYear();
-    const month = d0.getMonth();
-    const key = `${year}-${String(month + 1).padStart(2, "0")}`;
-    const daysInMonth = new Date(year, month + 1, 0).getDate();
+  // Walk each month from first to last (inclusive).
+  const cursor = new Date(Date.UTC(firstDate.getUTCFullYear(), firstDate.getUTCMonth(), 1));
+  const end    = new Date(Date.UTC(lastDate.getUTCFullYear(),  lastDate.getUTCMonth(),  1));
+  while (cursor <= end) {
+    const y = cursor.getUTCFullYear();
+    const m = cursor.getUTCMonth();
+    const key = `${y}-${String(m + 1).padStart(2, "0")}`;
+    const dim = new Date(Date.UTC(y, m + 1, 0)).getUTCDate();
     const days: DayData[] = [];
-    for (let d = 1; d <= daysInMonth; d++) {
-      const date = new Date(year, month, d);
-      const dow = date.getDay();
-      const isFuture = date > now;
-      const isWeekend = dow === 0 || dow === 6;
-      const seed = Math.sin(d * 7919 + month * 1031 + year) * 10000;
-      const rand = seed - Math.floor(seed);
-      const ret = isFuture ? null : isWeekend ? null : Math.round(((rand - 0.38) * 4) * 100) / 100;
-      days.push({ date: date.toISOString().slice(0, 10), day: d, dow, ret, future: isFuture });
+    for (let d = 1; d <= dim; d++) {
+      const ds = `${y}-${String(m + 1).padStart(2, "0")}-${String(d).padStart(2, "0")}`;
+      const dayDate = new Date(ds + "T00:00:00Z");
+      const isFuture = dayDate > now;
+      const dow = dayDate.getUTCDay();
+      const ret = byDate.has(ds) ? byDate.get(ds)! : null;
+      days.push({ date: ds, day: d, dow, ret, future: isFuture });
     }
     months[key] = days;
+    cursor.setUTCMonth(cursor.getUTCMonth() + 1);
   }
   return months;
 }
-
-const MOCK_CALENDAR = generateMockCalendarData();
 
 function getReturnColor(ret: number | null): string {
   if (ret === null) return "var(--bg3)";
@@ -67,13 +77,33 @@ function getReturnTextColor(ret: number | null): string {
   return "var(--t2)";
 }
 
-function CalendarHeatmap() {
+function CalendarHeatmap({
+  returns,
+  loading,
+}: {
+  returns: { date: string; daily_return: number }[] | null;
+  loading?: boolean;
+}) {
   const [mode, setMode] = useState<"GRID" | "CHART">("GRID");
   const [expanded, setExpanded] = useState(false);
 
-  const monthKeys = Object.keys(MOCK_CALENDAR).sort();
+  const calendar = buildCalendarFromReturns(returns);
+  const monthKeys = Object.keys(calendar).sort();
   const visibleKeys = expanded ? monthKeys : monthKeys.slice(-3);
   const DOW = ["S", "M", "T", "W", "T", "F", "S"];
+
+  if (monthKeys.length === 0) {
+    return (
+      <div style={{ background: "var(--bg2)", border: "1px solid var(--line)", borderRadius: 5, overflow: "hidden", marginBottom: 20 }}>
+        <div style={{ padding: "10px 16px", borderBottom: "1px solid var(--line)" }}>
+          <span style={{ fontSize: 9, color: "var(--t3)", letterSpacing: "0.12em", fontWeight: 700, textTransform: "uppercase" }}>CALENDAR RETURNS</span>
+        </div>
+        <div style={{ padding: "40px 16px", textAlign: "center", fontSize: 10, color: "var(--t3)" }}>
+          {loading ? "Loading…" : "No daily-return series available yet. Next refresh will populate."}
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div style={{ background: "var(--bg2)", border: "1px solid var(--line)", borderRadius: 5, overflow: "hidden", marginBottom: 20 }}>
@@ -96,7 +126,7 @@ function CalendarHeatmap() {
         {mode === "GRID" ? (
           <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 16 }}>
             {visibleKeys.map(key => {
-              const days = MOCK_CALENDAR[key];
+              const days = calendar[key];
               const label = new Date(key + "-01").toLocaleDateString("en-US", { month: "short", year: "numeric" });
               const parts = key.split("-");
               const yr = parseInt(parts[0]);
@@ -143,7 +173,7 @@ function CalendarHeatmap() {
         ) : (
           <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
             {visibleKeys.map(key => {
-              const days = MOCK_CALENDAR[key].filter(d => d.ret !== null);
+              const days = calendar[key].filter(d => d.ret !== null);
               const label = new Date(key + "-01").toLocaleDateString("en-US", { month: "short", year: "numeric" });
               const cumReturns = days.reduce<number[]>((acc, d) => { acc.push((acc.length > 0 ? acc[acc.length - 1] : 0) + (d.ret ?? 0)); return acc; }, []);
               const peak = Math.max(...cumReturns);
@@ -231,6 +261,14 @@ export default function MarketplaceDetailPage() {
   const [addedHover, setAddedHover] = useState(false);
   const sentinelRef = useRef<HTMLDivElement>(null);
 
+  // Real daily equity + returns for this strategy. Populated by the
+  // /returns endpoint (backed by audit.equity_curves, refreshed nightly).
+  // When `null`, the chart + heatmap fall back to an em-dash empty state.
+  const [returns, setReturns] = useState<
+    { date: string; equity: number; daily_return: number; drawdown: number }[] | null
+  >(null);
+  const [returnsLoading, setReturnsLoading] = useState(true);
+
   useEffect(() => {
     const el = sentinelRef.current;
     if (!el) return;
@@ -241,6 +279,26 @@ export default function MarketplaceDetailPage() {
     observer.observe(el);
     return () => observer.disconnect();
   }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    if (!cat?.strategyVersionId) {
+      setReturns(null);
+      setReturnsLoading(false);
+      return;
+    }
+    setReturnsLoading(true);
+    allocatorApi.getStrategyReturns(cat.strategyVersionId).then(res => {
+      if (cancelled) return;
+      setReturns(res.rows && res.rows.length > 0 ? res.rows : null);
+      setReturnsLoading(false);
+    }).catch(() => {
+      if (cancelled) return;
+      setReturns(null);
+      setReturnsLoading(false);
+    });
+    return () => { cancelled = true; };
+  }, [cat?.strategyVersionId]);
 
   function handleAdd() {
     const newId = `${id}-${Date.now()}`;
@@ -517,11 +575,19 @@ export default function MarketplaceDetailPage() {
                 <span style={{ color: "var(--t2)" }}> &middot; Vol </span><span style={{ color: "var(--t1)" }}>{fmt(cat.vol, 1)}%</span>
               </span>
             </div>
-            <div style={{ padding: "8px 0", height: 250 }}><EquityCurveSvg data={GHOST_CURVE} /></div>
+            <div style={{ padding: "8px 0", height: 250 }}>
+              {returns && returns.length > 1 ? (
+                <EquityCurveSvg data={returns.map(r => r.equity)} />
+              ) : (
+                <div style={{ height: "100%", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 10, color: "var(--t3)" }}>
+                  {returnsLoading ? "Loading…" : "No equity curve available yet. Next refresh will populate."}
+                </div>
+              )}
+            </div>
           </div>
 
-          {/* Calendar returns heatmap */}
-          <CalendarHeatmap />
+          {/* Calendar returns heatmap — real daily returns from audit.equity_curves */}
+          <CalendarHeatmap returns={returns} loading={returnsLoading} />
 
           {/* HOW IT WORKS */}
           <div style={{ background: "var(--bg2)", border: "1px solid var(--line)", borderRadius: 5, padding: "16px 18px", marginBottom: 20 }}>
