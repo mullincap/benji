@@ -2528,6 +2528,15 @@ if __name__ == "__main__":
     _start = _time.time()
     log.info(f"Starting overlap_analysis.py at {__import__('datetime').datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 
+    # Prominent top-of-run header so audits are visibly distinguishable by
+    # universe-selection mode. Mismatches between audit and live trading
+    # (observed 2026-04-23 TAC-vs-GENIUS) were invisible without this.
+    log.info("=" * 60)
+    log.info(f"LIVE-PARITY: {'ON' if args.live_parity else 'OFF'}"
+             f"  (universe = "
+             f"{'live trader basket (top-100 by 24h USD vol at 06:00 UTC, BloFin-filtered)' if args.live_parity else 'market.leaderboards fast path'})")
+    log.info("=" * 60)
+
     if args.live_parity and args.source != "db":
         log.warning("[LIVE-PARITY] --live-parity requires --source db; overriding source=db")
         args.source = "db"

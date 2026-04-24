@@ -87,7 +87,14 @@ class JobRequest(BaseModel):
     # candidate-exploration variants evaluated via the Simulator governance
     # framework — not canonical unless promoted per §5.
     overlap_dimensions:         str   = "price_oi"      # price_oi | price_volume | oi_volume | price_oi_volume
-    live_parity:                bool  = False
+    # live_parity default flipped to True on 2026-04-24 so Simulator audits
+    # are benchmarked against the same universe the live trader sees (top-100
+    # by 24h USD volume at 06:00 UTC, BloFin-filtered). Prior False default
+    # produced baskets that diverged from live at the margins (e.g. 04-23
+    # audit had TAC where live had GENIUS — 5h of rank shuffle between the
+    # 01:00 UTC leaderboards snapshot and the 05:58 UTC live pull).
+    # Set to False explicitly to explore the non-parity universe.
+    live_parity:                bool  = True
     freq_width:                 int   = 20
     freq_cutoff:                int   = 20
     sample_interval:            int   = 5
