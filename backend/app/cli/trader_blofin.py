@@ -2680,6 +2680,7 @@ def _run_monitoring_loop(today, today_date, api: ExchangeAdapter, inst_ids,
                     sym_stops_fired=sym_stops_fired,
                     session_exit_reason=exit_reason,
                     fill_report=fill_report,
+                    est_exit_prices=est_exit_prices,
                 )
             except Exception as e:
                 log.warning(
@@ -3211,6 +3212,7 @@ def _log_allocation_execution_symbols(
     sym_stops_fired: set | list | None,
     session_exit_reason: str,
     fill_report: dict | None = None,
+    est_exit_prices: dict | None = None,
 ) -> None:
     """Write one row per symbol into user_mgmt.allocation_execution_symbols.
 
@@ -3227,12 +3229,18 @@ def _log_allocation_execution_symbols(
     if not positions:
         return
     sym_stops_set = set(sym_stops_fired or [])
+    est_exit_lookup = est_exit_prices or {}
 
     rows: list[tuple] = []
     for p in positions:
         iid = p.get("inst_id")
         if not iid:
             continue
+        # est_exit_price is stored on a separate dict by the caller (master-
+        # path uses the same pattern at line ~2497), NOT on the position
+        # itself. Pull it from the lookup; fall back to whatever's on the
+        # position for forward-compat in case a future code path stashes it.
+        est_exit_price = est_exit_lookup.get(iid) or p.get("est_exit_price")
         # Per-symbol exit reason: sym_stop wins; else fall back to the
         # session-level reason (session_close / port_sl / port_tsl).
         exit_reason = "sym_stop" if iid in sym_stops_set else session_exit_reason
@@ -3277,7 +3285,7 @@ def _log_allocation_execution_symbols(
             p.get("est_entry_price"),
             p.get("fill_entry_price"),
             p.get("entry_slippage_bps"),
-            p.get("est_exit_price"),
+            est_exit_price,
             p.get("fill_exit_price"),
             p.get("exit_slippage_bps"),
             pnl_usd,
