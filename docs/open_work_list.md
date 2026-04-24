@@ -19,19 +19,13 @@ pruned — git log + commit messages are the historical record._
 - **Simulator live_parity UI toggle** (2026-04-24 late) — commit `59f52c5`. New UNIVERSE PARITY subsection at the top of EXECUTION CONFIG with an inline `live_parity` toggle (default On, matches backend default). Closes the "no opt-out path" gap noted after the default flip.
 - **Manager Overview Max DD — daily-close + capital-events adjusted** (2026-04-24 late) — commit `1a913f0`. Previous 5-min bucketed calculation was picking up transient unrealized MTM mid-session (04-23 dipped to $3,775 intraday but closed at $4,022 — labelled a -15.9% drawdown for what was actually a +17% gain day) AND unnetted operator capital movements between exchanges. New formula: daily-close equity per connection, summed, with cumulative capital events netted out via correlated subquery. Verified live: -15.9% / -$715 → -6.23% / -$239.
 - **Manager Execution table — full audit pass** (2026-04-24 late) — commit chain `7947949` → `635b35b`. Trader writer now persists `ctval` on every position dict (fresh + retry + reconcile-add) so pnl_usd computes for every symbol; added migration 013 column. `notional_usd` recalculated as `contracts × price × ctval` (fixes INX/KAT/SKR/ZEREBRO 100×/10× under-reports). `fill_report` mirrored into runtime_state at session start + every per-bar write so fill_rate + retries_used survive a subprocess respawn. `est_entry_price` writer fallback to `entry_price`. Reconcile-add path rounds fill_entry to 6 decimals, sets entry_slip to NULL (not fake 0.0), and updates `portfolio_sessions.entered[]` via new `_append_portfolio_session_entered` helper so Portfolios + Execution counts stay consistent. Manager backend: stale-filtered branch derives gross/net + est from `ps.fpr × lev_int` (gap = 0 honest); `est_return_pct` uses `effective_leverage` (was `lev_int`, made est-vs-actual look like a 9-pt miss when it was 1-pt); `pnl_gap = actual − est` (positive=beat, negative=underperform); per-symbol `est_pnl_pct` + `pnl_gap_pct` returned; per-symbol leverage uses `effective_leverage` not `lev_int`; fill_rate fallback from `len(entered)/len(symbols)`. Frontend: Est PnL % + PnL Gap columns added to per-symbol expand; Total Slip KPI card + daily-row column + per-symbol column (entry+exit, sign-preserving); pnlGapColor flipped to signed thresholds (>+0.25% green, <-0.25% red, near-zero amber); fmtPriceBare defensive rounding for any raw float that ever slips through. One-shot backfills: today's row pnl_usd + ctval + est_entry_price + ZEREBRO fill_entry rounded; ZEREBRO appended to portfolio_sessions.entered.
+- **Symbol registry nightly cron + tracked crontab file** (2026-04-24 late) — commit `ca4f11a`. `refresh_symbol_registry` scheduled at 00:45 UTC (between 00:15 metl pull and 01:00 indexer build) on prod. `ops/crontab.txt` is now a verbatim mirror of mcap's live crontab — pull fresh from prod after any cron edit so it stays in sync.
 
 ---
 
 ## 🟠 Follow-ups (same-week)
 
-### Cron-schedule the symbol registry refresh
-
-`backend/app/cli/refresh_symbol_registry.py` runs fine on prod (exercised
-manually on 2026-04-24), but it's not yet on cron. Schedule alongside
-the other nightly pulls (metl 00:15, coingecko 00:30, indexer 01:00).
-Suggested slot: **00:45 UTC daily** — after the previous day's
-leaderboards land but before `indexer 01:00` so downstream references
-see fresh ids. ~3 LOC crontab add.
+_(none open)_
 
 ---
 
