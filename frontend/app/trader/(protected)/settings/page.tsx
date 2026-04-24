@@ -816,7 +816,7 @@ function ExchangeCapitalGroup({
                   textTransform: "uppercase", padding: "5px 12px",
                   cursor: "pointer", fontFamily: FONT_MONO,
                 }}
-              >RESET TO DEFAULT</button>
+              >RESET DEFAULT</button>
             )}
             {onRecordNew && (
               <button
@@ -824,7 +824,7 @@ function ExchangeCapitalGroup({
                 disabled={group.allocations.length === 0}
                 title={group.allocations.length === 0
                   ? "No allocations on this exchange yet"
-                  : `Record a capital event on ${group.exchange_name ?? "this exchange"}`}
+                  : `Add an entry on ${group.exchange_name ?? "this exchange"}`}
                 style={{
                   background: "transparent", border: "1px solid var(--line2)",
                   borderRadius: 3,
@@ -834,7 +834,7 @@ function ExchangeCapitalGroup({
                   cursor: group.allocations.length === 0 ? "not-allowed" : "pointer",
                   fontFamily: FONT_MONO,
                 }}
-              >+ RECORD CAPITAL EVENT</button>
+              >+ ADD ENTRY</button>
             )}
           </div>
         )}
@@ -873,18 +873,31 @@ function ExchangeCapitalGroup({
               ${principal.toLocaleString("en-US", { maximumFractionDigits: 2 })}
             </span>
           </span>
-          {tradingDelta !== null && (
-            <span style={{ display: "flex", gap: 6, alignItems: "baseline" }}>
-              <span style={{ color: "var(--t3)" }}>TRADING Δ</span>
-              <span style={{
-                color: tradingDelta >= 0 ? "var(--green)" : "var(--red)",
-                fontWeight: 700,
-              }}>
-                {tradingDelta >= 0 ? "+" : "−"}$
-                {Math.abs(tradingDelta).toLocaleString("en-US", { maximumFractionDigits: 2 })}
+          {tradingDelta !== null && (() => {
+            // Near-zero gate: anything within ±$1 renders amber, not
+            // red/green. Avoids visual noise on immaterial drift.
+            const deltaColor = Math.abs(tradingDelta) < 1
+              ? "var(--amber)"
+              : tradingDelta >= 0 ? "var(--green)" : "var(--red)";
+            const pctValue = principal > 0
+              ? tradingDelta / principal * 100
+              : null;
+            return (
+              <span style={{ display: "flex", gap: 6, alignItems: "baseline" }}>
+                <span style={{ color: "var(--t3)" }}>TRADING Δ</span>
+                <span style={{ color: deltaColor, fontWeight: 700 }}>
+                  {tradingDelta >= 0 ? "+" : "−"}$
+                  {Math.abs(tradingDelta).toLocaleString("en-US", { maximumFractionDigits: 2 })}
+                  {pctValue !== null && (
+                    <span style={{ fontWeight: 400, marginLeft: 4 }}>
+                      ({pctValue >= 0 ? "+" : "−"}
+                      {Math.abs(pctValue).toFixed(2)}%)
+                    </span>
+                  )}
+                </span>
               </span>
-            </span>
-          )}
+            );
+          })()}
           <span style={{
             color: "var(--t3)", marginLeft: "auto",
             fontStyle: exchangeAnchorAt ? "normal" : "italic",
