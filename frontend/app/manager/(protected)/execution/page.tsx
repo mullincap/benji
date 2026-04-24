@@ -875,6 +875,8 @@ export default function ExecutionPage() {
                       selectedLogAllocationId === row.data.allocation_id &&
                       selectedLogDate === row.date
                     }
+                    expanded={expanded.has(`alloc:${row.data.allocation_id}:${row.date}`)}
+                    onToggleExpand={() => toggle(`alloc:${row.data.allocation_id}:${row.date}`)}
                   />
                 ) : (
                   <DayRow
@@ -903,11 +905,32 @@ export default function ExecutionPage() {
 // until the writer extension populates them. Not expandable — per-symbol
 // detail for allocations is part of the deferred writer extension.
 
+interface ExecPositionRow {
+  inst_id: string;
+  side: string | null;
+  target_contracts: number | null;
+  filled_contracts: number | null;
+  fill_pct: number | null;
+  est_entry_price: number | null;
+  fill_entry_price: number | null;
+  entry_slippage_bps: number | null;
+  est_exit_price: number | null;
+  fill_exit_price: number | null;
+  exit_slippage_bps: number | null;
+  pnl_usd: number | null;
+  pnl_pct: number | null;
+  exit_reason: string | null;
+  retry_rounds: number | null;
+  sym_stopped: boolean;
+}
+
 function AllocationDayRow({
   row,
   showAllocCol,
   onSelect,
   selected,
+  expanded,
+  onToggleExpand,
 }: {
   row: SummaryDaily;
   showAllocCol: boolean;
@@ -915,14 +938,50 @@ function AllocationDayRow({
   onSelect: (allocationId: string, date: string) => void;
   /** True when this row is currently feeding the Session Logs viewer. */
   selected: boolean;
+  /** True when the per-symbol breakdown is visible below this row. */
+  expanded: boolean;
+  /** Toggle per-symbol expand. */
+  onToggleExpand: () => void;
 }) {
   const exitReason = row.exit_reason ?? "";
   const flat = FLAT_REASONS.has(exitReason);
-  const rowClick = () => onSelect(row.allocation_id, row.date);
+  const rowClick = () => {
+    onToggleExpand();
+    onSelect(row.allocation_id, row.date);
+  };
   const rowStyle = {
     cursor: "pointer",
     background: selected ? "var(--bg3)" : undefined,
   } as React.CSSProperties;
+
+  // Per-symbol positions fetch: runs only when the row is expanded.
+  // Populated by the trader writer (see _log_allocation_execution_symbols
+  // in backend/app/cli/trader_blofin.py); empty for sessions before that
+  // writer was deployed.
+  const [positions, setPositions] = useState<ExecPositionRow[] | null>(null);
+  const [loadingPositions, setLoadingPositions] = useState(false);
+  useEffect(() => {
+    if (!expanded) return;
+    if (positions !== null) return;  // already fetched
+    let cancelled = false;
+    setLoadingPositions(true);
+    const url = `${API_BASE}/api/manager/execution-summary/${row.date}/positions?allocation_id=${encodeURIComponent(row.allocation_id)}`;
+    fetch(url, { credentials: "include" })
+      .then((r) => r.ok ? r.json() : { positions: [] })
+      .then((d) => {
+        if (cancelled) return;
+        setPositions((d.positions as ExecPositionRow[]) || []);
+        setLoadingPositions(false);
+      })
+      .catch(() => {
+        if (cancelled) return;
+        setPositions([]);
+        setLoadingPositions(false);
+      });
+    return () => { cancelled = true; };
+  }, [expanded, positions, row.date, row.allocation_id]);
+
+  const totalCols = (showAllocCol ? 16 : 15);
 
   const allocCell = showAllocCol ? (
     <td style={{ ...tdStyle, color: "var(--t1)" }}>
@@ -948,54 +1007,150 @@ function AllocationDayRow({
 
   if (flat) {
     return (
-      <tr onClick={rowClick} style={{ ...rowStyle, opacity: 0.6 }}>
-        <td style={tdStyle}></td>
-        <td style={{ ...tdStyle, color: "var(--t2)" }}>{row.date}</td>
-        {allocCell}
-        <td style={tdStyle}>{row.signal_count ?? "—"}</td>
-        <td style={tdStyle}>{convBadge}</td>
-        <td
-          colSpan={showAllocCol ? 11 : 11}
-          style={{ ...tdStyle, color: "var(--t2)", fontStyle: "italic" }}
-        >
-          {prettyReason(exitReason)}
-        </td>
-      </tr>
+      <>
+        <tr onClick={rowClick} style={{ ...rowStyle, opacity: 0.6 }}>
+          <td style={tdStyle}>{expanded ? "▾" : "▸"}</td>
+          <td style={{ ...tdStyle, color: "var(--t2)" }}>{row.date}</td>
+          {allocCell}
+          <td style={tdStyle}>{row.signal_count ?? "—"}</td>
+          <td style={tdStyle}>{convBadge}</td>
+          <td
+            colSpan={showAllocCol ? 11 : 11}
+            style={{ ...tdStyle, color: "var(--t2)", fontStyle: "italic" }}
+          >
+            {prettyReason(exitReason)}
+          </td>
+        </tr>
+        {expanded && (
+          <PositionsSubRow
+            colSpan={totalCols}
+            positions={positions}
+            loading={loadingPositions}
+          />
+        )}
+      </>
     );
   }
 
   return (
-    <tr onClick={rowClick} style={rowStyle}>
-      <td style={tdStyle}></td>
-      <td style={{ ...tdStyle, color: "var(--t0)" }}>{row.date}</td>
-      {allocCell}
-      <td style={tdStyle}>{row.signal_count ?? "—"}</td>
-      <td style={tdStyle}>{convBadge}</td>
-      <td style={{ ...tdStyle, color: "var(--t1)" }}>
-        {row.filled ? "yes" : "no"}
+    <>
+      <tr onClick={rowClick} style={rowStyle}>
+        <td style={tdStyle}>{expanded ? "▾" : "▸"}</td>
+        <td style={{ ...tdStyle, color: "var(--t0)" }}>{row.date}</td>
+        {allocCell}
+        <td style={tdStyle}>{row.signal_count ?? "—"}</td>
+        <td style={tdStyle}>{convBadge}</td>
+        <td style={{ ...tdStyle, color: "var(--t1)" }}>
+          {row.filled ? "yes" : "no"}
+        </td>
+        <td style={tdStyle}>{row.retried ?? "—"}</td>
+        <td style={{ ...tdStyle, color: fillRateColor(row.fill_rate) }}>
+          {row.fill_rate === null ? "—" : `${row.fill_rate.toFixed(0)}%`}
+        </td>
+        <td style={{ ...tdStyle, color: entrySlipColor(row.entry_slip_bps) }}>
+          {fmtBps(row.entry_slip_bps)}
+        </td>
+        <td style={{ ...tdStyle, color: exitSlipColor(row.exit_slip_bps) }}>
+          {fmtBps(row.exit_slip_bps)}
+        </td>
+        <td style={tdStyle}>{fmtPct(row.est_return_pct)}</td>
+        <td style={tdStyle}>{fmtPct(row.actual_return_pct)}</td>
+        <td style={{ ...tdStyle, color: pnlGapColor(row.pnl_gap_pct_from_gross) }}>
+          {fmtPct(row.pnl_gap_pct_from_gross)}
+        </td>
+        <td style={tdStyle}>
+          {row.leverage_applied ? `${row.leverage_applied.toFixed(2)}x` : "—"}
+        </td>
+        <td style={{ ...tdStyle, color: "var(--t2)" }}>
+          {prettyReason(exitReason || "—")}
+        </td>
+        <td style={{ ...tdStyle, color: "var(--t2)" }}>{row.alerts ?? "—"}</td>
+      </tr>
+      {expanded && (
+        <PositionsSubRow
+          colSpan={totalCols}
+          positions={positions}
+          loading={loadingPositions}
+        />
+      )}
+    </>
+  );
+}
+
+// ─── Per-symbol sub-row (expanded per allocation-day) ──────────────────────
+// Rendered below an AllocationDayRow when the user expands it. Fetches from
+// /api/manager/execution-summary/{date}/positions and renders one row per
+// symbol with fill / slippage / PnL / exit_reason. Sessions that ran before
+// the trader writer extension landed will have no rows — the empty state
+// explains that clearly.
+
+function PositionsSubRow({
+  colSpan,
+  positions,
+  loading,
+}: {
+  colSpan: number;
+  positions: ExecPositionRow[] | null;
+  loading: boolean;
+}) {
+  return (
+    <tr>
+      <td colSpan={colSpan} style={{ padding: 0, background: "var(--bg1)" }}>
+        <div style={{ padding: "10px 24px 14px 48px" }}>
+          {loading || positions === null ? (
+            <div style={{ fontSize: 10, color: "var(--t3)", padding: "6px 0" }}>Loading per-symbol detail…</div>
+          ) : positions.length === 0 ? (
+            <div style={{ fontSize: 10, color: "var(--t3)", padding: "6px 0", fontStyle: "italic" }}>
+              No per-symbol data for this session — populated starting with the trader writer extension deployed 2026-04-24.
+            </div>
+          ) : (
+            <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 10 }}>
+              <thead>
+                <tr>
+                  {[
+                    "SYMBOL", "SIDE", "SIZE", "ENTRY EST", "ENTRY FILL",
+                    "ENTRY SLIP", "EXIT EST", "EXIT FILL", "EXIT SLIP",
+                    "PNL USD", "PNL %", "EXIT", "RETRIES",
+                  ].map((h) => (
+                    <th key={h} style={{ ...thStyle, fontSize: 8 }}>{h}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {positions.map((p) => (
+                  <tr key={p.inst_id}>
+                    <td style={{ ...tdStyle, color: "var(--t0)", fontWeight: 700 }}>
+                      {p.inst_id.replace(/-USDT(-SWAP)?$/, "")}
+                    </td>
+                    <td style={{ ...tdStyle, color: "var(--t2)" }}>{p.side ?? "—"}</td>
+                    <td style={tdStyle}>{p.filled_contracts ?? "—"}</td>
+                    <td style={tdStyle}>{p.est_entry_price?.toString() ?? "—"}</td>
+                    <td style={tdStyle}>{p.fill_entry_price?.toString() ?? "—"}</td>
+                    <td style={{ ...tdStyle, color: entrySlipColor(p.entry_slippage_bps) }}>
+                      {fmtBps(p.entry_slippage_bps)}
+                    </td>
+                    <td style={tdStyle}>{p.est_exit_price?.toString() ?? "—"}</td>
+                    <td style={tdStyle}>{p.fill_exit_price?.toString() ?? "—"}</td>
+                    <td style={{ ...tdStyle, color: exitSlipColor(p.exit_slippage_bps) }}>
+                      {fmtBps(p.exit_slippage_bps)}
+                    </td>
+                    <td style={{ ...tdStyle, color: (p.pnl_usd ?? 0) >= 0 ? "var(--green)" : "var(--red)" }}>
+                      {p.pnl_usd === null ? "—" : `${p.pnl_usd >= 0 ? "+" : ""}$${p.pnl_usd.toFixed(2)}`}
+                    </td>
+                    <td style={{ ...tdStyle, color: (p.pnl_pct ?? 0) >= 0 ? "var(--green)" : "var(--red)" }}>
+                      {fmtPct(p.pnl_pct)}
+                    </td>
+                    <td style={{ ...tdStyle, color: p.sym_stopped ? "var(--amber)" : "var(--t2)" }}>
+                      {p.exit_reason ?? "—"}
+                    </td>
+                    <td style={tdStyle}>{p.retry_rounds ?? 0}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+        </div>
       </td>
-      <td style={tdStyle}>{row.retried ?? "—"}</td>
-      <td style={{ ...tdStyle, color: fillRateColor(row.fill_rate) }}>
-        {row.fill_rate === null ? "—" : `${row.fill_rate.toFixed(0)}%`}
-      </td>
-      <td style={{ ...tdStyle, color: entrySlipColor(row.entry_slip_bps) }}>
-        {fmtBps(row.entry_slip_bps)}
-      </td>
-      <td style={{ ...tdStyle, color: exitSlipColor(row.exit_slip_bps) }}>
-        {fmtBps(row.exit_slip_bps)}
-      </td>
-      <td style={tdStyle}>{fmtPct(row.est_return_pct)}</td>
-      <td style={tdStyle}>{fmtPct(row.actual_return_pct)}</td>
-      <td style={{ ...tdStyle, color: pnlGapColor(row.pnl_gap_pct_from_gross) }}>
-        {fmtPct(row.pnl_gap_pct_from_gross)}
-      </td>
-      <td style={tdStyle}>
-        {row.leverage_applied ? `${row.leverage_applied.toFixed(2)}x` : "—"}
-      </td>
-      <td style={{ ...tdStyle, color: "var(--t2)" }}>
-        {prettyReason(exitReason || "—")}
-      </td>
-      <td style={{ ...tdStyle, color: "var(--t2)" }}>{row.alerts ?? "—"}</td>
     </tr>
   );
 }

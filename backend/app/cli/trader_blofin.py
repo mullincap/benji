@@ -2669,6 +2669,23 @@ def _run_monitoring_loop(today, today_date, api: ExchangeAdapter, inst_ids,
                     f"nightly backfill cron runs"
                 )
 
+            # Per-symbol execution telemetry (Gap 7). Best-effort — logs a
+            # WARN on failure but doesn't raise. Additive telemetry; a miss
+            # only degrades the Manager Execution per-symbol expand for
+            # that session.
+            try:
+                _log_allocation_execution_symbols(
+                    allocation_id, today,
+                    positions=positions,
+                    sym_stops_fired=sym_stops_fired,
+                    session_exit_reason=exit_reason,
+                    fill_report=fill_report,
+                )
+            except Exception as e:
+                log.warning(
+                    f"{log_prefix}_log_allocation_execution_symbols failed: {e}"
+                )
+
             # ── Compounding mode: roll session-close equity into capital_usd ─
             # When allocations.compounding_mode = 'compound', capital_usd
             # auto-updates to the post-exit wallet equity so the next
@@ -3183,6 +3200,132 @@ def _log_allocation_return(
         conn.commit()
     except Exception as e:
         log.warning(f"  Could not log performance_daily for {allocation_id}: {e}")
+    finally:
+        conn.close()
+
+
+def _log_allocation_execution_symbols(
+    allocation_id: str,
+    session_date: str,
+    positions: list[dict],
+    sym_stops_fired: set | list | None,
+    session_exit_reason: str,
+    fill_report: dict | None = None,
+) -> None:
+    """Write one row per symbol into user_mgmt.allocation_execution_symbols.
+
+    Called after _log_allocation_return in the allocation-mode close. Uses
+    the same post-reconcile `positions` list (so entry + exit slippage are
+    populated) plus the sym_stops_fired set (so per-symbol exit_reason can
+    distinguish sym_stop vs session_close vs port_sl/port_tsl).
+
+    Best-effort — any exception is swallowed with a WARN so this never
+    prevents allocation_returns from being written. The table is additive
+    telemetry; a missing row degrades the Manager Execution per-symbol
+    expand for that session but does not affect trading.
+    """
+    if not positions:
+        return
+    sym_stops_set = set(sym_stops_fired or [])
+
+    rows: list[tuple] = []
+    for p in positions:
+        iid = p.get("inst_id")
+        if not iid:
+            continue
+        # Per-symbol exit reason: sym_stop wins; else fall back to the
+        # session-level reason (session_close / port_sl / port_tsl).
+        exit_reason = "sym_stop" if iid in sym_stops_set else session_exit_reason
+
+        # pnl from fills when both are available.  Side not yet tracked
+        # per symbol (strategy is long-only today); set to "long" as a
+        # placeholder so the column isn't always NULL.
+        side = p.get("side") or "long"
+        fill_entry = p.get("fill_entry_price")
+        fill_exit  = p.get("fill_exit_price")
+        contracts  = p.get("filled_contracts") or p.get("contracts")
+        ctval      = p.get("ctval") or p.get("ct_val")
+
+        pnl_pct = None
+        pnl_usd = None
+        try:
+            if fill_entry is not None and fill_exit is not None and float(fill_entry) > 0:
+                raw = (float(fill_exit) - float(fill_entry)) / float(fill_entry) * 100.0
+                # strategy is long-only; negate for shorts in the future.
+                pnl_pct = -raw if side == "short" else raw
+                if contracts and ctval:
+                    pnl_usd = (float(fill_exit) - float(fill_entry)) * float(contracts) * float(ctval)
+                    if side == "short":
+                        pnl_usd = -pnl_usd
+        except (TypeError, ValueError):
+            pass
+
+        # retry_rounds: pulled from fill_report when available (symbol-scoped).
+        retry_rounds = 0
+        if fill_report and isinstance(fill_report.get("fills"), dict):
+            for s in (fill_report["fills"].get("symbols") or []):
+                if s.get("inst_id") == iid:
+                    retry_rounds = int(s.get("retry_rounds") or 0)
+                    break
+
+        rows.append((
+            allocation_id, session_date, iid,
+            side,
+            p.get("target_contracts"),
+            p.get("filled_contracts") or p.get("contracts"),
+            p.get("fill_pct"),
+            p.get("est_entry_price"),
+            p.get("fill_entry_price"),
+            p.get("entry_slippage_bps"),
+            p.get("est_exit_price"),
+            p.get("fill_exit_price"),
+            p.get("exit_slippage_bps"),
+            pnl_usd,
+            pnl_pct,
+            exit_reason,
+            retry_rounds,
+            iid in sym_stops_set,
+        ))
+
+    if not rows:
+        return
+    conn = _trader_db_connect()
+    try:
+        with conn.cursor() as cur:
+            cur.executemany(
+                """
+                INSERT INTO user_mgmt.allocation_execution_symbols
+                    (allocation_id, session_date, inst_id, side,
+                     target_contracts, filled_contracts, fill_pct,
+                     est_entry_price, fill_entry_price, entry_slippage_bps,
+                     est_exit_price, fill_exit_price, exit_slippage_bps,
+                     pnl_usd, pnl_pct, exit_reason, retry_rounds, sym_stopped)
+                VALUES (%s::uuid, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                        %s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (allocation_id, session_date, inst_id) DO UPDATE SET
+                    side                = EXCLUDED.side,
+                    target_contracts    = EXCLUDED.target_contracts,
+                    filled_contracts    = EXCLUDED.filled_contracts,
+                    fill_pct            = EXCLUDED.fill_pct,
+                    est_entry_price     = EXCLUDED.est_entry_price,
+                    fill_entry_price    = EXCLUDED.fill_entry_price,
+                    entry_slippage_bps  = EXCLUDED.entry_slippage_bps,
+                    est_exit_price      = EXCLUDED.est_exit_price,
+                    fill_exit_price     = EXCLUDED.fill_exit_price,
+                    exit_slippage_bps   = EXCLUDED.exit_slippage_bps,
+                    pnl_usd             = EXCLUDED.pnl_usd,
+                    pnl_pct             = EXCLUDED.pnl_pct,
+                    exit_reason         = EXCLUDED.exit_reason,
+                    retry_rounds        = EXCLUDED.retry_rounds,
+                    sym_stopped         = EXCLUDED.sym_stopped,
+                    updated_at          = NOW()
+                """,
+                rows,
+            )
+        conn.commit()
+        log.info(f"  Wrote {len(rows)} allocation_execution_symbols rows for {allocation_id[:8]}/{session_date}")
+    except Exception as e:
+        log.warning(f"  Could not log allocation_execution_symbols for {allocation_id}: {e}")
     finally:
         conn.close()
 

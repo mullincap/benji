@@ -1535,6 +1535,63 @@ def execution_summary(
     }
 
 
+@router.get("/execution-summary/{session_date}/positions")
+def execution_summary_positions(
+    session_date: str,
+    allocation_id: str,
+    cur=Depends(get_cursor),
+) -> dict[str, Any]:
+    """Per-symbol execution breakdown for a single (allocation × session_date).
+
+    Backs the Manager Execution per-row expand. Pulls from
+    user_mgmt.allocation_execution_symbols, which the trader writes at
+    session close (see _log_allocation_execution_symbols in trader_blofin.py).
+
+    Pre-trader-extension sessions have no rows — response returns an empty
+    list and the frontend renders a "no per-symbol data" notice.
+    """
+    cur.execute(
+        """
+        SELECT inst_id, side,
+               target_contracts, filled_contracts, fill_pct,
+               est_entry_price, fill_entry_price, entry_slippage_bps,
+               est_exit_price, fill_exit_price, exit_slippage_bps,
+               pnl_usd, pnl_pct, exit_reason, retry_rounds, sym_stopped
+          FROM user_mgmt.allocation_execution_symbols
+         WHERE allocation_id = %s::uuid
+           AND session_date  = %s::date
+         ORDER BY sym_stopped DESC, inst_id ASC
+        """,
+        (allocation_id, session_date),
+    )
+    rows = [
+        {
+            "inst_id":            r["inst_id"],
+            "side":               r["side"],
+            "target_contracts":   _dec(r["target_contracts"]),
+            "filled_contracts":   _dec(r["filled_contracts"]),
+            "fill_pct":           _dec(r["fill_pct"]),
+            "est_entry_price":    _dec(r["est_entry_price"]),
+            "fill_entry_price":   _dec(r["fill_entry_price"]),
+            "entry_slippage_bps": _dec(r["entry_slippage_bps"]),
+            "est_exit_price":     _dec(r["est_exit_price"]),
+            "fill_exit_price":    _dec(r["fill_exit_price"]),
+            "exit_slippage_bps":  _dec(r["exit_slippage_bps"]),
+            "pnl_usd":            _dec(r["pnl_usd"]),
+            "pnl_pct":            _dec(r["pnl_pct"]),
+            "exit_reason":        r["exit_reason"],
+            "retry_rounds":       r["retry_rounds"],
+            "sym_stopped":        r["sym_stopped"],
+        }
+        for r in cur.fetchall()
+    ]
+    return {
+        "allocation_id": allocation_id,
+        "session_date":  session_date,
+        "positions":     rows,
+    }
+
+
 # ── Portfolio time series (SQL-backed) ──────────────────────────────────────
 # The Manager UI reads exclusively from user_mgmt.portfolio_sessions +
 # user_mgmt.portfolio_bars, which the trader writes live every 5 minutes.
