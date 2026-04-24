@@ -1266,11 +1266,74 @@ def enter_positions(api: ExchangeAdapter, inst_ids, entry_prices,
 
         failed = still_failed
 
+    # ── Shrinking-size fallback ────────────────────────────────────────────
+    # If the main retry loop exhausted (typical for BloFin risk-control
+    # rejections on low-liquidity pairs — observed on VELVET-USDT
+    # 2026-04-23 and ZEREBRO-USDT 2026-04-24), step down through a fixed
+    # ladder of fractions-of-original. BloFin UI market-fills by the
+    # operator have always worked at smaller sizes, suggesting the
+    # risk-control threshold is notional-based — a partial fill at 1-2%
+    # of target is still strictly better than zero, and the monitoring
+    # loop handles partial-size positions natively.
+    #
+    # First success wins. If the ladder runs out with zero fills the
+    # symbol is genuinely blocked and gets marked skipped as before.
+    LADDER_FRACTIONS = [0.25, 0.10, 0.05, 0.02, 0.01]
+    for item in list(failed):
+        inst_id = item["inst_id"]
+        target  = item["contracts"]
+        lot     = item["lot"]
+        min_sz  = item["min_sz"]
+        max_mkt = item["max_mkt"]
+        price   = item["price"]
+
+        ladder_attempts = []
+        ladder_filled = False
+        for frac in LADDER_FRACTIONS:
+            attempt = _round_to_lot(target * frac, lot)
+            if attempt < min_sz:
+                ladder_attempts.append(f"{frac*100:.0f}%={attempt}ct<min")
+                continue
+            time.sleep(2)
+            ok_l, oid_l = _place_order_chunked(
+                api, inst_id, attempt, lot, min_sz, max_mkt,
+                sl_trigger_price=None,  # embedded SL is already disabled globally
+            )
+            ladder_attempts.append(f"{frac*100:.0f}%={attempt}ct→{'OK' if ok_l else 'FAIL'}")
+            if ok_l:
+                log.warning(
+                    f"  ⚠️  {inst_id} ladder fill succeeded at {frac*100:.0f}% "
+                    f"({attempt}ct vs {target}ct target) orderId={oid_l}"
+                )
+                filled_via_retry_syms.add(inst_id)
+                if inst_id in opened_by_sym:
+                    opened_by_sym[inst_id]["contracts"] += attempt
+                    opened_by_sym[inst_id]["retry_rounds"] = MAX_ENTRY_RETRIES + 1
+                else:
+                    opened_by_sym[inst_id] = {
+                        "inst_id": inst_id, "contracts": attempt,
+                        "entry_price": price, "order_id": oid_l,
+                        "lev_int": item["lev_int"],
+                        "marginMode": MARGIN_MODE,
+                        "positionSide": POSITION_SIDE,
+                        "target_contracts": symbol_status[inst_id]["target_contracts"],
+                        "retry_rounds": MAX_ENTRY_RETRIES + 1,
+                    }
+                symbol_status[inst_id]["filled_contracts"] += attempt
+                symbol_status[inst_id]["retry_rounds"] = MAX_ENTRY_RETRIES + 1
+                symbol_status[inst_id]["order_ids"].append(oid_l)
+                ladder_filled = True
+                break
+
+        log.info(f"  {inst_id} ladder attempts: {' | '.join(ladder_attempts)}")
+        if ladder_filled:
+            failed = [it for it in failed if it["inst_id"] != inst_id]
+
     for item in failed:
-        log.error(f"RETRY EXHAUSTED {item['inst_id']}: {item['contracts']}ct unfilled after {MAX_ENTRY_RETRIES} rounds")
+        log.error(f"RETRY EXHAUSTED {item['inst_id']}: {item['contracts']}ct unfilled after {MAX_ENTRY_RETRIES} rounds + ladder fallback")
         if symbol_status[item["inst_id"]]["skipped_reason"] is None:
             symbol_status[item["inst_id"]]["skipped_reason"] = (
-                f"retry_exhausted_{MAX_ENTRY_RETRIES}_rounds"
+                f"retry_and_ladder_exhausted"
             )
 
     # Finalize per-symbol fill_pct and notional (using est_entry_price as the
