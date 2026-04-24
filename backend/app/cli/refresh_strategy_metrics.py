@@ -296,9 +296,22 @@ def refresh_one(sv: dict[str, Any], *, dry_run: bool = False) -> dict[str, Any]:
             # _overwrite_equity_chart) and persist to audit.equity_curves
             # keyed on this result_id. Consumed by the strategy view's
             # /api/allocator/strategies/{id}/returns endpoint.
+            # Filename sanitization mirrors audit.py's rule exactly:
+            # non-alnum chars (except -_.) → underscore.
             _equity_rows = 0
             try:
-                _equity_csv = audit_output_path.parent / f"equity_{picked_filter_name}.csv"
+                _safe_label = "".join(
+                    c if c.isalnum() or c in "-_." else "_"
+                    for c in str(picked_filter_name)
+                )
+                _equity_csv = audit_output_path.parent / f"equity_{_safe_label}.csv"
+                # Fall back to glob match if the exact sanitized name isn't
+                # there — covers small drift in audit.py's write rule.
+                if not _equity_csv.exists():
+                    _matches = list(audit_output_path.parent.glob("equity_*.csv"))
+                    if _matches:
+                        _equity_csv = _matches[0]
+                        log.info(f"  [{short_id}] equity CSV fallback: {_equity_csv.name}")
                 if _equity_csv.exists():
                     import csv as _csv
                     with open(_equity_csv) as _fh:
