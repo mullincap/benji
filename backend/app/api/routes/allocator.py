@@ -885,6 +885,92 @@ def get_strategies(
     return {"strategies": result}
 
 
+@router.get("/strategies/{strategy_version_id}/returns")
+def get_strategy_returns(
+    strategy_version_id: str,
+    days: int = 0,
+    user_id: str = Depends(get_current_user),
+    cur=Depends(get_cursor),
+) -> dict[str, Any]:
+    """Daily equity/return series for a strategy_version.
+
+    Resolution chain: strategy_version_id → latest audit.jobs → audit.results
+    → audit.equity_curves (populated nightly by app.cli.refresh_strategy_metrics
+    via the AUDIT_DAILY_EQUITY_DIR hook in audit.py).
+
+    Parameters
+    ----------
+    strategy_version_id : UUID of the audit.strategy_versions row
+    days : 0 = return the full series. Positive N = last N days only.
+
+    Response: { strategy_version_id, result_id, rows: [{date, equity, daily_return, drawdown}] }
+    Empty rows array if audit.equity_curves has no data yet for this version.
+    """
+    cur.execute(
+        """
+        SELECT r.result_id::text AS result_id
+          FROM audit.results r
+          JOIN audit.jobs j ON j.job_id = r.job_id
+         WHERE j.strategy_version_id = %s::uuid
+           AND EXISTS (SELECT 1 FROM audit.equity_curves ec WHERE ec.result_id = r.result_id)
+         ORDER BY j.updated_at DESC
+         LIMIT 1
+        """,
+        (strategy_version_id,),
+    )
+    row = cur.fetchone()
+    if row is None:
+        return {
+            "strategy_version_id": strategy_version_id,
+            "result_id": None,
+            "rows": [],
+        }
+    result_id = row["result_id"]
+
+    if days and days > 0:
+        cur.execute(
+            """
+            SELECT to_char(date, 'YYYY-MM-DD') AS date,
+                   equity, daily_return, drawdown
+              FROM audit.equity_curves
+             WHERE result_id = %s::uuid
+               AND date >= (
+                   SELECT MAX(date) - (%s || ' days')::interval
+                     FROM audit.equity_curves
+                    WHERE result_id = %s::uuid
+               )
+             ORDER BY date
+            """,
+            (result_id, days, result_id),
+        )
+    else:
+        cur.execute(
+            """
+            SELECT to_char(date, 'YYYY-MM-DD') AS date,
+                   equity, daily_return, drawdown
+              FROM audit.equity_curves
+             WHERE result_id = %s::uuid
+             ORDER BY date
+            """,
+            (result_id,),
+        )
+
+    rows = [
+        {
+            "date": r["date"],
+            "equity": float(r["equity"]) if r["equity"] is not None else None,
+            "daily_return": float(r["daily_return"]) if r["daily_return"] is not None else None,
+            "drawdown": float(r["drawdown"]) if r["drawdown"] is not None else None,
+        }
+        for r in cur.fetchall()
+    ]
+    return {
+        "strategy_version_id": strategy_version_id,
+        "result_id": result_id,
+        "rows": rows,
+    }
+
+
 # ── Strategy publish / unpublish (admin-only) ──────────────────────────────
 # Toggles audit.strategies.is_published — the filter the list query above
 # applies. Admin-gated because controlling what regular allocator users can
