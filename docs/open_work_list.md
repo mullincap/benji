@@ -1,147 +1,49 @@
 # Open Work List
 
-_Last cleanup: 2026-04-24. Anything that shipped is intentionally pruned —
-git log + commit messages are the historical record._
+_Last cleanup: 2026-04-24 (late). Anything that shipped is intentionally
+pruned — git log + commit messages are the historical record._
 
 ## ✅ Recently shipped (2026-04-23 → 2026-04-24)
 
 - **ALTS MAIN live promotion** (former Gaps 1-8) — strategy live on allocation `f87fe130`, per-strategy `tail_drop_pct` config-read in `daily_signal_v2.py`, Dispersion filter ported, allocation pointed at ALTS MAIN's `strategy_version_id`, capital-events reconciliation (compute-on-read + auto-poll exchange income APIs)
 - **Manager Execution table fixes** — Gap 6 (stale 04-23 "filtered" row when session was actually recovered) → commit `0721e3b`. Gap 7 (per-symbol expand on each daily row, with NOTIONAL + LEV columns) → commits `bc6339b` + `28333f5` + `29d5284`. Gap 8 (reconcile vs Session E spec) → substantively addressed by Gap 6 + Gap 7 fixes; ALLOCATION column already restored.
 - **Strategy detail page real data** — equity curve + calendar heatmap rendered from `audit.equity_curves`, populated nightly via the existing `refresh_strategy_metrics` cron + new audit.py CSV write hook → commits `72a3363`, `2623d00`, `aaf8be9`, `57e405b`, `5d4758e`
-- **Simulator live-parity** — `--live-parity` knob in `overlap_analysis.py` + JobRequest `live_parity` field + frontend dropdown. Closes the audit-vs-live symbol-selection divergence → commits `c8768fc`, `89d8e5c`, `fcb88be`, `392094f`
+- **Simulator live-parity backend + CLI** — `--live-parity` knob in `overlap_analysis.py` + JobRequest `live_parity` field. Previously marked as shipping the UI toggle too; that was incorrect (those commits shipped `ranking_metric` dropdown, not the live_parity toggle) → commits `c8768fc`, `89d8e5c`, `fcb88be`, `392094f`
 - **Capital Events UI** on `/trader/settings` + auto-poll exchange income APIs → commit `99ddf61`
 - **Trader fill_rate / entry_slip / retries** — verified working in current code via dry-call (2026-04-24). The historical NULLs on the 2026-04-21 row are pre-writer-extension stale data, not a current bug. All 6 KPIs at the top of `/manager/execution` will populate naturally starting with the next session close.
 - **Trader resilience hardening** (2026-04-24) — six-commit bundle deployed via manual rebuild after kill+respawn of PID 623 with ~3 min unmanaged window. Commits: `6c3b506` SIGTERM/SIGINT/atexit → lock release on graceful shutdown. `957524a` revert shrinking-size ladder (hypothesis disproven by operator $1,800 UI fill succeeding). `6911252` per-bar reconcile in monitoring loop (every 5 min) + raw BloFin reject payload logging in `BlofinAdapter._submit_order`. `a3917db` classify "risk control"/"low-liquidity pair" BloFin errors as non-retriable (avoids extending BloFin's 5-min cooldown via further retries). `21cfca2` entry order spacing (5s base + 0-3s jitter between symbols; 5-symbol basket now 20-32s total span vs prior 4.5s). `e0c6129` retry cadence 5s → 330s (5.5 min) + `MAX_ENTRY_RETRIES` 3 → 1.
 - **Manager Overview KPI A+B** (2026-04-24) — commit `adc5e66`. Today P&L fallback gate changed from `not perf_by_alloc` to `no today row` (so snapshot-based fallback fills the gap when today's performance_daily row is absent). Max DD scope intersected with connections that have a snapshot in the last 48h (drops phantom-cliff contribution from retired Binance connection_id `f428458f`).
+- **Portfolio_session auto-close on SIGTERM + supervisor sweep** (2026-04-24 late) — commit `7496f47`. SIGTERM/SIGINT/atexit handler now closes the held portfolio_sessions row as `exit_reason='subprocess_died'` before exit (next to the existing lock release). Belt-and-suspenders sweep in `trader_supervisor.py` covers past-date active rows (signal_date < today) and today rows where runtime_state is stale for >15m AND phase ≠ 'active' — catches the SIGKILL case the signal handler can't.
+- **Manager Overview KPI C — Total AUM baseline unified** (2026-04-24 late) — commit `fd78a61`. Manager's Total P&L subvalue now derives principal the same way Allocator's `/trader/{id}/pnl` does: `SUM(connection.principal_baseline_usd + capital_events since principal_anchor_at)` across all connections with an active allocation, then `total_live_equity - sum_principal`. Verified live on 04-24: $4,874.96 − $2,673.32 = **$2,201.65** matches the Allocator card number. Bootstrap fallback preserved for fresh installs without capital-events history.
+- **Simulator live_parity=True default + audit-log label + symbol registry refresh** (2026-04-24 late) — commit `11da28a`. Flipped `JobRequest.live_parity` default from False → True so Simulator audits match the universe the live trader sees. Prominent `LIVE-PARITY: ON/OFF` header added to every `overlap_analysis.py` run. New `backend/app/cli/refresh_symbol_registry.py` pulls BloFin `/api/v1/market/instruments` + Binance `/fapi/v1/exchangeInfo` and UPSERTs `market.symbols.binance_id`/`blofin_id` — 15 inserts + 144 updates on first prod run, GENIUS now populated (`GENIUS-USDT`/`GENIUSUSDT`).
 
 ---
 
-## 🔴 TOP PRIORITY — Unclosed portfolio_session on mid-session trader death
+## 🟠 Follow-ups (same-week)
 
-### 2026-04-23 session stuck as LIVE with 193 bars, no exit reason
+### Live_parity UI toggle inside Simulator Execution Configs
 
-Observed 2026-04-24 via `/manager/portfolios`: the 2026-04-23 row renders
-status=LIVE, bars=193, exit='—' (vs 2026-04-21 which correctly shows
-status=Session Close, bars=197, exit='session_close'). 193 bars × 5min
-≈ 16h of monitoring — the session started around the ~06:31 UTC
-recovery-respawn that morning, then died silently mid-afternoon when
-one of the backend rebuilds during our ship work killed the subprocess
-without graceful close.
+Backend default now flips to True (commit `11da28a`), so users are on
+the live-parity universe automatically. But there's still no explicit
+opt-out toggle in the Simulator left panel — someone wanting to
+explore the non-parity universe has to hit the API directly.
 
-**Root cause:** `user_mgmt.portfolio_sessions` rows have a lifecycle
-managed by the trader: INSERTed at session start with `status='active'`,
-then UPDATEd to `status='closed'` + `exit_reason` + `exit_time_utc` at
-the normal exit path in `trader_blofin.py` (`_close_portfolio_session_
-for_allocation`). A SIGTERM/SIGKILL mid-loop skips that path — the row
-stays `active` forever. Parallel to the Manager Execution stale-row
-problem we already fixed (Gap 6), but surfacing in the Portfolios tab
-instead.
+**Fix:** add a `live_parity` boolean toggle in the Execution Configs
+section of the Simulator's left panel ParamForm, mirroring the pattern
+of existing boolean params like `end_cross_midnight`. Default True to
+match the backend.
 
-**Fix:**
-1. **One-shot DB cleanup** for the stuck 04-23 row now:
-   ```sql
-   UPDATE user_mgmt.portfolio_sessions
-      SET status='closed',
-          exit_reason='subprocess_died',
-          exit_time_utc=NOW()
-    WHERE allocation_id='f87fe130-a90c-4e60-908a-14f4065b415c'::uuid
-      AND signal_date='2026-04-23'::date
-      AND status='active';
-   ```
+**Scope:** ~15 LOC frontend only. No backend change (default already
+True). Trivial.
 
-2. **Persistent fix** — extend the SIGTERM handler (commit `6c3b506`)
-   to ALSO close the portfolio_session if one is active. The handler
-   currently only releases the allocation lock. Add:
-   ```python
-   # In _release_held_lock_on_shutdown()
-   _close_held_portfolio_session_if_active()  # new helper
-   ```
-   Where the new helper queries runtime_state for the current
-   session_id + writes `status='closed', exit_reason='subprocess_died',
-   exit_time_utc=NOW()`. Pairs cleanly with the existing lock-release
-   pattern.
+### Cron-schedule the symbol registry refresh
 
-3. **Belt-and-suspenders supervisor sweep** — the `--resume-stuck`
-   supervisor already detects stale runtime_state. Extend its sweep to
-   also close any portfolio_session row where `status='active'` AND
-   the allocation's runtime_state is stale (updated_at > 15 min ago).
-   Covers the SIGKILL case where the signal handler can't run.
-
-**Scope:** ~20 LOC trader_blofin.py (Fix 2) + ~15 LOC
-trader_supervisor.py (Fix 3) + one-shot SQL (Fix 1). ~30 min total.
-No schema change.
-
-Also: the Symbols count column (showing 5/6 for 04-23) might be
-wrong per operator observation — worth verifying the numerator/
-denominator semantic while in there. Expected from
-portfolio_sessions: `entered[]` length / `symbols[]` length.
-
-## 🔴 TOP PRIORITY — Manager Overview Total AUM baseline + audit/live parity
-
-### Manager Overview — Total AUM subvalue ≠ Allocator PnL (Part C, remaining)
-
-Parts A (Today P&L fallback) and B (Max DD phantom connection) shipped
-in commit `adc5e66` on 2026-04-24. Part C remains.
-
-**Total AUM subvalue +$854 ≠ Allocator's +$1,623.95**
-
-Manager's subvalue math: `total_aum - performance_daily_row_0.equity_usd`
-= $4,272.40 - $3,418.06 (the only row in `performance_daily` for this
-allocation, from 04-21) = **$854.34**.
-
-Allocator's capital-events-adjusted PnL: current balance vs
-capital-events-derived principal = $4,297.27 − $2,673.32 (BloFin) +
-($1.22 − $1.22) ≈ **$1,623.95**. Different baseline methodology.
-
-**Fix:** change Manager's Total AUM subvalue to use the SAME principal
-derivation the Allocator uses — `connection.principal_baseline_usd`
-per connection (auto-derived from anchor date if NULL), plus
-capital-events net adjustment. One baseline across both UI surfaces.
-
-**Scope:** ~30 LOC backend `manager.py`. Frontend renders whatever the
-endpoint returns, no TS changes. Needs to cross-reference the PnL
-formula in `allocator.py:/trader/{id}/pnl` (which already has the
-capital-events-adjusted baseline) so both surfaces stay in sync.
-
-### Audit basket vs live basket — 04-23 TAC-vs-GENIUS
-
-Observed 2026-04-24: audit for 04-23 reported
-`BIO/SPK/STRK/TAC/TAKE/VELVET`; live traded
-`BIO/GENIUS/SPK/STRK/TAKE/VELVET` — audit had TAC where live had GENIUS.
-
-**Root cause:** the audit that generated the 04-23 basket was run
-**without `live_parity=True`**. Two different universe sources:
-  - Audit default: `market.leaderboards` nightly parquet (snapshot at
-    ~01:00 UTC from the prior day's build)
-  - Live: Binance REST `/fapi/v1/ticker/24hr` at 05:58 UTC
-
-The `--live-parity` knob SHIPPED (commits `c8768fc`, `89d8e5c`,
-`fcb88be`, `392094f`) addresses this when explicitly enabled. The
-audit producing TAC for 04-23 evidently did not pass the flag, so
-the audit's top-100-by-quoteVolume snapshot at 01:00 UTC disagreed
-with live's 05:58 UTC snapshot — normal 5-hour-of-rank-shuffle drift,
-TAC in audit's cut, GENIUS in live's cut.
-
-Also worth noting: `market.symbols` has `blofin_id=NULL` for GENIUS,
-but the trader successfully entered GENIUS on BloFin. The table is
-stale — BloFin listed GENIUS between our last universe refresh and
-today's session. Doesn't affect today's issue but signals the symbol
-registry needs a refresh job.
-
-**Fix:**
-1. Make `live_parity=True` the **default** for any Simulator audit
-   submission that's benchmarked against live trading. UI toggle stays
-   for deliberate exploration of the non-parity universe.
-2. Add a header/label in the audit output that explicitly states
-   "live-parity: on|off" so mismatches like this are visible.
-3. Add a nightly symbol-registry refresh job to re-populate
-   `market.symbols.binance_id` / `blofin_id` from each exchange's
-   `/instruments` endpoint. Prevents "GENIUS trades live but our
-   table says it's not on BloFin" divergences.
-
-**Scope:** ~60 LOC backend (default flip + label + refresh job) + ~10
-LOC frontend (label render). Not blocking — workaround is "always pass
-live_parity=True" when evaluating live performance.
+`backend/app/cli/refresh_symbol_registry.py` runs fine on prod (exercised
+manually on 2026-04-24), but it's not yet on cron. Schedule alongside
+the other nightly pulls (metl 00:15, coingecko 00:30, indexer 01:00).
+Suggested slot: **00:45 UTC daily** — after the previous day's
+leaderboards land but before `indexer 01:00` so downstream references
+see fresh ids. ~3 LOC crontab add.
 
 ---
 
