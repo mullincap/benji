@@ -53,6 +53,17 @@ function DashboardContent({ equity, weeklyPnl, allTimePnl, sharpe, allocated, ac
   instances?: StrategyInstance[];
 }) {
   const availableBalance = Math.max(0, totalAvailable - allocated);
+  const [deployedOpen, setDeployedOpen] = useState(false);
+  const activeInstances = (instances ?? []).filter(i => i.status === "live" || i.status === "paused");
+  const breakdownTotal = totalAvailable > 0 ? totalAvailable : allocated;
+  const canExpand = activeInstances.length > 0;
+  const breakdownUnalloc = Math.max(0, breakdownTotal - activeInstances.reduce((s, i) => s + (i.allocation ?? 0), 0));
+  const BAND_COLORS: Record<string, { bg: string; border: string; text: string }> = {
+    low:    { bg: "var(--green-dim)", border: "var(--green-mid)", text: "var(--green)" },
+    medium: { bg: "#f0a50015", border: "#f0a50030", text: "var(--amber)" },
+    high:   { bg: "#ff4d4d10", border: "#ff4d4d25", text: "var(--red)" },
+  };
+  const fmtAbbrev = (n: number) => n >= 1000000 ? `$${(n / 1000000).toFixed(1)}m` : n >= 1000 ? `$${Math.round(n / 1000)}k` : `$${n}`;
   return (
     <>
       {/* Hero cards */}
@@ -64,13 +75,26 @@ function DashboardContent({ equity, weeklyPnl, allTimePnl, sharpe, allocated, ac
         <MetricCard label="ACTIVE TRADERS" value={String(activeCount)} />
       </div>
 
-      {/* Capital deployed bar */}
+      {/* Capital deployed bar — collapsible; expanded reveals per-strategy breakdown */}
       <div style={{
         background: "var(--bg2)", border: "1px solid var(--line)", borderRadius: 6,
         padding: "10px 14px", marginBottom: 10,
       }}>
-        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 8 }}>
-          <span style={{ fontSize: 9, color: "var(--t3)", letterSpacing: "0.12em", fontWeight: 700, textTransform: "uppercase" }}>CAPITAL DEPLOYED</span>
+        <div
+          onClick={canExpand ? () => setDeployedOpen(o => !o) : undefined}
+          style={{
+            display: "flex", alignItems: "center", justifyContent: "space-between",
+            marginBottom: 8,
+            cursor: canExpand ? "pointer" : "default",
+            userSelect: "none",
+          }}
+        >
+          <span style={{ fontSize: 9, color: "var(--t3)", letterSpacing: "0.12em", fontWeight: 700, textTransform: "uppercase", display: "flex", alignItems: "center", gap: 6 }}>
+            {canExpand && (
+              <span style={{ display: "inline-block", transform: deployedOpen ? "rotate(90deg)" : "rotate(0deg)", transition: "transform 0.15s ease", fontSize: 8 }}>▶</span>
+            )}
+            CAPITAL DEPLOYED
+          </span>
           <span style={{ fontSize: 10, whiteSpace: "nowrap" }}>
             <span style={{ color: "var(--t2)" }}>${fmt(allocated, 0)} allocated</span>
             <span style={{ color: "var(--t3)", margin: "0 6px" }}>|</span>
@@ -87,6 +111,91 @@ function DashboardContent({ equity, weeklyPnl, allTimePnl, sharpe, allocated, ac
             borderRadius: 3,
           }} />
         </div>
+
+        {deployedOpen && canExpand && (
+          <div style={{ marginTop: 12, paddingTop: 12, borderTop: "0.5px solid var(--line)" }}>
+            {/* Stacked per-strategy bands */}
+            <div style={{ display: "flex", gap: 4, height: 36, borderRadius: 5, overflow: "hidden", marginBottom: 6 }}>
+              {activeInstances.map(inst => {
+                const alloc = inst.allocation ?? 0;
+                const pctWidth = breakdownTotal > 0 ? (alloc / breakdownTotal) * 100 : 0;
+                const bc = inst.status === "live" ? BAND_COLORS.low : (BAND_COLORS[inst.risk] ?? BAND_COLORS.low);
+                const showText = pctWidth >= 8;
+                const pctOfTotal = breakdownTotal > 0 ? ((alloc / breakdownTotal) * 100).toFixed(1) : "0.0";
+                return (
+                  <div key={inst.id} style={{
+                    width: `${pctWidth}%`, minWidth: 4,
+                    background: bc.bg, border: `0.5px solid ${bc.border}`,
+                    borderRadius: 3, padding: showText ? "0 10px" : 0,
+                    display: "flex", alignItems: "center", overflow: "hidden",
+                  }}>
+                    {showText && (
+                      <div style={{ overflow: "hidden" }}>
+                        <div style={{ fontSize: 9, fontWeight: 700, textTransform: "uppercase", color: bc.text, whiteSpace: "nowrap" }}>{inst.strategyName}</div>
+                        <div style={{ fontSize: 8, color: bc.text, opacity: 0.5, whiteSpace: "nowrap" }}>${fmt(alloc, 0)} &middot; {pctOfTotal}%</div>
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+              {breakdownUnalloc > 0 && (
+                <div style={{
+                  flex: 1, minWidth: 4,
+                  background: "var(--bg3)", border: "0.5px solid var(--line)",
+                  borderRadius: 3, padding: "0 8px",
+                  display: "flex", alignItems: "center",
+                }}>
+                  <span style={{ fontSize: 9, color: "var(--t3)", whiteSpace: "nowrap" }}>IDLE</span>
+                </div>
+              )}
+            </div>
+            <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 10 }}>
+              <span style={{ fontSize: 9, color: "var(--t3)" }}>$0</span>
+              <span style={{ fontSize: 9, color: "var(--t3)" }}>{fmtAbbrev(Math.round(breakdownTotal / 2))}</span>
+              <span style={{ fontSize: 9, color: "var(--t3)" }}>{fmtAbbrev(breakdownTotal)}</span>
+            </div>
+            <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+              {(() => {
+                let cumulative = 0;
+                return activeInstances.map(inst => {
+                  const alloc = inst.allocation ?? 0;
+                  const pct = breakdownTotal > 0 ? ((alloc / breakdownTotal) * 100).toFixed(1) : "0.0";
+                  const leftPct = breakdownTotal > 0 ? (cumulative / breakdownTotal) * 100 : 0;
+                  const widthPct = breakdownTotal > 0 ? (alloc / breakdownTotal) * 100 : 0;
+                  cumulative += alloc;
+                  const fillColor = "var(--green)";
+                  return (
+                    <div key={inst.id} style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                      <span style={{ width: 7, height: 7, borderRadius: 2, background: fillColor, flexShrink: 0 }} />
+                      <span style={{ fontSize: 10, color: "var(--t2)", width: 80, flexShrink: 0, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{inst.strategyName}</span>
+                      <div style={{ flex: 1, height: 4, background: "var(--bg3)", borderRadius: 2, overflow: "hidden" }}>
+                        <div style={{ height: "100%", marginLeft: `${leftPct}%`, width: `${widthPct}%`, background: fillColor, borderRadius: 2 }} />
+                      </div>
+                      <span style={{ fontSize: 10, fontWeight: 700, color: "var(--t0)", flexShrink: 0, textAlign: "right", width: 65 }}>${fmt(alloc, 0)}</span>
+                      <span style={{ fontSize: 9, color: "var(--t3)", flexShrink: 0, width: 35, textAlign: "right" }}>{pct}%</span>
+                    </div>
+                  );
+                });
+              })()}
+              {breakdownUnalloc > 0 && (() => {
+                const allocSum = activeInstances.reduce((s, i) => s + (i.allocation ?? 0), 0);
+                const leftPct = breakdownTotal > 0 ? (allocSum / breakdownTotal) * 100 : 0;
+                const widthPct = breakdownTotal > 0 ? (breakdownUnalloc / breakdownTotal) * 100 : 0;
+                return (
+                  <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                    <span style={{ width: 7, height: 7, borderRadius: 2, background: "var(--amber)", flexShrink: 0 }} />
+                    <span style={{ fontSize: 10, color: "var(--t3)", width: 80, flexShrink: 0 }}>Unallocated</span>
+                    <div style={{ flex: 1, height: 4, background: "var(--bg3)", borderRadius: 2, overflow: "hidden" }}>
+                      <div style={{ height: "100%", marginLeft: `${leftPct}%`, width: `${widthPct}%`, background: "var(--amber)", borderRadius: 2 }} />
+                    </div>
+                    <span style={{ fontSize: 10, fontWeight: 700, color: "var(--t3)", flexShrink: 0, textAlign: "right", width: 65 }}>${fmt(breakdownUnalloc, 0)}</span>
+                    <span style={{ fontSize: 9, color: "var(--t3)", flexShrink: 0, width: 35, textAlign: "right" }}>{breakdownTotal > 0 ? ((breakdownUnalloc / breakdownTotal) * 100).toFixed(1) : "0.0"}%</span>
+                  </div>
+                );
+              })()}
+            </div>
+          </div>
+        )}
       </div>
 
       {/* Total account balance — aggregate across all connections */}
@@ -128,7 +237,6 @@ function DashboardContent({ equity, weeklyPnl, allTimePnl, sharpe, allocated, ac
 export default function OverviewPage() {
   const router = useRouter();
   const { instances, exchanges, loading, error } = useTrader();
-  const [breakdownOpen, setBreakdownOpen] = useState(false);
   const empty = instances.length === 0;
   const exchangeBalance = exchanges.reduce((s, e) => s + e.balance, 0);
   const totalAllocatedRaw = instances.reduce((s, i) => s + (i.allocation ?? 0), 0);
@@ -239,8 +347,8 @@ export default function OverviewPage() {
                 exchanges={exchanges}
                 instances={instances}
                 showAggregate
-                chartContainerHeight={breakdownOpen ? 400 : 530}
-                chartEquityHeight={breakdownOpen ? 250 : 380}
+                chartContainerHeight={530}
+                chartEquityHeight={380}
               />
             )}
           </div>
@@ -283,118 +391,6 @@ export default function OverviewPage() {
               <div style={{ fontSize: 9, fontWeight: 700, letterSpacing: "0.12em", color: "var(--t3)", textTransform: "uppercase", marginTop: 24, marginBottom: 10 }}>
                 TRADERS
               </div>
-
-              {/* Allocation breakdown bands */}
-              {activeInstances.length > 0 && (() => {
-                const BAND_COLORS: Record<string, { bg: string; border: string; text: string }> = {
-                  low:    { bg: "var(--green-dim)", border: "var(--green-mid)", text: "var(--green)" },
-                  medium: { bg: "#f0a50015", border: "#f0a50030", text: "var(--amber)" },
-                  high:   { bg: "#ff4d4d10", border: "#ff4d4d25", text: "var(--red)" },
-                };
-                const BAR_FILL: Record<string, string> = { low: "var(--green)", medium: "var(--amber)", high: "var(--red)" };
-                const totalAlloc = activeInstances.reduce((s, i) => s + (i.allocation ?? 0), 0);
-                const unalloc = Math.max(0, treemapTotal - totalAlloc);
-                const fmtAbbrev = (n: number) => n >= 1000000 ? `$${(n / 1000000).toFixed(1)}m` : n >= 1000 ? `$${Math.round(n / 1000)}k` : `$${n}`;
-
-                return (
-                  <div style={{
-                    background: "var(--bg1)", border: "1px solid var(--line)", borderRadius: 6,
-                    padding: "10px 14px", marginBottom: 8,
-                  }}>
-                    <div
-                      onClick={() => setBreakdownOpen(o => !o)}
-                      style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: breakdownOpen ? 8 : 0, cursor: "pointer", userSelect: "none" }}
-                    >
-                      <span style={{ fontSize: 9, color: "var(--t3)", letterSpacing: "0.12em", fontWeight: 700, textTransform: "uppercase", display: "flex", alignItems: "center", gap: 6 }}>
-                        <span style={{ display: "inline-block", transform: breakdownOpen ? "rotate(90deg)" : "rotate(0deg)", transition: "transform 0.15s ease", fontSize: 8 }}>▶</span>
-                        ALLOCATION BREAKDOWN
-                      </span>
-                      <span style={{ fontSize: 9, color: "var(--t3)" }}>${fmt(treemapTotal, 0)} total</span>
-                    </div>
-                    {breakdownOpen && (<>
-                    <div style={{ display: "flex", gap: 4, height: 36, borderRadius: 5, overflow: "hidden", marginBottom: 6 }}>
-                      {activeInstances.map(inst => {
-                        const alloc = inst.allocation ?? 0;
-                        const pctWidth = treemapTotal > 0 ? (alloc / treemapTotal) * 100 : 0;
-                        const bc = inst.status === "live" ? BAND_COLORS.low : (BAND_COLORS[inst.risk] ?? BAND_COLORS.low);
-                        const showText = pctWidth >= 8;
-                        const pctOfTotal = treemapTotal > 0 ? ((alloc / treemapTotal) * 100).toFixed(1) : "0.0";
-                        return (
-                          <div key={inst.id} style={{
-                            width: `${pctWidth}%`, minWidth: 4,
-                            background: bc.bg, border: `0.5px solid ${bc.border}`,
-                            borderRadius: 3, padding: showText ? "0 10px" : 0,
-                            display: "flex", alignItems: "center", overflow: "hidden",
-                          }}>
-                            {showText && (
-                              <div style={{ overflow: "hidden" }}>
-                                <div style={{ fontSize: 9, fontWeight: 700, textTransform: "uppercase", color: bc.text, whiteSpace: "nowrap" }}>{inst.strategyName}</div>
-                                <div style={{ fontSize: 8, color: bc.text, opacity: 0.5, whiteSpace: "nowrap" }}>${fmt(alloc, 0)} &middot; {pctOfTotal}%</div>
-                              </div>
-                            )}
-                          </div>
-                        );
-                      })}
-                      {unalloc > 0 && (
-                        <div style={{
-                          flex: 1, minWidth: 4,
-                          background: "var(--bg3)", border: "0.5px solid var(--line)",
-                          borderRadius: 3, padding: "0 8px",
-                          display: "flex", alignItems: "center",
-                        }}>
-                          <span style={{ fontSize: 9, color: "var(--t3)", whiteSpace: "nowrap" }}>IDLE</span>
-                        </div>
-                      )}
-                    </div>
-                    <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 10 }}>
-                      <span style={{ fontSize: 9, color: "var(--t3)" }}>$0</span>
-                      <span style={{ fontSize: 9, color: "var(--t3)" }}>{fmtAbbrev(Math.round(treemapTotal / 2))}</span>
-                      <span style={{ fontSize: 9, color: "var(--t3)" }}>{fmtAbbrev(treemapTotal)}</span>
-                    </div>
-                    <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-                      {(() => {
-                        let cumulative = 0;
-                        return activeInstances.map(inst => {
-                          const alloc = inst.allocation ?? 0;
-                          const pct = treemapTotal > 0 ? ((alloc / treemapTotal) * 100).toFixed(1) : "0.0";
-                          const leftPct = treemapTotal > 0 ? (cumulative / treemapTotal) * 100 : 0;
-                          const widthPct = treemapTotal > 0 ? (alloc / treemapTotal) * 100 : 0;
-                          cumulative += alloc;
-                          const fillColor = "var(--green)";
-                          return (
-                            <div key={inst.id} style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                              <span style={{ width: 7, height: 7, borderRadius: 2, background: fillColor, flexShrink: 0 }} />
-                              <span style={{ fontSize: 10, color: "var(--t2)", width: 80, flexShrink: 0, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{inst.strategyName}</span>
-                              <div style={{ flex: 1, height: 4, background: "var(--bg3)", borderRadius: 2, overflow: "hidden" }}>
-                                <div style={{ height: "100%", marginLeft: `${leftPct}%`, width: `${widthPct}%`, background: fillColor, borderRadius: 2 }} />
-                              </div>
-                              <span style={{ fontSize: 10, fontWeight: 700, color: "var(--t0)", flexShrink: 0, textAlign: "right", width: 65 }}>${fmt(alloc, 0)}</span>
-                              <span style={{ fontSize: 9, color: "var(--t3)", flexShrink: 0, width: 35, textAlign: "right" }}>{pct}%</span>
-                            </div>
-                          );
-                        });
-                      })()}
-                      {unalloc > 0 && (() => {
-                        const allocSum = activeInstances.reduce((s, i) => s + (i.allocation ?? 0), 0);
-                        const leftPct = treemapTotal > 0 ? (allocSum / treemapTotal) * 100 : 0;
-                        const widthPct = treemapTotal > 0 ? (unalloc / treemapTotal) * 100 : 0;
-                        return (
-                          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                            <span style={{ width: 7, height: 7, borderRadius: 2, background: "var(--amber)", flexShrink: 0 }} />
-                            <span style={{ fontSize: 10, color: "var(--t3)", width: 80, flexShrink: 0 }}>Unallocated</span>
-                            <div style={{ flex: 1, height: 4, background: "var(--bg3)", borderRadius: 2, overflow: "hidden" }}>
-                              <div style={{ height: "100%", marginLeft: `${leftPct}%`, width: `${widthPct}%`, background: "var(--amber)", borderRadius: 2 }} />
-                            </div>
-                            <span style={{ fontSize: 10, fontWeight: 700, color: "var(--t3)", flexShrink: 0, textAlign: "right", width: 65 }}>${fmt(unalloc, 0)}</span>
-                            <span style={{ fontSize: 9, color: "var(--t3)", flexShrink: 0, width: 35, textAlign: "right" }}>{treemapTotal > 0 ? ((unalloc / treemapTotal) * 100).toFixed(1) : "0.0"}%</span>
-                          </div>
-                        );
-                      })()}
-                    </div>
-                    </>)}
-                  </div>
-                );
-              })()}
 
               {/* Treemap */}
               {activeInstances.length > 0 && (
