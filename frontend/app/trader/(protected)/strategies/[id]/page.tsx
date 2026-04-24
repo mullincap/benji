@@ -474,11 +474,11 @@ export default function MarketplaceDetailPage() {
         {/* Stats strip — 6 cards */}
         <div style={{ display: "grid", gridTemplateColumns: "repeat(6, 1fr)", gap: 8, marginBottom: 20 }}>
           <MetricCard label="YTD RETURN" value={`+${fmt(cat.ytd, 1)}%`} color="var(--green)" />
-          <MetricCard label="SHARPE" value={fmt(cat.sharpe, 2)} />
-          <MetricCard label="MAX DD" value={`-${fmt(cat.maxDd, 1)}%`} color="var(--red)" />
-          <MetricCard label="WIN RATE" value={`${fmt(cat.winRate, 0)}%`} />
           <MetricCard label="CAGR" value={`${fmt(cat.cagr, 1)}%`} color="var(--green)" />
+          <MetricCard label="SHARPE" value={fmt(cat.sharpe, 2)} />
           <MetricCard label="PROFIT FACTOR" value={`${fmt(cat.profitFactor, 2)}x`} />
+          <MetricCard label="WORST MONTH" value={`-${fmt(cat.worstMonth, 1)}%`} color="var(--red)" />
+          <MetricCard label="MAX DD" value={`-${fmt(cat.maxDd, 1)}%`} color="var(--red)" />
         </div>
 
         {/* Inline wizard panel — slides down when open */}

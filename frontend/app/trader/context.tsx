@@ -69,6 +69,7 @@ export interface StrategyCatalogEntry {
   sharpe: number;
   maxDd: number;
   winRate: number;
+  worstMonth: number;
   ytd: number;
   cagr: number;
   profitFactor: number;
@@ -112,6 +113,7 @@ function mapApiStrategyToCatalog(s: ApiStrategy): StrategyCatalogEntry {
     sharpe: m.sharpe ?? 0,
     maxDd: Math.abs(m.max_dd_pct ?? 0),
     winRate: m.win_rate_daily ?? 0,
+    worstMonth: Math.abs(m.worst_month_pct ?? 0),
     ytd: m.total_return_pct ?? 0,
     cagr: m.cagr_pct ?? 0,
     profitFactor: m.profit_factor ?? 0,
@@ -135,7 +137,7 @@ const FALLBACK_CATALOG: Record<string, StrategyCatalogEntry> = {
   "alpha-low": {
     name: "Alpha Low", risk: "low",
     description: "Conservative capital preservation strategy with tight drawdown controls and reduced position sizing.",
-    sharpe: 1.84, maxDd: 8.2, winRate: 61, ytd: 14.2, cagr: 18.7,
+    sharpe: 1.84, maxDd: 8.2, winRate: 61, worstMonth: 4.5, ytd: 14.2, cagr: 18.7,
     profitFactor: 1.88, avg1m: 1.2, activeDays: 312, vol: 6.4,
     simpleReturn: 14.2, compoundedReturn: 18.7, avgWinLoss: 1.42,
     strategyId: 0, strategyVersionId: "", capitalCapUsd: null, isPublished: true, isCanonical: false,
@@ -143,7 +145,7 @@ const FALLBACK_CATALOG: Record<string, StrategyCatalogEntry> = {
   "alpha-mid": {
     name: "Alpha Mid", risk: "medium",
     description: "Balanced trend-following approach with dynamic position sizing that scales with conviction.",
-    sharpe: 2.63, maxDd: 14.6, winRate: 63, ytd: 38.2, cagr: 42.1,
+    sharpe: 2.63, maxDd: 14.6, winRate: 63, worstMonth: 8.1, ytd: 38.2, cagr: 42.1,
     profitFactor: 2.25, avg1m: 2.4, activeDays: 342, vol: 11.8,
     simpleReturn: 38.2, compoundedReturn: 42.1, avgWinLoss: 1.71,
     strategyId: 0, strategyVersionId: "", capitalCapUsd: null, isPublished: true, isCanonical: false,
@@ -151,7 +153,7 @@ const FALLBACK_CATALOG: Record<string, StrategyCatalogEntry> = {
   "alpha-high": {
     name: "Alpha High", risk: "high",
     description: "Aggressive momentum capture across top-20 pairs with concentrated position sizing.",
-    sharpe: 3.90, maxDd: 19.9, winRate: 67, ytd: 91.4, cagr: 187.3,
+    sharpe: 3.90, maxDd: 19.9, winRate: 67, worstMonth: 12.4, ytd: 91.4, cagr: 187.3,
     profitFactor: 3.09, avg1m: 3.2, activeDays: 358, vol: 18.2,
     simpleReturn: 91.4, compoundedReturn: 187.3, avgWinLoss: 2.34,
     strategyId: 0, strategyVersionId: "", capitalCapUsd: null, isPublished: true, isCanonical: false,
