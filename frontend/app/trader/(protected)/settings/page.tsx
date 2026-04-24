@@ -1363,7 +1363,7 @@ function CapitalEventsSection() {
 
   async function handleAnchorSave(
     connectionId: string,
-    data: { anchor_at?: string; baseline_usd?: number; reset?: boolean },
+    data: { anchor_at?: string; reset?: boolean },
   ) {
     setSubmitting(true);
     try {
@@ -1371,8 +1371,9 @@ function CapitalEventsSection() {
         clear_principal_anchor: true,
         clear_principal_baseline: true,
       } : {
+        // Only send the anchor; backend auto-derives baseline from
+        // exchange_snapshots at the anchor moment.
         principal_anchor_at: data.anchor_at,
-        principal_baseline_usd: data.baseline_usd,
       });
       setEditingAnchor(null);
       await refresh();
@@ -1720,18 +1721,17 @@ function AnchorEditModal({
   exchangeLabel: string;
   /** Operator-set anchor, or null to signal default. */
   currentAnchorAt: string | null;
+  /** Current stored baseline — shown read-only as a hint but not editable
+   * in the modal. Backend auto-derives on save from snapshot history. */
   currentBaselineUsd: number | null;
   /** ISO 8601 of the earliest recorded event on this connection, or null. */
   earliestEventAt: string | null;
   submitting: boolean;
   onCancel: () => void;
-  onSave: (data: { anchor_at?: string; baseline_usd?: number; reset?: boolean }) => void;
+  onSave: (data: { anchor_at?: string; reset?: boolean }) => void;
 }) {
   const [anchorAt, setAnchorAt] = useState<string>(
     currentAnchorAt ? currentAnchorAt.slice(0, 16) : "",
-  );
-  const [baseline, setBaseline] = useState<string>(
-    currentBaselineUsd != null ? currentBaselineUsd.toString() : "",
   );
 
   const hasOverride = currentAnchorAt !== null || currentBaselineUsd !== null;
@@ -1806,20 +1806,22 @@ function AnchorEditModal({
         </div>
 
         <div style={{ marginBottom: 14 }}>
-          <div style={fieldLabelStyle}>Baseline USD at anchor</div>
-          <input
-            type="number"
-            min="0"
-            step="0.01"
-            placeholder="e.g. 5000.00"
-            value={baseline}
-            onChange={e => setBaseline(e.target.value)}
-            style={inputStyle}
-            onFocus={e => (e.target.style.borderColor = "var(--green)")}
-            onBlur={e => (e.target.style.borderColor = "var(--line)")}
-          />
-          <div style={{ fontSize: 9, color: "var(--t3)", marginTop: 4 }}>
-            Leave at 0 if you want principal = SUM(events since anchor) only.
+          <div style={fieldLabelStyle}>Baseline (auto-derived)</div>
+          <div style={{
+            padding: "10px 12px",
+            background: "var(--bg3)",
+            border: "1px solid var(--line)",
+            borderRadius: 3,
+            fontSize: 10, color: "var(--t2)",
+            fontFamily: FONT_MONO,
+          }}>
+            {currentBaselineUsd !== null
+              ? `$${currentBaselineUsd.toLocaleString("en-US", { maximumFractionDigits: 2 })}`
+              : "—"}
+          </div>
+          <div style={{ fontSize: 9, color: "var(--t3)", marginTop: 4, lineHeight: 1.5 }}>
+            Set automatically on save: the exchange wallet equity at the anchor moment,
+            from snapshot history. If no snapshot exists before the anchor, baseline = 0.
           </div>
         </div>
 
@@ -1857,26 +1859,14 @@ function AnchorEditModal({
             >Cancel</button>
             <button
               type="button"
-              disabled={
-                submitting || !anchorAt
-                || Number.isNaN(parseFloat(baseline))
-                || parseFloat(baseline) < 0
-              }
+              disabled={submitting || !anchorAt}
               onClick={() => {
                 try {
                   const iso = anchorAt ? new Date(anchorAt).toISOString() : undefined;
-                  onSave({
-                    anchor_at: iso,
-                    baseline_usd: parseFloat(baseline),
-                  });
+                  onSave({ anchor_at: iso });
                 } catch { /* noop */ }
               }}
-              style={
-                (submitting || !anchorAt
-                 || Number.isNaN(parseFloat(baseline))
-                 || parseFloat(baseline) < 0)
-                  ? disabledBtnStyle : primaryBtnStyle
-              }
+              style={(submitting || !anchorAt) ? disabledBtnStyle : primaryBtnStyle}
             >{submitting ? "Saving…" : "Save"}</button>
           </div>
         </div>

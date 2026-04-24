@@ -1415,22 +1415,39 @@ def update_connection(
     user_id: str = Depends(get_current_user),
     cur=Depends(get_cursor),
 ) -> dict[str, Any]:
-    """Set / clear the exchange-level principal anchor + baseline
-    (migration 010). Ownership-verified via exchange_connections.user_id.
+    """Set / clear the exchange-level principal anchor (migration 010).
+
+    Baseline is AUTO-DERIVED from the exchange_snapshots history: on any
+    anchor change, we look up the latest snapshot with
+    `snapshot_at <= anchor_at` and use its total_equity_usd as the
+    baseline. If no snapshot exists before the anchor (anchor is before
+    the first recorded snapshot on this exchange), baseline = 0.
+    Operators don't need to provide baseline themselves — it's a
+    bookkeeping detail that the snapshot history already knows.
+
+    The ConnectionUpdateRequest still accepts `principal_baseline_usd`
+    and `clear_principal_baseline` for edge cases where an operator
+    explicitly wants to override the auto-derived value (e.g., the
+    snapshot history is missing or wrong at the anchor moment). When
+    none provided, auto-derive wins.
     """
     _verify_connection_owned_by(cur, connection_id, user_id)
 
     updates: list[str] = []
     params: list = []
+    explicit_baseline = False
 
     if body.clear_principal_anchor:
         updates.append("principal_anchor_at = NULL")
+        # Clear baseline too — it's meaningless without an anchor.
+        updates.append("principal_baseline_usd = NULL")
     elif body.principal_anchor_at is not None:
         updates.append("principal_anchor_at = %s::timestamptz")
         params.append(body.principal_anchor_at)
 
     if body.clear_principal_baseline:
         updates.append("principal_baseline_usd = NULL")
+        explicit_baseline = True
     elif body.principal_baseline_usd is not None:
         if body.principal_baseline_usd < 0:
             raise HTTPException(
@@ -1439,9 +1456,33 @@ def update_connection(
             )
         updates.append("principal_baseline_usd = %s")
         params.append(body.principal_baseline_usd)
+        explicit_baseline = True
 
     if not updates:
         raise HTTPException(status_code=400, detail="No fields to update")
+
+    # Auto-derive baseline from snapshots when operator set an anchor but
+    # didn't provide an explicit baseline. Snapshot closest to anchor_at
+    # from below represents "wallet equity at the moment of the anchor."
+    if (
+        body.principal_anchor_at is not None
+        and not body.clear_principal_anchor
+        and not explicit_baseline
+    ):
+        cur.execute("""
+            SELECT total_equity_usd::float AS equity
+              FROM user_mgmt.exchange_snapshots
+             WHERE connection_id = %s::uuid
+               AND fetch_ok = TRUE
+               AND total_equity_usd IS NOT NULL
+               AND snapshot_at <= %s::timestamptz
+             ORDER BY snapshot_at DESC
+             LIMIT 1
+        """, (connection_id, body.principal_anchor_at))
+        snap_row = cur.fetchone()
+        derived_baseline = float(snap_row["equity"]) if snap_row else 0.0
+        updates.append("principal_baseline_usd = %s")
+        params.append(derived_baseline)
 
     updates.append("updated_at = NOW()")
     params.append(connection_id)
