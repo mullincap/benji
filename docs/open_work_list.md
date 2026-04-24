@@ -11,52 +11,19 @@ git log + commit messages are the historical record._
 - **Simulator live-parity** — `--live-parity` knob in `overlap_analysis.py` + JobRequest `live_parity` field + frontend dropdown. Closes the audit-vs-live symbol-selection divergence → commits `c8768fc`, `89d8e5c`, `fcb88be`, `392094f`
 - **Capital Events UI** on `/trader/settings` + auto-poll exchange income APIs → commit `99ddf61`
 - **Trader fill_rate / entry_slip / retries** — verified working in current code via dry-call (2026-04-24). The historical NULLs on the 2026-04-21 row are pre-writer-extension stale data, not a current bug. All 6 KPIs at the top of `/manager/execution` will populate naturally starting with the next session close.
+- **Trader resilience hardening** (2026-04-24) — six-commit bundle deployed via manual rebuild after kill+respawn of PID 623 with ~3 min unmanaged window. Commits: `6c3b506` SIGTERM/SIGINT/atexit → lock release on graceful shutdown. `957524a` revert shrinking-size ladder (hypothesis disproven by operator $1,800 UI fill succeeding). `6911252` per-bar reconcile in monitoring loop (every 5 min) + raw BloFin reject payload logging in `BlofinAdapter._submit_order`. `a3917db` classify "risk control"/"low-liquidity pair" BloFin errors as non-retriable (avoids extending BloFin's 5-min cooldown via further retries). `21cfca2` entry order spacing (5s base + 0-3s jitter between symbols; 5-symbol basket now 20-32s total span vs prior 4.5s). `e0c6129` retry cadence 5s → 330s (5.5 min) + `MAX_ENTRY_RETRIES` 3 → 1.
+- **Manager Overview KPI A+B** (2026-04-24) — commit `adc5e66`. Today P&L fallback gate changed from `not perf_by_alloc` to `no today row` (so snapshot-based fallback fills the gap when today's performance_daily row is absent). Max DD scope intersected with connections that have a snapshot in the last 48h (drops phantom-cliff contribution from retired Binance connection_id `f428458f`).
 
 ---
 
-## 🔴 TOP PRIORITY — Manager Overview KPI baselines + audit/live parity
+## 🔴 TOP PRIORITY — Manager Overview Total AUM baseline + audit/live parity
 
-### Manager Overview regression — Today P&L, Max DD, Total AUM subvalue
+### Manager Overview — Total AUM subvalue ≠ Allocator PnL (Part C, remaining)
 
-Diagnosed 2026-04-24. Three symptoms, three distinct causes, one
-underlying theme: the Manager Overview uses implicit / opportunistic
-baselines that silently break when the underlying data shape changes.
+Parts A (Today P&L fallback) and B (Max DD phantom connection) shipped
+in commit `adc5e66` on 2026-04-24. Part C remains.
 
-**A. Today P&L = 0%** (should reflect intraday equity rise)
-
-`manager.py:166` matches `if row["date"] == today` against
-`user_mgmt.performance_daily`. That table is populated ONLY on session
-close with a non-None `equity_usd` — no-entry/filtered/errored sessions
-skip the write. Today's session is still running; no 04-22, 04-23, or
-04-24 row exists. `today_return_by_alloc` stays empty → Today = 0%.
-
-The fallback at `manager.py:176` gates on `if not perf_by_alloc`, but
-`perf_by_alloc` has the 2026-04-21 row, so fallback is skipped entirely.
-
-**Fix:** change fallback gate from "is perf_by_alloc empty" to "does
-perf_by_alloc have a row for `today` specifically." If missing today's
-row, derive Today P&L from `exchange_snapshots` first-of-day vs latest.
-
-**B. Max DD = -15.9% — phantom connection ID**
-
-`historical_connection_uuids` at `manager.py:137` DISTINCTs over every
-allocation_id + connection_id ever recorded. Binance has TWO connection
-UUIDs in the history:
-  - `4c084387` — current connection (min $1.21, last snapshot today)
-  - `f428458f` — RETIRED (max $4,456, last snapshot 2026-04-18)
-
-The 5-min bucket `SUM(equity)` across connections picks up both. When
-the retired connection's snapshot stream ended at 04-18, the summed
-total equity has an artificial `-$4,456` cliff that the DD calc
-attributes to drawdown. That is the "double counting."
-
-**Fix:** filter `historical_connection_uuids` to connections with a
-snapshot in the last N days (e.g. 48h) — retired connections don't
-contribute to the current-account drawdown narrative. Preserves the
-existing "include paused allocations" semantic while excluding
-connection IDs that have been decommissioned.
-
-**C. Total AUM subvalue +$854 ≠ Allocator's +$1,623.95**
+**Total AUM subvalue +$854 ≠ Allocator's +$1,623.95**
 
 Manager's subvalue math: `total_aum - performance_daily_row_0.equity_usd`
 = $4,272.40 - $3,418.06 (the only row in `performance_daily` for this
@@ -71,9 +38,10 @@ derivation the Allocator uses — `connection.principal_baseline_usd`
 per connection (auto-derived from anchor date if NULL), plus
 capital-events net adjustment. One baseline across both UI surfaces.
 
-**Scope:** ~40 LOC in `backend/app/api/routes/manager.py`. Three edits
-(A, B, C) are independent but share the same query path; ship together.
-Frontend renders whatever values the endpoint returns, no TS changes.
+**Scope:** ~30 LOC backend `manager.py`. Frontend renders whatever the
+endpoint returns, no TS changes. Needs to cross-reference the PnL
+formula in `allocator.py:/trader/{id}/pnl` (which already has the
+capital-events-adjusted baseline) so both surfaces stay in sync.
 
 ### Audit basket vs live basket — 04-23 TAC-vs-GENIUS
 
