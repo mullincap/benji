@@ -2259,6 +2259,15 @@ def _run_monitoring_loop(today, today_date, api: ExchangeAdapter, inst_ids,
     if session_start_equity_usdt is None:
         session_start_equity_usdt = 0.0
 
+    # Periodic reconcile cadence: every N bars, re-query the exchange for
+    # positions missing from active_positions. Picks up post-entry manual
+    # fills (e.g. operator filling a symbol the trader couldn't place due
+    # to BloFin risk control) so the monitoring loop manages them from
+    # then on. 12 bars × 5min = ~1h, which is aggressive enough to bound
+    # "unmanaged window" after a manual fill without hammering the
+    # positions endpoint.
+    RECONCILE_BAR_INTERVAL = 12
+
     while utcnow() < session_close_dt:
         sleep_until_next_bar()
         if utcnow() >= session_close_dt:
@@ -2270,6 +2279,31 @@ def _run_monitoring_loop(today, today_date, api: ExchangeAdapter, inst_ids,
         if not current:
             log.warning(f"{log_prefix}Bar {b}: all price fetches failed -- skipping bar")
             continue
+
+        # Periodic reconcile. Best-effort — any failure logs a WARN but
+        # doesn't interrupt the bar. `active_positions` only grows here
+        # (never shrinks), so this can't accidentally drop a position the
+        # trader is already managing.
+        if bars_monitored > 0 and bars_monitored % RECONCILE_BAR_INTERVAL == 0:
+            try:
+                before_n = len(active_positions)
+                reconciled = _reconcile_positions_with_exchange(
+                    api=api,
+                    positions=active_positions,
+                    inst_ids=[iid for iid in inst_ids if iid not in sym_stopped],
+                    entry_prices=entry_prices,
+                    eff_lev=eff_lev,
+                    log_prefix=log_prefix,
+                )
+                if len(reconciled) > before_n:
+                    active_positions = reconciled
+                    # Keep `positions` (the outer full list) in sync so the
+                    # close-out phase sees the adopted symbols too.
+                    for p in reconciled[before_n:]:
+                        if p not in positions:
+                            positions.append(p)
+            except Exception as _e:
+                log.warning(f"{log_prefix}Periodic reconcile failed: {_e}")
 
         # ── Per-symbol stop check ──────────────────────────────────────────
         # Check each still-active symbol against its individual -6% stop.
