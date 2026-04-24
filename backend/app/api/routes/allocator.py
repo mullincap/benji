@@ -1462,22 +1462,30 @@ def update_connection(
         raise HTTPException(status_code=400, detail="No fields to update")
 
     # Auto-derive baseline when operator set an anchor but didn't provide
-    # an explicit baseline. Two-tier fallback:
+    # an explicit baseline. Semantic target: "whatever the wallet was
+    # worth at the anchor moment" (operator's intent: anchor resets the
+    # account; baseline = starting equity from that point forward).
+    #
+    # Two-tier fallback:
     #   1. Latest exchange_snapshot with snapshot_at <= anchor_at → true
-    #      wallet equity at the anchor moment (includes pre-anchor
-    #      trading gains). Best answer when we have snapshot history.
-    #   2. SUM(capital events before anchor) → net operator-deposited
-    #      capital at the anchor moment (does NOT include pre-anchor
-    #      trading gains). Fallback when our snapshot history doesn't
-    #      reach back to the anchor (e.g., snapshots started after the
-    #      anchor date). Trading Δ in this case includes both pre-anchor
-    #      trading and post-anchor trading — acceptable approximation.
-    #   3. Zero if neither source has data.
+    #      wallet equity at the anchor moment, straight from history.
+    #      Best answer when snapshot tracking covered the anchor date.
+    #   2. current_balance − SUM(events since anchor) → reconstructed
+    #      wallet equity at anchor assuming no post-anchor trading. For
+    #      the common case (operator sets a recent mid-history anchor,
+    #      wants to track going forward), this is a close approximation
+    #      even though post-anchor trading adds a small fidelity gap.
+    #      Importantly, it MATCHES the operator's stated intent — the
+    #      account is "reset" to its current-equity-minus-post-anchor-
+    #      flows at the anchor moment.
+    #   3. Zero when balance data is also missing (e.g., first-ever link
+    #      with no snapshot yet).
     if (
         body.principal_anchor_at is not None
         and not body.clear_principal_anchor
         and not explicit_baseline
     ):
+        # Tier 1: snapshot at/before anchor.
         cur.execute("""
             SELECT total_equity_usd::float AS equity
               FROM user_mgmt.exchange_snapshots
@@ -1492,18 +1500,35 @@ def update_connection(
         if snap_row is not None:
             derived_baseline = float(snap_row["equity"])
         else:
-            # Fallback to net capital events before anchor.
+            # Tier 2: balance_now − SUM(events since anchor).
+            cur.execute("""
+                SELECT total_equity_usd::float AS equity
+                  FROM user_mgmt.exchange_snapshots
+                 WHERE connection_id = %s::uuid
+                   AND fetch_ok = TRUE
+                   AND total_equity_usd IS NOT NULL
+                 ORDER BY snapshot_at DESC
+                 LIMIT 1
+            """, (connection_id,))
+            latest_snap = cur.fetchone()
+            current_balance = float(latest_snap["equity"]) if latest_snap else 0.0
+
             cur.execute("""
                 SELECT COALESCE(SUM(CASE kind
                                       WHEN 'deposit'    THEN amount_usd
                                       WHEN 'withdrawal' THEN -amount_usd
-                                    END), 0)::float AS pre_anchor_net
+                                    END), 0)::float AS post_anchor_net
                   FROM user_mgmt.allocation_capital_events
                  WHERE connection_id = %s::uuid
                    AND deleted_at IS NULL
-                   AND event_at < %s::timestamptz
+                   AND event_at >= %s::timestamptz
             """, (connection_id, body.principal_anchor_at))
-            derived_baseline = float(cur.fetchone()["pre_anchor_net"] or 0)
+            post_anchor_net = float(cur.fetchone()["post_anchor_net"] or 0)
+            # Clamp at 0 — a negative reconstructed baseline is nonsense
+            # (wallet can't have been "worth negative"), happens only
+            # when post-anchor deposits exceed current balance which
+            # implies trading losses we can't resolve here.
+            derived_baseline = max(current_balance - post_anchor_net, 0.0)
         updates.append("principal_baseline_usd = %s")
         params.append(derived_baseline)
 
