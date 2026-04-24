@@ -185,8 +185,13 @@ def poll_connection(
 
     # Determine since_ms.
     if backfill:
-        days = _BACKFILL_DAYS.get(row["exchange"], 90)
-        since_ms = int(time.time() * 1000) - (days * 86_400_000)
+        # No client-side lower bound in backfill mode. Each adapter's API
+        # has its own natural retention limit (BloFin ~120d on
+        # deposit-history, Binance 90d per call paginated by the adapter);
+        # passing since_ms=0 lets us keep whatever the API still exposes,
+        # instead of our old _BACKFILL_DAYS default accidentally dropping
+        # rows that BloFin was willing to return.
+        since_ms = 0
     else:
         last_ms = _last_auto_event_ms(cur, connection_id)
         if last_ms is not None:

@@ -570,8 +570,13 @@ class BinanceMarginAdapter(ExchangeAdapter):
         chunks. Default lookback when since_ms is None: 365 days.
         """
         now_ms = int(time.time() * 1000)
-        if since_ms is None:
-            since_ms = now_ms - (365 * 86_400_000)
+        # Binance exposes ~1 year of history on /capital/{deposit,withdraw}.
+        # Cap the lookback at 365 days regardless of caller's request so
+        # we don't make pointless empty chunked calls from epoch when the
+        # caller passed since_ms=0 (backfill-mode "take everything").
+        min_since_ms = now_ms - (365 * 86_400_000)
+        if since_ms is None or since_ms < min_since_ms:
+            since_ms = min_since_ms
         # Cap each call at 90 days (Binance limit). Walk the window in
         # 90-day chunks if the lookback exceeds that.
         WINDOW_MS = 90 * 86_400_000
