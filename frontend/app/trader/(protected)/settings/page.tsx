@@ -912,14 +912,8 @@ function ExchangeCapitalGroup({
           fontSize: 10, fontFamily: FONT_MONO,
           whiteSpace: "nowrap", overflow: "hidden",
         }}>
-          <span style={{
-            color: "var(--t3)", letterSpacing: "0.12em",
-            textTransform: "uppercase", fontWeight: 700,
-          }}>
-            Exchange
-          </span>
           <span style={{ display: "flex", gap: 6, alignItems: "baseline" }}>
-            <span style={{ color: "var(--t3)" }}>BALANCE</span>
+            <span style={{ color: "var(--t3)" }}>Bal:</span>
             <span style={{ color: "var(--t0)", fontWeight: 700 }}>
               {exchangeBalance !== null
                 ? `$${exchangeBalance.toLocaleString("en-US", { maximumFractionDigits: 2 })}`
@@ -927,7 +921,7 @@ function ExchangeCapitalGroup({
             </span>
           </span>
           <span style={{ display: "flex", gap: 6, alignItems: "baseline" }}>
-            <span style={{ color: "var(--t3)" }}>PRINCIPAL</span>
+            <span style={{ color: "var(--t3)" }}>Prin:</span>
             <span style={{ color: "var(--t0)", fontWeight: 700 }}>
               ${principal.toLocaleString("en-US", { maximumFractionDigits: 2 })}
             </span>
@@ -943,7 +937,7 @@ function ExchangeCapitalGroup({
               : null;
             return (
               <span style={{ display: "flex", gap: 6, alignItems: "baseline" }}>
-                <span style={{ color: "var(--t3)" }}>TRADING Δ</span>
+                <span style={{ color: "var(--t3)" }}>PnL:</span>
                 <span style={{ color: deltaColor, fontWeight: 700 }}>
                   {tradingDelta >= 0 ? "+" : "−"}$
                   {Math.abs(tradingDelta).toLocaleString("en-US", { maximumFractionDigits: 2 })}
