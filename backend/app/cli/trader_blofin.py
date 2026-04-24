@@ -1052,6 +1052,18 @@ def enter_positions(api: ExchangeAdapter, inst_ids, entry_prices,
     filled_first_pass = 0
     filled_via_retry_syms = set()
 
+    # Rate-limit avoidance: BloFin imposes a temporary 5-min ban on
+    # high-frequency request bursts against low-liquidity pairs (per
+    # their docs; observed 2026-04-24 ZEREBRO-USDT). Prior behavior
+    # fired one order every ~1s (4.5s total for 5 symbols) which is
+    # in the burst-detect zone. Space each placement with a base
+    # delay + random jitter to flatten the rate and look less
+    # bot-like to the rate-limit heuristic.
+    import random as _random
+    ENTRY_SPACING_BASE_S   = 5.0
+    ENTRY_SPACING_JITTER_S = 3.0
+    _entry_order_idx = 0
+
     for inst_id in tradeable:
         price = entry_prices[inst_id]
         symbol_status[inst_id] = {
@@ -1151,6 +1163,16 @@ def enter_positions(api: ExchangeAdapter, inst_ids, entry_prices,
             sl_trigger = price * (1 + EXCHANGE_SL_PCT)
             log.info(f"  {inst_id}: exchange SL set at ${sl_trigger:,.4f} "
                      f"({EXCHANGE_SL_PCT*100:.1f}% from entry)")
+
+        # Space out order placements (rate-limit avoidance). Skip the
+        # delay on the first order since there's no preceding request
+        # to flatten against. `_entry_order_idx` resets per entry phase
+        # (enter_positions call), so retry rounds don't inherit this.
+        if _entry_order_idx > 0 and not dry_run:
+            _delay = ENTRY_SPACING_BASE_S + _random.uniform(0, ENTRY_SPACING_JITTER_S)
+            log.info(f"  {inst_id}: spacing delay {_delay:.2f}s before placement")
+            time.sleep(_delay)
+        _entry_order_idx += 1
 
         ok, order_id, err_msg = _place_order_chunked(
             api, inst_id, contracts, lot, min_sz, max_mkt,
