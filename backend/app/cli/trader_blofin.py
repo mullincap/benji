@@ -2064,6 +2064,41 @@ def run_session(dry_run: bool = False, resume: bool = False):
     )
 
 
+def _append_portfolio_session_entered(session_id: str | None, iid: str) -> None:
+    """Best-effort: append `iid` to portfolio_sessions.entered[].
+
+    Called when _reconcile_positions_with_exchange adopts a manual UI fill
+    into the live session. Without this, portfolio_sessions.entered stays
+    stuck at the programmatic-fill set (e.g. 4) while positions in memory
+    grows to include the reconciled symbol (5). The Manager Portfolios tab
+    + Execution per-symbol count then disagree with reality.
+
+    Idempotent via array_append + NOT ANY check so double-reconcile on
+    subsequent bars doesn't duplicate the entry.
+    """
+    if not session_id:
+        return
+    try:
+        conn = _trader_db_connect()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE user_mgmt.portfolio_sessions
+                       SET entered    = array_append(entered, %s),
+                           updated_at = NOW()
+                     WHERE portfolio_session_id = %s::uuid
+                       AND NOT (%s = ANY(entered))
+                    """,
+                    (iid, session_id, iid),
+                )
+            conn.commit()
+        finally:
+            conn.close()
+    except Exception as e:
+        log.warning(f"Could not append {iid} to portfolio_session {session_id[:8]}: {e}")
+
+
 def _reconcile_positions_with_exchange(
     api: ExchangeAdapter,
     positions: list,
@@ -2071,6 +2106,7 @@ def _reconcile_positions_with_exchange(
     entry_prices: dict,
     eff_lev: float,
     log_prefix: str = "",
+    session_id: str | None = None,
 ) -> list:
     """Sync runtime_state.positions[] against live exchange positions.
 
@@ -2154,6 +2190,10 @@ def _reconcile_positions_with_exchange(
             "reconciled":         True,
             "ctval":              _ctval,
         })
+        # Mirror the adopt into portfolio_sessions.entered so the
+        # per-symbol count the Manager/Portfolios tabs surface stays
+        # consistent with the in-memory positions list.
+        _append_portfolio_session_entered(session_id, iid)
 
     if added:
         log.info(
@@ -2257,6 +2297,7 @@ def _run_monitoring_loop(today, today_date, api: ExchangeAdapter, inst_ids,
         entry_prices=entry_prices,
         eff_lev=eff_lev,
         log_prefix=log_prefix,
+        session_id=session_id,
     )
 
     active_positions = list(positions)   # shrinks as per-symbol stops fire
@@ -2383,6 +2424,7 @@ def _run_monitoring_loop(today, today_date, api: ExchangeAdapter, inst_ids,
                     entry_prices=entry_prices,
                     eff_lev=eff_lev,
                     log_prefix=log_prefix,
+                    session_id=session_id,
                 )
                 if len(reconciled) > before_n:
                     active_positions = reconciled

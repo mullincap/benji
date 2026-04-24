@@ -1519,6 +1519,7 @@ def execution_summary(
                 ps.max_dd_from_peak,
                 ps.sym_stops,
                 ps.lev_int,
+                ps.exit_reason       AS ps_exit_reason,
                 ec.exchange,
                 s.display_name       AS strategy_display_name,
                 s.name               AS strategy_name,
@@ -1558,15 +1559,6 @@ def execution_summary(
                 er in ("filtered", "no_entry_conviction")
                 and len(entered_arr) > 0
             )
-            if ar_is_stale_filtered:
-                er_effective = None  # mid-session / recovered, not yet closed
-                conviction_passed = True
-            else:
-                er_effective = er
-                conviction_passed = er not in (
-                    "filtered", "no_entry_conviction", "missed_window",
-                    "stale_close_failed", "no_entry", "errored", "entry_failed",
-                )
 
             # Leveraged estimated return proxy: final_portfolio_return is 1x,
             # so scale by lev_int × 100 to get pre-fee leveraged %.
@@ -1576,15 +1568,34 @@ def execution_summary(
                 fpr * lev_int * 100 if fpr is not None and lev_int is not None else None
             )
 
-            # For a stale-filtered row the ar net/gross are zero (wrote-before-
-            # trading snapshot) — don't surface them as "actual return 0%".
-            # The true actual_return is only known after session close.
             if ar_is_stale_filtered:
-                net_ret = None
-                gross_ret = None
+                # Stale-filtered: the ar.exit_reason was written BEFORE the
+                # recovered trader ran. Trust portfolio_sessions for the real
+                # outcome. If ps has an exit_reason (e.g. subprocess_died set
+                # by the supervisor sweep), surface it; otherwise surface the
+                # final_portfolio_return as actual. Fee-drag is omitted here —
+                # we don't have the strategy config in scope, and the gap is
+                # small enough (~20-30bps) that displaying gross as actual is
+                # closer to truth than rendering "—". Downstream pnl_gap_pct
+                # computes against the same value so the gap reads 0 — signals
+                # "actual ≈ estimated gross" rather than faking precision.
+                er_effective = r["ps_exit_reason"] or None
+                conviction_passed = True
+                if fpr is not None and lev_int is not None:
+                    gross_ret = float(fpr) * lev_int * 100
+                    net_ret = gross_ret
+                else:
+                    gross_ret = None
+                    net_ret = None
             else:
+                er_effective = er
+                conviction_passed = er not in (
+                    "filtered", "no_entry_conviction", "missed_window",
+                    "stale_close_failed", "no_entry", "errored", "entry_failed",
+                )
                 net_ret = _dec(r["net_return_pct"])
                 gross_ret = _dec(r["gross_return_pct"])
+
             pnl_gap_pct_from_gross = (
                 gross_ret - net_ret
                 if gross_ret is not None and net_ret is not None
@@ -1608,6 +1619,15 @@ def execution_summary(
             roi_x = _dec(r["conviction_roi_x"])
             alerts_list = r["alerts_fired"] or []
 
+            # fill_rate fallback: pre-writer-extension sessions left
+            # ar.fill_rate NULL. When portfolio_sessions has both entered and
+            # symbols populated, derive fill_rate = len(entered)/len(symbols)
+            # × 100 so historical rows render a meaningful value instead of —.
+            # Writer-populated rows keep their stored value.
+            fill_rate = _dec(r["ar_fill_rate"])
+            if fill_rate is None and symbols_arr and entered_arr:
+                fill_rate = round(len(entered_arr) / len(symbols_arr) * 100, 2)
+
             daily.append({
                 "date": r["session_date"].isoformat(),
                 "allocation_id": str(r["allocation_id"]),
@@ -1623,7 +1643,7 @@ def execution_summary(
                 # Persisted by the writer extension (commit adding fill_rate
                 # et al. to allocation_returns). Null for pre-writer rows.
                 "retried":          int(r["retries_used"]) if r["retries_used"] is not None else None,
-                "fill_rate":        _dec(r["ar_fill_rate"]),
+                "fill_rate":        fill_rate,
                 "entry_slip_bps":   _dec(r["avg_entry_slip_bps"]),
                 "exit_slip_bps":    _dec(r["avg_exit_slip_bps"]),
                 "alerts":           len(alerts_list) if alerts_list else None,
@@ -1692,13 +1712,16 @@ def execution_summary_positions(
     Pre-trader-extension sessions have no rows — response returns an empty
     list and the frontend renders a "no per-symbol data" notice.
     """
-    # Pull session-level leverage from portfolio_sessions (or
-    # allocation_returns as a fallback) so each per-symbol row can render
-    # the leverage applied that day. Session-level value duplicated per
-    # row keeps the table self-contained without an extra header.
+    # Pull session-level leverage — prefer ar.effective_leverage so the
+    # per-symbol expand matches the daily row's LEV column. The old
+    # COALESCE(ps.lev_int, ar.effective_leverage) read the integer
+    # exchange-leverage (ceiling, e.g. 3 for eff_lev=2.14) which
+    # disagreed with the daily 2.14x. ps.lev_int is only used as a
+    # last-resort fallback now, kept so pre-writer-extension rows still
+    # render something.
     cur.execute(
         """
-        SELECT COALESCE(ps.lev_int, ar.effective_leverage) AS leverage
+        SELECT COALESCE(ar.effective_leverage, ps.lev_int) AS leverage
           FROM user_mgmt.allocation_returns ar
           LEFT JOIN user_mgmt.portfolio_sessions ps
                  ON ps.allocation_id = ar.allocation_id
