@@ -1217,11 +1217,24 @@ def enter_positions(api: ExchangeAdapter, inst_ids, entry_prices,
                 "ctval":    ctval,
             })
 
-    MAX_ENTRY_RETRIES = 3
+    # Retry cadence: 5.5 min (330s) between rounds. Rationale — BloFin
+    # imposes a temporary 5-min ban on burst requests against
+    # low-liquidity pairs; retrying inside that window guarantees
+    # re-rejection and prolongs the ban. 5.5 min adds a 30s safety
+    # margin past the documented ban expiry. Risk-control errors are
+    # already classified as non-retriable upstream (see
+    # _is_risk_control_error) — this retry handles only OTHER transient
+    # errors (network, auth hiccup, etc.), which at 5.5 min cadence
+    # should resolve on the first retry or not at all. MAX_ENTRY_RETRIES
+    # is therefore 1: multiple retries at this cadence would push the
+    # entry phase past monitoring bar 1 at +5:00 min and delay coverage
+    # on the symbols that successfully filled.
+    MAX_ENTRY_RETRIES = 1
+    RETRY_SPACING_S = 330
     retry_round = 0
     while failed and not dry_run and retry_round < MAX_ENTRY_RETRIES:
         retry_round += 1
-        time.sleep(5)
+        time.sleep(RETRY_SPACING_S)
         log.info(f"RETRY round {retry_round}/{MAX_ENTRY_RETRIES} -- {len(failed)} symbol(s)")
         still_failed = []
         for item in failed:
