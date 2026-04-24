@@ -878,7 +878,7 @@ def get_strategies(
             "capacity": {
                 "allocators": cap_info["allocators"],
                 "deployed_usd": cap_info["deployed_usd"],
-                "capacity_usd": s["capital_cap_usd"] or 1_000_000,
+                "capacity_usd": s["capital_cap_usd"] or 100_000,
             },
         })
 

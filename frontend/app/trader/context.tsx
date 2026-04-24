@@ -111,7 +111,7 @@ function mapApiStrategyToCatalog(s: ApiStrategy): StrategyCatalogEntry {
     description: s.description || "",
     sharpe: m.sharpe ?? 0,
     maxDd: Math.abs(m.max_dd_pct ?? 0),
-    winRate: (m.win_rate_daily ?? 0) * 100,
+    winRate: m.win_rate_daily ?? 0,
     ytd: m.total_return_pct ?? 0,
     cagr: m.cagr_pct ?? 0,
     profitFactor: m.profit_factor ?? 0,
