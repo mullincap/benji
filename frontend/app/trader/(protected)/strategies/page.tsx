@@ -954,7 +954,7 @@ export default function StrategiesPage() {
                         </div>
                       )}
                       <p style={{ fontSize: 10, color: dominant ? "var(--t1)" : "var(--t3)", margin: 0, lineHeight: 1.5, maxWidth: 560, transition: trans }}>
-                        {cat.description.split(".")[0]}.
+                        {cat.description}
                       </p>
                     </div>
 
@@ -1056,7 +1056,7 @@ export default function StrategiesPage() {
 
                 {/* Description */}
                 <p style={{ fontSize: 10, color: dominant ? "var(--t1)" : "var(--t3)", margin: "0 0 14px", lineHeight: 1.5, flex: 1, transition: trans }}>
-                  {cat.description.split(".")[0]}.
+                  {cat.description}
                 </p>
 
                 {/* Stats — vertical in grid mode, no dividers */}
