@@ -236,11 +236,14 @@ function Sidebar() {
                 </div>
                 {hasExchanges ? (
                   <div style={{ width: "100%", marginTop: 10 }}>
-                    {[
-                      { label: "BALANCE", value: fmtFull(totalBalance), color: "var(--t0)" },
-                      { label: "DEPLOYED", value: fmtFull(totalAllocated), color: "var(--green)" },
-                      { label: "AVAILABLE", value: fmtFull(available), color: "var(--t2)" },
-                    ].map((row, i) => (
+                    {(() => {
+                      const deployedPct = totalBalance > 0 ? totalAllocated / totalBalance : 0;
+                      const deployedColor = deployedPct >= 0.8 ? "var(--green)" : "var(--amber)";
+                      return [
+                        { label: "DEPLOYED", value: fmtFull(totalAllocated), color: deployedColor },
+                        { label: "AVAILABLE", value: fmtFull(available), color: "var(--t3)" },
+                      ];
+                    })().map((row, i) => (
                       <div key={row.label} style={{
                         display: "flex", alignItems: "center", justifyContent: "space-between",
                         padding: "5px 2px",
