@@ -1152,7 +1152,7 @@ def enter_positions(api: ExchangeAdapter, inst_ids, entry_prices,
             log.info(f"  {inst_id}: exchange SL set at ${sl_trigger:,.4f} "
                      f"({EXCHANGE_SL_PCT*100:.1f}% from entry)")
 
-        ok, order_id = _place_order_chunked(
+        ok, order_id, err_msg = _place_order_chunked(
             api, inst_id, contracts, lot, min_sz, max_mkt,
             sl_trigger_price=sl_trigger,
         )
@@ -1171,6 +1171,17 @@ def enter_positions(api: ExchangeAdapter, inst_ids, entry_prices,
             symbol_status[inst_id]["fill_pct"] = 100.0
             symbol_status[inst_id]["order_ids"].append(order_id)
             filled_first_pass += 1
+        elif _is_risk_control_error(err_msg):
+            # BloFin risk-control is sticky; retrying in the next 16s won't
+            # help. Mark skipped, skip the retry loop, and let operator
+            # manual fill + per-bar reconcile pick it up in the monitoring
+            # loop (feedback 2026-04-24 ZEREBRO incident).
+            log.warning(
+                f"  ⚠️  {inst_id}: risk-control rejection — skipping retries, "
+                f"monitoring-loop reconcile will adopt any manual fill. "
+                f"msg={err_msg}"
+            )
+            symbol_status[inst_id]["skipped_reason"] = "exchange_risk_control"
         else:
             log.error(f"  ❌ {inst_id}: order failed -- queued for retry")
             failed.append({
@@ -1213,10 +1224,22 @@ def enter_positions(api: ExchangeAdapter, inst_ids, entry_prices,
 
             filled_total = 0.0
             round_order_ids = []
-            ok1, order_id1 = _place_order_chunked(
+            ok1, order_id1, err_msg1 = _place_order_chunked(
                 api, inst_id, half, lot, min_sz, max_mkt,
                 sl_trigger_price=sl_trigger,
             )
+            # If we hit risk control on a retry, stop retrying this symbol
+            # for the rest of the entry phase. BloFin's 5-min ban is
+            # triggered by rapid-fire requests; continuing to retry
+            # prolongs the ban and doesn't help.
+            if not ok1 and _is_risk_control_error(err_msg1):
+                log.warning(
+                    f"  ⚠️  {inst_id}: risk-control rejection on retry — "
+                    f"abandoning retries for this symbol"
+                )
+                if symbol_status[inst_id]["skipped_reason"] is None:
+                    symbol_status[inst_id]["skipped_reason"] = "exchange_risk_control"
+                continue  # skip this item in the retry loop
             if ok1:
                 log.info(f"  ✅ {inst_id} retry half-1 {half}ct orderId={order_id1}")
                 filled_total += half
@@ -1224,7 +1247,7 @@ def enter_positions(api: ExchangeAdapter, inst_ids, entry_prices,
                 time.sleep(1)
                 remainder_first = _round_to_lot(target - half, lot)
                 if remainder_first >= min_sz:
-                    ok2, order_id2 = _place_order_chunked(
+                    ok2, order_id2, _err_msg2 = _place_order_chunked(
                         api, inst_id, remainder_first, lot, min_sz, max_mkt,
                         sl_trigger_price=None,
                     )
@@ -1312,6 +1335,16 @@ def enter_positions(api: ExchangeAdapter, inst_ids, entry_prices,
 
     return list(opened_by_sym.values()), fill_report
 
+def _is_risk_control_error(err_msg: str) -> bool:
+    """BloFin's low-liquidity / risk-control rejection is sticky for N
+    minutes — retrying inside the entry phase (burst of 4 in 16s) doesn't
+    help and burns API budget. Callers match this to skip the retry loop
+    and let the per-bar monitoring-loop reconcile pick up any operator
+    manual fill instead."""
+    low = (err_msg or "").lower()
+    return "risk control" in low or "low-liquidity pair" in low
+
+
 def _place_order_chunked(trading_api: ExchangeAdapter, inst_id: str,
                           total_contracts: float, lot: float, min_sz: float,
                           max_mkt_sz,
@@ -1324,7 +1357,11 @@ def _place_order_chunked(trading_api: ExchangeAdapter, inst_id: str,
     native SL (e.g., Binance margin), SL is monitored client-side by the
     port_sl / port_tsl loop instead; callers should pass sl_trigger_price=None
     for those paths.
-    Returns (success: bool, last_order_id: str).
+    Returns (success: bool, last_order_id_or_tag: str, error_msg: str).
+    error_msg is "" on success, the BloFin-surfaced rejection message
+    otherwise (or the exception string for transport-level failures).
+    Callers use error_msg to skip retries for known non-retriable
+    errors (e.g. risk control).
 
     Retry-on-102015 (exceeds maxMarketSize) lives HERE, not in the adapter.
     Adapter surfaces error_code="102015"; trader reduces chunk cap by 20%
@@ -1360,7 +1397,7 @@ def _place_order_chunked(trading_api: ExchangeAdapter, inst_id: str,
             new_cap = _round_to_lot(max(min_sz, chunk_cap * 0.8), lot)
             if new_cap >= chunk_cap or new_cap < min_sz:
                 log.error(f"  {inst_id}: cannot reduce chunk further (cap={chunk_cap})")
-                return False, "max_size_error"
+                return False, "max_size_error", result.error_msg or ""
             log.warning(f"  {inst_id}: maxMarketSize hit -- reducing cap {chunk_cap} -> {new_cap}")
             chunk_cap = new_cap
             continue
@@ -1368,12 +1405,12 @@ def _place_order_chunked(trading_api: ExchangeAdapter, inst_id: str,
         if not result.success:
             if result.error_code == "exception":
                 log.error(f"  {inst_id}: place_entry_order exception: {result.error_msg}")
-                return False, "exception"
+                return False, "exception", result.error_msg or ""
             log.error(
                 f"  {inst_id}: order error code={result.error_code} "
                 f"msg={result.error_msg}"
             )
-            return False, f"error_{result.error_code}"
+            return False, f"error_{result.error_code}", result.error_msg or ""
 
         last_id   = result.order_id or "unknown"
         remaining = _round_to_lot(remaining - chunk, lot)
@@ -1381,7 +1418,7 @@ def _place_order_chunked(trading_api: ExchangeAdapter, inst_id: str,
     if remaining > min_sz / 2.0:
         log.warning(f"  {inst_id}: unfilled remainder {remaining}ct -- partial fill")
 
-    return True, last_id
+    return True, last_id, ""
 
 
 def reconcile_fill_prices(api: ExchangeAdapter, positions: list) -> list:
