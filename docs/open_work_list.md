@@ -16,6 +16,66 @@ git log + commit messages are the historical record._
 
 ---
 
+## 🔴 TOP PRIORITY — Unclosed portfolio_session on mid-session trader death
+
+### 2026-04-23 session stuck as LIVE with 193 bars, no exit reason
+
+Observed 2026-04-24 via `/manager/portfolios`: the 2026-04-23 row renders
+status=LIVE, bars=193, exit='—' (vs 2026-04-21 which correctly shows
+status=Session Close, bars=197, exit='session_close'). 193 bars × 5min
+≈ 16h of monitoring — the session started around the ~06:31 UTC
+recovery-respawn that morning, then died silently mid-afternoon when
+one of the backend rebuilds during our ship work killed the subprocess
+without graceful close.
+
+**Root cause:** `user_mgmt.portfolio_sessions` rows have a lifecycle
+managed by the trader: INSERTed at session start with `status='active'`,
+then UPDATEd to `status='closed'` + `exit_reason` + `exit_time_utc` at
+the normal exit path in `trader_blofin.py` (`_close_portfolio_session_
+for_allocation`). A SIGTERM/SIGKILL mid-loop skips that path — the row
+stays `active` forever. Parallel to the Manager Execution stale-row
+problem we already fixed (Gap 6), but surfacing in the Portfolios tab
+instead.
+
+**Fix:**
+1. **One-shot DB cleanup** for the stuck 04-23 row now:
+   ```sql
+   UPDATE user_mgmt.portfolio_sessions
+      SET status='closed',
+          exit_reason='subprocess_died',
+          exit_time_utc=NOW()
+    WHERE allocation_id='f87fe130-a90c-4e60-908a-14f4065b415c'::uuid
+      AND signal_date='2026-04-23'::date
+      AND status='active';
+   ```
+
+2. **Persistent fix** — extend the SIGTERM handler (commit `6c3b506`)
+   to ALSO close the portfolio_session if one is active. The handler
+   currently only releases the allocation lock. Add:
+   ```python
+   # In _release_held_lock_on_shutdown()
+   _close_held_portfolio_session_if_active()  # new helper
+   ```
+   Where the new helper queries runtime_state for the current
+   session_id + writes `status='closed', exit_reason='subprocess_died',
+   exit_time_utc=NOW()`. Pairs cleanly with the existing lock-release
+   pattern.
+
+3. **Belt-and-suspenders supervisor sweep** — the `--resume-stuck`
+   supervisor already detects stale runtime_state. Extend its sweep to
+   also close any portfolio_session row where `status='active'` AND
+   the allocation's runtime_state is stale (updated_at > 15 min ago).
+   Covers the SIGKILL case where the signal handler can't run.
+
+**Scope:** ~20 LOC trader_blofin.py (Fix 2) + ~15 LOC
+trader_supervisor.py (Fix 3) + one-shot SQL (Fix 1). ~30 min total.
+No schema change.
+
+Also: the Symbols count column (showing 5/6 for 04-23) might be
+wrong per operator observation — worth verifying the numerator/
+denominator semantic while in there. Expected from
+portfolio_sessions: `entered[]` length / `symbols[]` length.
+
 ## 🔴 TOP PRIORITY — Manager Overview Total AUM baseline + audit/live parity
 
 ### Manager Overview — Total AUM subvalue ≠ Allocator PnL (Part C, remaining)
