@@ -240,8 +240,8 @@ function Sidebar() {
                       const deployedPct = totalBalance > 0 ? totalAllocated / totalBalance : 0;
                       const deployedColor = deployedPct >= 0.8 ? "var(--green)" : "var(--amber)";
                       return [
-                        { label: "DEPLOYED", value: fmtFull(totalAllocated), color: deployedColor },
-                        { label: "AVAILABLE", value: fmtFull(available), color: "var(--t3)" },
+                        { label: "DEPLOYED", value: fmtFull(totalAllocated), color: deployedColor, weight: 700 },
+                        { label: "AVAILABLE", value: fmtFull(available), color: "var(--t3)", weight: 400 },
                       ];
                     })().map((row, i) => (
                       <div key={row.label} style={{
@@ -250,7 +250,7 @@ function Sidebar() {
                         borderTop: i > 0 ? "0.5px solid var(--line)" : "none",
                       }}>
                         <span style={{ fontSize: 8, color: "var(--t3)", textTransform: "uppercase", letterSpacing: "0.06em" }}>{row.label}</span>
-                        <span style={{ fontSize: 10, fontWeight: 700, color: row.color }}>{row.value}</span>
+                        <span style={{ fontSize: 10, fontWeight: row.weight, color: row.color }}>{row.value}</span>
                       </div>
                     ))}
                   </div>
