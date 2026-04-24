@@ -140,6 +140,8 @@ function Divider() {
 
 // ─── Component ───────────────────────────────────────────────────────────────
 
+const API_BASE = process.env.NEXT_PUBLIC_API_BASE || '';
+
 export default function Topbar() {
   const [modulesOpen, setModulesOpen] = useState(false);
   const [themeOpen, setThemeOpen] = useState(false);
@@ -147,6 +149,7 @@ export default function Topbar() {
   const [themeId, setThemeId] = useState('spectrum');
   const [themeTarget, setThemeTarget] = useState<ThemeTarget>('text');
   const [baseThemeId, setBaseThemeId] = useState('vault');
+  const [equity, setEquity] = useState<number | null>(null);
   const modulesRef = useRef<HTMLDivElement | null>(null);
   const themeRef = useRef<HTMLDivElement | null>(null);
   const router = useRouter();
@@ -197,6 +200,29 @@ export default function Topbar() {
       document.removeEventListener('fullscreenchange', syncFullscreen);
     };
   }, []);
+
+  // Total exchange equity — only renders when the auth-protected API call
+  // succeeds (i.e. user is logged in). Polls every 30s; clears on 401.
+  useEffect(() => {
+    let cancelled = false;
+    async function fetchEquity() {
+      try {
+        const res = await fetch(`${API_BASE}/api/allocator/exchanges`, { credentials: 'include' });
+        if (!res.ok) { if (!cancelled) setEquity(null); return; }
+        const data = (await res.json()) as { exchanges: Array<{ status: string; balance: number }> };
+        if (cancelled) return;
+        const total = data.exchanges
+          .filter((e) => e.status === 'active')
+          .reduce((s, e) => s + (e.balance ?? 0), 0);
+        setEquity(total);
+      } catch {
+        if (!cancelled) setEquity(null);
+      }
+    }
+    fetchEquity();
+    const id = setInterval(fetchEquity, 30000);
+    return () => { cancelled = true; clearInterval(id); };
+  }, [pathname]);
 
   // Keyboard shortcuts: ⌘1–5 navigate to modules
   useEffect(() => {
@@ -432,6 +458,29 @@ export default function Topbar() {
 
       {/* ─── Right side ─────────────────────────────────────────────────────── */}
       <div style={{ display: 'flex', alignItems: 'center', gap: 0 }}>
+
+        {/* Total exchange equity — only when authed */}
+        {equity != null && (
+          <>
+            <div
+              title="Total equity across connected exchanges"
+              style={{
+                display: 'inline-flex', alignItems: 'baseline', gap: 6,
+                marginRight: 8, padding: '0 6px',
+                fontFamily: 'var(--font-space-mono), Space Mono, monospace',
+              }}
+            >
+              <span style={{
+                fontSize: 8, color: 'var(--t3)',
+                letterSpacing: '0.08em', textTransform: 'uppercase', fontWeight: 700,
+              }}>EQUITY</span>
+              <span style={{
+                fontSize: 11, color: 'var(--t0)', fontWeight: 700,
+              }}>${Math.round(equity).toLocaleString('en-US')}</span>
+            </div>
+            <Divider />
+          </>
+        )}
 
         {/* Fullscreen toggle — borderless */}
         <button
