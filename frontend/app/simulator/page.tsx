@@ -507,7 +507,17 @@ export default function Home() {
     setJobId(job.id);
     setJobData(job as unknown as Record<string, unknown>);
     setErrorInfo(null);
-    setParams((job.params as Record<string, unknown>) ?? DEFAULT_PARAMS);
+    // Merge saved params over DEFAULT_PARAMS so fields absent from older
+    // audits (e.g. nightly cron's sparse params missing mcap_source) get a
+    // defined form value instead of staying undefined. Without this, the
+    // <select> renders as the first option visually but the underlying
+    // state stays undefined, so submitting that audit silently omits the
+    // field and the backend's Pydantic default (e.g. mcap_source='db')
+    // applies — invisibly diverging from what the user thought they sent.
+    // Discovered 2026-04-25 trying to re-run the ALTS MAIN nightly with
+    // mcap_source='parquet' explicitly: dropdown showed 'parquet' but
+    // submission carried no mcap_source field → backend defaulted to 'db'.
+    setParams({ ...DEFAULT_PARAMS, ...((job.params as Record<string, unknown>) ?? {}) });
 
     const status = String(job.status || '').toLowerCase();
     if (status === 'complete' || status === 'completed' || status === 'done') {
