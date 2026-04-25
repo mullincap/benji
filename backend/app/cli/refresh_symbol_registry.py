@@ -32,6 +32,7 @@ committing.
 from __future__ import annotations
 
 import logging
+import re
 import sys
 
 import requests
@@ -50,6 +51,29 @@ log = logging.getLogger("refresh_symbol_registry")
 BLOFIN_INSTRUMENTS_URL = "https://openapi.blofin.com/api/v1/market/instruments"
 BINANCE_EXCHANGE_INFO_URL = "https://fapi.binance.com/fapi/v1/exchangeInfo"
 HTTP_TIMEOUT_S = 15
+
+# Binance applies a multiplier prefix to perp tickers for sub-cent coins so
+# the contract notional stays manageable: 1000PEPE = 1000 PEPE per contract,
+# 1000000MOG = 1,000,000 MOG. The convention is "1" followed by 3+ zeros,
+# then the canonical base symbol. We strip this prefix when matching against
+# market.symbols (which is keyed on the unprefixed CoinGecko base) so the
+# row gets the real Binance ticker (e.g. PEPE row gets binance_id="1000PEPEUSDT").
+#
+# Pattern intentionally requires ≥3 zeros to avoid false positives:
+#  - "1INCH" → no match (just "1", no zeros)
+#  - "1000PEPE" → match (1000, PEPE)
+#  - "1000000MOG" → match (1000000, MOG)
+#  - "ETH" → no match (no leading digit)
+_MULTIPLIER_PREFIX_RE = re.compile(r"^(10{3,})([A-Z].*)$")
+
+
+def _strip_multiplier_prefix(base: str) -> tuple[str, int | None]:
+    """Return (real_base, multiplier) if `base` carries a Binance-style
+    1000+/10000+/etc. multiplier prefix; otherwise (base, None)."""
+    m = _MULTIPLIER_PREFIX_RE.match(base)
+    if m:
+        return m.group(2), int(m.group(1))
+    return base, None
 
 
 def _fetch_blofin_bases_to_inst_ids() -> dict[str, str]:
@@ -76,22 +100,39 @@ def _fetch_blofin_bases_to_inst_ids() -> dict[str, str]:
 
 
 def _fetch_binance_bases_to_symbols() -> dict[str, str]:
-    """Return {base: symbol} for all live Binance USDT perpetual contracts."""
+    """Return {real_base: symbol} for all live Binance USDT perpetual contracts.
+
+    Strips multiplier prefixes (1000PEPE → PEPE, 1000000MOG → MOG) so the
+    returned key matches market.symbols.base (unprefixed CoinGecko base).
+    Without the strip, the cron would create duplicate "1000PEPE" rows
+    instead of populating the binance_id on the existing "PEPE" row,
+    causing audit + live trader to silently drop these symbols (the bug
+    that drove PR #7's hardcoded override map for PEPE/SHIB/FLOKI/BONK).
+    """
     resp = requests.get(BINANCE_EXCHANGE_INFO_URL, timeout=HTTP_TIMEOUT_S)
     resp.raise_for_status()
     symbols = resp.json().get("symbols") or []
     bases: dict[str, str] = {}
+    multiplier_hits: list[tuple[str, str, int]] = []
     for row in symbols:
         sym = row.get("symbol") or ""
         ctype = row.get("contractType")
         status = row.get("status")
         quote = row.get("quoteAsset")
-        base = row.get("baseAsset") or ""
+        raw_base = row.get("baseAsset") or ""
         if ctype != "PERPETUAL" or status != "TRADING" or quote != "USDT":
             continue
-        if not base:
+        if not raw_base:
             continue
-        bases[base.upper()] = sym
+        real_base, multiplier = _strip_multiplier_prefix(raw_base.upper())
+        bases[real_base] = sym
+        if multiplier is not None:
+            multiplier_hits.append((raw_base, sym, multiplier))
+    if multiplier_hits:
+        log.info(
+            f"binance multiplier-prefix detected on {len(multiplier_hits)} "
+            f"symbols: {sorted([h[0] for h in multiplier_hits])}"
+        )
     return bases
 
 
