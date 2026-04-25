@@ -133,6 +133,49 @@ needs its own fix.
 Either makes basket selection deterministic-per-day independent of
 when the script runs.
 
+### Canonical-compare card false-negative on identical methodology
+
+Surfaced 2026-04-25. `CanonicalCompareCard.paramsMatchCanonical()` has a
+short-circuit that suppresses the side-by-side comparison + governance
+verdict when a candidate matches canonical on all `METHODOLOGY_KEYS`
+("Nothing to compare — this candidate IS canonical"). The check is
+asymmetric on undefined-vs-defined: if EITHER side is undefined and
+the other is set, returns false even when the defined value equals
+the system default.
+
+The published `ALTS MAIN v1` (`5cb04dc8`) was promoted before 4 of the
+16 methodology keys existed, so its stored config is missing
+`price_ranking_metric`, `oi_ranking_metric`, `apply_blofin_filter`,
+`ranking_metric`. Today's candidates (frontend `DEFAULT_PARAMS` merge
+from PR #5) always carry those fields with default values. Result:
+short-circuit fails → full comparison renders → shows "DOES NOT
+QUALIFY: Sharpe below canonical + 0.3" against literally the same audit.
+
+**Fix scope** (~10 LOC, frontend-only):
+
+```ts
+const METHODOLOGY_KEY_DEFAULTS: Record<string, unknown> = {
+  price_ranking_metric: 'pct_change',
+  oi_ranking_metric: 'pct_change',
+  apply_blofin_filter: false,
+  ranking_metric: null,
+};
+
+function paramsMatchCanonical(candidate, canonical) {
+  for (const k of METHODOLOGY_KEYS) {
+    const a = candidate[k] ?? METHODOLOGY_KEY_DEFAULTS[k];
+    const b = canonical[k] ?? METHODOLOGY_KEY_DEFAULTS[k];
+    if (a === undefined && b === undefined) continue;
+    if (String(a) !== String(b)) return false;
+  }
+  return true;
+}
+```
+
+Backend alternative (more invasive but cleaner long-term): backfill
+the canonical strategy version's config to include current defaults
+at promotion time. Frontend fix is the safe ship-now path.
+
 ---
 
 ## 🟡 Active — when ready
