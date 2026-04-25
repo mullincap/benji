@@ -2404,9 +2404,14 @@ def _load_mcap_from_db(start: str, end: str) -> pd.DataFrame:
     Load market cap from market.market_cap_daily and return the same
     wide-format DataFrame as _load_mcap_from_parquet().
 
-    The DB table uses `base` (e.g. "BTC") whereas the audit expects
-    Binance USDT-M perp tickers (e.g. "BTCUSDT"). We append "USDT"
-    to each base to match the COINGECKO_TO_BINANCE convention.
+    Maps via `coin_id` (CoinGecko canonical ID like "pepe") through
+    COINGECKO_TO_BINANCE to get the Binance USDT-M perp ticker
+    (e.g. "1000PEPEUSDT"). The earlier base+"USDT" concat path silently
+    dropped 1000-prefix perps (1000PEPE/SHIB/FLOKI/BONK) because the DB
+    stores them under the unprefixed base — meanwhile parquet's loader
+    used coin_id-based mapping and got them right, producing a Sharpe
+    delta of ~0.45 between the two sources on identical params (audit
+    discovered 2026-04-25 reproducing CANNON 1.5).
     """
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
     from pipeline.db.connection import get_conn
@@ -2414,7 +2419,7 @@ def _load_mcap_from_db(start: str, end: str) -> pd.DataFrame:
     cur = conn.cursor()
     cur.execute(
         """
-        SELECT date, base, market_cap_usd
+        SELECT date, coin_id, market_cap_usd
         FROM market.market_cap_daily
         WHERE date >= %s::date AND date <= %s::date
           AND market_cap_usd IS NOT NULL
@@ -2427,12 +2432,10 @@ def _load_mcap_from_db(start: str, end: str) -> pd.DataFrame:
     conn.close()
     if not rows:
         raise ValueError(f"No mcap data in DB for {start} → {end}")
-    df = pd.DataFrame(rows, columns=["date", "base", "market_cap_usd"])
+    df = pd.DataFrame(rows, columns=["date", "coin_id", "market_cap_usd"])
     df["date"] = pd.to_datetime(df["date"])
-    df["binance_ticker"] = df["base"] + "USDT"
-    # Only keep tickers that appear in the COINGECKO_TO_BINANCE mapping
-    valid_tickers = set(COINGECKO_TO_BINANCE.values())
-    df = df[df["binance_ticker"].isin(valid_tickers)]
+    df["binance_ticker"] = df["coin_id"].map(COINGECKO_TO_BINANCE)
+    df = df.dropna(subset=["binance_ticker"])
     if df.empty:
         raise ValueError("No DB mcap rows match COINGECKO_TO_BINANCE mapping")
     df = (df.sort_values("market_cap_usd", ascending=False)
