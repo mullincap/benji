@@ -61,7 +61,15 @@ class TraderConfig:
     # this with port_sl_pct — wrong threshold AND wrong clamp on stops.
     stop_raw_pct: float = -0.06
     early_fill_y: float = 0.09
-    fill_max_bar: int = 143
+    # Minutes from session_open after which the early-fill trigger stops
+    # firing. Mirrors audit's EARLY_FILL_X param in
+    # institutional_audit.py:_apply_hybrid_day_param (early_fill_max_minutes).
+    # Was previously fill_max_bar=143 (in bars) hardcoded — coincidentally
+    # equivalent to 720 min for 5-min bars, but didn't propagate from
+    # strategy config so future changes to early_fill_x would silently
+    # not flow through. Audit default is 540 (9hr); ALTS MAIN sets 720
+    # (12hr → fill window ends 18:00 UTC).
+    early_fill_x: int = 720
     active_filter: str = "Tail Guardrail"
 
     # ── Session timing ─────────────────────────────────────────────────────
@@ -204,6 +212,9 @@ class TraderConfig:
             early_fill_y=float(_pick(
                 "early_fill_y", ["early_fill_y"], defaults.early_fill_y,
             )),
+            early_fill_x=int(_pick(
+                "early_fill_x", ["early_fill_x"], defaults.early_fill_x,
+            )),
             active_filter=active_filter,
             capital_mode="fixed_usd",
             capital_value=capital_usd,
@@ -224,7 +235,7 @@ _LIVE_BASELINE = {
     "port_sl_pct": -0.06,
     "port_tsl_pct": -0.075,
     "early_fill_y": 0.09,
-    "fill_max_bar": 143,
+    "early_fill_x": 720,
     "active_filter": "Tail Guardrail",
     "session_start_hour": 6,
     "bar_minutes": 5,

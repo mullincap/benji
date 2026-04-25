@@ -2268,8 +2268,8 @@ def _run_monitoring_loop(today, today_date, api: ExchangeAdapter, inst_ids,
     )
     session_close_dt = datetime.datetime.combine(today_date, datetime.time(23, 55, 0))
     fill_gate_dt     = session_open + datetime.timedelta(
-        minutes=cfg.fill_max_bar * cfg.bar_minutes + cfg.bar_minutes   # 720 min = 18:00 UTC
-    )
+        minutes=cfg.early_fill_x   # audit's EARLY_FILL_X — minutes from session open
+    )                              # past which early-fill triggers stop firing
 
     exit_reason     = None
     final_return_1x = 0.0
