@@ -25,7 +25,64 @@ pruned — git log + commit messages are the historical record._
 
 ## 🟠 Follow-ups (same-week)
 
-_(none open)_
+### Audit-vs-live structural divergences
+
+Surfaced 2026-04-25 reproducing canonical ALTS MAIN through the simulator.
+After PRs #6 (audit `_load_mcap_from_db` coin_id mapping) and #7 (live
+trader 1000X-prefix fix), the audit + live trader's *dispersion universes*
+agree on the 1000X-prefix subset (PEPE/SHIB/FLOKI/BONK no longer dropped).
+Two structural mismatches still produce divergent baskets between
+nightly audits (e.g. `41fec4df`, ALTS MAIN) and what the live trader
+actually trades the same morning.
+
+**1. Dispersion-universe selection — point-in-time vs today's snapshot**
+
+| | Audit | Live trader |
+|---|---|---|
+| For day X dispersion calc, uses... | top-N mcap **as of day X** | top-N mcap **as of TODAY**, then their historical returns |
+| Look-ahead bias | none — point-in-time | yes — today's mcap rankings applied to history |
+| Code | `pipeline/audit.py:build_dispersion_filter` | `daily_signal_v2.py:compute_dispersion_filter` (line 535–548) |
+
+The live trader self-documents this as an explicit approximation at
+`daily_signal_v2.py:516` ("Approximation vs audit: ... Live uses
+TODAY's top-N (i.e. fixed snapshot of mcap, not per-day)"). Magnitude
+depends on universe churn — modest for established mcaps, larger after
+big mcap rotations. **Fix scope**: rewrite live's dispersion calc to do
+N daily DB queries, mapping each day's symbol set to its kline returns.
+Manageable but ~100-200 LOC and adds latency to the 05:58 cron.
+
+**2. Basket-selection universe scope + snapshot timing**
+
+| | Audit | Live trader |
+|---|---|---|
+| Universe source | `market.leaderboards` table — top-100 by 24h volume | `market.futures_1m` — **all 535 USDT perps** scanned live |
+| Snapshot bar | 06:00 UTC | 05:59 UTC (last closed 5m bar before cron at 05:58) |
+| Anchor bar | per audit config (`index_lookback`) | 00:04 UTC (first 1m bar after midnight) |
+
+Concrete impact (observed 2026-04-24): audit's basket = `ENJ, INX, KAT,
+RED, SKR, SPORTFUN, ZEREBRO`; live's basket = `ENJ, INX, KAT, SKR,
+ZEREBRO`. RED ranked top-3 OI in live's 535-perp universe but didn't
+make price top-20, so it failed the price∩OI intersection. In audit's
+100-perp universe, RED *did* make price top-20 → traded → audit
+recorded -5.25% strat return on a day live made +18.4%. This is the
+**biggest single source of audit-vs-live result drift**. Three fix
+paths (decision needed before coding):
+
+- **A. Live moves to leaderboards path** — fastest convergence, but
+  live loses real-time coverage advantage and must wait for 01:00 UTC
+  nightly leaderboard rebuild
+- **B. Audit moves to all-USDT-perps path** — what the now-removed
+  `live_parity` toggle did. Slower per-audit-day (full 1m scan), but
+  matches live exactly. Could re-add as opt-in flag without the
+  regime-changing default
+- **C. Both share a new common universe-construction path** — biggest
+  refactor, cleanest long-term
+
+**Side-channel work**: market.symbols.binance_id has NULL for PEPE/SHIB
+and is missing FLOKI/BONK entirely (PR #7 worked around it with an
+inline override map). Symbol-registry refresh has its own 1000X-prefix
+detection bug worth a separate small fix so future 1000X-style listings
+are handled automatically.
 
 ---
 
