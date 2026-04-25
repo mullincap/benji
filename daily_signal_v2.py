@@ -277,21 +277,44 @@ def _fetch_all_futures_symbols():
 
 
 def _fetch_symbol_snapshot(args):
-    """Fetch 5m klines + OI history for one symbol, extract anchor close
-    (first bar at start_ms) and snapshot close (last bar ≤ end_ms). Returns
-    (symbol, price_pct_change, oi_pct_change). Any failure or missing data
-    maps to None so the symbol is silently dropped from ranking."""
+    """Fetch 1m price klines + 5m OI history for one symbol, extract anchor
+    close (first bar at start_ms) and snapshot close (latest CLOSED bar ≤
+    end_ms). Returns (symbol, price_pct_change, oi_pct_change). Any failure
+    or missing data maps to None so the symbol is silently dropped.
+
+    Why 1m for price + 5m for OI: the audit reads market.leaderboards rows
+    at timestamp=06:00, which were built by the indexer from market.futures_1m
+    (1-minute bars). To exactly match the audit's snapshot bar, price must
+    be the 1m bar at 06:00 UTC (closes at 06:00:59). Binance's
+    openInterestHist endpoint only supports period=5m+ (no 1m OI from the
+    public API), so OI uses the 5m bar at 05:55 UTC (closes at 05:59:59) —
+    1 second off the audit's 06:00:59 reference, best-effort given the API
+    constraint. Limit bumped to 380 for 1m klines to cover the 6h+ window.
+    """
     symbol, start_ms, end_ms = args
     try:
         kr = requests.get(
             f"{_BINANCE_FAPI}/fapi/v1/klines",
-            params={"symbol": symbol, "interval": "5m",
-                    "startTime": start_ms, "endTime": end_ms, "limit": 80},
+            params={"symbol": symbol, "interval": "1m",
+                    "startTime": start_ms, "endTime": end_ms, "limit": 380},
             timeout=_REST_TIMEOUT,
         )
         if kr.status_code != 200:
             return symbol, None, None
         klines = kr.json()
+        if not klines:
+            return symbol, None, None
+
+        # Drop any in-progress bar from the tail so klines[-1] is always the
+        # latest CLOSED bar regardless of when this script ran. Paired with
+        # the 65s sleep at main() entry — baskets are now reproducible across
+        # runs (was the wall-clock-non-determinism bug per
+        # docs/open_work_list.md "Live trader basket — wall-clock non-determinism").
+        now_ms = int(time.time() * 1000)
+        BAR_MS_1M = 60 * 1000
+        BAR_MS_5M = 5 * 60 * 1000
+        while klines and (int(klines[-1][0]) + BAR_MS_1M > now_ms):
+            klines.pop()
         if not klines:
             return symbol, None, None
 
@@ -302,6 +325,15 @@ def _fetch_symbol_snapshot(args):
             timeout=_REST_TIMEOUT,
         )
         oi_hist = or_.json() if or_.status_code == 200 else []
+        while oi_hist and isinstance(oi_hist, list):
+            try:
+                tail_ts = int(oi_hist[-1].get("timestamp", 0))
+                if tail_ts + BAR_MS_5M > now_ms:
+                    oi_hist.pop()
+                    continue
+            except (KeyError, ValueError, TypeError, AttributeError):
+                pass
+            break
 
         # klines row: [open_time, open, high, low, close, volume, ...]
         anchor_close = float(klines[0][4])
@@ -1058,6 +1090,19 @@ def write_to_db(date_str, filter_name, overlap_pool, sit_flat, filter_reason,
 
 def main():
     t_start = time.time()
+    # Sleep at script start so the 06:00 UTC 1m bar is fully closed before
+    # we fetch klines. Cron fires at 06:00:00 UTC; the 1m bar at 06:00 closes
+    # at 06:00:59 UTC. 65s sleep lands us at ~06:01:05 — past 06:00:59 close
+    # with a small buffer for clock skew + Binance API latency. The
+    # _fetch_symbol_snapshot function below uses interval="1m" + closed-bar
+    # filter so klines[-1] is always the closed 06:00 1m bar, exactly
+    # matching the audit's market.leaderboards reference at timestamp=06:00.
+    # Discovered 2026-04-25: prior 05:58 cron fired before the 06:00 bar
+    # opened, so klines[-1] returned the in-progress 05:55-05:59 5m bar.
+    # Two runs minutes apart produced different baskets (MAGIC vs SAND swap)
+    # because the in-progress bar's close moved with wall-clock. See
+    # docs/open_work_list.md "Live trader basket — wall-clock non-determinism".
+    time.sleep(65)
     today = _dt.datetime.now(_dt.timezone.utc).date()
     log.info("=" * 65)
     log.info(f"  DAILY SIGNAL v2 -- {today} (canonical methodology, LIVE)")
