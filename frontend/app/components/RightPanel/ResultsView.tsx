@@ -2813,11 +2813,18 @@ function HourlyPerformanceChart({
 }) {
   const [mode, setMode] = useState<'hourly' | 'cumulative'>('hourly');
   const [dayFilter, setDayFilter] = useState<'all' | 'pos' | 'neg'>('all');
+  const [firstHourAnchor, setFirstHourAnchor] = useState<'entry' | 'full'>('entry');
   const [hovered, setHovered] = useState<number | null>(null);
   const [open, setOpen] = useState(true);
 
   const N_HOURS = 18;
   const BARS_PER_HOUR = 12;
+  // Bar index at 06:35 UTC (entry timestamp = session_open + 35 min, 5-min bars).
+  // Used when firstHourAnchor='entry' to start hour-0's binning at the moment
+  // positions actually exist, excluding the 06:00-06:35 pre-entry window
+  // where intraday_bars values reflect symbol price drift the strategy
+  // didn't capture (no positions open yet).
+  const ENTRY_BAR_IDX = 7;
 
   // Filter the day set based on each day's strat_roi sign before
   // aggregating: ALL keeps every active day, POS keeps strat_roi > 0
@@ -2845,7 +2852,12 @@ function HourlyPerformanceChart({
       const effectiveLen = Math.min(rawBars.length, exitBar);
 
       for (let h = 0; h < N_HOURS; h++) {
-        const startIdx = h * BARS_PER_HOUR;
+        // Hour 0 has a special start anchor: 06:35 (entry) by default,
+        // 06:00 (session open) when toggled to FULL. All other hours
+        // always start at their natural h*12 boundary.
+        const startIdx = (h === 0 && firstHourAnchor === 'entry')
+          ? ENTRY_BAR_IDX
+          : h * BARS_PER_HOUR;
         const targetEndIdx = (h + 1) * BARS_PER_HOUR;
         // Skip hours we don't have full data for. Allow the trailing hour 17
         // to use the very last available bar even if it sits one bar shy of
@@ -2996,7 +3008,46 @@ function HourlyPerformanceChart({
           </div>
         )}
         {open && (
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+            {/* First-hour anchor: ENTRY (06:35, default — truthful, captures
+                only the period the strategy actually had positions on) vs
+                FULL (06:00, includes the 06:00-06:35 pre-entry price drift
+                that the strategy never realized). */}
+            <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+              <span style={{ fontSize: 8, color: 'var(--t3)', letterSpacing: '0.08em', fontFamily: 'var(--font-space-mono)' }}>1H</span>
+              <div style={{ display: 'flex', gap: 0 }}>
+                {([
+                  { key: 'entry', label: '06:35' },
+                  { key: 'full', label: '06:00' },
+                ] as const).map((opt, i, arr) => {
+                  const active = firstHourAnchor === opt.key;
+                  return (
+                    <button
+                      key={opt.key}
+                      type="button"
+                      onClick={() => setFirstHourAnchor(opt.key)}
+                      title={opt.key === 'entry'
+                        ? "Hour 0 anchored at 06:35 entry — excludes pre-entry price drift the strategy didn't capture"
+                        : 'Hour 0 spans the full 06:00–07:00 window — includes 06:00–06:35 pre-entry price drift'}
+                      style={{
+                        padding: '3px 7px',
+                        fontSize: 9,
+                        fontWeight: 700,
+                        letterSpacing: '0.08em',
+                        background: active ? 'var(--bg4)' : 'transparent',
+                        color: active ? 'var(--t0)' : 'var(--t2)',
+                        border: '1px solid var(--line)',
+                        borderRight: i === arr.length - 1 ? '1px solid var(--line)' : 'none',
+                        cursor: 'pointer',
+                        fontFamily: 'var(--font-space-mono)',
+                      }}
+                    >
+                      {opt.label}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
             {/* Day-set filter: include all active days, only winning days,
                 or only losing days. Lets the user see WHEN the wins happen
                 separately from WHEN the losses happen. */}
