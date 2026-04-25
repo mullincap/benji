@@ -2801,31 +2801,43 @@ function normalizeIntradaySeriesToDayReturn(
 //               every day got every hour's average; ends roughly at the avg
 //               daily strat_roi assuming all days completed all hours)
 function HourlyPerformanceChart({
-  activeDates,
+  activeDays,
   intradayBars,
   exitBars,
   levByDate,
 }: {
-  activeDates: string[];
+  activeDays: Array<{ date: string; stratRoi: number }>;
   intradayBars: Record<string, Array<number | null>> | null | undefined;
   exitBars: Record<string, number> | null | undefined;
   levByDate: Record<string, number>;
 }) {
   const [mode, setMode] = useState<'hourly' | 'cumulative'>('hourly');
+  const [dayFilter, setDayFilter] = useState<'all' | 'pos' | 'neg'>('all');
   const [hovered, setHovered] = useState<number | null>(null);
   const [open, setOpen] = useState(true);
 
   const N_HOURS = 18;
   const BARS_PER_HOUR = 12;
 
+  // Filter the day set based on each day's strat_roi sign before
+  // aggregating: ALL keeps every active day, POS keeps strat_roi > 0
+  // (winning days only — answers "when does the win happen?"), NEG keeps
+  // strat_roi < 0 (losing days only — answers "when does the damage land?").
+  const filteredDays = activeDays.filter(({ stratRoi }) => {
+    if (dayFilter === 'pos') return stratRoi > 0;
+    if (dayFilter === 'neg') return stratRoi < 0;
+    return true;
+  });
+  const filteredDates = filteredDays.map((d) => d.date);
+
   // Aggregate per-hour stats. Bucket h covers session hour [06+h, 06+h+1).
   const stats = Array.from({ length: N_HOURS }, () => ({
     count: 0, wins: 0, total: 0,
   }));
-  if (!intradayBars || activeDates.length === 0) {
+  if (!intradayBars || filteredDates.length === 0) {
     // fall through with empty stats — render below shows "no data"
   } else {
-    for (const date of activeDates) {
+    for (const date of filteredDates) {
       const rawBars = intradayBars[date];
       if (!rawBars || rawBars.length < 2) continue;
       const lev = levByDate[date] ?? 1;
@@ -2870,9 +2882,18 @@ function HourlyPerformanceChart({
   const yValues = mode === 'hourly'
     ? avgs.filter((v): v is number => v !== null)
     : cumulative;
-  const yMax = yValues.length > 0 ? Math.max(...yValues, 0) : 1;
-  const yMin = yValues.length > 0 ? Math.min(...yValues, 0) : -1;
-  const yRange = Math.max(Math.abs(yMax), Math.abs(yMin), 0.5) * 1.2;
+  // Asymmetric y-range: pad just enough above the data max and below the
+  // data min so the chart fits the actual values tightly. Always include 0
+  // in range so the zero line renders. Earlier symmetric ±yRange wasted
+  // huge vertical space when data was mostly positive (or vice versa).
+  const dataMax = yValues.length > 0 ? Math.max(...yValues, 0) : 0.5;
+  const dataMin = yValues.length > 0 ? Math.min(...yValues, 0) : -0.5;
+  const span = Math.max(dataMax - dataMin, 0.5);
+  // 8% pad above + 4% pad below — top needs more room for hover tooltips
+  // sitting above positive bars; bottom rarely has hover text below.
+  const yMaxPadded = dataMax + span * 0.08;
+  const yMinPadded = dataMin - span * 0.04;
+  const yPaddedSpan = Math.max(yMaxPadded - yMinPadded, 1e-9);
 
   const W = 600, H = 240;
   const padL = 36, padR = 8, padT = 10, padB = 24;
@@ -2890,7 +2911,7 @@ function HourlyPerformanceChart({
 
   const xForBar = (h: number) => padL + (h + 0.5) * (plotW / N_HOURS);
   const xForCum = (h: number) => padL + (h / N_HOURS) * plotW;
-  const yFor = (v: number) => padT + plotH / 2 - (v / yRange) * (plotH / 2);
+  const yFor = (v: number) => padT + plotH * (1 - (v - yMinPadded) / yPaddedSpan);
   const yZero = yFor(0);
 
   const barW = (plotW / N_HOURS) * 0.7;
@@ -2900,7 +2921,7 @@ function HourlyPerformanceChart({
     .map((v, i) => `${i === 0 ? 'M' : 'L'} ${xForCum(i).toFixed(1)} ${yFor(v).toFixed(1)}`)
     .join(' ');
 
-  const totalDays = activeDates.length;
+  const totalDays = filteredDates.length;
   const dataDays = stats.reduce((m, s) => Math.max(m, s.count), 0);
 
   // Header stats — bucket-level (each of the 18 hour buckets is one data
@@ -2975,32 +2996,69 @@ function HourlyPerformanceChart({
           </div>
         )}
         {open && (
-          <div style={{ display: 'flex', gap: 0 }}>
-            {(['hourly', 'cumulative'] as const).map((m) => {
-              const active = mode === m;
-              return (
-                <button
-                  key={m}
-                  type="button"
-                  onClick={() => setMode(m)}
-                  style={{
-                    padding: '3px 8px',
-                    fontSize: 9,
-                    fontWeight: 700,
-                    letterSpacing: '0.08em',
-                    textTransform: 'uppercase',
-                    background: active ? 'var(--bg4)' : 'transparent',
-                    color: active ? 'var(--t0)' : 'var(--t2)',
-                    border: '1px solid var(--line)',
-                    borderRight: m === 'hourly' ? 'none' : '1px solid var(--line)',
-                    cursor: 'pointer',
-                    fontFamily: 'var(--font-space-mono)',
-                  }}
-                >
-                  {m}
-                </button>
-              );
-            })}
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            {/* Day-set filter: include all active days, only winning days,
+                or only losing days. Lets the user see WHEN the wins happen
+                separately from WHEN the losses happen. */}
+            <div style={{ display: 'flex', gap: 0 }}>
+              {([
+                { key: 'all', label: 'ALL' },
+                { key: 'pos', label: 'POS' },
+                { key: 'neg', label: 'NEG' },
+              ] as const).map((opt, i, arr) => {
+                const active = dayFilter === opt.key;
+                return (
+                  <button
+                    key={opt.key}
+                    type="button"
+                    onClick={() => setDayFilter(opt.key)}
+                    style={{
+                      padding: '3px 7px',
+                      fontSize: 9,
+                      fontWeight: 700,
+                      letterSpacing: '0.08em',
+                      background: active ? 'var(--bg4)' : 'transparent',
+                      color: active
+                        ? (opt.key === 'pos' ? 'var(--green)' : opt.key === 'neg' ? 'var(--red)' : 'var(--t0)')
+                        : 'var(--t2)',
+                      border: '1px solid var(--line)',
+                      borderRight: i === arr.length - 1 ? '1px solid var(--line)' : 'none',
+                      cursor: 'pointer',
+                      fontFamily: 'var(--font-space-mono)',
+                    }}
+                  >
+                    {opt.label}
+                  </button>
+                );
+              })}
+            </div>
+            <div style={{ display: 'flex', gap: 0 }}>
+              {(['hourly', 'cumulative'] as const).map((m) => {
+                const active = mode === m;
+                return (
+                  <button
+                    key={m}
+                    type="button"
+                    onClick={() => setMode(m)}
+                    style={{
+                      padding: '3px 8px',
+                      fontSize: 9,
+                      fontWeight: 700,
+                      letterSpacing: '0.08em',
+                      textTransform: 'uppercase',
+                      background: active ? 'var(--bg4)' : 'transparent',
+                      color: active ? 'var(--t0)' : 'var(--t2)',
+                      border: '1px solid var(--line)',
+                      borderRight: m === 'hourly' ? 'none' : '1px solid var(--line)',
+                      cursor: 'pointer',
+                      fontFamily: 'var(--font-space-mono)',
+                    }}
+                  >
+                    {m}
+                  </button>
+                );
+              })}
+            </div>
           </div>
         )}
       </div>
@@ -3009,15 +3067,22 @@ function HourlyPerformanceChart({
       <svg width="100%" height={H} viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none" style={{ display: 'block' }}>
         {/* y-axis zero line */}
         <line x1={padL} x2={W - padR} y1={yZero} y2={yZero} stroke="var(--line2)" strokeWidth={0.5} strokeDasharray="2 2" />
-        {/* y-axis ticks at +/- yRange/2 */}
-        {[yRange / 2, -yRange / 2].map((v) => (
-          <g key={v}>
-            <line x1={padL} x2={W - padR} y1={yFor(v)} y2={yFor(v)} stroke="var(--line)" strokeWidth={0.5} />
-            <text x={padL - 4} y={yFor(v) + 3} fontSize={8} fill="var(--t3)" textAnchor="end" fontFamily="var(--font-space-mono)">
-              {v >= 0 ? '+' : ''}{v.toFixed(1)}%
-            </text>
-          </g>
-        ))}
+        {/* y-axis ticks at data extents (asymmetric — drops empty space when
+            data is mostly positive or mostly negative). Skip a side if its
+            extent is too close to zero to be a useful tick. */}
+        {[
+          dataMax > 0.01 ? dataMax : null,
+          dataMin < -0.01 ? dataMin : null,
+        ]
+          .filter((v): v is number => v !== null)
+          .map((v) => (
+            <g key={v}>
+              <line x1={padL} x2={W - padR} y1={yFor(v)} y2={yFor(v)} stroke="var(--line)" strokeWidth={0.5} />
+              <text x={padL - 4} y={yFor(v) + 3} fontSize={8} fill="var(--t3)" textAnchor="end" fontFamily="var(--font-space-mono)">
+                {v >= 0 ? '+' : ''}{v.toFixed(1)}%
+              </text>
+            </g>
+          ))}
         {/* x-axis hour labels — every hour, compact 12h format ("6a", "11p"). */}
         {Array.from({ length: N_HOURS + 1 }).map((_, h) => (
           <text
@@ -14915,10 +14980,10 @@ export default function ResultsView({ results, jobId, startingCapital, params }:
               return dpRoot?.daily_portfolio as Record<string, PortfolioDayHour> | undefined;
             })();
             if (!portfolio || Object.keys(portfolio).length === 0) return null;
-            const activeDates = Object.entries(portfolio)
+            const activeDays = Object.entries(portfolio)
               .filter(([, v]) => v.filter === 'pass' && v.conviction === 'pass')
-              .map(([d]) => d);
-            if (activeDates.length === 0) return null;
+              .map(([date, v]) => ({ date, stratRoi: v.strat_roi }));
+            if (activeDays.length === 0) return null;
             const intradayBars = (m.intraday_bars ?? (results as Record<string, unknown>)?.intraday_bars) as Record<string, Array<number | null>> | null | undefined;
             if (!intradayBars || Object.keys(intradayBars).length === 0) return null;
             const exitBars = selectedFilter
@@ -14932,7 +14997,7 @@ export default function ResultsView({ results, jobId, startingCapital, params }:
             }
             return (
               <HourlyPerformanceChart
-                activeDates={activeDates}
+                activeDays={activeDays}
                 intradayBars={intradayBars}
                 exitBars={exitBars}
                 levByDate={levByDate}
