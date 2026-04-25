@@ -301,6 +301,46 @@ Portfolios-tab visualization improvements that share a backend deploy.
 
 ---
 
+### Simulator — per-symbol take-profit toggle
+
+Surfaced 2026-04-25. Mirror of the existing `stop_raw_pct=-6%` per-
+symbol stop, but on the upside: when a symbol's return crosses a
+configurable take-profit threshold, the position closes and the
+symbol's contribution clamps at the TP value for the rest of the
+session. Captures individual-symbol winners that may give back gains
+later, complementing the portfolio-level early_fill trigger which
+operates on portfolio-wide return.
+
+**Two new params in the simulator:**
+- `enable_sym_tp`: bool, default `false` (preserves canonical)
+- `sym_tp_pct`: float, default `0.10` (e.g., +10% per symbol). Only
+  used when `enable_sym_tp=true`.
+
+**Implementation:**
+- `pipeline/rebuild_portfolio_matrix.py`: extend `apply_raw_stop` (or
+  add `apply_raw_stop_with_tp`) to also clamp from above when
+  `raw[i] >= sym_tp_pct`. Same clamp-and-freeze pattern: once fired,
+  symbol contributes `sym_tp_pct` for all subsequent bars.
+- `backend/app/api/routes/jobs.py`: 2 new JobRequest fields.
+- `backend/app/services/audit/pipeline_runner.py`: env passthrough
+  (`ENABLE_SYM_TP`, `SYM_TP_PCT`).
+- `frontend/app/components/LeftPanel/ParamForm.tsx`: toggle + numeric
+  input under existing per-symbol risk controls section.
+- `frontend/app/simulator/page.tsx`: DEFAULT_PARAMS adds the fields.
+
+**Default preserves canonical:** `enable_sym_tp=false` is identical to
+today's behavior (no upper clamp, only the -6% stop).
+
+**Scope:** ~2-3h. Pairs cleanly with the reinvest knobs feature — both
+modify per-symbol path construction. Could ship together as a single
+"per-symbol risk controls" PR, or independently.
+
+**Not implemented to live trader yet** — simulator-only until
+backtests validate the TP threshold. Live integration would mirror
+the per-symbol stop close path in trader_blofin.py (~80 LOC).
+
+---
+
 ## 🟢 Low priority — opportunistic
 
 ### D-perf — precomputed abs_dollar leaderboards
