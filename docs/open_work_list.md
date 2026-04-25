@@ -1,7 +1,13 @@
 # Open Work List
 
-_Last cleanup: 2026-04-24 (late). Anything that shipped is intentionally
-pruned — git log + commit messages are the historical record._
+_Last cleanup: 2026-04-25. Anything that shipped is intentionally pruned —
+git log + commit messages are the historical record._
+
+## ✅ Recently shipped (2026-04-25)
+
+- **Audit-vs-live snapshot bar — exact match** (2026-04-25) — PR #8 (commit `ea06213`). Cron 05:58 → 06:00 UTC, 65s sleep at script start, price interval 5m → 1m + closed-bar tail filter. Live's snapshot now reads the 1m bar at 06:00 UTC (close 06:00:59) which is the exact reference the audit's `market.leaderboards` row at `timestamp=06:00` was built from. Eliminates the wall-clock-non-determinism bug that produced MAGIC vs SAND swap at the rank-20 boundary on 2026-04-25. Trade deployment at 06:35 unchanged.
+- **Audit + live trader 1000X-prefix mapping** (2026-04-25) — PRs #6 + #7. Audit's `_load_mcap_from_db` was concatenating `base + 'USDT'` and missing 1000PEPE/1000SHIB/1000FLOKI/1000BONK; live trader's dispersion kline fetch had the same bug. Both fixed: audit maps via `coin_id` through `COINGECKO_TO_BINANCE`; live uses an inline override map. Closed the 0.45 Sharpe gap between db-sourced and parquet-sourced audits (3.502 → 3.957 — exact match to nightly).
+- **Simulator atomic-write fix + DEFAULT_PARAMS merge + remove live_parity toggle + db-default mcap_source + add coingecko mcap option** (2026-04-25) — PRs #1-#5. Cluster of simulator usability + reproducibility fixes surfaced while reproducing canonical CANNON. Job race that left submissions stuck in `queued`, "Edit & Re-run" silently dropping fields not in the saved params, removal of the live_parity toggle that was producing Sharpe 0.85 vs canonical 3.9, and the env-default migrations to keep frontend + nightly cron paths converged.
 
 ## ✅ Recently shipped (2026-04-23 → 2026-04-24)
 
@@ -51,101 +57,42 @@ big mcap rotations. **Fix scope**: rewrite live's dispersion calc to do
 N daily DB queries, mapping each day's symbol set to its kline returns.
 Manageable but ~100-200 LOC and adds latency to the 05:58 cron.
 
-**2. Basket-selection — snapshot bar + data path**
+**2. Basket-selection residuals (snapshot bar SHIPPED via PR #8)**
 
-Both audit and live use essentially the same universe (~all USDT perps
-with snapshot data). The audit's
-`overlap_analysis.py` query at lines 812-829 reads
-`market.leaderboards` filtered by `metric IN ('close','open_interest')`
-+ `rank<=20` — no volume threshold or top-100 cutoff (corrected
-2026-04-25, prior version of this entry incorrectly attributed a
-volume filter). The indexer ranks all symbols it has data for (~565 on
-04-24); the audit takes top-20 by each metric and intersects.
+PR #8 (commit `ea06213`) closed the largest part of this divergence:
+live now reads the 1m bar at 06:00 UTC for price, exactly matching the
+audit's `market.leaderboards` row at `timestamp=06:00`. Wall-clock
+non-determinism (originally listed as divergence #3) is also resolved
+by the same change. Three residual seams remain:
 
-Real differences that produce divergent baskets:
+- **OI 1-second granularity gap**: live uses 5m OI from Binance's
+  `openInterestHist` (period=5m, no 1m supported); audit uses 1m OI
+  from `market.futures_1m` (built via amberdata batch). Live reads the
+  5m OI bar at 05:55 (close 05:59:59), 1 second off audit's 06:00:59
+  reference. OI doesn't move fast enough on most coins for this to
+  swap symbols, but it can on volatile small caps at the rank-20
+  boundary. **Fix scope**: alternate OI source with 1m granularity
+  (amberdata API, requires key + new fetch logic) OR push Binance for
+  1m OI support (won't happen). Probably not worth chasing unless
+  audit-vs-live disagreement gets traced back to OI.
 
-| | Audit | Live trader |
-|---|---|---|
-| Snapshot bar | 06:00 UTC bar (open at 06:00, close at 06:04:59) — always closed by audit-time | At 05:58 cron: in-progress 05:55-05:59 bar via `klines[-1]`. Effectively 5 min EARLIER than audit, AND in-progress (uses partial close at moment of fetch) |
-| Anchor bar | 00:00 UTC bar from `market.futures_1m` (`anchor_hour=0`) | 00:00 UTC 5m bar via Binance FAPI klines |
-| Data path | `market.futures_1m` populated by metl batch nightly | Binance FAPI direct, real-time |
-| OI source | Same `market.futures_1m` row | `/futures/data/openInterestHist` separate endpoint |
+- **Anchor bar source asymmetry**: audit reads 00:00 1m bar from
+  `market.futures_1m`; live reads 00:00 1m bar from Binance FAPI. Same
+  underlying data (both originate at Binance), but two paths can
+  diverge on rare missed/delayed rows. Negligible on most days.
 
-Concrete impact (observed 2026-04-24): audit's basket = `ENJ, INX, KAT,
-RED, SKR, SPORTFUN, ZEREBRO`; live's basket = `ENJ, INX, KAT, SKR,
-ZEREBRO`. RED was top-3 OI in BOTH universes (same scope), but it
-ranked outside live's price top-20 because the 5-min-earlier in-progress
-bar showed different price action than the audit's closed 06:00 bar.
-Same root cause as divergence #3 below (wall-clock non-determinism)
-applied to live's snapshot bar choice.
-
-Three fix paths (decision needed before coding):
-
-- **A. Live waits for 06:00 bar to close** before fetching — moves the
-  cron from 05:58 to 06:00:30, uses the closed 06:00 bar. Matches
-  audit on snapshot timing. Adds 2-3 min latency before trader entry
-  but eliminates this divergence + divergence #3
-- **B. Audit moves to live's snapshot semantics** — uses the 05:55-05:59
-  bar instead of the 06:00 bar. Smaller change, but locks the audit
-  into the wall-clock-dependent semantics that bit us today
-- **C. Both run from the same data source** with the same explicit
-  snapshot timestamp — biggest refactor, but eliminates path/source
-  mismatches too
+- **Universe scope micro-difference**: audit reads symbols ranked by
+  the indexer from `market.futures_1m` (~565 on 04-24); live reads
+  Binance `exchangeInfo` filtered to `status=TRADING` (~535). The
+  audit can include recently-delisted symbols that still have
+  historical futures_1m data; live only sees currently-trading. Tiny
+  impact on active days.
 
 **Side-channel work**: market.symbols.binance_id has NULL for PEPE/SHIB
 and is missing FLOKI/BONK entirely (PR #7 worked around it with an
 inline override map). Symbol-registry refresh has its own 1000X-prefix
 detection bug worth a separate small fix so future 1000X-style listings
 are handled automatically.
-
-### Live trader basket — wall-clock non-determinism
-
-Surfaced 2026-04-25. `daily_signal_v2.py:compute_canonical_basket`
-computes its snapshot via:
-
-```python
-target_snap = ref_date 06:00 UTC
-end_ms = (target_snap + 5min).timestamp()  # 06:05 UTC
-# fetch klines startTime=00:00, endTime=06:05
-snap_close = float(klines[-1][4])  # last bar's close
-```
-
-Binance's klines endpoint returns BOTH closed and in-progress bars.
-`klines[-1]` therefore depends on wall-clock at fetch time:
-
-- **Run at 05:58 UTC** (cron): `klines[-1]` = 05:55–05:59 bar **still open**,
-  close = price at ~05:58
-- **Run at 06:14 UTC** (manual rerun): `klines[-1]` = 06:00–06:04 bar
-  closed at 06:04:59
-
-Different snapshot bars → different price/OI pct_change → different
-top-20 ranks → different baskets. Concrete impact today: 05:58 cron
-basket = `[API3, AXS, BSB, MAGIC, SAFE, YGG]`; 06:14 manual rerun
-basket = `[API3, AXS, BSB, SAFE, SAND, YGG]`. MAGIC ↔ SAND swap at
-the rank-20 boundary because of 16 min of price drift in the snapshot
-window. **Caused today's accidental double-spawn** — ALTS MAIN's 06:05
-trader had already entered MAGIC before the manual signal regen wrote
-SAND for ALTS DAILY.
-
-This is a third divergence dimension distinct from #1 and #2 above —
-they're audit-vs-live; this one is live-vs-itself. Note: Path A from
-divergence #2 (live moves to leaderboards) would fix this as a side
-effect since leaderboards are precomputed once per day. Otherwise this
-needs its own fix.
-
-**Two fix options (cleaner is #2):**
-
-1. **Filter out the in-progress bar** in `compute_canonical_basket`:
-   after fetching klines, discard any bar where
-   `open_time + 5min > now()` → use the latest *closed* bar. ~10 LOC
-   in one place.
-2. **Wait until `06:00 UTC + 30s` before fetching**: ensures the
-   05:55–05:59 bar (and the 06:00 bar if needed) is fully closed →
-   all runs of that day produce the same basket. Requires moving the
-   cron from 05:58 to 06:00 plus a small post-fetch close-bar guard.
-
-Either makes basket selection deterministic-per-day independent of
-when the script runs.
 
 ### Canonical-compare card false-negative on identical methodology
 
