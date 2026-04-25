@@ -61,8 +61,12 @@ PATH=/usr/local/sbin:/usr/local/bin:/sbin:/bin:/usr/sbin:/usr/bin
 # ── Allocation returns backfill — 00:10 UTC (safety net for writer misses) ──
 10 0 * * * /root/benji/backend/scripts/nightly_backfill_allocation_returns.sh
 
-# ── Signal v2 LIVE — 05:58 UTC (canonical methodology, replaces v1 as of 2026-04-23) ──
-58 5 * * * . /mnt/quant-data/credentials/secrets.env && /root/benji/pipeline/.venv/bin/python /root/benji/daily_signal_v2.py >> /mnt/quant-data/logs/signal/cron.log 2>&1
+# ── Signal v2 LIVE — 06:00 UTC (canonical methodology, replaces v1 as of 2026-04-23) ──
+# Cron moved 05:58 → 06:00 on 2026-04-25 to fix wall-clock-dependent basket
+# selection. Script sleeps 30s at start; the closed-bar filter in
+# _fetch_symbol_snapshot drops any in-progress trailing bar so klines[-1]
+# is always the latest CLOSED bar. Trade deployment at 06:35 unchanged.
+0 6 * * * . /mnt/quant-data/credentials/secrets.env && /root/benji/pipeline/.venv/bin/python /root/benji/daily_signal_v2.py >> /mnt/quant-data/logs/signal/cron.log 2>&1
 
 # ── Signal shadow diff — 06:15 UTC (v1 vs v2 vs canonical basket diff) ───────
 15 6 * * * . /mnt/quant-data/credentials/secrets.env && /root/benji/pipeline/.venv/bin/python /root/benji/shadow_diff.py >> /mnt/quant-data/logs/signal/shadow_diff.log 2>&1
