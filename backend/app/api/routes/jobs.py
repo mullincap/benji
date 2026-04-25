@@ -87,14 +87,6 @@ class JobRequest(BaseModel):
     # candidate-exploration variants evaluated via the Simulator governance
     # framework — not canonical unless promoted per §5.
     overlap_dimensions:         str   = "price_oi"      # price_oi | price_volume | oi_volume | price_oi_volume
-    # live_parity default flipped to True on 2026-04-24 so Simulator audits
-    # are benchmarked against the same universe the live trader sees (top-100
-    # by 24h USD volume at 06:00 UTC, BloFin-filtered). Prior False default
-    # produced baskets that diverged from live at the margins (e.g. 04-23
-    # audit had TAC where live had GENIUS — 5h of rank shuffle between the
-    # 01:00 UTC leaderboards snapshot and the 05:58 UTC live pull).
-    # Set to False explicitly to explore the non-parity universe.
-    live_parity:                bool  = True
     freq_width:                 int   = 20
     freq_cutoff:                int   = 20
     sample_interval:            int   = 5
@@ -267,36 +259,7 @@ class JobRequest(BaseModel):
     build_master_file:          bool  = True
 
     @model_validator(mode="after")
-    def _check_live_parity_knob_mutex(self) -> "JobRequest":
-        """Mirror overlap_analysis.py's argparse mutual-exclusion check at the
-        HTTP boundary. Without this, combining live_parity with any individual
-        ranking/filter knob queues a Celery job that fails deep inside the
-        subprocess (argparse error), burning worker time and muddying the
-        job status timeline. 422 at submit time is the correct UX.
-
-        See docs/strategy_specification.md § 3.1. Updated 2026-04-23 for
-        D-medium-split: live_parity conflicts with price_ranking_metric,
-        oi_ranking_metric, apply_blofin_filter, and the deprecated
-        `ranking_metric` field — live_parity's asymmetric v1-matching setup
-        is already encoded internally and can't be re-parameterized per-knob
-        without contradicting what v1 actually did."""
-        if self.live_parity and (
-            self.price_ranking_metric != "pct_change"
-            or self.oi_ranking_metric != "pct_change"
-            or self.apply_blofin_filter
-            or (self.ranking_metric is not None and self.ranking_metric != "pct_change")
-            or self.overlap_dimensions != "price_oi"
-        ):
-            raise ValueError(
-                "live_parity is mutually exclusive with price_ranking_metric, "
-                "oi_ranking_metric, apply_blofin_filter, the deprecated "
-                "ranking_metric field, and overlap_dimensions (must stay "
-                "'price_oi'). live_parity reproduces daily_signal.py v1 "
-                "exactly (asymmetric: log-return on price, abs-$ on OI; "
-                "top-100 by 24h volume; BloFin-filtered; price ∩ OI only) — "
-                "its internal setup can't be layered with individual knobs. "
-                "Use one OR the other per docs/strategy_specification.md § 3.1."
-            )
+    def _check_overlap_dimensions_price_source(self) -> "JobRequest":
         if "volume" in self.overlap_dimensions and self.price_source != "db":
             raise ValueError(
                 f"overlap_dimensions={self.overlap_dimensions!r} requires "
