@@ -328,10 +328,10 @@ function EarlyFillProgressBar({
 
   // Color: green if the relevant value crossed threshold, amber otherwise.
   // In layered mode, picking close-bar color drives the badge (the trigger
-  // reference); the live overlay always uses amber/green by its own state.
+  // reference); the directional delta sliver between close and live picks
+  // its own color (green=gain, red=loss) inline at render time.
   const fillColor = primaryFired ? "var(--green)" : "var(--amber)";
   const fillBg    = primaryFired ? "var(--green-dim)" : "var(--amber-dim)";
-  const liveOverlayColor = liveFired ? "var(--green)" : "var(--amber)";
 
   const liveCurPctStr  = sessionRet === null
     ? "—"
@@ -482,30 +482,40 @@ function EarlyFillProgressBar({
       >
         {showLayered ? (
           <>
-            {/* Frozen close-ROI bar (the trigger reference at the buzzer). */}
+            {/* Common-ground base: bar fills to min(close, live). Color
+                reflects close-trigger state (the historical anchor) — green
+                if the trigger fired at the buzzer, amber otherwise. */}
             <div
               style={{
                 position: "absolute",
                 top: 0, left: 0,
-                width: `${closeWidthPct}%`,
+                width: `${Math.min(closeWidthPct, liveWidthPct)}%`,
                 height: "100%",
                 background: closeFired ? "var(--green)" : "var(--amber)",
-                opacity: 0.45,
-              }}
-            />
-            {/* Live session_ret bar (still moving past the buzzer). */}
-            <div
-              style={{
-                position: "absolute",
-                top: 0, left: 0,
-                width: `${liveWidthPct}%`,
-                height: "100%",
-                background: liveOverlayColor,
-                opacity: 0.55,
+                opacity: 0.7,
                 transition: "width 0.4s ease",
               }}
             />
-            {/* Vertical tick anchoring the close-ROI mark. */}
+            {/* Directional delta sliver between live and close. Green when
+                live > close (gained since buzzer), red when live < close
+                (drifted back). Sits between min(close,live) and max(close,live). */}
+            {Math.abs(closeWidthPct - liveWidthPct) > 0.01 && (
+              <div
+                style={{
+                  position: "absolute",
+                  top: 0,
+                  left: `${Math.min(closeWidthPct, liveWidthPct)}%`,
+                  width: `${Math.abs(closeWidthPct - liveWidthPct)}%`,
+                  height: "100%",
+                  background: liveCur >= closeCur ? "var(--green)" : "var(--red)",
+                  opacity: 0.7,
+                  transition: "width 0.4s ease, left 0.4s ease",
+                }}
+              />
+            )}
+            {/* Vertical tick anchoring the close-ROI mark. Always sits at
+                closeWidthPct so the user sees the buzzer reference even
+                when the live bar overshoots or undershoots. */}
             <div
               style={{
                 position: "absolute",
