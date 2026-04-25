@@ -233,6 +233,30 @@ def get_blofin_symbols():
 # normalize_symbol, top-20 intersection, BloFin filter applied AFTER
 # ranking) are preserved exactly.
 _BINANCE_FAPI   = "https://fapi.binance.com"
+
+# Binance multiplier-prefix overrides for low-priced perps.
+# market.symbols.binance_id is NULL for PEPE/SHIB and missing FLOKI/BONK
+# entirely — the symbol_registry refresh has a bug that doesn't detect
+# 1000-prefix mappings (PEPE listed as 1000PEPEUSDT, etc.). Hardcoded
+# here until that registry refresh is patched. Same set the audit
+# corrected via PR #6 (commit a204113), which fixed _load_mcap_from_db
+# to map mcap rows by coin_id instead of naive base+USDT concat.
+# Verify against: curl https://fapi.binance.com/fapi/v1/exchangeInfo
+_BINANCE_TICKER_OVERRIDES = {
+    "PEPE":  "1000PEPEUSDT",
+    "SHIB":  "1000SHIBUSDT",
+    "FLOKI": "1000FLOKIUSDT",
+    "BONK":  "1000BONKUSDT",
+}
+
+
+def _base_to_binance_ticker(base: str) -> str:
+    """Map CoinGecko base ('PEPE') to actual Binance perp ticker
+    ('1000PEPEUSDT'). Naive `f"{base}USDT"` silently drops 1000-prefix
+    perps from any kline-fetch path that takes a base symbol — observed
+    in compute_dispersion_filter, where PEPE/SHIB/FLOKI/BONK were dropped
+    despite ranking high in market.market_cap_daily."""
+    return _BINANCE_TICKER_OVERRIDES.get(base, f"{base}USDT")
 _OI_HIST_URL    = "https://fapi.binance.com/futures/data/openInterestHist"
 _REST_WORKERS   = 8
 _REST_TIMEOUT   = 10
@@ -565,10 +589,11 @@ def compute_dispersion_filter(ref_date,
     end_ms    = int(end_dt.timestamp()   * 1000)
 
     def _fetch_daily(sym):
+        ticker = _base_to_binance_ticker(sym)
         try:
             r = requests.get(
                 f"{_BINANCE_FAPI}/fapi/v1/klines",
-                params={"symbol": f"{sym}USDT", "interval": "1d",
+                params={"symbol": ticker, "interval": "1d",
                         "startTime": start_ms, "endTime": end_ms,
                         "limit": fetch_days + 5},
                 timeout=_REST_TIMEOUT,
