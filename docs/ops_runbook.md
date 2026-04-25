@@ -130,14 +130,32 @@ ssh mcap "ls /mnt/quant-data/logs/trader/allocation_*.log | xargs -I {} tail -5 
 
 ## Trader incident playbooks
 
-The trader subprocess lives inside `benji-celery-1` (spawned by `*/5` supervisor
-cron via `docker compose exec celery python -m app.cli.trader_supervisor` and
-by celery's startup hook). Verified 2026-04-25 18:50 UTC: `PID 144` was running
-`python3 -m app.cli.trader_blofin --allocation-id …` inside the celery container,
-not the backend container.
+Trader subprocesses run inside the **same container as the process that
+spawned them**, because `spawn_allocation()` uses `subprocess.Popen` (see
+[spawn_traders.py:228-269](../backend/app/cli/spawn_traders.py#L228-L269),
+docstring: "subprocess runs inside the same long-lived backend container as
+the parent and survives the parent's exit"). Concretely:
 
-Implication: **celery rebuilds kill the trader; backend / frontend rebuilds do
-not.** This is the inverse of what an earlier version of this runbook claimed.
+| Spawn path | Container the trader lives in |
+|---|---|
+| `06:05` cron — `docker compose exec celery python -m app.cli.spawn_traders` | `benji-celery-1` |
+| `*/5` supervisor cron — `docker compose exec celery python -m app.cli.trader_supervisor` | `benji-celery-1` |
+| FastAPI startup hook — `app/main.py:resume_orphaned_traders` calls `startup_recovery()` | `benji-backend-1` (child of uvicorn) |
+
+So the trader can be in **either** container depending on who last spawned
+it. Verified 2026-04-25 18:50 UTC: PID 144 in benji-celery-1 (06:05 cron's
+spawn). Verified 2026-04-25 19:05 UTC: PID 8 in benji-backend-1 (FastAPI
+startup hook spawn after a backend rebuild).
+
+**Critical implication — dup-spawn race:** when a backend rebuild fires
+mid-session, the FastAPI startup hook's `startup_recovery()` runs, sees
+`runtime_state.updated_at` older than `STARTUP_STALE_BUFFER_MIN`, and Popens
+a NEW trader inside the backend container. If a celery-resident trader is
+also alive (06:05 cron's spawn), both run in parallel, double-logging every
+bar and double-calling exchange APIs. Mitigation: see
+[trader_supervisor.py:74](../backend/app/cli/trader_supervisor.py#L74) — the
+buffer was raised to match `STALE_THRESHOLD_MIN` (15 min) so a sleeping trader
+between 5-min bars is no longer mistaken for orphaned.
 
 The supervisor auto-respawns dead traders, but several failure modes need
 manual SQL. Each playbook is a self-contained recipe; copy-paste verbatim.
@@ -246,7 +264,54 @@ curl -s https://mullincap.com/health/trader | python3 -m json.tool
 
 If `/health/trader` now shows stale, do Playbook A.
 
-### Playbook E: emergency flatten all positions on an allocation
+### Playbook E: dup-spawn (trader running in BOTH containers)
+
+Symptom: bar entries appear twice in the per-allocation log within ~50ms of
+each other, both with identical `incr/peak/sess/active/stopped` values.
+Confirmed via `grep -c "Bar N "` on the log file.
+
+Cause: both `benji-celery-1` and `benji-backend-1` have a live trader
+process for the same allocation. Most commonly happens after a backend
+container restart (or rebuild) on pre-fix code where
+`STARTUP_STALE_BUFFER_MIN = 2` — the FastAPI startup hook respawns
+inside backend even though the celery-resident trader is alive.
+Post-fix (`STARTUP_STALE_BUFFER_MIN = STALE_THRESHOLD_MIN = 15`), this
+should not occur unless something else is concurrently spawning.
+
+Recovery:
+
+```bash
+# 1. Confirm dup by listing trader processes in both containers
+ssh mcap 'for c in benji-backend-1 benji-celery-1; do echo "=== $c ==="; docker exec $c sh -c "for f in /proc/[0-9]*/cmdline; do c=\$(tr \"\\0\" \" \" < \$f 2>/dev/null); case \"\$c\" in *trader_blofin*allocation-id*) p=\${f#/proc/}; p=\${p%/cmdline}; echo \"PID=\$p :: \$c\";; esac; done"; done'
+
+# 2. Identify which to kill. Prefer keeping the OLDER process (it has the
+#    full in-memory state — peak, sym_stopped, positions tracked across the
+#    whole session). Kill the newer one. Compare wall-clock start times:
+ssh mcap 'docker exec <CONTAINER> sh -c "awk \"{print \$22}\" /proc/<PID>/stat | awk -v b=\$(grep ^btime /proc/stat | awk \"{print \\\$2}\") \"{printf \\\"%d\\n\\\", b + \$1/100}\""'
+# Compare the two; lower number = older.
+
+# 3. SIGKILL the duplicate. Use SIGKILL not SIGTERM:
+#    SIGTERM would fire _release_held_lock_on_shutdown, which marks the
+#    portfolio_session as 'subprocess_died' — that closes the live session
+#    in the DB even though the surviving trader is still running.
+ssh mcap "docker exec <CONTAINER> sh -c 'kill -9 <DUP_PID>'"
+
+# 4. Verify only one process remains
+ssh mcap 'for c in benji-backend-1 benji-celery-1; do echo "=== $c ==="; docker exec $c sh -c "for f in /proc/[0-9]*/cmdline; do c=\$(tr \"\\0\" \" \" < \$f 2>/dev/null); case \"\$c\" in *trader_blofin*allocation-id*) echo \$c;; esac; done"; done'
+
+# 5. Audit the exchange for duplicate orders placed during the dup window.
+#    Both processes ran position_reconcile + balance fetch every bar; if a
+#    SYM_STOP fired during the window, both would have tried to close it.
+#    Check BloFin's recent fills and SL orders for the affected symbols
+#    around the dup-window timeframe.
+```
+
+After SIGKILL, the surviving trader keeps running normally. `lock_acquired_at`
+is whatever the killed process last set it to (harmless — neither process
+re-checks during operation). `runtime_state` continues being updated by the
+survivor. No further action needed unless step 5 reveals duplicate orders.
+
+### Playbook F: emergency flatten all positions on an allocation
 
 For when you need to exit cleanly without waiting for trader. Uses the same
 close routine as the trader's port_sl path (idempotent, reconciles against
@@ -294,31 +359,59 @@ in the DB. Next 06:05 UTC spawn picks it up.
 
 ## Deploy safety
 
-Trader subprocesses live in `benji-celery-1`. Container-level deploy impact:
+Container-level deploy impact (assumes the post-2026-04-25 fix to
+`STARTUP_STALE_BUFFER_MIN` has shipped — see "dup-spawn race" note in Trader
+incident playbooks above; before that fix, `--no-deps backend` was also unsafe):
 
-| Command | Trader impact | Notes |
-|---|---|---|
-| `docker compose up -d --build --no-deps backend` | **Safe** anytime | Restarts uvicorn only |
-| `docker compose up -d --build --no-deps frontend` | **Safe** anytime | Different container |
-| `docker compose up -d --build --no-deps nginx` / `restart nginx` | **Safe** anytime | Reverse proxy only |
-| `docker compose up -d --build --no-deps celery` | **KILLS TRADER** | Mid-session: avoid |
-| `./redeploy.sh` (full `--force-recreate`) | **KILLS TRADER** | Recreates celery |
-| `git pull` only (cron-driven host scripts) | Safe | No container change |
+| Command | Trader impact |
+|---|---|
+| `docker compose up -d --build --no-deps frontend` | Safe anytime |
+| `docker compose up -d --build --no-deps nginx` / `restart nginx` | Safe anytime |
+| `docker compose up -d --build --no-deps backend` | Safe anytime *(post-fix)*; triggers `startup_recovery()` but the 15-min staleness threshold prevents false-positive respawn on a sleeping trader |
+| `docker compose up -d --build --no-deps celery` | **KILLS TRADER** if it lives in celery (06:05 / supervisor cron spawn) |
+| `./redeploy.sh` (full `--force-recreate`) | **KILLS TRADER** + dup-spawn risk: recreates celery (kills celery-resident trader) AND fires backend startup hook (spawns in backend) |
+| `git pull` only (cron-driven host scripts) | Safe |
 
 Hard rules:
 
 1. **Never run `./redeploy.sh` mid-session** (06:00 UTC → session close, typically
-   23:00 UTC). It recreates the celery container, kills trader subprocesses,
-   and triggers the dup-spawn race that has caused every BACKOFF incident to date.
-2. **`--no-deps celery` is also unsafe mid-session** — same kill mechanism as
-   redeploy.sh, just narrower in scope. If celery code MUST ship mid-session,
-   follow the "Deploying with running traders" procedure below.
-3. **`--no-deps backend` and `--no-deps frontend` are both safe anytime.** A
-   2026-04-25 mid-session deploy of `manager.py` rebuilt the backend container
-   end-to-end and the trader at PID 144 in celery never noticed.
+   23:00 UTC). The full recreation kills any celery-resident trader AND fires
+   backend's startup hook, which on the *old* `STARTUP_STALE_BUFFER_MIN=2`
+   code respawns the celery-spawned trader inside backend before celery comes
+   back up — root cause of the 2026-04-25 19:05 UTC dup-spawn.
+2. **`--no-deps celery` is unsafe mid-session if a celery-resident trader is
+   running.** Always check first (see "Pre-flight: locate the trader" below).
+   If celery code MUST ship, follow the "Deploying with running traders"
+   procedure.
+3. **`--no-deps backend` is safe post-fix.** The startup hook's
+   `STARTUP_STALE_BUFFER_MIN = STALE_THRESHOLD_MIN` (15 min) is wider than
+   the 5-min bar interval, so a sleeping trader is never mistaken for orphaned.
+4. **`--no-deps frontend` and `restart nginx` are unconditionally safe.**
+
+### Pre-flight: locate the trader
+
+Before any rebuild during 06:05–close, find which container holds the trader
+so you know whether the rebuild will kill it:
+
+```bash
+ssh mcap 'for c in benji-backend-1 benji-celery-1; do
+  echo "=== $c ===";
+  docker exec $c sh -c "for f in /proc/[0-9]*/cmdline; do c=\$(tr \"\\0\" \" \" < \$f 2>/dev/null); case \"\$c\" in *trader_blofin*allocation-id*) p=\${f#/proc/}; p=\${p%/cmdline}; echo \"PID=\$p :: \$c\";; esac; done";
+done'
+```
+
+Possible outcomes:
+- Trader in `benji-celery-1` only → backend rebuild safe (post-fix); celery
+  rebuild requires Approach B
+- Trader in `benji-backend-1` only → celery rebuild safe; backend rebuild
+  requires Approach B
+- Trader in BOTH → dup-spawn already in progress; SIGKILL the duplicate
+  (typically the newer one; see Playbook D below) before any further action
+- Trader in neither → check `/health/trader` and supervisor state; either
+  session is genuinely closed or both spawn paths have failed
 
 If you MUST deploy celery mid-session: be ready to run Playbook A/B/C if the
-respawn race deadlocks (it usually does).
+respawn race deadlocks.
 
 ### Deploying with running traders
 

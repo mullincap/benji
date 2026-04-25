@@ -69,9 +69,22 @@ BACKOFF_MAX_RESPAWNS = 3
 BACKOFF_WINDOW_MIN = 60
 
 # Startup recovery: how stale runtime_state must be vs the container's
-# start time before we respawn. Small buffer avoids false-positives for
-# traders that are just about to write their next bar.
-STARTUP_STALE_BUFFER_MIN = 2
+# start time before we respawn.
+#
+# History: was 2 min. Caused a dup-spawn on 2026-04-25 19:05 UTC during a
+# mid-session backend rebuild. The trader at PID 144 in benji-celery-1 was
+# alive and sleeping between bar 156 (19:00:04) and bar 157 (19:05:04).
+# When backend container booted at 19:05:02, runtime_state.updated_at was
+# 5 min stale (the gap between bars), which exceeded the 2-min buffer ->
+# startup_recovery respawned, creating PID 8 in benji-backend-1. Both
+# processes then double-logged bar 158.
+#
+# Set to STALE_THRESHOLD_MIN so startup matches the supervisor cron's own
+# notion of staleness — never respawn on a gap shorter than what the
+# supervisor would itself act on. The supervisor's 5-min cadence catches
+# any genuine orphans within minutes anyway, so being conservative at
+# startup costs little and prevents the cross-container dup-spawn race.
+STARTUP_STALE_BUFFER_MIN = STALE_THRESHOLD_MIN
 
 
 _SCHEMA_SQL = """
