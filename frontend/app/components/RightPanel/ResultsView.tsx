@@ -2813,6 +2813,7 @@ function HourlyPerformanceChart({
 }) {
   const [mode, setMode] = useState<'hourly' | 'cumulative'>('hourly');
   const [hovered, setHovered] = useState<number | null>(null);
+  const [open, setOpen] = useState(true);
 
   const N_HOURS = 18;
   const BARS_PER_HOUR = 12;
@@ -2902,38 +2903,109 @@ function HourlyPerformanceChart({
   const totalDays = activeDates.length;
   const dataDays = stats.reduce((m, s) => Math.max(m, s.count), 0);
 
+  // Header stats — bucket-level (each of the 18 hour buckets is one data
+  // point). posCount = buckets whose mean is > 0; negCount = mean < 0.
+  // hourlyWinrate = posCount / (posCount + negCount). avgPos / avgNeg are
+  // the average of the bucket means by sign.
+  const validAvgs = avgs.filter((v): v is number => v !== null);
+  const posAvgs = validAvgs.filter((v) => v > 0);
+  const negAvgs = validAvgs.filter((v) => v < 0);
+  const posCount = posAvgs.length;
+  const negCount = negAvgs.length;
+  const totalWithData = posCount + negCount;
+  const hourlyWinrate = totalWithData > 0 ? (posCount / totalWithData) * 100 : 0;
+  const avgPos = posCount > 0 ? posAvgs.reduce((a, b) => a + b, 0) / posCount : 0;
+  const avgNeg = negCount > 0 ? negAvgs.reduce((a, b) => a + b, 0) / negCount : 0;
+
   return (
     <div style={{ border: '1px solid var(--line)', borderRadius: 3, padding: 10, background: 'var(--bg2)', marginBottom: 14 }}>
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
-        <div style={{ fontSize: 8, fontWeight: 700, letterSpacing: '0.12em', color: 'var(--t3)', textTransform: 'uppercase' }}>Performance by Hour of Day (UTC)</div>
-        <div style={{ display: 'flex', gap: 0 }}>
-          {(['hourly', 'cumulative'] as const).map((m) => {
-            const active = mode === m;
-            return (
-              <button
-                key={m}
-                type="button"
-                onClick={() => setMode(m)}
-                style={{
-                  padding: '3px 8px',
-                  fontSize: 9,
-                  fontWeight: 700,
-                  letterSpacing: '0.08em',
-                  textTransform: 'uppercase',
-                  background: active ? 'var(--bg4)' : 'transparent',
-                  color: active ? 'var(--t0)' : 'var(--t2)',
-                  border: '1px solid var(--line)',
-                  borderRight: m === 'hourly' ? 'none' : '1px solid var(--line)',
-                  cursor: 'pointer',
-                  fontFamily: 'var(--font-space-mono)',
-                }}
-              >
-                {m}
-              </button>
-            );
-          })}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: open ? 8 : 0 }}>
+        <button
+          type="button"
+          onClick={() => setOpen((v) => !v)}
+          aria-label={open ? 'Collapse hourly performance' : 'Expand hourly performance'}
+          style={{
+            background: 'transparent',
+            border: 'none',
+            color: 'var(--t2)',
+            cursor: 'pointer',
+            padding: 0,
+            fontSize: 10,
+            lineHeight: 1,
+            display: 'inline-flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            width: 14,
+            height: 14,
+            transform: open ? 'rotate(90deg)' : 'rotate(0deg)',
+            transition: 'transform 0.15s ease',
+          }}
+        >
+          ▸
+        </button>
+        <div style={{ fontSize: 8, fontWeight: 700, letterSpacing: '0.12em', color: 'var(--t3)', textTransform: 'uppercase' }}>
+          Performance by Hour of Day (UTC)
         </div>
+        {/* Header stats — visible whether open or collapsed */}
+        {totalWithData > 0 && (
+          <div
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: 12,
+              fontSize: 9,
+              fontFamily: 'var(--font-space-mono)',
+              flex: 1,
+            }}
+          >
+            <span><span style={{ color: 'var(--green)', fontWeight: 700 }}>{posCount}</span><span style={{ color: 'var(--t3)' }}>+</span></span>
+            <span><span style={{ color: 'var(--red)', fontWeight: 700 }}>{negCount}</span><span style={{ color: 'var(--t3)' }}>−</span></span>
+            <span style={{ color: 'var(--t2)' }}>
+              <span style={{ color: hourlyWinrate >= 50 ? 'var(--green)' : 'var(--red)', fontWeight: 700 }}>{hourlyWinrate.toFixed(0)}%</span>
+              <span style={{ color: 'var(--t3)', marginLeft: 2 }}>W</span>
+            </span>
+            <span>
+              <span style={{ color: 'var(--t3)', marginRight: 4 }}>μ+</span>
+              <span style={{ color: 'var(--green)', fontWeight: 700 }}>+{avgPos.toFixed(2)}%</span>
+            </span>
+            <span>
+              <span style={{ color: 'var(--t3)', marginRight: 4 }}>μ−</span>
+              <span style={{ color: 'var(--red)', fontWeight: 700 }}>{avgNeg.toFixed(2)}%</span>
+            </span>
+          </div>
+        )}
+        {open && (
+          <div style={{ display: 'flex', gap: 0 }}>
+            {(['hourly', 'cumulative'] as const).map((m) => {
+              const active = mode === m;
+              return (
+                <button
+                  key={m}
+                  type="button"
+                  onClick={() => setMode(m)}
+                  style={{
+                    padding: '3px 8px',
+                    fontSize: 9,
+                    fontWeight: 700,
+                    letterSpacing: '0.08em',
+                    textTransform: 'uppercase',
+                    background: active ? 'var(--bg4)' : 'transparent',
+                    color: active ? 'var(--t0)' : 'var(--t2)',
+                    border: '1px solid var(--line)',
+                    borderRight: m === 'hourly' ? 'none' : '1px solid var(--line)',
+                    cursor: 'pointer',
+                    fontFamily: 'var(--font-space-mono)',
+                  }}
+                >
+                  {m}
+                </button>
+              );
+            })}
+          </div>
+        )}
       </div>
+      {open && (<>
+
       <svg width="100%" height={H} viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none" style={{ display: 'block' }}>
         {/* y-axis zero line */}
         <line x1={padL} x2={W - padR} y1={yZero} y2={yZero} stroke="var(--line2)" strokeWidth={0.5} strokeDasharray="2 2" />
@@ -3056,6 +3128,7 @@ function HourlyPerformanceChart({
           </span>
         )}
       </div>
+      </>)}
     </div>
   );
 }
