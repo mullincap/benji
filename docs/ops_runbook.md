@@ -452,63 +452,97 @@ ssh mcap "cd ~/benji && docker compose up -d --build --no-deps frontend"
 ssh mcap "cd ~/benji && docker compose restart nginx"
 ```
 
-#### Approach B — celery rebuild mid-session with lock sweep
+#### Approach B — celery rebuild mid-session (SIGKILL + manual respawn)
 
-Higher risk; only when an in-flight bug fix MUST land before session close.
-Wraps the celery rebuild with a pre-flight snapshot, post-rebuild lock sweep,
-and respawn verification:
+Verified working multiple times on 2026-04-25 with ~30s of trader downtime
+per rebuild and **zero unintended portfolio_session closures**. The key
+trick: SIGKILL the trader BEFORE `docker compose up` rather than letting
+docker's SIGTERM hit it. SIGTERM fires the trader's
+`_release_held_lock_on_shutdown` handler which marks the active
+portfolio_session as `subprocess_died` and closes it — bad mid-session
+because the UI will show the day's session as ended even though the
+trader resumes via runtime_state. SIGKILL bypasses the handler, leaving
+the portfolio_session as `active` and the lock as-is; we then clear the
+lock manually and let the new spawn re-acquire.
+
+The whole sequence is one ssh command — fast and atomic:
 
 ```bash
-# (a) Snapshot trader state before rebuild
+# 1. Pre-flight snapshot (optional but recommended)
 ssh mcap "PGPASSWORD=A psql -h 127.0.0.1 -U quant -d marketdata -c \
   \"SELECT allocation_id, lock_acquired_at, runtime_state->>'phase' AS phase, \
            runtime_state->>'bar' AS bar \
-    FROM user_mgmt.allocations \
-    WHERE runtime_state->>'phase' = 'active' \
-    ORDER BY allocation_id;\""
+    FROM user_mgmt.allocations WHERE runtime_state->>'phase' = 'active';\""
 
-# Pre-flight: count live trader subprocesses inside celery
-ssh mcap 'docker exec benji-celery-1 sh -c "for f in /proc/[0-9]*/cmdline; do c=\$(tr \"\\0\" \" \" < \$f 2>/dev/null); case \"\$c\" in *trader_blofin*allocation-id*) echo \$c;; esac; done | wc -l"'
-
-# (b) Push + rebuild celery (SIGTERM → 10s grace → SIGKILL → restart)
+# 2. Push the code first
 git push origin main
-ssh mcap "cd ~/benji && git pull && docker compose up -d --build --no-deps celery"
 
-# (c) Wait for SIGTERM handler + container start + supervisor first tick
-sleep 30
+# 3. SIGKILL → clear lock → pull → rebuild celery → manual spawn (single ssh).
+#    Replace <PID> with the trader PID inside benji-celery-1 (from /proc scan)
+#    and <ALLOC_ID> with the allocation_id from step 1.
+ssh mcap "
+  docker exec benji-celery-1 sh -c 'kill -9 <PID>' &&
+  PGPASSWORD=A psql -h 127.0.0.1 -U quant -d marketdata -c \
+    \"UPDATE user_mgmt.allocations SET lock_acquired_at = NULL
+      WHERE allocation_id='<ALLOC_ID>'::uuid;\" &&
+  cd ~/benji && git pull &&
+  docker compose up -d --build --no-deps celery &&
+  docker compose exec -T celery python -m app.cli.spawn_traders
+"
 
-# (d) Sweep stuck locks — the > 5min guard avoids yanking freshly-acquired locks
-ssh mcap "PGPASSWORD=A psql -h 127.0.0.1 -U quant -d marketdata -c \
-  \"UPDATE user_mgmt.allocations SET lock_acquired_at = NULL \
-    WHERE runtime_state->>'phase' = 'active' \
-      AND lock_acquired_at IS NOT NULL \
-      AND lock_acquired_at < NOW() - INTERVAL '5 minutes';\""
+# 4. Verify new trader is alive and the new code shipped
+ssh mcap 'docker exec benji-celery-1 sh -c "for f in /proc/[0-9]*/cmdline; do c=\$(tr \"\\0\" \" \" < \$f 2>/dev/null); case \"\$c\" in *trader_blofin*allocation-id*) p=\${f#/proc/}; p=\${p%/cmdline}; echo \"PID=\$p :: \$c\";; esac; done"'
 
-# (e) Verify each trader respawned and resumed (bar should be ≥ pre-flight bar)
-ssh mcap "PGPASSWORD=A psql -h 127.0.0.1 -U quant -d marketdata -c \
-  \"SELECT allocation_id, runtime_state->>'phase' AS phase, \
-           runtime_state->>'bar' AS bar, \
-           NOW() - (runtime_state->>'updated_at')::timestamptz AS staleness \
-    FROM user_mgmt.allocations \
-    WHERE runtime_state->>'phase' = 'active';\""
-
-# Confirm a Spawn block landed in the per-allocation log post-rebuild
-ssh mcap "tail -50 /mnt/quant-data/logs/trader/allocation_<aid>_$(date -u +%Y-%m-%d).log | grep -E 'Spawn at|Entering 5-min monitoring'"
-
-# Process count should match pre-flight
-ssh mcap 'docker exec benji-celery-1 sh -c "for f in /proc/[0-9]*/cmdline; do c=\$(tr \"\\0\" \" \" < \$f 2>/dev/null); case \"\$c\" in *trader_blofin*allocation-id*) echo \$c;; esac; done | wc -l"'
-
-curl -s https://mullincap.com/health/trader | python3 -m json.tool
-# ↑ status=ok; if 503 with stale entries, do Playbook A/B/C
+# 5. Wait for the next 5-min bar boundary, confirm bar advances
+ssh mcap "tail -5 /mnt/quant-data/logs/trader/allocation_<ALLOC_ID>_$(date -u +%Y-%m-%d).log"
 ```
 
-Failure modes after step (b):
-- Supervisor logs `last_error` mentioning lock acquisition → Playbook B
-- `respawn_count >= 10` with BACKOFF → Playbook C
-- Trader process count short of pre-flight after step (e) → check
-  `trader_supervisor_state.last_error` and route to the matching playbook
-- No `Spawn at …` block in the per-allocation log → trader was never respawned;
-  the supervisor cron will retry within 5 min, OR run Playbook B/C immediately
+Expected outcomes after step 3:
+- `kill -9 <PID>` → silent, no output if successful
+- `UPDATE user_mgmt.allocations` → `UPDATE 1`
+- `git pull` → fast-forwards
+- `docker compose up -d --build --no-deps celery` → image build (~45s) + container restart
+- `docker compose exec -T celery python -m app.cli.spawn_traders` →
+  `Found 1 eligible allocation(s).` followed by `Spawned allocation <ID>: pid=<NEW_PID>`
+
+Total elapsed: ~60-90s. **Trader downtime: ~30-35s** (PID kill → new PID
+entering monitoring loop). One bar typically missed; positions remain
+managed by exchange-side SL during the gap.
+
+Failure modes:
+- Step 3 spawn returns "Skipping allocation: already finished today" →
+  runtime_state.phase is in TERMINAL_PHASES (closed/errored). Manually
+  reset to 'active' first: `UPDATE allocations SET runtime_state = jsonb_set(runtime_state, '{phase}', '"active"'::jsonb) WHERE allocation_id='<ID>'::uuid`.
+- New spawn exits "already locked or stale-but-recent" → step 3's
+  lock-clear didn't apply. Re-run step 3's UPDATE then call
+  `spawn_traders` again.
+- Supervisor `last_error` mentions BACKOFF → Playbook C.
+- No `Spawn at …` block in log after step 5 → spawn never reached the
+  monitoring loop. Check the log file for tracebacks (credential
+  decrypt errors, exchange connection failures, etc.).
+
+#### Verified deploy patterns (2026-04-25 session log)
+
+Empirical data from the 2026-04-25 session — useful as a reference for
+"what should this take?" and "is anything anomalous about this run?":
+
+| Type | Code-to-deployed wall-clock | Trader downtime | Bars missed |
+|---|---:|---:|---:|
+| `--no-deps frontend` | ~90s | **0** | 0 |
+| `--no-deps backend frontend` (parallel) | ~3min | **0** *(post-fix)* | 0 |
+| `--no-deps celery` (Approach B) | ~90s | ~30-35s | 1 |
+| `--no-deps backend frontend` w/ bar-boundary timing | ~8min | **0** *(pre-fix)* | 0 |
+
+Pre-fix vs post-fix refers to commit `ff36f59`
+(`STARTUP_STALE_BUFFER_MIN: 2 → 15`). With pre-fix code in production,
+backend rebuilds had to be timed within 2min of a 5-min bar boundary
+to avoid the FastAPI startup hook spuriously respawning. Post-fix,
+backend rebuilds are safe at any moment.
+
+Total session: 9 mid-session deploys, ~96s aggregate trader downtime,
+3 bars missed across the entire trading day, 0 lost portfolio sessions,
+0 duplicate orders placed. One dup-spawn caught and resolved within 5
+min via Playbook E.
 
 ## Database checks
 
