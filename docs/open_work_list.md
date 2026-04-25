@@ -341,6 +341,66 @@ the per-symbol stop close path in trader_blofin.py (~80 LOC).
 
 ---
 
+### Simulator — capital distribution mode
+
+Surfaced 2026-04-25. The audit currently assumes uniform 1/N
+equal-weight allocation across the basket at session start. Want a
+toggle to test alternative distribution methods so we can backtest
+whether weighting by some signal improves risk-adjusted returns.
+
+**Initial set of distribution modes:**
+- `equal` (default, current behavior): weight = 1/N for all symbols
+- `mcap_weighted`: weight ∝ market cap (large-cap gets more)
+- `inverse_mcap_weighted`: weight ∝ 1/mcap (small-cap gets more —
+  the basket's small-caps tend to be where the dispersion-driven
+  signal is strongest)
+- `rank_weighted`: weight ∝ (N - rank + 1) (top-of-basket linearly
+  preferred — rewards the strongest price+OI signal)
+- `vol_weighted_inverse`: weight ∝ 1/historical_vol (risk parity —
+  smooths per-symbol contribution to portfolio variance)
+
+Extensible: each mode is a function of (basket symbols, available
+metadata at session-start time). Easy to add more (volume-weighted,
+score-weighted, etc.) without touching the framework.
+
+**Implementation:**
+- `pipeline/rebuild_portfolio_matrix.py`: replace implicit
+  `mean(clamped_paths)` with `np.average(clamped_paths, weights=w)`
+  where `w` is computed once at session start by a new
+  `compute_basket_weights(symbols, mode, snapshot_data)` function.
+  Weights normalized to sum to 1.0.
+- Data fetch: at session-start anchor, pull mcap (from
+  `market.market_cap_daily`) and historical vol (from
+  `market.futures_1m` rolling stdev). Already loaded for
+  dispersion/ranking purposes — reuse the existing fetch.
+- `backend/app/api/routes/jobs.py`: 1 new JobRequest field
+  (`distribution_mode: str = "equal"`).
+- `backend/app/services/audit/pipeline_runner.py`: env passthrough
+  (`DISTRIBUTION_MODE`).
+- `frontend/app/components/LeftPanel/ParamForm.tsx`: dropdown under
+  Universe + Risk section.
+- `frontend/app/simulator/page.tsx`: DEFAULT_PARAMS adds
+  `distribution_mode: 'equal'`.
+
+**Default preserves canonical:** `distribution_mode='equal'` is
+identical to today's behavior.
+
+**Pairs naturally with reinvest knobs:** both features modify
+weights — distribution_mode sets the INITIAL weights; reinvest
+modifies them DYNAMICALLY as stops fire. Implementation can share
+the same share-weighted NAV path machinery.
+
+**Scope:** ~3-4h. Bundle with reinvest knobs + per-symbol TP into a
+single "advanced position-sizing" PR — all three touch the same
+per-symbol path construction code, share infrastructure, and benefit
+from a single acceptance test pass.
+
+**Not implemented to live trader yet** — simulator-only until
+backtests validate. Live integration would touch the order-sizing
+logic in trader_blofin.py at session start.
+
+---
+
 ## 🟢 Low priority — opportunistic
 
 ### D-perf — precomputed abs_dollar leaderboards
