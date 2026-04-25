@@ -2543,7 +2543,19 @@ def _run_monitoring_loop(today, today_date, api: ExchangeAdapter, inst_ids,
         except Exception as _e:
             log.warning(f"{log_prefix}Bar {b:3d}: equity fetch failed: {_e}")
 
-        expected_roi = incr * eff_lev
+        # Scale expected_roi by the structural deploy fraction. enter_positions
+        # holds back a 10% MARGIN_BUFFER (trader_blofin.py:1046) so only ~90%
+        # of total equity goes into leveraged positions. Hardcoding 0.90
+        # rather than computing from runtime_state.capital_deployed_usd
+        # because the persisted value reflects "this allocation's new orders"
+        # and can be artificially low when other positions on the same BloFin
+        # account pre-empt available margin (observed 2026-04-25: persisted
+        # $1,464 vs effective ~92% of account, because pre-existing long-crypto
+        # positions moved with this allocation's basket). The 0.90 constant
+        # captures the buffer drag — the residual fee/slippage signal lives
+        # in delta after this scaling.
+        DEPLOY_RATIO = 0.90
+        expected_roi = incr * eff_lev * DEPLOY_RATIO
         roi_delta    = actual_roi - expected_roi
 
         log.info(
@@ -2561,7 +2573,7 @@ def _run_monitoring_loop(today, today_date, api: ExchangeAdapter, inst_ids,
             f"{log_prefix}         | actual_roi={actual_roi*100:+.3f}%  "
             f"equity=${current_equity_usdt:,.2f}  "
             f"pnl=${session_pnl_usd:+,.2f}  "
-            f"expected={expected_roi*100:+.3f}% (incr×lev)  "
+            f"expected={expected_roi*100:+.3f}% (incr×lev×0.90)  "
             f"delta={roi_delta*100:+.3f}%"
         )
 
