@@ -2785,6 +2785,269 @@ function normalizeIntradaySeriesToDayReturn(
   return bars.map((v) => (v === null || !Number.isFinite(v) ? null : v * leverage));
 }
 
+// ── Performance by Hour of Day ──────────────────────────────────────────────
+//
+// Bins each active day's intraday session into 18 hour buckets (06:00–07:00,
+// 07:00–08:00, … 23:00–00:00 UTC). For each bucket on each day, computes
+// (bars[end_of_hour] - bars[start_of_hour]) × leverage — i.e. the leveraged
+// return realized within that hour. Days where the bucket isn't fully
+// available (early exit before end_of_hour, missing data) are OMITTED from
+// that bucket's average rather than counted as 0% — preserves signal for
+// hours that don't always fire.
+//
+// Two view modes:
+//   HOURLY      bar chart of avg per-hour return
+//   CUMULATIVE  line chart of running sum (= hypothetical equity curve assuming
+//               every day got every hour's average; ends roughly at the avg
+//               daily strat_roi assuming all days completed all hours)
+function HourlyPerformanceChart({
+  activeDates,
+  intradayBars,
+  exitBars,
+  levByDate,
+}: {
+  activeDates: string[];
+  intradayBars: Record<string, Array<number | null>> | null | undefined;
+  exitBars: Record<string, number> | null | undefined;
+  levByDate: Record<string, number>;
+}) {
+  const [mode, setMode] = useState<'hourly' | 'cumulative'>('hourly');
+  const [hovered, setHovered] = useState<number | null>(null);
+
+  const N_HOURS = 18;
+  const BARS_PER_HOUR = 12;
+
+  // Aggregate per-hour stats. Bucket h covers session hour [06+h, 06+h+1).
+  const stats = Array.from({ length: N_HOURS }, () => ({
+    count: 0, wins: 0, total: 0,
+  }));
+  if (!intradayBars || activeDates.length === 0) {
+    // fall through with empty stats — render below shows "no data"
+  } else {
+    for (const date of activeDates) {
+      const rawBars = intradayBars[date];
+      if (!rawBars || rawBars.length < 2) continue;
+      const lev = levByDate[date] ?? 1;
+      const exitBar = exitBars?.[date] ?? rawBars.length;
+      const effectiveLen = Math.min(rawBars.length, exitBar);
+
+      for (let h = 0; h < N_HOURS; h++) {
+        const startIdx = h * BARS_PER_HOUR;
+        const targetEndIdx = (h + 1) * BARS_PER_HOUR;
+        // Skip hours we don't have full data for. Allow the trailing hour 17
+        // to use the very last available bar even if it sits one bar shy of
+        // a full 12-bar hour (session closes at 23:55 UTC = bar 215, not 216).
+        if (startIdx >= effectiveLen) break;
+        let endIdx: number;
+        if (targetEndIdx <= effectiveLen - 1) {
+          endIdx = targetEndIdx;
+        } else if (h === N_HOURS - 1 && effectiveLen >= N_HOURS * BARS_PER_HOUR - 1) {
+          endIdx = effectiveLen - 1;
+        } else {
+          break; // partial hour from early exit — omit
+        }
+        const sv = rawBars[startIdx];
+        const ev = rawBars[endIdx];
+        if (sv == null || ev == null || !Number.isFinite(sv) || !Number.isFinite(ev)) continue;
+        const r = (ev - sv) * lev;
+        stats[h].count++;
+        stats[h].total += r;
+        if (r > 0) stats[h].wins++;
+      }
+    }
+  }
+
+  const avgs: Array<number | null> = stats.map((s) => (s.count > 0 ? s.total / s.count : null));
+  // Cumulative: running sum, starting at 0 at the 06:00 anchor. Hours with
+  // no data contribute 0 to the cumulative line so the curve doesn't
+  // disappear — this is a hypothetical "average path" not a real equity.
+  const cumulative: number[] = [0];
+  for (let h = 0; h < N_HOURS; h++) {
+    cumulative.push(cumulative[cumulative.length - 1] + (avgs[h] ?? 0));
+  }
+
+  const yValues = mode === 'hourly'
+    ? avgs.filter((v): v is number => v !== null)
+    : cumulative;
+  const yMax = yValues.length > 0 ? Math.max(...yValues, 0) : 1;
+  const yMin = yValues.length > 0 ? Math.min(...yValues, 0) : -1;
+  const yRange = Math.max(Math.abs(yMax), Math.abs(yMin), 0.5) * 1.2;
+
+  const W = 600, H = 140;
+  const padL = 36, padR = 8, padT = 8, padB = 22;
+  const plotW = W - padL - padR;
+  const plotH = H - padT - padB;
+
+  const xForBar = (h: number) => padL + (h + 0.5) * (plotW / N_HOURS);
+  const xForCum = (h: number) => padL + (h / N_HOURS) * plotW;
+  const yFor = (v: number) => padT + plotH / 2 - (v / yRange) * (plotH / 2);
+  const yZero = yFor(0);
+
+  const barW = (plotW / N_HOURS) * 0.7;
+
+  // Cumulative line path
+  const cumPath = cumulative
+    .map((v, i) => `${i === 0 ? 'M' : 'L'} ${xForCum(i).toFixed(1)} ${yFor(v).toFixed(1)}`)
+    .join(' ');
+
+  const totalDays = activeDates.length;
+  const dataDays = stats.reduce((m, s) => Math.max(m, s.count), 0);
+
+  return (
+    <div style={{ border: '1px solid var(--line)', borderRadius: 3, padding: 10, background: 'var(--bg2)', marginBottom: 14 }}>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
+        <div style={{ fontSize: 8, fontWeight: 700, letterSpacing: '0.12em', color: 'var(--t3)', textTransform: 'uppercase' }}>Performance by Hour of Day (UTC)</div>
+        <div style={{ display: 'flex', gap: 0 }}>
+          {(['hourly', 'cumulative'] as const).map((m) => {
+            const active = mode === m;
+            return (
+              <button
+                key={m}
+                type="button"
+                onClick={() => setMode(m)}
+                style={{
+                  padding: '3px 8px',
+                  fontSize: 9,
+                  fontWeight: 700,
+                  letterSpacing: '0.08em',
+                  textTransform: 'uppercase',
+                  background: active ? 'var(--bg4)' : 'transparent',
+                  color: active ? 'var(--t0)' : 'var(--t2)',
+                  border: '1px solid var(--line)',
+                  borderRight: m === 'hourly' ? 'none' : '1px solid var(--line)',
+                  cursor: 'pointer',
+                  fontFamily: 'var(--font-space-mono)',
+                }}
+              >
+                {m}
+              </button>
+            );
+          })}
+        </div>
+      </div>
+      <svg width="100%" height={H} viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none" style={{ display: 'block' }}>
+        {/* y-axis zero line */}
+        <line x1={padL} x2={W - padR} y1={yZero} y2={yZero} stroke="var(--line2)" strokeWidth={0.5} strokeDasharray="2 2" />
+        {/* y-axis ticks at +/- yRange/2 */}
+        {[yRange / 2, -yRange / 2].map((v) => (
+          <g key={v}>
+            <line x1={padL} x2={W - padR} y1={yFor(v)} y2={yFor(v)} stroke="var(--line)" strokeWidth={0.5} />
+            <text x={padL - 4} y={yFor(v) + 3} fontSize={8} fill="var(--t3)" textAnchor="end" fontFamily="var(--font-space-mono)">
+              {v >= 0 ? '+' : ''}{v.toFixed(1)}%
+            </text>
+          </g>
+        ))}
+        {/* x-axis hour labels — show every 3rd to avoid crowding */}
+        {Array.from({ length: N_HOURS + 1 }).map((_, h) => {
+          if (h % 3 !== 0) return null;
+          const x = xForCum(h);
+          const hourLabel = String((6 + h) % 24).padStart(2, '0') + ':00';
+          return (
+            <text key={h} x={x} y={H - 6} fontSize={8} fill="var(--t3)" textAnchor="middle" fontFamily="var(--font-space-mono)">
+              {hourLabel}
+            </text>
+          );
+        })}
+
+        {mode === 'hourly' ? (
+          // Bar chart
+          <>
+            {avgs.map((v, h) => {
+              if (v === null) return null;
+              const cx = xForBar(h);
+              const top = yFor(Math.max(0, v));
+              const bot = yFor(Math.min(0, v));
+              const fill = v >= 0 ? 'var(--green)' : 'var(--red)';
+              return (
+                <g key={h}>
+                  <rect
+                    x={cx - barW / 2}
+                    y={top}
+                    width={barW}
+                    height={Math.max(1, bot - top)}
+                    fill={fill}
+                    opacity={hovered == null || hovered === h ? 0.7 : 0.3}
+                    onMouseEnter={() => setHovered(h)}
+                    onMouseLeave={() => setHovered(null)}
+                    style={{ cursor: 'crosshair' }}
+                  />
+                </g>
+              );
+            })}
+            {/* Hourly hover tooltip */}
+            {hovered !== null && avgs[hovered] !== null && (
+              <g>
+                <text
+                  x={xForBar(hovered)}
+                  y={yFor(avgs[hovered] as number) + ((avgs[hovered] as number) >= 0 ? -4 : 12)}
+                  fontSize={9}
+                  fill={(avgs[hovered] as number) >= 0 ? 'var(--green)' : 'var(--red)'}
+                  fontWeight={700}
+                  textAnchor="middle"
+                  fontFamily="var(--font-space-mono)"
+                >
+                  {(avgs[hovered] as number) >= 0 ? '+' : ''}{(avgs[hovered] as number).toFixed(2)}%
+                </text>
+              </g>
+            )}
+          </>
+        ) : (
+          // Cumulative line
+          <>
+            {/* Filled area under the curve */}
+            <path
+              d={`${cumPath} L ${xForCum(N_HOURS).toFixed(1)} ${yZero} L ${xForCum(0).toFixed(1)} ${yZero} Z`}
+              fill="var(--green)"
+              opacity={0.12}
+            />
+            <path d={cumPath} stroke="var(--green)" strokeWidth={1.5} fill="none" />
+            {/* Hover dots at each hour boundary */}
+            {cumulative.map((v, i) => (
+              <circle
+                key={i}
+                cx={xForCum(i)}
+                cy={yFor(v)}
+                r={hovered === i - 1 || hovered === i ? 3 : 1.5}
+                fill={v >= 0 ? 'var(--green)' : 'var(--red)'}
+                onMouseEnter={() => setHovered(i)}
+                onMouseLeave={() => setHovered(null)}
+                style={{ cursor: 'crosshair' }}
+              />
+            ))}
+            {hovered !== null && cumulative[hovered] !== undefined && (
+              <text
+                x={xForCum(hovered)}
+                y={yFor(cumulative[hovered]) + (cumulative[hovered] >= 0 ? -6 : 14)}
+                fontSize={9}
+                fill={cumulative[hovered] >= 0 ? 'var(--green)' : 'var(--red)'}
+                fontWeight={700}
+                textAnchor="middle"
+                fontFamily="var(--font-space-mono)"
+              >
+                {cumulative[hovered] >= 0 ? '+' : ''}{cumulative[hovered].toFixed(2)}%
+              </text>
+            )}
+          </>
+        )}
+      </svg>
+      <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 6, fontSize: 8, color: 'var(--t3)' }}>
+        <span>{totalDays} active day{totalDays === 1 ? '' : 's'} · max {dataDays} day{dataDays === 1 ? '' : 's'}/hour</span>
+        {hovered !== null && stats[mode === 'cumulative' ? Math.max(0, hovered - 1) : hovered] && (
+          <span>
+            {(() => {
+              const idx = mode === 'cumulative' ? Math.max(0, hovered - 1) : hovered;
+              const s = stats[idx];
+              if (!s || s.count === 0) return null;
+              const hourLabel = String((6 + idx) % 24).padStart(2, '0') + '–' + String((6 + idx + 1) % 24).padStart(2, '0');
+              return `${hourLabel} · ${s.count}d · ${(s.wins / s.count * 100).toFixed(0)}%W`;
+            })()}
+          </span>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function DailyReturnOverlapChart({
   rows,
   intradayBars,
@@ -14539,6 +14802,59 @@ export default function ResultsView({ results, jobId, startingCapital, params }:
             </>
           )}
 
+          {/* ── Performance by Hour of Day ──────────────────────────────
+              Sits directly under the Fees Panel. Filter-specific via
+              activeDays (filter='pass' + conviction='pass') + per-filter
+              intraday_exit_bars to omit hours past each day's actual exit. */}
+          {(() => {
+            const dpRoot = (results as Record<string, unknown>)?.metrics as Record<string, unknown> | undefined;
+            type PortfolioDayHour = {
+              symbols: string[];
+              filter: string;
+              filter_name: string;
+              conviction: string;
+              raw_roi: number;
+              strat_roi: number;
+              exit_reason: string;
+            };
+            const byFilter = dpRoot?.daily_portfolio_by_filter as Record<string, Record<string, PortfolioDayHour>> | undefined;
+            const portfolio: Record<string, PortfolioDayHour> | undefined = (() => {
+              if (byFilter && selectedFilter) {
+                const exact = byFilter[selectedFilter];
+                if (exact) return exact;
+                const normSel = selectedFilter.replace(/\s+/g, '_');
+                for (const [k, v] of Object.entries(byFilter)) {
+                  if (k.replace(/\s+/g, '_') === normSel) return v;
+                }
+              }
+              return dpRoot?.daily_portfolio as Record<string, PortfolioDayHour> | undefined;
+            })();
+            if (!portfolio || Object.keys(portfolio).length === 0) return null;
+            const activeDates = Object.entries(portfolio)
+              .filter(([, v]) => v.filter === 'pass' && v.conviction === 'pass')
+              .map(([d]) => d);
+            if (activeDates.length === 0) return null;
+            const intradayBars = (m.intraday_bars ?? (results as Record<string, unknown>)?.intraday_bars) as Record<string, Array<number | null>> | null | undefined;
+            if (!intradayBars || Object.keys(intradayBars).length === 0) return null;
+            const exitBars = selectedFilter
+              ? ((m.intraday_exit_bars ?? (results as Record<string, unknown>)?.intraday_exit_bars) as Record<string, Record<string, number>> | null | undefined)?.[selectedFilter] ?? null
+              : null;
+            const levByDate: Record<string, number> = {};
+            for (const r of selectedFeesTableRows) {
+              if (typeof r.lev === 'number' && Number.isFinite(r.lev)) {
+                levByDate[r.date] = r.lev;
+              }
+            }
+            return (
+              <HourlyPerformanceChart
+                activeDates={activeDates}
+                intradayBars={intradayBars}
+                exitBars={exitBars}
+                levByDate={levByDate}
+              />
+            );
+          })()}
+
           {/* ── Per-Day Portfolio Breakdown ──────────────────────────── */}
           {(() => {
             const dp = (results as Record<string, unknown>)?.metrics as Record<string, unknown> | undefined;
@@ -14866,6 +15182,7 @@ export default function ResultsView({ results, jobId, startingCapital, params }:
                           })}
                         </div>
                       </div>
+
                     </>
                   );
                 })()}
