@@ -482,6 +482,7 @@ export default function ParamForm({ params, onChange, onSubmit }: ParamFormProps
             options={[
               { value: 'parquet', label: 'parquet' },
               { value: 'db', label: 'database' },
+              { value: 'coingecko', label: 'coingecko (live)' },
             ]}
           />
         </Row>
