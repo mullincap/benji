@@ -2057,17 +2057,11 @@ DISPERSION_SYMBOLS_10 = [
     "TRXUSDT",    "DOGEUSDT",   "HYPEUSDT",    "BCHUSDT",    "ADAUSDT",
 ]
 
-# NOTE 2026-04-25: 1000SHIBUSDT/1000PEPEUSDT/1000FLOKIUSDT/1000BONKUSDT
-# removed from these lists to test reproducing the pre-PR-#6 canonical
-# (Sharpe 3.957). Pre-PR-#6, the mcap loader silently dropped these 4 from
-# mcap_df via the buggy base+"USDT" concat, so they were effectively excluded
-# from the dispersion calc despite appearing in alt_returns. Removing them
-# from alt_returns reproduces that exclusion explicitly.
 DISPERSION_SYMBOLS_20 = [
     "BTCUSDT",    "ETHUSDT",    "BNBUSDT",     "XRPUSDT",    "SOLUSDT",
     "TRXUSDT",    "DOGEUSDT",   "HYPEUSDT",    "BCHUSDT",    "ADAUSDT",
     "LINKUSDT",   "XLMUSDT",    "LTCUSDT",     "AVAXUSDT",   "HBARUSDT",
-    "ZECUSDT",    "SUIUSDT",    "TONUSDT",     "TAOUSDT",
+    "ZECUSDT",    "SUIUSDT",    "1000SHIBUSDT","TONUSDT",    "TAOUSDT",
 ]
 
 
@@ -2075,9 +2069,9 @@ DISPERSION_SYMBOLS_30 = [
     "BTCUSDT",    "ETHUSDT",    "BNBUSDT",     "XRPUSDT",    "SOLUSDT",
     "TRXUSDT",    "DOGEUSDT",   "HYPEUSDT",    "BCHUSDT",    "ADAUSDT",
     "LINKUSDT",   "XLMUSDT",    "LTCUSDT",     "AVAXUSDT",   "HBARUSDT",
-    "ZECUSDT",    "SUIUSDT",    "TONUSDT",     "TAOUSDT",
+    "ZECUSDT",    "SUIUSDT",    "1000SHIBUSDT","TONUSDT",    "TAOUSDT",
     "DOTUSDT",    "MNTUSDT",    "UNIUSDT",     "NEARUSDT",   "AAVEUSDT",
-    "ICPUSDT",    "ETCUSDT",    "ONDOUSDT",    "KASUSDT",
+    "1000PEPEUSDT","ICPUSDT",   "ETCUSDT",     "ONDOUSDT",   "KASUSDT",
 ]
 
 # ── ADDED to reach TOP-60  (market cap ranks #55–#84, perp-filtered) ──
@@ -2091,11 +2085,10 @@ _ADDED_60 = [
 ]
 
 # ── ADDED to reach TOP-90  (market cap ranks #85–#119, perp-filtered) ─
-# 1000FLOKIUSDT + 1000BONKUSDT removed — see note above DISPERSION_SYMBOLS_20.
 _ADDED_90 = [
     "CHZUSDT",    "FLOWUSDT",   "1INCHUSDT",   "CRVUSDT",    "MKRUSDT",
-    "SNXUSDT",    "GMXUSDT",    "COMPUSDT",    "ORDIUSDT",
-    "LRCUSDT",    "APEUSDT",    "AXSUSDT",     "KAVAUSDT",
+    "SNXUSDT",    "1000FLOKIUSDT","GMXUSDT",   "COMPUSDT",   "ORDIUSDT",
+    "LRCUSDT",    "1000BONKUSDT","APEUSDT",    "AXSUSDT",    "KAVAUSDT",
     "XTZUSDT",    "SUSHIUSDT",  "YFIUSDT",     "NOTUSDT",    "COTIUSDT",
     "OCEANUSDT",  "ANKRUSDT",   "BANDUSDT",    "MAGICUSDT",  "STRKUSDT",
     "DYDXUSDT",   "ENSUSDT",    "STGUSDT",     "CFXUSDT",    "BLURUSDT",
