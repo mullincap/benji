@@ -80,7 +80,7 @@ def build_cli_args(params: dict) -> list[str]:
         "apply_blofin_filter":   "--apply-blofin-filter",
     }
 
-    audit_source = params.get("price_source", "parquet")
+    audit_source = params.get("price_source", "db")
     args: list[str] = ["--audit", "--audit-source", audit_source]
 
     for param, flag in flag_map.items():
@@ -146,8 +146,8 @@ def build_pipeline_env(params: dict) -> dict[str, str]:
         "DROP_UNVERIFIED":            _boolenv(params.get("drop_unverified", False)),
         "LEVERAGE":                   str(params.get("leverage", 4.0)),
         "STOP_RAW_PCT":               str(params.get("stop_raw_pct", -6.0)),
-        "PRICE_SOURCE":               str(params.get("price_source", "parquet")),
-        "MCAP_SOURCE":                str(params.get("mcap_source", "parquet")),
+        "PRICE_SOURCE":               str(params.get("price_source", "db")),
+        "MCAP_SOURCE":                str(params.get("mcap_source", "db")),
         "SAVE_CHARTS":                _boolenv(params.get("save_charts", True)),
         "TRIAL_PURCHASES":            _boolenv(params.get("trial_purchases", False)),
         "QUICK":                      _boolenv(params.get("quick", False)),
