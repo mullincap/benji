@@ -90,3 +90,74 @@ def resume_orphaned_traders():
 @app.get("/health")
 def health() -> dict:
     return {"status": "ok"}
+
+
+@app.get("/health/trader")
+def health_trader():
+    """Trader-aware health probe for external monitoring (UptimeRobot etc.).
+
+    Returns 503 if any DB-active allocation has a runtime_state in 'active'
+    phase but its updated_at timestamp is older than STALE_MINUTES. This
+    catches dead trader subprocesses and stuck-lock recoveries that the
+    plain /health endpoint can't surface (FastAPI is up = /health 200, but
+    a dead subprocess only shows in the UI).
+
+    Threshold is supervisor's STALE_THRESHOLD_MIN (15) + buffer for the
+    next supervisor tick to actually respawn before this probe alerts.
+    Allocations whose phase is anything other than 'active' (closed,
+    exited_*, etc.) are intentionally idle and not counted as stale.
+    """
+    from datetime import datetime, timezone
+    from app.db import get_worker_conn
+
+    STALE_MINUTES = 20
+
+    try:
+        with get_worker_conn() as conn:
+            cur = conn.cursor()
+            cur.execute(
+                """
+                SELECT allocation_id,
+                       runtime_state->>'phase' AS phase,
+                       runtime_state->>'updated_at' AS upd
+                FROM user_mgmt.allocations
+                WHERE status = 'active'
+                """
+            )
+            rows = cur.fetchall()
+    except Exception as e:
+        return JSONResponse(
+            status_code=503,
+            content={"status": "error", "error": f"db query failed: {e!r}"},
+        )
+
+    now = datetime.now(timezone.utc)
+    stale: list[dict] = []
+    healthy: list[dict] = []
+    idle: list[dict] = []
+
+    for aid, phase, upd_str in rows:
+        short = str(aid)[:8]
+        if phase != "active":
+            idle.append({"allocation_id": short, "phase": phase})
+            continue
+        if not upd_str:
+            stale.append({"allocation_id": short, "reason": "no updated_at"})
+            continue
+        try:
+            upd = datetime.fromisoformat(upd_str.replace(" ", "T"))
+            if upd.tzinfo is None:
+                upd = upd.replace(tzinfo=timezone.utc)
+            age_min = (now - upd).total_seconds() / 60
+            entry = {"allocation_id": short, "age_min": round(age_min, 1)}
+            if age_min > STALE_MINUTES:
+                stale.append(entry)
+            else:
+                healthy.append(entry)
+        except Exception as e:
+            stale.append({"allocation_id": short, "reason": f"unparseable upd: {e!r}"})
+
+    body = {"healthy": healthy, "idle": idle, "stale": stale}
+    if stale:
+        return JSONResponse(status_code=503, content={"status": "stale", **body})
+    return {"status": "ok", **body}
