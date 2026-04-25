@@ -2488,8 +2488,16 @@ def fetch_mcap_history(
         except Exception as e:
             print(f"    DB mcap load failed ({e}), falling back to parquet ...")
 
+    # MCAP_SOURCE='coingecko' explicitly skips parquet and goes straight to
+    # the live CoinGecko API + CSV cache below. Used to A/B test canonical
+    # (db) vs CoinGecko-derived dispersion when reproducing historical audit
+    # numbers — the nightly cron previously fell back to CoinGecko silently
+    # when MCAP_SOURCE=parquet on prod (no parquet present); this lets the
+    # user opt into that path deterministically.
+    if MCAP_SOURCE == "coingecko":
+        print(f"    Mcap source: coingecko (explicit, skipping parquet)")
     # ── Source 1: parquet from coingecko_marketcap.py ─────────────────
-    if DISPERSION_MCAP_PARQUET:
+    elif DISPERSION_MCAP_PARQUET:
         pq_path = Path(DISPERSION_MCAP_PARQUET)
         if pq_path.exists():
             try:
