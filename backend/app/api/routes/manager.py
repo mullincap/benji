@@ -2095,6 +2095,31 @@ def get_portfolio(
     else:
         cfg = TraderConfig.master_defaults()
 
+    # Snapshot session_ret at the moment the fill window closed: find the first
+    # bar whose timestamp exceeds session_open + early_fill_x. Compute its
+    # session_ret as mean(symbol_returns) for that bar — open-anchored once
+    # post-d9eac53 celery ships, entry-anchored on current pre-fix data
+    # (off by ~0.87pp on today's session). Frontend uses this to show
+    # "WINDOW CLOSED AT +X.XX%" once the window has expired.
+    fill_window_close_ret: float | None = None
+    fill_window_close_bar: int | None = None
+    if session["session_start_utc"] is not None:
+        fill_gate = (
+            session["session_start_utc"]
+            + datetime.timedelta(minutes=cfg.early_fill_x)
+        )
+        for b in bar_rows:
+            ts = b["bar_timestamp_utc"]
+            if ts is None:
+                continue
+            if ts > fill_gate:
+                sr = b["symbol_returns"] or {}
+                if sr:
+                    vals = [float(v) for v in sr.values()]
+                    fill_window_close_ret = sum(vals) / len(vals)
+                    fill_window_close_bar = b["bar_number"]
+                break
+
     meta = {
         "date":              session["signal_date"].isoformat(),
         "allocation_id":     str(session["allocation_id"]) if session["allocation_id"] else None,
@@ -2124,6 +2149,13 @@ def get_portfolio(
         # (which the running pre-fix container persists as entry-anchored).
         # null for closed master sessions or allocations with no runtime_state.
         "current_session_ret": session["session_ret"],
+        # session_ret snapshot at the bar where the fill window first closed
+        # (i.e. first bar whose timestamp > session_open + early_fill_x). UI
+        # freezes the progress bar at this value once the window expires so
+        # the user can see how close the portfolio came to firing. null
+        # while the window is still open or before any bar past the gate.
+        "fill_window_close_ret": fill_window_close_ret,
+        "fill_window_close_bar": fill_window_close_bar,
     }
     bars = [{
         "bar":         b["bar_number"],

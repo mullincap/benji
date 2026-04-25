@@ -90,6 +90,12 @@ interface PortfolioMeta {
   // mean for visual continuity, accepting it'll match `incr` until celery
   // ships post-d9eac53 code.
   current_session_ret: number | null;
+  // session_ret snapshot at the first bar past the fill window. Set once
+  // the window closes; null while still open. The bar freezes its fill at
+  // this ratio post-window so the user can see how close the portfolio
+  // came to firing — a historical "score at the buzzer".
+  fill_window_close_ret: number | null;
+  fill_window_close_bar: number | null;
 }
 
 // When the backend detects multiple allocations on the requested date and no
@@ -268,6 +274,7 @@ function EarlyFillProgressBar({
   date,
   sessionStartHourUTC,
   isActive,
+  fillWindowCloseRet,
 }: {
   sessionRet: number | null;
   earlyFillY: number;
@@ -275,6 +282,7 @@ function EarlyFillProgressBar({
   date: string;
   sessionStartHourUTC: number;
   isActive: boolean;
+  fillWindowCloseRet: number | null;
 }) {
   // Live-tick the countdown each second so "remaining" stays current
   // between 30s polls. Skip the interval once the session is closed —
@@ -290,30 +298,50 @@ function EarlyFillProgressBar({
   const remaining = elapsed !== null ? earlyFillX - elapsed : null;
   const windowOpen = remaining !== null && remaining > 0;
 
-  const cur = sessionRet ?? 0;
-  const fired = sessionRet !== null && cur >= earlyFillY;
+  // Past the fill gate, freeze the bar at the captured close-ROI rather
+  // than tracking live session_ret — the trigger can no longer fire so
+  // the historical "where did this portfolio land at the buzzer" is the
+  // useful number. Falls back to live sessionRet if the close snapshot
+  // is missing (e.g. session opened on/after the gate, or backfill gap).
+  const useCloseSnapshot = !windowOpen && fillWindowCloseRet !== null;
+  const displayRet = useCloseSnapshot ? fillWindowCloseRet : sessionRet;
+
+  const cur = displayRet ?? 0;
+  const fired = displayRet !== null && cur >= earlyFillY;
   const ratio = earlyFillY > 0 ? cur / earlyFillY : 0;
   const widthPct = Math.min(100, Math.max(0, ratio * 100));
   const gap = earlyFillY - cur;
   const fillColor = fired ? "var(--green)" : "var(--amber)";
   const fillBg    = fired ? "var(--green-dim)" : "var(--amber-dim)";
 
-  const curPctStr = sessionRet === null
+  const curPctStr = displayRet === null
     ? "—"
     : `${cur >= 0 ? "+" : ""}${(cur * 100).toFixed(2)}%`;
   const targetPctStr = `${(earlyFillY * 100).toFixed(2)}%`;
 
   let timeBadge: string;
-  if (!isActive) timeBadge = "SESSION CLOSED";
-  else if (!windowOpen) timeBadge = "FILL WINDOW CLOSED";
-  else timeBadge = `${fmtMinutesRemaining(remaining as number)} REMAINING`;
+  if (useCloseSnapshot) {
+    timeBadge = fired ? "TARGET HIT AT CLOSE" : "WINDOW CLOSED";
+  } else if (!isActive) {
+    timeBadge = "SESSION CLOSED";
+  } else if (!windowOpen) {
+    timeBadge = "FILL WINDOW CLOSED";
+  } else {
+    timeBadge = `${fmtMinutesRemaining(remaining as number)} REMAINING`;
+  }
 
   let gapStr: string;
-  if (sessionRet === null) gapStr = "—";
-  else if (fired) gapStr = "TARGET REACHED";
-  else gapStr = `${(gap * 100).toFixed(2)}% TO TARGET`;
+  if (displayRet === null) {
+    gapStr = "—";
+  } else if (fired) {
+    gapStr = useCloseSnapshot ? "TARGET HIT" : "TARGET REACHED";
+  } else if (useCloseSnapshot) {
+    gapStr = `${(gap * 100).toFixed(2)}% SHORT`;
+  } else {
+    gapStr = `${(gap * 100).toFixed(2)}% TO TARGET`;
+  }
 
-  const badgeMuted = !isActive || !windowOpen;
+  const badgeMuted = !isActive || (!windowOpen && !useCloseSnapshot);
 
   return (
     <div
@@ -353,7 +381,9 @@ function EarlyFillProgressBar({
               textTransform: "none",
             }}
           >
-            · session ROI vs portfolio take-profit
+            · {useCloseSnapshot
+                ? "session ROI at fill-window close"
+                : "session ROI vs portfolio take-profit"}
           </span>
         </div>
         <div
@@ -915,6 +945,7 @@ export default function PortfolioDetailPage() {
           date={meta.date}
           sessionStartHourUTC={meta.session_start_hour}
           isActive={live}
+          fillWindowCloseRet={meta.fill_window_close_ret}
         />
 
         {/* Chart */}
