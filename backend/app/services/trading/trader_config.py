@@ -53,6 +53,13 @@ class TraderConfig:
     kill_y: float = 0.003
     port_sl_pct: float = -0.06
     port_tsl_pct: float = -0.075
+    # Per-symbol stop threshold (also the clamped value once a symbol is
+    # stopped). Distinct from port_sl_pct (portfolio stop). Audit's
+    # apply_raw_stop in rebuild_portfolio_matrix.py uses this for the
+    # individual-symbol stop check, NOT port_sl. Default mirrors the
+    # canonical strategy spec. Earlier the live trader was conflating
+    # this with port_sl_pct — wrong threshold AND wrong clamp on stops.
+    stop_raw_pct: float = -0.06
     early_fill_y: float = 0.09
     fill_max_bar: int = 143
     active_filter: str = "Tail Guardrail"
@@ -168,6 +175,24 @@ class TraderConfig:
                 active_filter_raw, active_filter,
             )
 
+        # stop_raw_pct: per-symbol stop threshold + clamp value, distinct
+        # from port_sl_pct (portfolio stop). Audit's apply_raw_stop uses
+        # this for individual-symbol stops, NOT port_sl. Audit configs
+        # commonly store this as percent (-6.0) rather than decimal (-0.06);
+        # auto-detect by magnitude. Also accept positive magnitude (6.0)
+        # via the same -abs() normalization used for port_tsl.
+        raw_stop = float(_pick(
+            "stop_raw_pct", ["stop_raw_pct"], defaults.stop_raw_pct,
+        ))
+        if abs(raw_stop) > 1:
+            raw_stop = raw_stop / 100.0
+            log.info(
+                "TraderConfig: stop_raw_pct percent→decimal: %s -> %s",
+                _pick("stop_raw_pct", ["stop_raw_pct"], defaults.stop_raw_pct),
+                raw_stop,
+            )
+        stop_raw_pct = -abs(raw_stop) if raw_stop > 0 else raw_stop
+
         return cls(
             l_high=float(_pick("l_high", ["l_high"], defaults.l_high)),
             kill_y=float(_pick("kill_y", ["kill_y", "early_kill_y"], defaults.kill_y)),
@@ -175,6 +200,7 @@ class TraderConfig:
                 "port_sl_pct", ["port_sl_pct", "port_sl"], defaults.port_sl_pct,
             )),
             port_tsl_pct=port_tsl_pct,
+            stop_raw_pct=stop_raw_pct,
             early_fill_y=float(_pick(
                 "early_fill_y", ["early_fill_y"], defaults.early_fill_y,
             )),
