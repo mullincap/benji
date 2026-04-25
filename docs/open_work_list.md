@@ -176,6 +176,66 @@ record" numbers externally.
 
 ---
 
+### Reinvest knobs — capital redeployment from stopped positions
+
+Surfaced 2026-04-25. Today the audit implicitly models "freed capital
+from stopped-out positions sits idle" as the only behavior — when a
+symbol stops at -6%, its slot stays clamped at the loss for the rest of
+the session, and there's no way to ask "what if I redeployed that
+capital into the survivors?". Hides whether a more aggressive
+reinvestment policy would meaningfully improve risk-adjusted returns.
+
+**Two new knobs in the simulator:**
+- `reinvest_amount_pct`: `0.0` (default, current behavior) | `0.5` | `1.0`
+- `reinvest_trigger`: `"instant"` (default) | `"profitable"` (NAV >= 1.0)
+
+When per-symbol stop fires, the freed capital × amount_pct gets
+redeployed equal-weight across remaining active symbols. Non-reinvested
+portion sits as idle cash. Trigger controls whether redeployment
+happens at the stop bar or waits for the next bar where portfolio NAV
+is non-negative.
+
+**Verified math:** at `amount_pct=0`, the new share-weighted NAV path
+collapses exactly to today's `mean(clamped_paths)` — byte-identical
+canonical preservation. Confirmed across a 2-symbol example and a
+3-symbol example with mixed stop timings.
+
+**Implementation surface:**
+- `pipeline/rebuild_portfolio_matrix.py` — replace `mean()` with
+  `build_reinvest_path()` taking per-sym clamped paths + 2 new env
+  vars + returning NAV-based path. Pass to `_apply_hybrid_day_param`
+  unchanged (triggers fire on the new path; at `amount_pct=0` they
+  fire identically to today).
+- `backend/app/api/routes/jobs.py` — add 2 fields to JobRequest
+- `backend/app/services/audit/pipeline_runner.py` — env passthrough
+  (`REINVEST_AMOUNT_PCT`, `REINVEST_TRIGGER`)
+- `frontend/app/components/LeftPanel/ParamForm.tsx` — new "Capital
+  reinvestment" section with two dropdowns
+- `frontend/app/simulator/page.tsx` — DEFAULT_PARAMS adds the fields
+
+**Acceptance:**
+- canonical with `reinvest_amount_pct=0` → identical Sharpe/MaxDD/
+  CAGR to today's nightly
+- same with `amount_pct=1.0`, `trigger=instant` → Sharpe shifts in
+  expected direction; spot-check single-session basket math
+- same with `amount_pct=0.5`, `trigger=profitable` → results land
+  between 0% and 100% cases
+
+**Scope:** ~300-400 LOC. ~4-6h focused. Doable in one pass.
+
+**Not implemented to live trader yet** — simulator-only until the
+backtest results validate the policy. Live integration would be a
+follow-up PR (~150 LOC for order placement on each stop event +
+profitable trigger watch loop).
+
+**Concentration risk note:** with `amount_pct=1.0`, every stop
+concentrates capital into fewer symbols. By end of day if 8 of 10
+stopped, surviving 2 hold ~5x their original weight. Magnifies wins
+AND losses on survivors — the audit will reveal this directly, but
+worth understanding before promoting any reinvest config to live.
+
+---
+
 ## 🟢 Low priority — opportunistic
 
 ### D-perf — precomputed abs_dollar leaderboards
