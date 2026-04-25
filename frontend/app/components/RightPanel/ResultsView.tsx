@@ -3017,8 +3017,8 @@ function HourlyPerformanceChart({
               <span style={{ fontSize: 8, color: 'var(--t3)', letterSpacing: '0.08em', fontFamily: 'var(--font-space-mono)' }}>1H</span>
               <div style={{ display: 'flex', gap: 0 }}>
                 {([
-                  { key: 'entry', label: '06:35' },
                   { key: 'full', label: '06:00' },
+                  { key: 'entry', label: '06:35' },
                 ] as const).map((opt, i, arr) => {
                   const active = firstHourAnchor === opt.key;
                   return (
@@ -3116,24 +3116,60 @@ function HourlyPerformanceChart({
       {open && (<>
 
       <svg width="100%" height={H} viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none" style={{ display: 'block' }}>
-        {/* y-axis zero line */}
-        <line x1={padL} x2={W - padR} y1={yZero} y2={yZero} stroke="var(--line2)" strokeWidth={0.5} strokeDasharray="2 2" />
-        {/* y-axis ticks at data extents (asymmetric — drops empty space when
-            data is mostly positive or mostly negative). Skip a side if its
-            extent is too close to zero to be a useful tick. */}
-        {[
-          dataMax > 0.01 ? dataMax : null,
-          dataMin < -0.01 ? dataMin : null,
-        ]
-          .filter((v): v is number => v !== null)
-          .map((v) => (
-            <g key={v}>
-              <line x1={padL} x2={W - padR} y1={yFor(v)} y2={yFor(v)} stroke="var(--line)" strokeWidth={0.5} />
-              <text x={padL - 4} y={yFor(v) + 3} fontSize={8} fill="var(--t3)" textAnchor="end" fontFamily="var(--font-space-mono)">
-                {v >= 0 ? '+' : ''}{v.toFixed(1)}%
-              </text>
-            </g>
-          ))}
+        {/* Minor horizontal grid lines at "nice" round intervals across the
+            asymmetric y-range. Picks step from the {1, 2, 5} × 10^n family
+            so the resulting ticks are always at clean values like 0.5%, 1%,
+            2%, 5% rather than data-driven fractions. Always renders ≥3
+            lines (the algorithm targets ~5 lines). Zero line is rendered
+            on top with a dashed style for emphasis. */}
+        {(() => {
+          const niceStep = (() => {
+            const range = yPaddedSpan;
+            const rough = range / 5;
+            const exp = Math.pow(10, Math.floor(Math.log10(rough)));
+            const norm = rough / exp;
+            let nice: number;
+            if (norm < 1.5) nice = 1;
+            else if (norm < 3) nice = 2;
+            else if (norm < 7) nice = 5;
+            else nice = 10;
+            return nice * exp;
+          })();
+          const ticks: number[] = [];
+          const start = Math.ceil(yMinPadded / niceStep) * niceStep;
+          for (let v = start; v <= yMaxPadded + 1e-9; v += niceStep) {
+            ticks.push(Math.round(v / niceStep) * niceStep);
+          }
+          // Determine label precision from step magnitude so we don't show
+          // "+0%" when step is 0.5 — at least one decimal then.
+          const decimals = niceStep >= 1 ? 0 : niceStep >= 0.1 ? 1 : 2;
+          return ticks.map((v) => {
+            const isZero = Math.abs(v) < niceStep / 2;
+            return (
+              <g key={v}>
+                <line
+                  x1={padL}
+                  x2={W - padR}
+                  y1={yFor(v)}
+                  y2={yFor(v)}
+                  stroke={isZero ? 'var(--line2)' : 'var(--line)'}
+                  strokeWidth={0.5}
+                  strokeDasharray={isZero ? '2 2' : undefined}
+                />
+                <text
+                  x={padL - 4}
+                  y={yFor(v) + 3}
+                  fontSize={8}
+                  fill="var(--t3)"
+                  textAnchor="end"
+                  fontFamily="var(--font-space-mono)"
+                >
+                  {v > 0 ? '+' : ''}{v.toFixed(decimals)}%
+                </text>
+              </g>
+            );
+          });
+        })()}
         {/* x-axis hour labels — every hour, compact 12h format ("6a", "11p"). */}
         {Array.from({ length: N_HOURS + 1 }).map((_, h) => (
           <text
