@@ -1418,6 +1418,15 @@ def _fetch_blofin_instruments() -> set:
 
     Uses a User-Agent header — Cloudflare in front of openapi.blofin.com blocks
     urllib's default 'Python-urllib/3.x' as a bot signature, returning 403.
+
+    Uses normalize_symbol on each instId so the returned bases match what the
+    audit's basket symbols look like after their own normalization. Without
+    this, BloFin's per-exchange multiplier convention differs from Binance's
+    (Binance lists 1000BONKUSDT → audit normalize → BONK; BloFin lists
+    1000BONK-USDT → set entry would be "1000BONK" without normalization →
+    membership check fails → BONK silently filtered out despite being
+    tradeable on BloFin). Affects BONK/FLOKI/LUNC/RATS/SATS/MOG/BABYDOGE
+    pre-fix. Discovered 2026-04-25.
     """
     url = "https://openapi.blofin.com/api/v1/market/instruments?instType=SWAP"
     try:
@@ -1427,11 +1436,16 @@ def _fetch_blofin_instruments() -> set:
         )
         with _urllib_request.urlopen(req, timeout=15) as r:
             data = _json.load(r)
-        syms = {
-            inst["instId"].replace("-USDT", "").upper()
-            for inst in (data.get("data") or [])
-            if inst.get("instId", "").endswith("-USDT")
-        }
+        syms = set()
+        for inst in (data.get("data") or []):
+            inst_id = inst.get("instId", "")
+            if not inst_id.endswith("-USDT"):
+                continue
+            # Strip the dash so normalize_symbol's USDT-suffix path matches
+            # (it expects e.g. "1000BONKUSDT", not "1000BONK-USDT").
+            normalized = normalize_symbol(inst_id.replace("-", ""))
+            if normalized:
+                syms.add(normalized)
         log.info(f"[LIVE-PARITY] BloFin universe: {len(syms)} USDT-swap instruments (static snapshot)")
         return syms
     except Exception as e:
