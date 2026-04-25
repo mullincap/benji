@@ -148,6 +148,7 @@ def build_pipeline_env(params: dict) -> dict[str, str]:
         "STOP_RAW_PCT":               str(params.get("stop_raw_pct", -6.0)),
         "PRICE_SOURCE":               str(params.get("price_source", "db")),
         "MCAP_SOURCE":                str(params.get("mcap_source", "db")),
+        "DISPERSION_UNIVERSE_MODE":   str(params.get("dispersion_universe_mode", "curated")),
         "SAVE_CHARTS":                _boolenv(params.get("save_charts", True)),
         "TRIAL_PURCHASES":            _boolenv(params.get("trial_purchases", False)),
         "QUICK":                      _boolenv(params.get("quick", False)),

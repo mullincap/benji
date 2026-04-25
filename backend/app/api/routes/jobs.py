@@ -112,6 +112,12 @@ class JobRequest(BaseModel):
     stop_raw_pct:               float = -6.0
     price_source:               str   = "db"
     mcap_source:                str   = "db"
+    # Dispersion-universe selection mode (audit's _load_mcap_from_db):
+    # 'curated' = filter to COINGECKO_TO_BINANCE.keys() (90-coin whitelist,
+    #             current default — dispersion threshold tuned for this)
+    # 'all'     = no whitelist; join market.symbols.binance_id (matches
+    #             live trader's compute_dispersion_filter universe scope)
+    dispersion_universe_mode:   str   = "curated"
     save_charts:                bool  = True
     trial_purchases:            bool  = False
     quick:                      bool  = False

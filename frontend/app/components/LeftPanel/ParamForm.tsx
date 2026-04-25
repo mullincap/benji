@@ -486,6 +486,19 @@ export default function ParamForm({ params, onChange, onSubmit }: ParamFormProps
             ]}
           />
         </Row>
+        <Row
+          label="dispersion_universe_mode"
+          help="curated = audit's 90-coin whitelist (current default; threshold tuned for this). all = full mcap table (matches live trader's universe scope; may need threshold re-tune)."
+        >
+          <SelInput
+            value={p.dispersion_universe_mode as string ?? 'curated'}
+            onChange={(v) => set('dispersion_universe_mode', v)}
+            options={[
+              { value: 'curated', label: 'curated (90 coins)' },
+              { value: 'all', label: 'all (full mcap table)' },
+            ]}
+          />
+        </Row>
         <Row label="save_charts">
           <Toggle checked={!!p.save_charts} onChange={(v) => set('save_charts', v)} />
         </Row>
