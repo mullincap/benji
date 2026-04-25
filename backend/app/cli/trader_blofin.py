@@ -966,17 +966,30 @@ def get_actual_positions(
 # PORTFOLIO RETURN HELPERS
 # ==========================================================================
 
-def equal_weight_return(current: dict, ref: dict) -> float:
+def equal_weight_return(current: dict, ref: dict,
+                        sym_stopped: dict | None = None) -> float:
     """
     Equal-weight 1x return: mean((price/ref_price) - 1) across symbols.
     Symbols missing from current (delisted/fetch failure) are excluded;
     the denominator shrinks automatically -- no fabricated 0 returns.
+
+    sym_stopped (optional): {inst_id: clamped_return_decimal} — symbols whose
+    portfolio stop has fired. For these, the clamped value (typically -0.06)
+    is substituted for the live (current/ref - 1) calculation. This mirrors
+    the audit's apply_raw_stop in rebuild_portfolio_matrix.py — once a
+    symbol crosses STOP_RAW_PCT, its contribution to the portfolio mean is
+    locked at the stop level for the rest of the session, regardless of
+    how its market price moves afterwards. Audit-vs-live alignment for the
+    early-fill (sess) trigger relies on this clamp being applied here.
+    Pass None to disable clamping (legacy behaviour).
     """
-    rets = [
-        current[k] / ref[k] - 1.0
-        for k in ref
-        if k in current and ref[k] > 0
-    ]
+    sym_stopped = sym_stopped or {}
+    rets = []
+    for k in ref:
+        if k in sym_stopped:
+            rets.append(float(sym_stopped[k]))
+        elif k in current and ref[k] > 0:
+            rets.append(current[k] / ref[k] - 1.0)
     if not rets:
         return 0.0
     return float(np.mean(rets))
@@ -2480,8 +2493,13 @@ def _run_monitoring_loop(today, today_date, api: ExchangeAdapter, inst_ids,
 
         incr = float(np.mean(sym_returns)) if sym_returns else 0.0
 
-        # session_ret uses open_prices anchor (for EARLY_FILL threshold)
-        session_ret = equal_weight_return(current, open_prices)
+        # session_ret uses open_prices anchor (06:00 UTC) AND clamps stopped
+        # symbols at their realized stop value — mirrors the audit's path_1x
+        # in rebuild_portfolio_matrix.py:apply_raw_stop. This is what the
+        # EARLY_FILL_Y trigger compares against. Only difference vs `incr`
+        # above: anchor (06:00 vs entry @ 06:35). Both apply the same -6%
+        # clamp to stopped symbols, matching audit semantics.
+        session_ret = equal_weight_return(current, open_prices, sym_stopped)
 
         peak     = max(peak, incr)
         tsl_dist = incr - peak
