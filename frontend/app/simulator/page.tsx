@@ -69,6 +69,8 @@ const DEFAULT_PARAMS: Record<string, unknown> = {
   l_high: 1.0,
   port_tsl: 0.99,
   port_sl: -0.99,
+  dd_stop_x: 9999,
+  dd_stop_y: -0.99,
   early_fill_y: 0.99,
   early_fill_x: 5,
   // Filters

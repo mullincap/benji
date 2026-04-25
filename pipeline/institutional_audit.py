@@ -896,6 +896,9 @@ def _apply_hybrid_day_param(
     early_fill_max_minutes: int = 9 * 60,
     trial_purchases: bool = False,
     return_exit_bar: bool = False,
+    enable_dd_stop: bool = False,
+    dd_stop_threshold_1x: float = -999.0,   # incr threshold (already in 1x / unleveraged terms)
+    dd_stop_min_minutes: int = 0,           # bar idx after which dd_stop fires
 ) -> tuple:
     """
     Compact re-implementation of apply_best_hybrid_day.
@@ -913,6 +916,7 @@ def _apply_hybrid_day_param(
 
     x_idx        = _idx(early_x_minutes)
     fill_max_idx = min(_idx(early_fill_max_minutes), n - 1)
+    dd_stop_idx  = _idx(dd_stop_min_minutes) if enable_dd_stop else 0
 
     roi_x = float(path_1x[x_idx]) if np.isfinite(path_1x[x_idx]) else float(path_1x[-1])
     if not np.isfinite(roi_x):
@@ -932,6 +936,8 @@ def _apply_hybrid_day_param(
             if not np.isfinite(v): continue
             incr = v - entry_1x
             if enable_portfolio_stop and incr <= port_stop_1x:
+                exit_roi_incr = incr; exit_i = i; break
+            if enable_dd_stop and i > dd_stop_idx and incr <= dd_stop_threshold_1x:
                 exit_roi_incr = incr; exit_i = i; break
             if incr > peak: peak = incr
             if enable_trailing_stop and (incr - peak) <= -abs(trail_dd_1x):
@@ -953,6 +959,8 @@ def _apply_hybrid_day_param(
         v = float(path_1x[i])
         if not np.isfinite(v): continue
         if enable_portfolio_stop and v <= port_stop_1x:
+            exit_roi = v; exit_bar = i; break
+        if enable_dd_stop and i > dd_stop_idx and v <= dd_stop_threshold_1x:
             exit_roi = v; exit_bar = i; break
         if v > peak: peak = v
         if enable_trailing_stop and (v - peak) <= -abs(trail_dd_1x):
@@ -1056,6 +1064,12 @@ def _simulate_with_params(
     raw_efx = params.get("EARLY_FILL_X", 540)
     early_fill_max_min = int(raw_efx) if (raw_efx is not None and raw_efx != 0) else 0
 
+    raw_dd_x = params.get("DD_STOP_X", 9999)
+    raw_dd_y = params.get("DD_STOP_Y", -0.99)
+    en_dd    = raw_dd_y is not None and float(raw_dd_y) > -0.98 and int(raw_dd_x) < 9999
+    dd_x_val = int(raw_dd_x) if en_dd else 0
+    dd_y_val = float(raw_dd_y) if en_dd else -999.0
+
     daily = []
 
     for col in df_4x.columns:
@@ -1091,6 +1105,9 @@ def _simulate_with_params(
             enable_early_fill        = enable_early_fill,
             early_fill_max_minutes   = early_fill_max_min,
             trial_purchases          = trial_purchases,
+            enable_dd_stop           = en_dd,
+            dd_stop_threshold_1x     = dd_y_val,
+            dd_stop_min_minutes      = dd_x_val,
         )
         if np.isfinite(r):
             daily.append(r)
@@ -2879,6 +2896,11 @@ def walk_forward_validation(
                 ef_val       = float(raw_ef) if en_ef else 999.0
                 raw_efx      = params.get("EARLY_FILL_X", 540)
                 efx_val      = int(raw_efx) if (raw_efx is not None and raw_efx != 0) else 0
+                raw_dd_x     = params.get("DD_STOP_X", 9999)
+                raw_dd_y     = params.get("DD_STOP_Y", -0.99)
+                en_dd        = raw_dd_y is not None and float(raw_dd_y) > -0.98 and int(raw_dd_x) < 9999
+                dd_x_val     = int(raw_dd_x) if en_dd else 0
+                dd_y_val     = float(raw_dd_y) if en_dd else -999.0
                 r, _lev_used = _apply_hybrid_day_param(
                     path_1x,
                     early_x_minutes         = int(round(params.get("EARLY_KILL_X", 175))),
@@ -2893,6 +2915,9 @@ def walk_forward_validation(
                     enable_early_fill       = en_ef,
                     early_fill_max_minutes  = efx_val,
                     trial_purchases         = trial_purchases,
+                    enable_dd_stop          = en_dd,
+                    dd_stop_threshold_1x    = dd_y_val,
+                    dd_stop_min_minutes     = dd_x_val,
                 )
                 if np.isfinite(r):
                     test_daily.append(r)
@@ -3034,6 +3059,11 @@ def _wf_eval_segment(df_4x, cols, params, trial_purchases, tdy,
     ef_val     = float(raw_ef) if en_ef else 999.0
     raw_efx    = params.get("EARLY_FILL_X", 540)
     efx_val    = int(raw_efx) if (raw_efx is not None and raw_efx != 0) else 0
+    raw_dd_x   = params.get("DD_STOP_X", 9999)
+    raw_dd_y   = params.get("DD_STOP_Y", -0.99)
+    en_dd      = raw_dd_y is not None and float(raw_dd_y) > -0.98 and int(raw_dd_x) < 9999
+    dd_x_val   = int(raw_dd_x) if en_dd else 0
+    dd_y_val   = float(raw_dd_y) if en_dd else -999.0
 
     daily = []
     for col in cols:
@@ -3057,6 +3087,9 @@ def _wf_eval_segment(df_4x, cols, params, trial_purchases, tdy,
             enable_early_fill       = en_ef,
             early_fill_max_minutes  = efx_val,
             trial_purchases         = trial_purchases,
+            enable_dd_stop          = en_dd,
+            dd_stop_threshold_1x    = dd_y_val,
+            dd_stop_min_minutes     = dd_x_val,
         )
         if np.isfinite(r):
             daily.append(r)
@@ -4478,6 +4511,11 @@ def simulation_bias_audit(
         ef_val  = float(raw_ef) if en_ef else 999.0
         raw_efx = p.get("EARLY_FILL_X", None)
         efx_val = int(raw_efx) if (raw_efx is not None and raw_efx != 0) else 0
+        raw_dd_x = p.get("DD_STOP_X", 9999)
+        raw_dd_y = p.get("DD_STOP_Y", -0.99)
+        en_dd    = raw_dd_y is not None and float(raw_dd_y) > -0.98 and int(raw_dd_x) < 9999
+        dd_x_val = int(raw_dd_x) if en_dd else 0
+        dd_y_val = float(raw_dd_y) if en_dd else -999.0
         _r, _lu = _apply_hybrid_day_param(
             np.asarray(path_1x, dtype=float),
             early_x_minutes          = int(round(p["EARLY_KILL_X"])),
@@ -4492,6 +4530,9 @@ def simulation_bias_audit(
             enable_early_fill        = en_ef,
             early_fill_max_minutes   = efx_val,
             trial_purchases          = trial_purchases,
+            enable_dd_stop           = en_dd,
+            dd_stop_threshold_1x     = dd_y_val,
+            dd_stop_min_minutes      = dd_x_val,
         )
         return _r
 
@@ -4677,6 +4718,11 @@ def simulation_bias_audit(
             ef_val  = float(raw_ef) if en_ef else 999.0
             raw_efx = p_override.get("EARLY_FILL_X", None)
             efx_val = int(raw_efx) if (raw_efx is not None and raw_efx != 0) else 0
+            raw_dd_x = p_override.get("DD_STOP_X", 9999)
+            raw_dd_y = p_override.get("DD_STOP_Y", -0.99)
+            en_dd    = raw_dd_y is not None and float(raw_dd_y) > -0.98 and int(raw_dd_x) < 9999
+            dd_x_val = int(raw_dd_x) if en_dd else 0
+            dd_y_val = float(raw_dd_y) if en_dd else -999.0
             _r2, _lu2 = _apply_hybrid_day_param(
                 np.asarray(path, dtype=float),
                 early_x_minutes          = int(round(p_override["EARLY_KILL_X"])),
@@ -4691,6 +4737,9 @@ def simulation_bias_audit(
                 enable_early_fill        = en_ef,
                 early_fill_max_minutes   = efx_val,
                 trial_purchases          = True,
+                enable_dd_stop           = en_dd,
+                dd_stop_threshold_1x     = dd_y_val,
+                dd_stop_min_minutes      = dd_x_val,
             )
             return _r2
 

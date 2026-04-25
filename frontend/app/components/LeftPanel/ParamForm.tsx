@@ -570,6 +570,12 @@ export default function ParamForm({ params, onChange, onSubmit }: ParamFormProps
         <Row label="port_sl">
           <NumInput value={p.port_sl} onChange={(v) => set('port_sl', v)} />
         </Row>
+        <Row label="dd_stop_x">
+          <NumInput value={p.dd_stop_x} onChange={(v) => set('dd_stop_x', v)} />
+        </Row>
+        <Row label="dd_stop_y">
+          <NumInput value={p.dd_stop_y} onChange={(v) => set('dd_stop_y', v)} />
+        </Row>
 
         <div style={subSectionLabel}>EARLY FILL</div>
         <Row label="early_fill_y">

@@ -136,6 +136,8 @@ class JobRequest(BaseModel):
     port_sl:                    float = -0.99
     early_fill_y:               float = 0.99
     early_fill_x:               int   = 5
+    dd_stop_x:                  int   = 9999    # minutes from session open past which dd_stop activates; 9999 = disabled
+    dd_stop_y:                  float = -0.99   # incr threshold (unleveraged, negative); -0.99 = disabled
 
     # ── Filters — enable ──────────────────────────────────────────────────────
     enable_tail_guardrail:      bool  = True

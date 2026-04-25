@@ -899,6 +899,9 @@ CANDIDATE_CONFIGS = [
 
             "EARLY_FILL_Y":    float(os.environ.get("EARLY_FILL_Y", "0.99")),
             "EARLY_FILL_X":    int(os.environ.get("EARLY_FILL_X", "5")),
+
+            "DD_STOP_X":       int(os.environ.get("DD_STOP_X", "9999")),
+            "DD_STOP_Y":       float(os.environ.get("DD_STOP_Y", "-0.99")),
         },
     ),
 ]

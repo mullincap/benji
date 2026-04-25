@@ -165,6 +165,8 @@ def build_pipeline_env(params: dict) -> dict[str, str]:
         "PORT_SL":                    str(params.get("port_sl", -0.99)),
         "EARLY_FILL_Y":               str(params.get("early_fill_y", 0.99)),
         "EARLY_FILL_X":               str(params.get("early_fill_x", 5)),
+        "DD_STOP_X":                  str(params.get("dd_stop_x", 9999)),
+        "DD_STOP_Y":                  str(params.get("dd_stop_y", -0.99)),
 
         # ── Filters ───────────────────────────────────────────────────────────
         "ENABLE_TAIL_GUARDRAIL":      _boolenv(params.get("enable_tail_guardrail", True)),
