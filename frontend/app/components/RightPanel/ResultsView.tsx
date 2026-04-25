@@ -2873,10 +2873,19 @@ function HourlyPerformanceChart({
   const yMin = yValues.length > 0 ? Math.min(...yValues, 0) : -1;
   const yRange = Math.max(Math.abs(yMax), Math.abs(yMin), 0.5) * 1.2;
 
-  const W = 600, H = 140;
-  const padL = 36, padR = 8, padT = 8, padB = 22;
+  const W = 600, H = 240;
+  const padL = 36, padR = 8, padT = 10, padB = 24;
   const plotW = W - padL - padR;
   const plotH = H - padT - padB;
+
+  // Compact 12-hour label: "6a", "11p", "12a" — fits 19 ticks across plotW.
+  const fmtHourLabel = (utcHour: number): string => {
+    const h = ((utcHour % 24) + 24) % 24;
+    const period = h < 12 ? 'a' : 'p';
+    let h12 = h % 12;
+    if (h12 === 0) h12 = 12;
+    return `${h12}${period}`;
+  };
 
   const xForBar = (h: number) => padL + (h + 0.5) * (plotW / N_HOURS);
   const xForCum = (h: number) => padL + (h / N_HOURS) * plotW;
@@ -2937,17 +2946,20 @@ function HourlyPerformanceChart({
             </text>
           </g>
         ))}
-        {/* x-axis hour labels — show every 3rd to avoid crowding */}
-        {Array.from({ length: N_HOURS + 1 }).map((_, h) => {
-          if (h % 3 !== 0) return null;
-          const x = xForCum(h);
-          const hourLabel = String((6 + h) % 24).padStart(2, '0') + ':00';
-          return (
-            <text key={h} x={x} y={H - 6} fontSize={8} fill="var(--t3)" textAnchor="middle" fontFamily="var(--font-space-mono)">
-              {hourLabel}
-            </text>
-          );
-        })}
+        {/* x-axis hour labels — every hour, compact 12h format ("6a", "11p"). */}
+        {Array.from({ length: N_HOURS + 1 }).map((_, h) => (
+          <text
+            key={h}
+            x={xForCum(h)}
+            y={H - 8}
+            fontSize={9}
+            fill="var(--t2)"
+            textAnchor="middle"
+            fontFamily="var(--font-space-mono)"
+          >
+            {fmtHourLabel(6 + h)}
+          </text>
+        ))}
 
         {mode === 'hourly' ? (
           // Bar chart
