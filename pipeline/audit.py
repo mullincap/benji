@@ -2404,40 +2404,68 @@ def _load_mcap_from_db(start: str, end: str) -> pd.DataFrame:
     Load market cap from market.market_cap_daily and return the same
     wide-format DataFrame as _load_mcap_from_parquet().
 
-    Maps via `coin_id` (CoinGecko canonical ID like "pepe") through
-    COINGECKO_TO_BINANCE to get the Binance USDT-M perp ticker
-    (e.g. "1000PEPEUSDT"). The earlier base+"USDT" concat path silently
-    dropped 1000-prefix perps (1000PEPE/SHIB/FLOKI/BONK) because the DB
-    stores them under the unprefixed base — meanwhile parquet's loader
-    used coin_id-based mapping and got them right, producing a Sharpe
-    delta of ~0.45 between the two sources on identical params (audit
-    discovered 2026-04-25 reproducing CANNON 1.5).
+    Universe-selection mode is gated by env var DISPERSION_UNIVERSE_MODE:
+      - 'curated' (default): filter to COINGECKO_TO_BINANCE.keys() — 90
+        coin-id whitelist that the dispersion threshold (0.66) was tuned
+        on. Stable signal-tuning, but stale (new big-mcap listings need
+        manual dict edits).
+      - 'all': join market.symbols.binance_id, no coin_id whitelist.
+        Matches live trader's compute_dispersion_filter (which picks
+        top-N from the full mcap table). Universe is dynamic — auto-
+        absorbs new listings — but the dispersion threshold may need
+        re-tuning since the cross-sectional std distribution shifts.
+
+    Both modes take top-DISPERSION_N (40 default) by mcap downstream;
+    the difference is what they take from. See open_work_list.md
+    "Audit-vs-live structural divergences" #1.
     """
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
     from pipeline.db.connection import get_conn
+    universe_mode = os.environ.get("DISPERSION_UNIVERSE_MODE", "curated").lower()
     conn = get_conn()
     cur = conn.cursor()
-    cur.execute(
-        """
-        SELECT date, coin_id, market_cap_usd
-        FROM market.market_cap_daily
-        WHERE date >= %s::date AND date <= %s::date
-          AND market_cap_usd IS NOT NULL
-        ORDER BY date
-        """,
-        (start, end),
-    )
-    rows = cur.fetchall()
-    cur.close()
-    conn.close()
-    if not rows:
-        raise ValueError(f"No mcap data in DB for {start} → {end}")
-    df = pd.DataFrame(rows, columns=["date", "coin_id", "market_cap_usd"])
-    df["date"] = pd.to_datetime(df["date"])
-    df["binance_ticker"] = df["coin_id"].map(COINGECKO_TO_BINANCE)
-    df = df.dropna(subset=["binance_ticker"])
-    if df.empty:
-        raise ValueError("No DB mcap rows match COINGECKO_TO_BINANCE mapping")
+    if universe_mode == "all":
+        cur.execute(
+            """
+            SELECT mcd.date, mcd.base, sym.binance_id, mcd.market_cap_usd
+            FROM market.market_cap_daily mcd
+            JOIN market.symbols sym ON sym.base = mcd.base
+            WHERE mcd.date >= %s::date AND mcd.date <= %s::date
+              AND mcd.market_cap_usd IS NOT NULL
+              AND sym.binance_id IS NOT NULL
+            ORDER BY mcd.date
+            """,
+            (start, end),
+        )
+        rows = cur.fetchall()
+        cur.close()
+        conn.close()
+        if not rows:
+            raise ValueError(f"No mcap data in DB for {start} → {end}")
+        df = pd.DataFrame(rows, columns=["date", "base", "binance_ticker", "market_cap_usd"])
+        df["date"] = pd.to_datetime(df["date"])
+    else:
+        cur.execute(
+            """
+            SELECT date, coin_id, market_cap_usd
+            FROM market.market_cap_daily
+            WHERE date >= %s::date AND date <= %s::date
+              AND market_cap_usd IS NOT NULL
+            ORDER BY date
+            """,
+            (start, end),
+        )
+        rows = cur.fetchall()
+        cur.close()
+        conn.close()
+        if not rows:
+            raise ValueError(f"No mcap data in DB for {start} → {end}")
+        df = pd.DataFrame(rows, columns=["date", "coin_id", "market_cap_usd"])
+        df["date"] = pd.to_datetime(df["date"])
+        df["binance_ticker"] = df["coin_id"].map(COINGECKO_TO_BINANCE)
+        df = df.dropna(subset=["binance_ticker"])
+        if df.empty:
+            raise ValueError("No DB mcap rows match COINGECKO_TO_BINANCE mapping")
     df = (df.sort_values("market_cap_usd", ascending=False)
             .drop_duplicates(subset=["binance_ticker", "date"])
             .sort_values("date"))
