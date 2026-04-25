@@ -123,6 +123,187 @@ ssh mcap "tail -40 /mnt/quant-data/logs/trader/spawn.log"
 ssh mcap "ls /mnt/quant-data/logs/trader/allocation_*.log | xargs -I {} tail -5 {}"
 ```
 
+### Health endpoints (poll these from UptimeRobot)
+
+- `https://mullincap.com/health` — basic backend liveness (HTTP 200 + `{"status":"ok"}`)
+- `https://mullincap.com/health/trader` — returns 503 if any DB-active allocation has `runtime_state.phase='active'` but `updated_at` > 20 min ago. Catches dead trader subprocesses, BACKOFF state, stuck-lock recoveries.
+
+## Trader incident playbooks
+
+The trader subprocess lives inside `benji-backend-1` and is fragile to backend
+container restarts. The supervisor (`*/5` cron) auto-respawns dead traders, but
+several failure modes need manual SQL. Each playbook is a self-contained recipe;
+copy-paste verbatim.
+
+### Playbook A: `/health/trader` returns 503 with `stale` entries
+
+Surfaced when trader subprocess died and supervisor either hasn't respawned yet
+OR is stuck in BACKOFF. Check supervisor state first:
+
+```bash
+ssh mcap "docker compose -f ~/benji/docker-compose.yml exec -T celery python3 -c '
+import sys; sys.path.insert(0,\"/app/backend\")
+from app.db import get_worker_conn
+with get_worker_conn() as c:
+    cur = c.cursor()
+    cur.execute(\"SELECT respawn_count, last_respawn_at, last_error FROM user_mgmt.trader_supervisor_state\")
+    for r in cur.fetchall(): print(r)
+'"
+```
+
+- **`respawn_count >= 10` and `last_error` says BACKOFF**: do Playbook C
+- **`respawn_count < 10` and `last_error` is None**: supervisor will respawn within 5–10 min; wait, then re-check `/health/trader`
+- **`respawn_count < 10` but `last_error` mentions lock/CORRUPTED**: do Playbook B
+
+### Playbook B: stuck DB lock blocking respawn
+
+Symptom: supervisor keeps trying to respawn but every spawn exits immediately.
+`last_error` mentions lock acquisition. Cause is usually a previous trader PID
+died holding the lock (deploy or SIGKILL).
+
+```bash
+ssh mcap "docker compose -f ~/benji/docker-compose.yml exec -T celery python3 -c '
+import sys; sys.path.insert(0,\"/app/backend\")
+from app.db import get_worker_conn
+ALLOC = \"<allocation_id>\"
+with get_worker_conn() as c:
+    cur = c.cursor()
+    cur.execute(\"UPDATE user_mgmt.allocations SET lock_acquired_at=NULL WHERE allocation_id=%s\", (ALLOC,))
+    c.commit()
+    print(\"lock cleared\")
+'"
+```
+
+Replace `<allocation_id>` with the affected allocation_id (from `/health/trader` body).
+After this, supervisor's next 5-min tick will respawn cleanly.
+
+### Playbook C: BACKOFF — supervisor refuses to respawn
+
+Symptom: `respawn_count >= 10` AND `last_error: BACKOFF: N respawns within last 60m...`.
+The supervisor has given up. Need to reset counter, clear lock, and manually spawn.
+
+```bash
+ssh mcap "docker compose -f ~/benji/docker-compose.yml exec -T celery python3 << 'PYEOF'
+import sys; sys.path.insert(0, '/app/backend')
+from app.db import get_worker_conn
+from app.cli.spawn_traders import spawn_allocation
+
+ALLOC = '<allocation_id>'
+
+with get_worker_conn() as c:
+    cur = c.cursor()
+    cur.execute('UPDATE user_mgmt.trader_supervisor_state SET respawn_count=0, stale_detected_at=NULL, last_error=NULL, last_error_at=NULL WHERE allocation_id=%s', (ALLOC,))
+    cur.execute('UPDATE user_mgmt.allocations SET lock_acquired_at=NULL WHERE allocation_id=%s', (ALLOC,))
+    c.commit()
+    print('cleared BACKOFF + lock')
+
+pid = spawn_allocation(ALLOC)
+print(f'spawned pid={pid}')
+PYEOF
+"
+```
+
+Verify recovery within 30 sec:
+
+```bash
+curl -s https://mullincap.com/health/trader | python3 -m json.tool
+# Expect: status=ok, allocation in `healthy`, age_min < 5
+```
+
+### Playbook D: backend container down (`/health` 503 or no response)
+
+Symptom: UptimeRobot alerts on `/health`, not just `/health/trader`. Backend
+container died, network issue, or host down.
+
+First diagnose:
+
+```bash
+ssh mcap "docker compose -f ~/benji/docker-compose.yml ps"
+# Look for benji-backend-1 status. If "Exit" or missing, container died.
+```
+
+If container died:
+
+```bash
+# Restart backend ONLY — do not rebuild (rebuild kills trader subprocesses).
+ssh mcap "docker compose -f ~/benji/docker-compose.yml start backend"
+```
+
+This brings the container back without recreating it (preserves any in-flight
+trader subprocesses if they survived). After backend is up, check:
+
+```bash
+curl -s https://mullincap.com/health
+curl -s https://mullincap.com/health/trader | python3 -m json.tool
+```
+
+If `/health/trader` now shows stale, do Playbook A.
+
+### Playbook E: emergency flatten all positions on an allocation
+
+For when you need to exit cleanly without waiting for trader. Uses the same
+close routine as the trader's port_sl path (idempotent, reconciles against
+exchange).
+
+Via UI: Manager → Allocations → click allocation → "Close Positions" button.
+
+Via CLI (if UI down):
+
+```bash
+ssh mcap "docker compose -f ~/benji/docker-compose.yml exec -T celery python3 << 'PYEOF'
+import sys; sys.path.insert(0, '/app/backend')
+from app.db import get_worker_conn
+from app.services.trading.credential_loader import load_credentials
+from app.services.exchanges.adapter import adapter_for
+from app.cli.trader_blofin import close_all_positions
+
+ALLOC = '<allocation_id>'
+
+with get_worker_conn() as c:
+    cur = c.cursor()
+    cur.execute('SELECT connection_id::text, runtime_state FROM user_mgmt.allocations WHERE allocation_id=%s', (ALLOC,))
+    conn_id, rs = cur.fetchone()
+
+positions = rs.get('positions') or []
+print(f'positions to close: {len(positions)}')
+
+if positions:
+    creds = load_credentials(conn_id)
+    api = adapter_for(creds)
+    failed = close_all_positions(api, positions, reason='manual flatten via runbook', dry_run=False)
+    print(f'closed_ok={len(positions)-len(failed)}  failed={len(failed)}')
+
+# Pause the allocation so spawn_traders skips it tomorrow
+with get_worker_conn() as c:
+    cur = c.cursor()
+    cur.execute(\"UPDATE user_mgmt.allocations SET status='paused' WHERE allocation_id=%s\", (ALLOC,))
+    c.commit()
+PYEOF
+"
+```
+
+To resume trading after a flatten: change `status='paused'` back to `'active'`
+in the DB. Next 06:05 UTC spawn picks it up.
+
+## Deploy safety
+
+The supervisor + startup_recovery interact poorly with backend rebuilds. Hard
+rules:
+
+1. **Never run `./redeploy.sh` mid-session** (06:00 UTC → session close, typically
+   23:00 UTC). It kills trader subprocesses and triggers the dup-spawn race that
+   has caused every BACKOFF incident to date.
+2. **For backend-only code changes**, prefer `docker compose up -d --build --no-deps backend`
+   over `redeploy.sh` (skips celery + frontend rebuild). Still kills trader though.
+3. **For celery-only code changes** (audit pipeline edits), use
+   `docker compose up -d --build --no-deps celery` — does not touch backend or
+   trader subprocesses, safe to run anytime.
+4. **For pipeline/host script changes** (cron-driven scripts, no container
+   change), just `git pull` on the host; no rebuild needed.
+
+If you MUST deploy backend mid-session: be ready to run Playbook A/B/C if the
+respawn race deadlocks (it usually does).
+
 ## Database checks
 
 ### Today's signals + basket items
