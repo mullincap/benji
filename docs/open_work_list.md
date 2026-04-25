@@ -84,6 +84,55 @@ inline override map). Symbol-registry refresh has its own 1000X-prefix
 detection bug worth a separate small fix so future 1000X-style listings
 are handled automatically.
 
+### Live trader basket — wall-clock non-determinism
+
+Surfaced 2026-04-25. `daily_signal_v2.py:compute_canonical_basket`
+computes its snapshot via:
+
+```python
+target_snap = ref_date 06:00 UTC
+end_ms = (target_snap + 5min).timestamp()  # 06:05 UTC
+# fetch klines startTime=00:00, endTime=06:05
+snap_close = float(klines[-1][4])  # last bar's close
+```
+
+Binance's klines endpoint returns BOTH closed and in-progress bars.
+`klines[-1]` therefore depends on wall-clock at fetch time:
+
+- **Run at 05:58 UTC** (cron): `klines[-1]` = 05:55–05:59 bar **still open**,
+  close = price at ~05:58
+- **Run at 06:14 UTC** (manual rerun): `klines[-1]` = 06:00–06:04 bar
+  closed at 06:04:59
+
+Different snapshot bars → different price/OI pct_change → different
+top-20 ranks → different baskets. Concrete impact today: 05:58 cron
+basket = `[API3, AXS, BSB, MAGIC, SAFE, YGG]`; 06:14 manual rerun
+basket = `[API3, AXS, BSB, SAFE, SAND, YGG]`. MAGIC ↔ SAND swap at
+the rank-20 boundary because of 16 min of price drift in the snapshot
+window. **Caused today's accidental double-spawn** — ALTS MAIN's 06:05
+trader had already entered MAGIC before the manual signal regen wrote
+SAND for ALTS DAILY.
+
+This is a third divergence dimension distinct from #1 and #2 above —
+they're audit-vs-live; this one is live-vs-itself. Note: Path A from
+divergence #2 (live moves to leaderboards) would fix this as a side
+effect since leaderboards are precomputed once per day. Otherwise this
+needs its own fix.
+
+**Two fix options (cleaner is #2):**
+
+1. **Filter out the in-progress bar** in `compute_canonical_basket`:
+   after fetching klines, discard any bar where
+   `open_time + 5min > now()` → use the latest *closed* bar. ~10 LOC
+   in one place.
+2. **Wait until `06:00 UTC + 30s` before fetching**: ensures the
+   05:55–05:59 bar (and the 06:00 bar if needed) is fully closed →
+   all runs of that day produce the same basket. Requires moving the
+   cron from 05:58 to 06:00 plus a small post-fetch close-bar guard.
+
+Either makes basket selection deterministic-per-day independent of
+when the script runs.
+
 ---
 
 ## 🟡 Active — when ready
