@@ -3174,6 +3174,38 @@ function HourlyPerformanceChart({
                 </g>
               );
             })}
+            {/* Mean dashed line — average across non-null hour buckets,
+                drawn on top of bars so it's visible against the fills. */}
+            {validAvgs.length > 0 && (() => {
+              const mean = validAvgs.reduce((a, b) => a + b, 0) / validAvgs.length;
+              const meanY = yFor(mean);
+              const labelAbove = mean >= 0;
+              return (
+                <g>
+                  <line
+                    x1={padL}
+                    x2={W - padR}
+                    y1={meanY}
+                    y2={meanY}
+                    stroke="var(--t0)"
+                    strokeWidth={0.8}
+                    strokeDasharray="4 3"
+                    opacity={0.65}
+                  />
+                  <text
+                    x={W - padR - 4}
+                    y={labelAbove ? meanY - 4 : meanY + 11}
+                    fontSize={9}
+                    fill="var(--t1)"
+                    textAnchor="end"
+                    fontFamily="var(--font-space-mono)"
+                    fontWeight={700}
+                  >
+                    mean {mean >= 0 ? '+' : ''}{mean.toFixed(2)}%
+                  </text>
+                </g>
+              );
+            })()}
             {/* Hourly hover tooltip */}
             {hovered !== null && avgs[hovered] !== null && (
               <g>
