@@ -2500,6 +2500,21 @@ def _run_monitoring_loop(today, today_date, api: ExchangeAdapter, inst_ids,
 
         incr = float(np.mean(sym_returns)) if sym_returns else 0.0
 
+        # Open-anchored per-symbol returns for the Portfolio UI matrix.
+        # The per-symbol stop check above (cfg.stop_raw_pct) anchors on
+        # open_prices (audit's apply_raw_stop p0 = 06:00 UTC bar). Storing
+        # entry-anchored returns in portfolio_bars made the matrix display
+        # values 3pp+ worse than the trigger threshold whenever fills slipped
+        # against open, so a row at -8% in the UI looked like a missed stop
+        # even though the open-based ret was still above -6%. Same denominator
+        # on both sides removes that confusion.
+        sym_returns_map_open = {}
+        for iid in inst_ids:
+            if iid in sym_stopped:
+                sym_returns_map_open[iid] = sym_stopped[iid]
+            elif iid in current and open_prices.get(iid, 0) > 0:
+                sym_returns_map_open[iid] = current[iid] / open_prices[iid] - 1.0
+
         # session_ret uses open_prices anchor (06:00 UTC) AND clamps stopped
         # symbols at their realized stop value — mirrors the audit's path_1x
         # in rebuild_portfolio_matrix.py:apply_raw_stop. This is what the
@@ -2558,10 +2573,10 @@ def _run_monitoring_loop(today, today_date, api: ExchangeAdapter, inst_ids,
         if allocation_id is None:
             # Master: NDJSON + master-schema SQL row (matched by signal_date).
             append_portfolio_bar(
-                today, b, _bar_ts, incr, peak, sym_returns_map, _bar_stop,
+                today, b, _bar_ts, incr, peak, sym_returns_map_open, _bar_stop,
             )
             append_portfolio_bar_sql(
-                today, b, _bar_ts, incr, peak, sym_returns_map, _bar_stop,
+                today, b, _bar_ts, incr, peak, sym_returns_map_open, _bar_stop,
             )
         else:
             # Allocation: session row is FK-identified by session_id; no NDJSON.
@@ -2569,7 +2584,7 @@ def _run_monitoring_loop(today, today_date, api: ExchangeAdapter, inst_ids,
                 session_id=session_id, bar=b,
                 ts_utc=utcnow().replace(tzinfo=datetime.timezone.utc),
                 incr=incr, peak=peak,
-                sym_returns=sym_returns_map, stopped=_bar_stop,
+                sym_returns=sym_returns_map_open, stopped=_bar_stop,
             )
 
         # ── 1st: PORT_SL -- portfolio hard floor ───────────────────────────
