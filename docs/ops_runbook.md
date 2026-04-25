@@ -304,6 +304,96 @@ rules:
 If you MUST deploy backend mid-session: be ready to run Playbook A/B/C if the
 respawn race deadlocks (it usually does).
 
+### Deploying with running traders
+
+Two locks matter when the backend container restarts:
+
+1. **`pg_advisory_lock`** (session-scoped, keyed on connection_id) — auto-releases
+   when the trader's DB connection drops. No manual cleanup ever needed.
+2. **`allocations.lock_acquired_at`** (DB column) — the stuck-prone one. The
+   trader's SIGTERM handler at `trader_blofin.py:_release_held_lock_on_shutdown`
+   clears it on graceful shutdown (added after 2026-04-24 06:05 UTC incident).
+   `docker compose` sends SIGTERM with a 10s grace before SIGKILL, so the happy
+   path is clean. SIGKILL / OOM bypass the handler — that's when the lock sticks.
+   The CAS at `trader_blofin.py:_acquire_allocation_lock` self-heals after 24h
+   (`lock_acquired_at < NOW() - INTERVAL '24 hours'`), but that's too long mid-session.
+
+#### Approach A — split deploy (lowest risk, recommended)
+
+For changes that touch BOTH frontend and backend, ship them in two phases so
+the backend rebuild happens off-hours:
+
+```bash
+# Phase 1 — frontend only, anytime (does NOT touch backend container)
+git push origin main
+ssh mcap "cd ~/benji && git pull && docker compose up -d --build --no-deps frontend"
+ssh mcap "cd ~/benji && docker compose restart nginx"
+
+# Phase 2 — backend after session close (~23:00 UTC) or before 06:00 UTC
+ssh mcap "cd ~/benji && docker compose up -d --build --no-deps backend"
+ssh mcap "cd ~/benji && docker compose restart nginx"
+```
+
+Frontend changes that depend on new backend fields must include a defensive
+fallback (e.g. `meta.foo !== undefined && <Component … />`) so phase 1 ships
+without rendering garbage. The component activates automatically once phase 2
+lands — no further frontend deploy needed.
+
+#### Approach B — full mid-session deploy with lock sweep
+
+Higher risk; only when phase 1 / phase 2 split isn't viable. Wraps the rebuild
+with a pre-flight snapshot, post-rebuild lock sweep, and respawn verification:
+
+```bash
+# (a) Snapshot trader state before rebuild
+ssh mcap "PGPASSWORD=A psql -h 127.0.0.1 -U quant -d marketdata -c \
+  \"SELECT allocation_id, lock_acquired_at, runtime_state->>'phase' AS phase, \
+           runtime_state->>'bar' AS bar \
+    FROM user_mgmt.allocations \
+    WHERE runtime_state->>'phase' = 'active' \
+    ORDER BY allocation_id;\""
+
+ssh mcap "docker exec benji-backend-1 ps -ef | grep trader_blofin | grep -v grep | wc -l"
+
+# (b) Push + rebuild backend (SIGTERM → 10s grace → SIGKILL → restart)
+git push origin main
+ssh mcap "cd ~/benji && git pull && docker compose up -d --build --no-deps backend"
+
+# (c) Wait for SIGTERM handler + container start + supervisor first tick
+sleep 30
+
+# (d) Sweep stuck locks — the > 5min guard avoids yanking freshly-acquired locks
+ssh mcap "PGPASSWORD=A psql -h 127.0.0.1 -U quant -d marketdata -c \
+  \"UPDATE user_mgmt.allocations SET lock_acquired_at = NULL \
+    WHERE runtime_state->>'phase' = 'active' \
+      AND lock_acquired_at IS NOT NULL \
+      AND lock_acquired_at < NOW() - INTERVAL '5 minutes';\""
+
+# (e) Verify each trader respawned and resumed (bar should be ≥ pre-flight bar)
+ssh mcap "PGPASSWORD=A psql -h 127.0.0.1 -U quant -d marketdata -c \
+  \"SELECT allocation_id, runtime_state->>'phase' AS phase, \
+           runtime_state->>'bar' AS bar, \
+           NOW() - (runtime_state->>'updated_at')::timestamptz AS staleness \
+    FROM user_mgmt.allocations \
+    WHERE runtime_state->>'phase' = 'active';\""
+
+ssh mcap "docker exec benji-backend-1 ps -ef | grep trader_blofin | grep -v grep | wc -l"
+# ↑ should match pre-flight count
+
+curl -s https://mullincap.com/health/trader | python3 -m json.tool
+# ↑ status=ok; if 503 with stale entries, do Playbook A/B/C
+
+# (f) Frontend (safe — different container)
+ssh mcap "cd ~/benji && docker compose up -d --build --no-deps frontend"
+ssh mcap "cd ~/benji && docker compose restart nginx"
+```
+
+Failure modes after step (b):
+- Supervisor logs `last_error` mentioning lock acquisition → Playbook B
+- `respawn_count >= 10` with BACKOFF → Playbook C
+- Trader process count short of pre-flight after step (e) → check
+  `trader_supervisor_state.last_error` and route to the matching playbook
+
 ## Database checks
 
 ### Today's signals + basket items
