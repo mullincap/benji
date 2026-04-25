@@ -2928,11 +2928,6 @@ function HourlyPerformanceChart({
 
   const barW = (plotW / N_HOURS) * 0.7;
 
-  // Cumulative line path
-  const cumPath = cumulative
-    .map((v, i) => `${i === 0 ? 'M' : 'L'} ${xForCum(i).toFixed(1)} ${yFor(v).toFixed(1)}`)
-    .join(' ');
-
   const totalDays = filteredDates.length;
   const dataDays = stats.reduce((m, s) => Math.max(m, s.count), 0);
 
@@ -3260,15 +3255,49 @@ function HourlyPerformanceChart({
             )}
           </>
         ) : (
-          // Cumulative line
+          // Cumulative line — per-hour segment shading by slope direction
+          // (green = up-segment, red = down-segment), plus a faint dashed
+          // trendline from session-start (0%) to the final cumulative value
+          // as a "constant pace" reference.
           <>
-            {/* Filled area under the curve */}
-            <path
-              d={`${cumPath} L ${xForCum(N_HOURS).toFixed(1)} ${yZero} L ${xForCum(0).toFixed(1)} ${yZero} Z`}
-              fill="var(--green)"
-              opacity={0.12}
-            />
-            <path d={cumPath} stroke="var(--green)" strokeWidth={1.5} fill="none" />
+            {/* Per-segment fill + line. Each hour's segment is its own
+                trapezoid colored by avgs[h] sign, and its line stroke
+                matches. Visualizes which hours pull the cumulative path
+                up vs back. */}
+            {Array.from({ length: N_HOURS }).map((_, h) => {
+              const v = avgs[h];
+              if (v === null) return null;
+              const x0 = xForCum(h);
+              const x1 = xForCum(h + 1);
+              const y0 = yFor(cumulative[h]);
+              const y1 = yFor(cumulative[h + 1]);
+              const color = v >= 0 ? 'var(--green)' : 'var(--red)';
+              return (
+                <g key={`seg-${h}`}>
+                  <path
+                    d={`M ${x0} ${y0} L ${x1} ${y1} L ${x1} ${yZero} L ${x0} ${yZero} Z`}
+                    fill={color}
+                    opacity={0.14}
+                  />
+                  <line x1={x0} y1={y0} x2={x1} y2={y1} stroke={color} strokeWidth={1.5} />
+                </g>
+              );
+            })}
+            {/* Constant-pace trendline — straight from start (0%) to the
+                final cumulative value. Path above this line = strategy
+                outperforming its average pace; path below = lagging. */}
+            {cumulative.length > 1 && (
+              <line
+                x1={xForCum(0)}
+                y1={yFor(cumulative[0])}
+                x2={xForCum(N_HOURS)}
+                y2={yFor(cumulative[N_HOURS])}
+                stroke="var(--t2)"
+                strokeWidth={0.7}
+                strokeDasharray="3 3"
+                opacity={0.5}
+              />
+            )}
             {/* Hover dots at each hour boundary */}
             {cumulative.map((v, i) => (
               <circle
