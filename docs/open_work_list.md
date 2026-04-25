@@ -236,6 +236,71 @@ worth understanding before promoting any reinvest config to live.
 
 ---
 
+### Portfolios tab — actuals vs estimates toggle
+
+Surfaced 2026-04-25. The Portfolios tab's per-symbol cumulative ROI
+chart currently shows a single anchor — open_prices (06:00 UTC bar),
+audit-canonical, after Option 3 fix shipped 2026-04-25. User wants to
+toggle between two views to compare what manual cash redeployment
+after a stop costs vs. what the strategy-mechanical baseline would
+have delivered:
+
+- **Estimates** (current default): open-anchored returns. Strategy-
+  mechanical baseline. Ignores fill slippage and any manual
+  intervention. Matches per-symbol stop check.
+- **Actuals**: entry-anchored returns (current_price / entry_price).
+  Captures actual fill slippage and any manual buys that shifted
+  weighted-avg entry. Reflects realized account performance per
+  symbol.
+
+**What to build:**
+- Trader: write BOTH series to portfolio_bars per bar. Either restructure
+  `symbol_returns` JSONB to `{"BTC-USDT": {"open": -0.05, "entry": -0.08}}`
+  or add a sibling `symbol_returns_entry` column.
+- API: return both arrays in the bars[] response.
+- UI: toggle button in the Portfolios chart header (`[ESTIMATES] [ACTUALS]`).
+  Switches which array `b.sym_returns` reads. Default = estimates.
+- Portfolio aggregate line: also expose both `incr_open` (already
+  computed internally as the open-anchored equivalent) and `incr_entry`
+  (current `incr`). Toggle switches both per-symbol and aggregate
+  together so the chart stays internally consistent.
+
+**Use case:** user manually adds buys after a stop fires. Estimates view
+shows what would have happened mechanically (no manual reinvest); actuals
+shows what actually happened to the account. Difference = the impact of
+the manual policy.
+
+**Scope:** ~2-3h. Backend change requires backend container rebuild —
+deploy risk applies (dup-spawn race + lock-stuck recovery, see runbook
+playbooks B/C). Bundle with the early-fill progress bar feature for
+single deploy.
+
+---
+
+### Portfolios tab — early-fill progress bar (real-time)
+
+Surfaced 2026-04-25. The Portfolios tab shows portfolio ROI as a number
++ chart but doesn't visualize how close the session is to its early-fill
+trigger. User wants a real-time progress bar showing `current_incr /
+early_fill_y`, with a time-remaining indicator for the fill window.
+
+**What to build:**
+- API: extend `/api/manager/portfolios/{date}` meta to include
+  `early_fill_y` (target return %) and `early_fill_x` (max minutes in
+  fill window) by JOINing through to `audit.strategy_versions.config`.
+- UI: progress bar component below KPIs. Width = `min(1.0, current_incr
+  / early_fill_y)`. Fill color: amber while < 1.0, green when fired.
+  Show `incr%` over `early_fill_y%` numerically. Time-remaining badge:
+  `(early_fill_x - elapsed_minutes)` until the fill window closes;
+  flips to "fill window closed" past that.
+- Live polling already in place on the Portfolios page (`status=active`
+  triggers 30s polls), so no new fetch logic.
+
+**Scope:** ~2h. Bundle with the actuals/estimates toggle PR — both are
+Portfolios-tab visualization improvements that share a backend deploy.
+
+---
+
 ## 🟢 Low priority — opportunistic
 
 ### D-perf — precomputed abs_dollar leaderboards
