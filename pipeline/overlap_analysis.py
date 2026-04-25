@@ -1490,11 +1490,28 @@ def _load_live_parity_frequencies_from_db(
 
     d = dmin
     while d <= dmax:
-        anchor_ts = _dt.datetime.combine(d, _dt.time(0, 0, 0), tzinfo=_dt.timezone.utc)
-        snap_ts   = _dt.datetime.combine(d, _dt.time(deployment_start_hour, 0, 0),
+        # Anchor: 00:00 5m bar close ≈ 1m bar close at 00:04 UTC. v2's live
+        # cron uses Binance klines starting at 00:00 UTC; klines[0] is the
+        # bar opening at 00:00 with close at 00:04:59. Pulling the 1m bar at
+        # 00:04 close matches that exactly.
+        #
+        # Snapshot: v2's live cron runs at 05:58 UTC and uses the latest
+        # CLOSED 5m bar at that moment — the bar opening at 05:55, closing
+        # at 05:59:59. Pulling the 1m bar at 05:59 close matches that. This
+        # is critical: the 06:00 bar (the deployment_start_hour minute
+        # itself) hasn't closed yet at v2 cron time, so live ranking is on
+        # the 05:55-05:59 window. For volatile small-caps a 5-minute
+        # window can completely swap rankings — observed 04-22 BAS swung
+        # from +1.3% to -1.9% across this 5min window.
+        #
+        # When deployment_start_hour=0 (00:00) the anchor and snapshot
+        # collapse to the same bar; that's a misconfiguration but we don't
+        # police it here. All published strategies use 06:00 deployment.
+        anchor_ts = _dt.datetime.combine(d, _dt.time(0, 4, 0), tzinfo=_dt.timezone.utc)
+        snap_ts   = _dt.datetime.combine(d, _dt.time(deployment_start_hour - 1, 59, 0),
                                          tzinfo=_dt.timezone.utc)
 
-        # Single SQL pass: walk-forward 5-minute anchor + snapshot per symbol,
+        # Single SQL pass: walk-forward 1-minute anchor + snapshot per symbol,
         # filter to USDT linear perps (drop BTC_*, ETH_*, etc. extension
         # quotes via NOT LIKE '%\_%'), require both bars to have non-null/
         # non-zero close and open_interest. Server-side INNER JOIN drops any
