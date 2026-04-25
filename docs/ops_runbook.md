@@ -130,10 +130,17 @@ ssh mcap "ls /mnt/quant-data/logs/trader/allocation_*.log | xargs -I {} tail -5 
 
 ## Trader incident playbooks
 
-The trader subprocess lives inside `benji-backend-1` and is fragile to backend
-container restarts. The supervisor (`*/5` cron) auto-respawns dead traders, but
-several failure modes need manual SQL. Each playbook is a self-contained recipe;
-copy-paste verbatim.
+The trader subprocess lives inside `benji-celery-1` (spawned by `*/5` supervisor
+cron via `docker compose exec celery python -m app.cli.trader_supervisor` and
+by celery's startup hook). Verified 2026-04-25 18:50 UTC: `PID 144` was running
+`python3 -m app.cli.trader_blofin --allocation-id …` inside the celery container,
+not the backend container.
+
+Implication: **celery rebuilds kill the trader; backend / frontend rebuilds do
+not.** This is the inverse of what an earlier version of this runbook claimed.
+
+The supervisor auto-respawns dead traders, but several failure modes need
+manual SQL. Each playbook is a self-contained recipe; copy-paste verbatim.
 
 ### Playbook A: `/health/trader` returns 503 with `stale` entries
 
@@ -287,26 +294,39 @@ in the DB. Next 06:05 UTC spawn picks it up.
 
 ## Deploy safety
 
-The supervisor + startup_recovery interact poorly with backend rebuilds. Hard
-rules:
+Trader subprocesses live in `benji-celery-1`. Container-level deploy impact:
+
+| Command | Trader impact | Notes |
+|---|---|---|
+| `docker compose up -d --build --no-deps backend` | **Safe** anytime | Restarts uvicorn only |
+| `docker compose up -d --build --no-deps frontend` | **Safe** anytime | Different container |
+| `docker compose up -d --build --no-deps nginx` / `restart nginx` | **Safe** anytime | Reverse proxy only |
+| `docker compose up -d --build --no-deps celery` | **KILLS TRADER** | Mid-session: avoid |
+| `./redeploy.sh` (full `--force-recreate`) | **KILLS TRADER** | Recreates celery |
+| `git pull` only (cron-driven host scripts) | Safe | No container change |
+
+Hard rules:
 
 1. **Never run `./redeploy.sh` mid-session** (06:00 UTC → session close, typically
-   23:00 UTC). It kills trader subprocesses and triggers the dup-spawn race that
-   has caused every BACKOFF incident to date.
-2. **For backend-only code changes**, prefer `docker compose up -d --build --no-deps backend`
-   over `redeploy.sh` (skips celery + frontend rebuild). Still kills trader though.
-3. **For celery-only code changes** (audit pipeline edits), use
-   `docker compose up -d --build --no-deps celery` — does not touch backend or
-   trader subprocesses, safe to run anytime.
-4. **For pipeline/host script changes** (cron-driven scripts, no container
-   change), just `git pull` on the host; no rebuild needed.
+   23:00 UTC). It recreates the celery container, kills trader subprocesses,
+   and triggers the dup-spawn race that has caused every BACKOFF incident to date.
+2. **`--no-deps celery` is also unsafe mid-session** — same kill mechanism as
+   redeploy.sh, just narrower in scope. If celery code MUST ship mid-session,
+   follow the "Deploying with running traders" procedure below.
+3. **`--no-deps backend` and `--no-deps frontend` are both safe anytime.** A
+   2026-04-25 mid-session deploy of `manager.py` rebuilt the backend container
+   end-to-end and the trader at PID 144 in celery never noticed.
 
-If you MUST deploy backend mid-session: be ready to run Playbook A/B/C if the
+If you MUST deploy celery mid-session: be ready to run Playbook A/B/C if the
 respawn race deadlocks (it usually does).
 
 ### Deploying with running traders
 
-Two locks matter when the backend container restarts:
+For backend / frontend / nginx changes, no special procedure — those containers
+are independent of the trader. This section is **only for celery rebuilds**,
+which kill the trader subprocess.
+
+Two locks matter when the celery container restarts:
 
 1. **`pg_advisory_lock`** (session-scoped, keyed on connection_id) — auto-releases
    when the trader's DB connection drops. No manual cleanup ever needed.
@@ -318,31 +338,32 @@ Two locks matter when the backend container restarts:
    The CAS at `trader_blofin.py:_acquire_allocation_lock` self-heals after 24h
    (`lock_acquired_at < NOW() - INTERVAL '24 hours'`), but that's too long mid-session.
 
-#### Approach A — split deploy (lowest risk, recommended)
+#### Approach A — defer celery to off-hours (recommended)
 
-For changes that touch BOTH frontend and backend, ship them in two phases so
-the backend rebuild happens off-hours:
+For most celery code changes (audit pipeline edits, supervisor tweaks, trader
+logic): ship after session close (~23:00 UTC) or before 06:00 UTC the next day.
 
 ```bash
-# Phase 1 — frontend only, anytime (does NOT touch backend container)
 git push origin main
-ssh mcap "cd ~/benji && git pull && docker compose up -d --build --no-deps frontend"
-ssh mcap "cd ~/benji && docker compose restart nginx"
+ssh mcap "cd ~/benji && git pull && docker compose up -d --build --no-deps celery"
+```
 
-# Phase 2 — backend after session close (~23:00 UTC) or before 06:00 UTC
-ssh mcap "cd ~/benji && docker compose up -d --build --no-deps backend"
+Backend / frontend changes can ship anytime independently:
+
+```bash
+# Backend route or schema change — safe mid-session
+ssh mcap "cd ~/benji && git pull && docker compose up -d --build --no-deps backend"
+
+# Frontend change — safe mid-session, restart nginx if you want to clear cache
+ssh mcap "cd ~/benji && docker compose up -d --build --no-deps frontend"
 ssh mcap "cd ~/benji && docker compose restart nginx"
 ```
 
-Frontend changes that depend on new backend fields must include a defensive
-fallback (e.g. `meta.foo !== undefined && <Component … />`) so phase 1 ships
-without rendering garbage. The component activates automatically once phase 2
-lands — no further frontend deploy needed.
+#### Approach B — celery rebuild mid-session with lock sweep
 
-#### Approach B — full mid-session deploy with lock sweep
-
-Higher risk; only when phase 1 / phase 2 split isn't viable. Wraps the rebuild
-with a pre-flight snapshot, post-rebuild lock sweep, and respawn verification:
+Higher risk; only when an in-flight bug fix MUST land before session close.
+Wraps the celery rebuild with a pre-flight snapshot, post-rebuild lock sweep,
+and respawn verification:
 
 ```bash
 # (a) Snapshot trader state before rebuild
@@ -353,11 +374,12 @@ ssh mcap "PGPASSWORD=A psql -h 127.0.0.1 -U quant -d marketdata -c \
     WHERE runtime_state->>'phase' = 'active' \
     ORDER BY allocation_id;\""
 
-ssh mcap "docker exec benji-backend-1 ps -ef | grep trader_blofin | grep -v grep | wc -l"
+# Pre-flight: count live trader subprocesses inside celery
+ssh mcap 'docker exec benji-celery-1 sh -c "for f in /proc/[0-9]*/cmdline; do c=\$(tr \"\\0\" \" \" < \$f 2>/dev/null); case \"\$c\" in *trader_blofin*allocation-id*) echo \$c;; esac; done | wc -l"'
 
-# (b) Push + rebuild backend (SIGTERM → 10s grace → SIGKILL → restart)
+# (b) Push + rebuild celery (SIGTERM → 10s grace → SIGKILL → restart)
 git push origin main
-ssh mcap "cd ~/benji && git pull && docker compose up -d --build --no-deps backend"
+ssh mcap "cd ~/benji && git pull && docker compose up -d --build --no-deps celery"
 
 # (c) Wait for SIGTERM handler + container start + supervisor first tick
 sleep 30
@@ -377,15 +399,14 @@ ssh mcap "PGPASSWORD=A psql -h 127.0.0.1 -U quant -d marketdata -c \
     FROM user_mgmt.allocations \
     WHERE runtime_state->>'phase' = 'active';\""
 
-ssh mcap "docker exec benji-backend-1 ps -ef | grep trader_blofin | grep -v grep | wc -l"
-# ↑ should match pre-flight count
+# Confirm a Spawn block landed in the per-allocation log post-rebuild
+ssh mcap "tail -50 /mnt/quant-data/logs/trader/allocation_<aid>_$(date -u +%Y-%m-%d).log | grep -E 'Spawn at|Entering 5-min monitoring'"
+
+# Process count should match pre-flight
+ssh mcap 'docker exec benji-celery-1 sh -c "for f in /proc/[0-9]*/cmdline; do c=\$(tr \"\\0\" \" \" < \$f 2>/dev/null); case \"\$c\" in *trader_blofin*allocation-id*) echo \$c;; esac; done | wc -l"'
 
 curl -s https://mullincap.com/health/trader | python3 -m json.tool
 # ↑ status=ok; if 503 with stale entries, do Playbook A/B/C
-
-# (f) Frontend (safe — different container)
-ssh mcap "cd ~/benji && docker compose up -d --build --no-deps frontend"
-ssh mcap "cd ~/benji && docker compose restart nginx"
 ```
 
 Failure modes after step (b):
@@ -393,6 +414,8 @@ Failure modes after step (b):
 - `respawn_count >= 10` with BACKOFF → Playbook C
 - Trader process count short of pre-flight after step (e) → check
   `trader_supervisor_state.last_error` and route to the matching playbook
+- No `Spawn at …` block in the per-allocation log → trader was never respawned;
+  the supervisor cron will retry within 5 min, OR run Playbook B/C immediately
 
 ## Database checks
 
