@@ -298,30 +298,64 @@ function EarlyFillProgressBar({
   const remaining = elapsed !== null ? earlyFillX - elapsed : null;
   const windowOpen = remaining !== null && remaining > 0;
 
-  // Past the fill gate, freeze the bar at the captured close-ROI rather
-  // than tracking live session_ret — the trigger can no longer fire so
-  // the historical "where did this portfolio land at the buzzer" is the
-  // useful number. Falls back to live sessionRet if the close snapshot
-  // is missing (e.g. session opened on/after the gate, or backfill gap).
-  const useCloseSnapshot = !windowOpen && fillWindowCloseRet !== null;
-  const displayRet = useCloseSnapshot ? fillWindowCloseRet : sessionRet;
+  // Past the fill gate, render TWO layered semi-transparent bars: the frozen
+  // close-ROI (where the portfolio landed at the buzzer — trigger reference)
+  // and the live session_ret (still moving even though the trigger is dead).
+  // A vertical tick at the close-ROI mark anchors the comparison so the user
+  // can read "how much did the portfolio drift since the window expired".
+  // Pre-close, only the live bar renders (single-bar progress to target).
+  const showLayered = !windowOpen && fillWindowCloseRet !== null;
 
-  const cur = displayRet ?? 0;
-  const fired = displayRet !== null && cur >= earlyFillY;
-  const ratio = earlyFillY > 0 ? cur / earlyFillY : 0;
-  const widthPct = Math.min(100, Math.max(0, ratio * 100));
-  const gap = earlyFillY - cur;
-  const fillColor = fired ? "var(--green)" : "var(--amber)";
-  const fillBg    = fired ? "var(--green-dim)" : "var(--amber-dim)";
+  const liveCur = sessionRet ?? 0;
+  const closeCur = fillWindowCloseRet ?? 0;
 
-  const curPctStr = displayRet === null
+  const liveFired  = sessionRet !== null && liveCur >= earlyFillY;
+  const closeFired = fillWindowCloseRet !== null && closeCur >= earlyFillY;
+
+  const liveRatio  = earlyFillY > 0 ? liveCur  / earlyFillY : 0;
+  const closeRatio = earlyFillY > 0 ? closeCur / earlyFillY : 0;
+  const liveWidthPct  = Math.min(100, Math.max(0, liveRatio  * 100));
+  const closeWidthPct = Math.min(100, Math.max(0, closeRatio * 100));
+
+  // The "primary" value used for the headline number + gap-to-target text.
+  // Pre-close: live (we want to see live progress toward the trigger).
+  // Post-close: close (the historical buzzer value is the canonical fact;
+  // the live drift since shows separately as the SINCE delta below).
+  const primaryRet  = showLayered ? fillWindowCloseRet : sessionRet;
+  const primaryCur  = primaryRet ?? 0;
+  const primaryFired = showLayered ? closeFired : liveFired;
+  const gap = earlyFillY - primaryCur;
+
+  // Color: green if the relevant value crossed threshold, amber otherwise.
+  // In layered mode, picking close-bar color drives the badge (the trigger
+  // reference); the live overlay always uses amber/green by its own state.
+  const fillColor = primaryFired ? "var(--green)" : "var(--amber)";
+  const fillBg    = primaryFired ? "var(--green-dim)" : "var(--amber-dim)";
+  const liveOverlayColor = liveFired ? "var(--green)" : "var(--amber)";
+
+  const liveCurPctStr  = sessionRet === null
     ? "—"
-    : `${cur >= 0 ? "+" : ""}${(cur * 100).toFixed(2)}%`;
+    : `${liveCur >= 0 ? "+" : ""}${(liveCur * 100).toFixed(2)}%`;
+  const closeCurPctStr = fillWindowCloseRet === null
+    ? "—"
+    : `${closeCur >= 0 ? "+" : ""}${(closeCur * 100).toFixed(2)}%`;
   const targetPctStr = `${(earlyFillY * 100).toFixed(2)}%`;
 
+  // Drift since window close: live - close. Positive = portfolio kept
+  // climbing; negative = drifted back. Only meaningful in layered mode.
+  const sinceDelta = (sessionRet !== null && fillWindowCloseRet !== null)
+    ? liveCur - closeCur
+    : null;
+  const sinceStr = sinceDelta === null
+    ? null
+    : `${sinceDelta >= 0 ? "+" : ""}${(sinceDelta * 100).toFixed(2)}% SINCE`;
+  const sinceColor = sinceDelta === null
+    ? "var(--t2)"
+    : sinceDelta >= 0 ? "var(--green)" : "var(--red)";
+
   let timeBadge: string;
-  if (useCloseSnapshot) {
-    timeBadge = fired ? "TARGET HIT AT CLOSE" : "WINDOW CLOSED";
+  if (showLayered) {
+    timeBadge = closeFired ? "TARGET HIT AT CLOSE" : "WINDOW CLOSED";
   } else if (!isActive) {
     timeBadge = "SESSION CLOSED";
   } else if (!windowOpen) {
@@ -331,17 +365,17 @@ function EarlyFillProgressBar({
   }
 
   let gapStr: string;
-  if (displayRet === null) {
+  if (primaryRet === null) {
     gapStr = "—";
-  } else if (fired) {
-    gapStr = useCloseSnapshot ? "TARGET HIT" : "TARGET REACHED";
-  } else if (useCloseSnapshot) {
+  } else if (primaryFired) {
+    gapStr = showLayered ? "TARGET HIT" : "TARGET REACHED";
+  } else if (showLayered) {
     gapStr = `${(gap * 100).toFixed(2)}% SHORT`;
   } else {
     gapStr = `${(gap * 100).toFixed(2)}% TO TARGET`;
   }
 
-  const badgeMuted = !isActive || (!windowOpen && !useCloseSnapshot);
+  const badgeMuted = !isActive || (!windowOpen && !showLayered);
 
   return (
     <div
@@ -381,8 +415,8 @@ function EarlyFillProgressBar({
               textTransform: "none",
             }}
           >
-            · {useCloseSnapshot
-                ? "session ROI at fill-window close"
+            · {showLayered
+                ? "session ROI at fill-window close vs live"
                 : "session ROI vs portfolio take-profit"}
           </span>
         </div>
@@ -396,13 +430,30 @@ function EarlyFillProgressBar({
             flexWrap: "wrap",
           }}
         >
-          <span style={{ color: fired ? "var(--green)" : "var(--t1)", fontWeight: 700 }}>
-            {curPctStr} <span style={{ color: "var(--t3)" }}>/</span>{" "}
-            <span style={{ color: "var(--t2)" }}>{targetPctStr}</span>
-          </span>
-          <span style={{ color: fired ? "var(--green)" : "var(--amber)", fontWeight: 700 }}>
+          {showLayered ? (
+            <span style={{ fontWeight: 700 }}>
+              <span style={{ color: "var(--t2)", fontSize: 9, letterSpacing: "0.08em", marginRight: 4 }}>CLOSE</span>
+              <span style={{ color: closeFired ? "var(--green)" : "var(--t1)" }}>{closeCurPctStr}</span>
+              <span style={{ color: "var(--t3)", margin: "0 8px" }}>·</span>
+              <span style={{ color: "var(--t2)", fontSize: 9, letterSpacing: "0.08em", marginRight: 4 }}>NOW</span>
+              <span style={{ color: liveFired ? "var(--green)" : "var(--t1)" }}>{liveCurPctStr}</span>
+              <span style={{ color: "var(--t3)", margin: "0 8px" }}>/</span>
+              <span style={{ color: "var(--t2)" }}>{targetPctStr}</span>
+            </span>
+          ) : (
+            <span style={{ color: primaryFired ? "var(--green)" : "var(--t1)", fontWeight: 700 }}>
+              {liveCurPctStr} <span style={{ color: "var(--t3)" }}>/</span>{" "}
+              <span style={{ color: "var(--t2)" }}>{targetPctStr}</span>
+            </span>
+          )}
+          <span style={{ color: primaryFired ? "var(--green)" : "var(--amber)", fontWeight: 700 }}>
             {gapStr}
           </span>
+          {showLayered && sinceStr && (
+            <span style={{ color: sinceColor, fontWeight: 700 }}>
+              {sinceStr}
+            </span>
+          )}
           <span
             style={{
               padding: "2px 6px",
@@ -420,6 +471,7 @@ function EarlyFillProgressBar({
       </div>
       <div
         style={{
+          position: "relative",
           width: "100%",
           height: 10,
           background: "var(--bg3)",
@@ -428,14 +480,54 @@ function EarlyFillProgressBar({
           border: "1px solid var(--line)",
         }}
       >
-        <div
-          style={{
-            width: `${widthPct}%`,
-            height: "100%",
-            background: fillColor,
-            transition: "width 0.4s ease",
-          }}
-        />
+        {showLayered ? (
+          <>
+            {/* Frozen close-ROI bar (the trigger reference at the buzzer). */}
+            <div
+              style={{
+                position: "absolute",
+                top: 0, left: 0,
+                width: `${closeWidthPct}%`,
+                height: "100%",
+                background: closeFired ? "var(--green)" : "var(--amber)",
+                opacity: 0.45,
+              }}
+            />
+            {/* Live session_ret bar (still moving past the buzzer). */}
+            <div
+              style={{
+                position: "absolute",
+                top: 0, left: 0,
+                width: `${liveWidthPct}%`,
+                height: "100%",
+                background: liveOverlayColor,
+                opacity: 0.55,
+                transition: "width 0.4s ease",
+              }}
+            />
+            {/* Vertical tick anchoring the close-ROI mark. */}
+            <div
+              style={{
+                position: "absolute",
+                top: 0,
+                left: `calc(${closeWidthPct}% - 1px)`,
+                width: 2,
+                height: "100%",
+                background: "var(--t0)",
+                opacity: 0.85,
+              }}
+            />
+          </>
+        ) : (
+          <div
+            style={{
+              width: `${liveWidthPct}%`,
+              height: "100%",
+              background: fillColor,
+              transition: "width 0.4s ease",
+            }}
+          />
+        )}
       </div>
     </div>
   );
