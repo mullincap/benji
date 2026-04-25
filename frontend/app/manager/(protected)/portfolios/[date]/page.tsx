@@ -74,6 +74,12 @@ interface PortfolioMeta {
   entered: string[];
   eff_lev: number;
   lev_int: number;
+  // Early-fill trigger params from strategy config. early_fill_y is a
+  // decimal fraction (0.09 = 9%); early_fill_x is minutes from session
+  // open. session_start_hour drives the elapsed/remaining countdown.
+  early_fill_y: number;
+  early_fill_x: number;
+  session_start_hour: number;
 }
 
 // When the backend detects multiple allocations on the requested date and no
@@ -165,6 +171,48 @@ function exitBadge(reason: string | null, status: string) {
   );
 }
 
+// Open-anchored, equal-weight, stopped-clamped session return from a bar's
+// symbol_returns map. The trader writes this exact map (already with stopped
+// symbols clamped at stop_raw_pct) to portfolio_bars.symbol_returns —
+// see backend/app/cli/trader_blofin.py:2511-2524 — so taking the mean of the
+// values reproduces session_ret without persisting a separate column.
+// Mirrors equal_weight_return() in trader_blofin.py:969 by skipping symbols
+// missing from the map (delisted / fetch failure) rather than fabricating
+// zeros, so the denominator shrinks the same way.
+function sessionReturnFromBar(bar: PortfolioBar): number | null {
+  const vals = Object.values(bar.sym_returns);
+  if (vals.length === 0) return null;
+  let sum = 0;
+  for (const v of vals) sum += v;
+  return sum / vals.length;
+}
+
+// Minutes elapsed since session_start_hour:00 UTC on the given date. The
+// trader's fill window boundaries are UTC (fill_gate_dt at trader_blofin.py:
+// 2270), so the countdown must be UTC-anchored — local time would mis-show
+// "remaining" by the user's tz offset.
+function minutesSinceSessionOpen(
+  dateISO: string,
+  sessionStartHourUTC: number,
+  now: Date,
+): number | null {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(dateISO);
+  if (!m) return null;
+  const openMs = Date.UTC(
+    Number(m[1]), Number(m[2]) - 1, Number(m[3]),
+    sessionStartHourUTC, 0, 0, 0,
+  );
+  return (now.getTime() - openMs) / 60_000;
+}
+
+function fmtMinutesRemaining(mins: number): string {
+  const total = Math.max(0, Math.floor(mins));
+  const h = Math.floor(total / 60);
+  const m = total % 60;
+  if (h <= 0) return `${m}m`;
+  return `${h}h ${m}m`;
+}
+
 function LivePulse() {
   return (
     <span
@@ -190,6 +238,166 @@ function LivePulse() {
       />
       LIVE
     </span>
+  );
+}
+
+// ─── Early-Fill Progress Bar ────────────────────────────────────────────────
+//
+// Visualizes how close the portfolio is to the early-fill take-profit trigger.
+// The trigger fires when session_ret >= early_fill_y AND we're still inside
+// [session_open, session_open + early_fill_x]. See trader_blofin.py:2614.
+//
+// We compute session_ret from the latest bar's sym_returns (open-anchored,
+// stopped-clamped — same map the trader writes), NOT account-actual ROI, so
+// the bar tracks what the trader actually compares against.
+
+function EarlyFillProgressBar({
+  sessionRet,
+  earlyFillY,
+  earlyFillX,
+  date,
+  sessionStartHourUTC,
+  isActive,
+}: {
+  sessionRet: number | null;
+  earlyFillY: number;
+  earlyFillX: number;
+  date: string;
+  sessionStartHourUTC: number;
+  isActive: boolean;
+}) {
+  // Live-tick the countdown each second so "remaining" stays current
+  // between 30s polls. Skip the interval once the session is closed —
+  // there's nothing left to count down.
+  const [now, setNow] = useState(() => new Date());
+  useEffect(() => {
+    if (!isActive) return;
+    const id = setInterval(() => setNow(new Date()), 1000);
+    return () => clearInterval(id);
+  }, [isActive]);
+
+  const elapsed = minutesSinceSessionOpen(date, sessionStartHourUTC, now);
+  const remaining = elapsed !== null ? earlyFillX - elapsed : null;
+  const windowOpen = remaining !== null && remaining > 0;
+
+  const cur = sessionRet ?? 0;
+  const fired = sessionRet !== null && cur >= earlyFillY;
+  const ratio = earlyFillY > 0 ? cur / earlyFillY : 0;
+  const widthPct = Math.min(100, Math.max(0, ratio * 100));
+  const gap = earlyFillY - cur;
+  const fillColor = fired ? "var(--green)" : "var(--amber)";
+  const fillBg    = fired ? "var(--green-dim)" : "var(--amber-dim)";
+
+  const curPctStr = sessionRet === null
+    ? "—"
+    : `${cur >= 0 ? "+" : ""}${(cur * 100).toFixed(2)}%`;
+  const targetPctStr = `${(earlyFillY * 100).toFixed(2)}%`;
+
+  let timeBadge: string;
+  if (!isActive) timeBadge = "SESSION CLOSED";
+  else if (!windowOpen) timeBadge = "FILL WINDOW CLOSED";
+  else timeBadge = `${fmtMinutesRemaining(remaining as number)} REMAINING`;
+
+  let gapStr: string;
+  if (sessionRet === null) gapStr = "—";
+  else if (fired) gapStr = "TARGET REACHED";
+  else gapStr = `${(gap * 100).toFixed(2)}% TO TARGET`;
+
+  const badgeMuted = !isActive || !windowOpen;
+
+  return (
+    <div
+      style={{
+        background: "var(--bg1)",
+        border: "1px solid var(--line)",
+        borderRadius: 5,
+        padding: "12px 16px",
+      }}
+    >
+      <div
+        style={{
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "space-between",
+          marginBottom: 10,
+          gap: 12,
+          flexWrap: "wrap",
+        }}
+      >
+        <div
+          style={{
+            fontSize: 9,
+            fontWeight: 700,
+            letterSpacing: "0.12em",
+            color: "var(--t3)",
+            textTransform: "uppercase",
+          }}
+        >
+          Early-Fill Progress
+          <span
+            style={{
+              marginLeft: 10,
+              color: "var(--t2)",
+              fontWeight: 400,
+              letterSpacing: "0.06em",
+              textTransform: "none",
+            }}
+          >
+            · session ROI vs portfolio take-profit
+          </span>
+        </div>
+        <div
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 14,
+            fontSize: 10,
+            fontFamily: FONT_MONO,
+            flexWrap: "wrap",
+          }}
+        >
+          <span style={{ color: fired ? "var(--green)" : "var(--t1)", fontWeight: 700 }}>
+            {curPctStr} <span style={{ color: "var(--t3)" }}>/</span>{" "}
+            <span style={{ color: "var(--t2)" }}>{targetPctStr}</span>
+          </span>
+          <span style={{ color: fired ? "var(--green)" : "var(--amber)", fontWeight: 700 }}>
+            {gapStr}
+          </span>
+          <span
+            style={{
+              padding: "2px 6px",
+              borderRadius: 3,
+              background: badgeMuted ? "var(--bg3)" : fillBg,
+              color:      badgeMuted ? "var(--t2)"  : fillColor,
+              fontSize: 9,
+              fontWeight: 700,
+              letterSpacing: "0.06em",
+            }}
+          >
+            {timeBadge}
+          </span>
+        </div>
+      </div>
+      <div
+        style={{
+          width: "100%",
+          height: 10,
+          background: "var(--bg3)",
+          borderRadius: 3,
+          overflow: "hidden",
+          border: "1px solid var(--line)",
+        }}
+      >
+        <div
+          style={{
+            width: `${widthPct}%`,
+            height: "100%",
+            background: fillColor,
+            transition: "width 0.4s ease",
+          }}
+        />
+      </div>
+    </div>
   );
 }
 
@@ -445,6 +653,10 @@ export default function PortfolioDetailPage() {
   const lastBar = bars[bars.length - 1];
   const final = lastBar ? lastBar.incr * 100 : 0;
   const peak = lastBar ? lastBar.peak * 100 : 0;
+  // Open-anchored portfolio return at the latest bar — what the trader's
+  // EARLY_FILL trigger compares to early_fill_y. Distinct from `final`
+  // (entry-anchored incr); the bar must mirror the trigger's input.
+  const currentSessionRet = lastBar ? sessionReturnFromBar(lastBar) : null;
   const dd = bars.length
     ? Math.min(...bars.map((b) => b.incr - b.peak)) * 100
     : 0;
@@ -677,6 +889,16 @@ export default function PortfolioDetailPage() {
           <KpiCard label="Eff Leverage" value={`${meta.eff_lev.toFixed(2)}x`} />
           <KpiCard label="Exit" value={exitBadge(meta.exit_reason, meta.status)} />
         </div>
+
+        {/* Early-fill take-profit progress */}
+        <EarlyFillProgressBar
+          sessionRet={currentSessionRet}
+          earlyFillY={meta.early_fill_y}
+          earlyFillX={meta.early_fill_x}
+          date={meta.date}
+          sessionStartHourUTC={meta.session_start_hour}
+          isActive={live}
+        />
 
         {/* Chart */}
         <div

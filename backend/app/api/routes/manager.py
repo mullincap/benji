@@ -29,6 +29,7 @@ from pydantic import BaseModel
 
 from ...db import get_cursor
 from ...core.config import settings, load_secrets
+from ...services.trading.trader_config import TraderConfig
 from .admin import require_admin
 from .allocator import refresh_snapshots
 
@@ -2023,7 +2024,8 @@ def get_portfolio(
                ps.allocation_id,
                ec.exchange,
                s.display_name AS strategy_display_name,
-               s.name         AS strategy_name
+               s.name         AS strategy_name,
+               sv.config      AS strategy_config
         FROM user_mgmt.portfolio_sessions ps
         LEFT JOIN user_mgmt.allocations a ON a.allocation_id = ps.allocation_id
         LEFT JOIN audit.strategy_versions sv ON sv.strategy_version_id = a.strategy_version_id
@@ -2081,6 +2083,17 @@ def get_portfolio(
     """, (session["portfolio_session_id"],))
     bar_rows = cur.fetchall()
 
+    # Resolve strategy params for the early-fill progress bar. For master rows
+    # (no allocation, no strategy_version) the config is None and we use the
+    # baked-in defaults — same fallback the trader uses. capital_usd is
+    # irrelevant for these fields (early_fill_*, session_start_hour) but
+    # required by the factory signature.
+    sv_config = session["strategy_config"]
+    if sv_config:
+        cfg = TraderConfig.from_strategy_version(sv_config, capital_usd=1.0)
+    else:
+        cfg = TraderConfig.master_defaults()
+
     meta = {
         "date":              session["signal_date"].isoformat(),
         "allocation_id":     str(session["allocation_id"]) if session["allocation_id"] else None,
@@ -2094,6 +2107,15 @@ def get_portfolio(
         "entered":           list(session["entered"] or []),
         "eff_lev":           session["eff_lev"],
         "lev_int":           session["lev_int"],
+        # Early-fill trigger params (decimal fractions for early_fill_y, minutes
+        # for early_fill_x). These mirror the live trader's check at
+        # backend/app/cli/trader_blofin.py:2614 — `session_ret >= early_fill_y`
+        # while utcnow() <= session_open + early_fill_x. The frontend uses
+        # them to render a progress bar showing distance-to-trigger and the
+        # remaining time in the fill window.
+        "early_fill_y":       cfg.early_fill_y,
+        "early_fill_x":       cfg.early_fill_x,
+        "session_start_hour": cfg.session_start_hour,
     }
     bars = [{
         "bar":         b["bar_number"],
