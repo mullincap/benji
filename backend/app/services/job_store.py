@@ -1,4 +1,5 @@
 import json
+import os
 import shutil
 import time
 import uuid
@@ -6,6 +7,20 @@ from pathlib import Path
 from typing import Any
 
 from app.core.config import settings
+
+
+def _atomic_write_text(path: Path, text: str) -> None:
+    """Write text to path atomically: write to tmp + os.replace.
+
+    Plain Path.write_text() truncates the destination before writing, so a
+    concurrent reader can hit a zero-byte file mid-write. The Celery dispatch
+    in create_job_endpoint races against the worker that picks the task up
+    within milliseconds — observed JSONDecodeError on empty job.json (job
+    5847c548 on 2026-04-25). os.replace is atomic on POSIX.
+    """
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(text)
+    os.replace(tmp, path)
 
 
 # ─── Folders ──────────────────────────────────────────────────────────────────
@@ -27,7 +42,7 @@ def _load_folders() -> list[dict[str, Any]]:
 def _save_folders(folders: list[dict[str, Any]]) -> None:
     path = _folders_file()
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(folders, indent=2))
+    _atomic_write_text(path, json.dumps(folders, indent=2))
 
 
 def list_folders() -> list[dict[str, Any]]:
@@ -96,7 +111,7 @@ def create_job(job_id: str, params: dict[str, Any]) -> dict[str, Any]:
         "created_at": time.time(),
         "updated_at": time.time(),
     }
-    _job_file(job_id).write_text(json.dumps(job, indent=2))
+    _atomic_write_text(_job_file(job_id), json.dumps(job, indent=2))
     return job
 
 
@@ -111,7 +126,7 @@ def update_job(job_id: str, **fields: Any) -> dict[str, Any]:
     job = get_job(job_id) or {}
     job.update(fields)
     job["updated_at"] = time.time()
-    _job_file(job_id).write_text(json.dumps(job, indent=2))
+    _atomic_write_text(_job_file(job_id), json.dumps(job, indent=2))
     return job
 
 
