@@ -2284,12 +2284,14 @@ def _run_monitoring_loop(today, today_date, api: ExchangeAdapter, inst_ids,
     # Without this, a mid-session trader restart would drop those symbols
     # from the portfolio_avg entirely and distort incr upward (less negative),
     # which in turn distorts expected = incr × eff_lev and the delta vs
-    # actual_roi. port_sl_pct is the canonical clamp value — the stored list
+    # actual_roi. stop_raw_pct is the canonical clamp value — the stored list
     # only records which symbols stopped, not their individual clamp values,
-    # because all per-symbol stops clamp at the same cfg threshold.
+    # because all per-symbol stops clamp at the same cfg threshold. Was
+    # previously port_sl_pct (-7.5% for ALTS MAIN) by mistake; now correctly
+    # uses stop_raw_pct (-6%) matching audit's apply_raw_stop.
     sym_stopped: dict[str, float] = {}
     if resume_sym_stopped:
-        _clamp = float(cfg.port_sl_pct)
+        _clamp = float(cfg.stop_raw_pct)
         for _iid in resume_sym_stopped:
             sym_stopped[_iid] = _clamp
         log.info(
@@ -2450,22 +2452,27 @@ def _run_monitoring_loop(today, today_date, api: ExchangeAdapter, inst_ids,
                 log.warning(f"{log_prefix}Periodic reconcile failed: {_e}")
 
         # ── Per-symbol stop check ──────────────────────────────────────────
-        # Check each still-active symbol against its individual -6% stop.
-        # Matches apply_raw_stop: once raw return <= STOP_RAW_PCT, close and clamp.
+        # Check each still-active symbol against its individual stop_raw_pct
+        # threshold (canonical -6%). Mirrors audit's apply_raw_stop in
+        # rebuild_portfolio_matrix.py: anchor at OPEN price (06:00 UTC,
+        # matrix's bar 0), trigger + clamp at stop_raw_pct. Earlier this
+        # used cfg.port_sl_pct (-7.5% for ALTS MAIN) by mistake — symbols
+        # held 1.5pp longer + clamped 1.5pp lower than audit. Fixed
+        # 2026-04-25.
         newly_stopped = []
         for pos in list(active_positions):
             iid   = pos["inst_id"]
-            ref   = entry_prices.get(iid, 0)
+            ref   = open_prices.get(iid, 0)  # 06:00 anchor (audit parity)
             price = current.get(iid, 0)
             if not ref or not price:
                 continue
             sym_ret = price / ref - 1.0
-            if sym_ret <= cfg.port_sl_pct:
+            if sym_ret <= cfg.stop_raw_pct:
                 log.warning(
-                    f"{log_prefix}  SYM STOP: {iid} ret={sym_ret*100:.3f}% <= {cfg.port_sl_pct*100:.0f}%"
-                    f" -- closing symbol and clamping at {cfg.port_sl_pct*100:.0f}%"
+                    f"{log_prefix}  SYM STOP: {iid} ret={sym_ret*100:.3f}% <= {cfg.stop_raw_pct*100:.1f}%"
+                    f" -- closing symbol and clamping at {cfg.stop_raw_pct*100:.1f}%"
                 )
-                sym_stopped[iid] = cfg.port_sl_pct
+                sym_stopped[iid] = cfg.stop_raw_pct
                 sym_exit_prices[iid] = price
                 newly_stopped.append(pos)
                 active_positions = [p for p in active_positions if p["inst_id"] != iid]
