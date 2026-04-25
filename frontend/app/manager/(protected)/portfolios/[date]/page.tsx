@@ -80,6 +80,16 @@ interface PortfolioMeta {
   early_fill_y: number;
   early_fill_x: number;
   session_start_hour: number;
+  // Latest open-anchored session_ret from the trader's runtime_state.
+  // This is the exact value EARLY_FILL compares against. Prefer this
+  // over computing from sym_returns — the running pre-fix trader writes
+  // entry-anchored values to portfolio_bars.symbol_returns, so averaging
+  // them gives `incr` (06:35 entry-anchored) instead of `sess`
+  // (06:00 open-anchored). null for closed master sessions or allocations
+  // missing runtime_state; in that case we fall back to the sym_returns
+  // mean for visual continuity, accepting it'll match `incr` until celery
+  // ships post-d9eac53 code.
+  current_session_ret: number | null;
 }
 
 // When the backend detects multiple allocations on the requested date and no
@@ -653,10 +663,17 @@ export default function PortfolioDetailPage() {
   const lastBar = bars[bars.length - 1];
   const final = lastBar ? lastBar.incr * 100 : 0;
   const peak = lastBar ? lastBar.peak * 100 : 0;
-  // Open-anchored portfolio return at the latest bar — what the trader's
-  // EARLY_FILL trigger compares to early_fill_y. Distinct from `final`
-  // (entry-anchored incr); the bar must mirror the trigger's input.
-  const currentSessionRet = lastBar ? sessionReturnFromBar(lastBar) : null;
+  // Open-anchored portfolio return — what the trader's EARLY_FILL trigger
+  // compares to early_fill_y. Prefer the meta value (the trader's own
+  // runtime_state.session_ret, exactly the trigger's input). Fall back to
+  // averaging the latest bar's sym_returns only if the meta value is
+  // missing (closed master rows / allocations without runtime_state).
+  const currentSessionRet =
+    meta.current_session_ret !== null && meta.current_session_ret !== undefined
+      ? meta.current_session_ret
+      : lastBar
+      ? sessionReturnFromBar(lastBar)
+      : null;
   const dd = bars.length
     ? Math.min(...bars.map((b) => b.incr - b.peak)) * 100
     : 0;

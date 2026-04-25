@@ -2025,7 +2025,8 @@ def get_portfolio(
                ec.exchange,
                s.display_name AS strategy_display_name,
                s.name         AS strategy_name,
-               sv.config      AS strategy_config
+               sv.config      AS strategy_config,
+               (a.runtime_state->>'session_ret')::double precision AS session_ret
         FROM user_mgmt.portfolio_sessions ps
         LEFT JOIN user_mgmt.allocations a ON a.allocation_id = ps.allocation_id
         LEFT JOIN audit.strategy_versions sv ON sv.strategy_version_id = a.strategy_version_id
@@ -2116,6 +2117,13 @@ def get_portfolio(
         "early_fill_y":       cfg.early_fill_y,
         "early_fill_x":       cfg.early_fill_x,
         "session_start_hour": cfg.session_start_hour,
+        # Latest open-anchored session_ret as written by the trader to its
+        # runtime_state (see trader_blofin.py:2613). This is the exact value
+        # the EARLY_FILL trigger compares against, so the progress bar should
+        # render this rather than averaging portfolio_bars.symbol_returns
+        # (which the running pre-fix container persists as entry-anchored).
+        # null for closed master sessions or allocations with no runtime_state.
+        "current_session_ret": session["session_ret"],
     }
     bars = [{
         "bar":         b["bar_number"],
