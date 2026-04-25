@@ -77,7 +77,6 @@ def build_cli_args(params: dict) -> list[str]:
         "end_cross_midnight":    "--end-cross-midnight",
         "drop_unverified":       "--drop-unverified",
         "quick":                 "--quick",
-        "live_parity":           "--live-parity",
         "apply_blofin_filter":   "--apply-blofin-filter",
     }
 

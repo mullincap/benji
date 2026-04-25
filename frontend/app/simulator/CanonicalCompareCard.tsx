@@ -51,7 +51,6 @@ const METHODOLOGY_KEYS = [
   'deployment_start_hour',
   'index_lookback',
   'sort_lookback',
-  'live_parity',
 ] as const;
 
 interface CanonicalReference {
