@@ -51,32 +51,46 @@ big mcap rotations. **Fix scope**: rewrite live's dispersion calc to do
 N daily DB queries, mapping each day's symbol set to its kline returns.
 Manageable but ~100-200 LOC and adds latency to the 05:58 cron.
 
-**2. Basket-selection universe scope + snapshot timing**
+**2. Basket-selection — snapshot bar + data path**
+
+Both audit and live use essentially the same universe (~all USDT perps
+with snapshot data). The audit's
+`overlap_analysis.py` query at lines 812-829 reads
+`market.leaderboards` filtered by `metric IN ('close','open_interest')`
++ `rank<=20` — no volume threshold or top-100 cutoff (corrected
+2026-04-25, prior version of this entry incorrectly attributed a
+volume filter). The indexer ranks all symbols it has data for (~565 on
+04-24); the audit takes top-20 by each metric and intersects.
+
+Real differences that produce divergent baskets:
 
 | | Audit | Live trader |
 |---|---|---|
-| Universe source | `market.leaderboards` table — top-100 by 24h volume | `market.futures_1m` — **all 535 USDT perps** scanned live |
-| Snapshot bar | 06:00 UTC | 05:59 UTC (last closed 5m bar before cron at 05:58) |
-| Anchor bar | per audit config (`index_lookback`) | 00:04 UTC (first 1m bar after midnight) |
+| Snapshot bar | 06:00 UTC bar (open at 06:00, close at 06:04:59) — always closed by audit-time | At 05:58 cron: in-progress 05:55-05:59 bar via `klines[-1]`. Effectively 5 min EARLIER than audit, AND in-progress (uses partial close at moment of fetch) |
+| Anchor bar | 00:00 UTC bar from `market.futures_1m` (`anchor_hour=0`) | 00:00 UTC 5m bar via Binance FAPI klines |
+| Data path | `market.futures_1m` populated by metl batch nightly | Binance FAPI direct, real-time |
+| OI source | Same `market.futures_1m` row | `/futures/data/openInterestHist` separate endpoint |
 
 Concrete impact (observed 2026-04-24): audit's basket = `ENJ, INX, KAT,
 RED, SKR, SPORTFUN, ZEREBRO`; live's basket = `ENJ, INX, KAT, SKR,
-ZEREBRO`. RED ranked top-3 OI in live's 535-perp universe but didn't
-make price top-20, so it failed the price∩OI intersection. In audit's
-100-perp universe, RED *did* make price top-20 → traded → audit
-recorded -5.25% strat return on a day live made +18.4%. This is the
-**biggest single source of audit-vs-live result drift**. Three fix
-paths (decision needed before coding):
+ZEREBRO`. RED was top-3 OI in BOTH universes (same scope), but it
+ranked outside live's price top-20 because the 5-min-earlier in-progress
+bar showed different price action than the audit's closed 06:00 bar.
+Same root cause as divergence #3 below (wall-clock non-determinism)
+applied to live's snapshot bar choice.
 
-- **A. Live moves to leaderboards path** — fastest convergence, but
-  live loses real-time coverage advantage and must wait for 01:00 UTC
-  nightly leaderboard rebuild
-- **B. Audit moves to all-USDT-perps path** — what the now-removed
-  `live_parity` toggle did. Slower per-audit-day (full 1m scan), but
-  matches live exactly. Could re-add as opt-in flag without the
-  regime-changing default
-- **C. Both share a new common universe-construction path** — biggest
-  refactor, cleanest long-term
+Three fix paths (decision needed before coding):
+
+- **A. Live waits for 06:00 bar to close** before fetching — moves the
+  cron from 05:58 to 06:00:30, uses the closed 06:00 bar. Matches
+  audit on snapshot timing. Adds 2-3 min latency before trader entry
+  but eliminates this divergence + divergence #3
+- **B. Audit moves to live's snapshot semantics** — uses the 05:55-05:59
+  bar instead of the 06:00 bar. Smaller change, but locks the audit
+  into the wall-clock-dependent semantics that bit us today
+- **C. Both run from the same data source** with the same explicit
+  snapshot timestamp — biggest refactor, but eliminates path/source
+  mismatches too
 
 **Side-channel work**: market.symbols.binance_id has NULL for PEPE/SHIB
 and is missing FLOKI/BONK entirely (PR #7 worked around it with an
