@@ -1771,7 +1771,7 @@ export default function PortfolioDetailPage() {
           const ddSubtitle = (() => {
             if (bars.length === 0 || dd === 0) return undefined;
             const sign = recovery >= 0 ? "+" : "";
-            return `now ${sign}${recovery.toFixed(2)}% vs DD`;
+            return `${sign}${recovery.toFixed(2)}% since`;
           })();
           return (
             <div style={{ display: "flex", gap: 10 }}>
