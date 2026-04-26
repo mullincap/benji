@@ -710,6 +710,12 @@ export default function PortfolioDetailPage() {
   // drifts from "portfolio" regardless of how the page is reached.
   const [view, setViewState] = useState<"portfolio" | "symbols">("portfolio");
   const [hiddenSymbols, setHiddenSymbols] = useState<Set<string>>(new Set());
+  // When true, the pace trendline extends across the historical region
+  // too (bar 0 → end of session) instead of only the projection segment.
+  // Default off so the trendline reads as a forecast; on, it doubles as
+  // a "best-fit pace" overlay across the full path so the user can spot
+  // bars sitting above/below the line at a glance.
+  const [trendlineExtended, setTrendlineExtended] = useState(false);
 
   const setView = useCallback((next: "portfolio" | "symbols") => {
     setViewState(next);
@@ -1079,7 +1085,10 @@ export default function PortfolioDetailPage() {
       const denom = n * sumX2 - sumX * sumX;
       slope = denom === 0 ? 0 : (n * sumXY - sumX * sumY) / denom;
     }
-    for (let i = lastReal.x; i < totalSlots; i++) {
+    // Bidirectional toggle: forward-only (default) vs full-span. Same
+    // slope + anchor either way; only the rendering range differs.
+    const startX = trendlineExtended ? 0 : lastReal.x;
+    for (let i = startX; i < totalSlots; i++) {
       trendData[i] = lastReal.y + slope * (i - lastReal.x);
     }
   }
@@ -1094,8 +1103,10 @@ export default function PortfolioDetailPage() {
     pointHoverRadius: 0,
     // Subtle wedge under the projection — same depth treatment as the
     // Manager Overview's intraday equity forecast. Anchors the projection
-    // visually without competing with the live portfolio gradient.
-    fill: "origin" as const,
+    // visually without competing with the live portfolio gradient. Drop
+    // the fill in extended mode so we don't paint a second wedge on top
+    // of the live path's own gradient.
+    fill: (trendlineExtended ? false : "origin") as "origin" | false,
     tension: 0.15,
     spanGaps: false,
     _isSymbol: false,
@@ -1391,6 +1402,34 @@ export default function PortfolioDetailPage() {
                   })}
                 </div>
               )}
+              {/* Trendline extent toggle — when off, the dashed pace line
+                  only spans the empty future region; when on, it extends
+                  backwards across the historical path too so the user can
+                  spot bars sitting above/below the line at a glance. */}
+              <button
+                type="button"
+                onClick={() => setTrendlineExtended((v) => !v)}
+                style={{
+                  fontFamily: FONT_MONO,
+                  fontSize: 9,
+                  fontWeight: 700,
+                  letterSpacing: "0.12em",
+                  textTransform: "uppercase",
+                  padding: "4px 10px",
+                  borderRadius: 3,
+                  border: `1px solid ${trendlineExtended ? "var(--line2)" : "var(--line)"}`,
+                  background: trendlineExtended ? "var(--bg3)" : "transparent",
+                  color: trendlineExtended ? "var(--t0)" : "var(--t2)",
+                  cursor: "pointer",
+                }}
+                title={
+                  trendlineExtended
+                    ? "Trendline spans the full session. Click to limit to the projection segment only."
+                    : "Trendline currently covers only the projection segment. Click to extend it backwards across the historical path too."
+                }
+              >
+                {trendlineExtended ? "Trendline · Full" : "Trendline · Projection"}
+              </button>
               {/* Mode toggle */}
               <ModeToggle value={view} onChange={setView} />
             </div>
