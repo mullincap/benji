@@ -18,6 +18,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { useParams, useSearchParams, useRouter } from "next/navigation";
 import PortfolioSessionLogs from "./PortfolioSessionLogs";
+import PortfolioMatrix from "./PortfolioMatrix";
 import {
   Chart as ChartJS,
   CategoryScale,
@@ -755,8 +756,6 @@ export default function PortfolioDetailPage() {
     });
   }, []);
 
-  const matrixRef = useRef<HTMLDivElement>(null);
-  const wasAtBottomRef = useRef(true);
 
   const load = useCallback(async () => {
     try {
@@ -779,12 +778,6 @@ export default function PortfolioDetailPage() {
       }
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
       const json = (await r.json()) as PortfolioDetail;
-      // Capture scroll position before state update so we can restore it.
-      const el = matrixRef.current;
-      if (el) {
-        wasAtBottomRef.current =
-          el.scrollHeight - el.scrollTop - el.clientHeight < 24;
-      }
       setAmbiguity(null);
       setData(json);
       setLastUpdated(new Date());
@@ -836,15 +829,10 @@ export default function PortfolioDetailPage() {
     }
   }, [data, lateEntrySpawning]);
 
-  // Auto-scroll matrix to bottom when new bars arrive (only if user was already at bottom)
-  useEffect(() => {
-    if (!data) return;
-    const el = matrixRef.current;
-    if (!el) return;
-    if (wasAtBottomRef.current) {
-      el.scrollTop = el.scrollHeight;
-    }
-  }, [data]);
+  // Matrix scroll-to-bottom effect removed when the matrix moved into
+  // PortfolioMatrix (the ref no longer points at anything visible). The
+  // inner scroll container preserves position naturally; if we want
+  // bottom-pinned behavior back we'd add it inside SimpleMatrix.
 
   const symbolsOrdered = useMemo(() => {
     if (!data) return [] as string[];
@@ -1760,140 +1748,17 @@ export default function PortfolioDetailPage() {
           </div>
         </div>
 
-        {/* Matrix */}
-        <div
-          style={{
-            background: "var(--bg1)",
-            border: "1px solid var(--line)",
-            borderRadius: 5,
-            padding: "12px 16px",
-            minHeight: 0,
-            display: "flex",
-            flexDirection: "column",
-          }}
-        >
-          <div
-            style={{
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "space-between",
-              marginBottom: 10,
-            }}
-          >
-            <div
-              style={{
-                fontSize: 9,
-                fontWeight: 700,
-                letterSpacing: "0.12em",
-                color: "var(--t3)",
-                textTransform: "uppercase",
-              }}
-            >
-              5-min ROI Matrix
-              <span
-                style={{
-                  marginLeft: 10,
-                  color: "var(--t2)",
-                  fontWeight: 400,
-                  letterSpacing: "0.06em",
-                }}
-              >
-                · {matrixBars.length} of {bars.length} bars
-              </span>
-            </div>
-          </div>
-          <div
-            ref={matrixRef}
-            style={{
-              overflow: "auto",
-              maxHeight: 420,
-              border: "1px solid var(--line)",
-              borderRadius: 4,
-            }}
-          >
-            <table
-              style={{
-                width: "100%",
-                borderCollapse: "collapse",
-                fontFamily: FONT_MONO,
-              }}
-            >
-              <thead
-                style={{
-                  position: "sticky",
-                  top: 0,
-                  background: "var(--bg2)",
-                  zIndex: 1,
-                }}
-              >
-                <tr>
-                  <th style={matrixThStyle}>Bar</th>
-                  <th style={matrixThStyle}>Time</th>
-                  {symbolsOrdered.map((sym) => (
-                    <th key={sym} style={matrixThStyle}>
-                      {sym.replace("-USDT", "")}
-                    </th>
-                  ))}
-                  <th
-                    style={{
-                      ...matrixThStyle,
-                      borderLeft: "2px solid var(--line2)",
-                      color: PORTFOLIO_COLOR,
-                    }}
-                  >
-                    Portfolio
-                  </th>
-                </tr>
-              </thead>
-              <tbody>
-                {matrixBars.map((b) => (
-                  <tr key={b.bar}>
-                    <td style={{ ...matrixTdStyle, color: "var(--t2)" }}>{b.bar}</td>
-                    <td style={{ ...matrixTdStyle, color: "var(--t2)" }}>
-                      {fmtTime(b.ts)}
-                    </td>
-                    {symbolsOrdered.map((sym) => {
-                      const v = b.sym_returns[sym];
-                      const stopBar = stoppedAtBar.get(sym);
-                      const isStopped =
-                        stopBar !== undefined && b.bar >= stopBar;
-                      const pct = v !== undefined ? v * 100 : null;
-                      return (
-                        <td
-                          key={sym}
-                          style={{
-                            ...matrixTdStyle,
-                            color:
-                              pct === null
-                                ? "var(--t3)"
-                                : isStopped
-                                ? "var(--t3)"
-                                : pct >= 0
-                                ? "var(--green)"
-                                : "var(--red)",
-                            fontStyle: isStopped ? "italic" : undefined,
-                          }}
-                        >
-                          {pct === null ? "—" : fmtPct(pct, 2)}
-                        </td>
-                      );
-                    })}
-                    <td
-                      style={{
-                        ...matrixTdStyle,
-                        borderLeft: "2px solid var(--line2)",
-                        fontWeight: 700,
-                        color: b.incr >= 0 ? "var(--green)" : "var(--red)",
-                      }}
-                    >
-                      {fmtPct(b.incr * 100)}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </div>
+        {/* Matrix — extracted to PortfolioMatrix.tsx to host the
+            SIMPLE / ADVANCED theme split. SIMPLE keeps the original
+            inline-matrix behavior verbatim; ADVANCED adds the heatmap
+            tinting + sparkline strip + statistics footer + scope pills
+            specified in the matrix style brief. */}
+        <PortfolioMatrix
+          bars={matrixBars}
+          symbolsOrdered={symbolsOrdered}
+          stoppedAtBar={stoppedAtBar}
+          symStopsCount={symStopsCount}
+        />
 
         {/* Session-logs deep-link removed — replaced by the right-edge
             sidebar handle (see PortfolioSessionLogs mounted below). Two
@@ -2111,27 +1976,6 @@ function LegendChip({
   );
 }
 
-// ─── Matrix cell styles ─────────────────────────────────────────────────────
-
-const matrixThStyle: React.CSSProperties = {
-  fontSize: 9,
-  fontWeight: 700,
-  letterSpacing: "0.12em",
-  color: "var(--t3)",
-  textTransform: "uppercase",
-  textAlign: "right",
-  padding: "8px 10px",
-  borderBottom: "1px solid var(--line)",
-  whiteSpace: "nowrap",
-  background: "var(--bg2)",
-};
-
-const matrixTdStyle: React.CSSProperties = {
-  fontSize: 11,
-  color: "var(--t1)",
-  padding: "6px 10px",
-  borderBottom: "1px solid var(--line)",
-  whiteSpace: "nowrap",
-  textAlign: "right",
-  fontFamily: FONT_MONO,
-};
+// Matrix cell styles moved into PortfolioMatrix.tsx along with the rest
+// of the matrix render. SimpleMatrix preserves the original visual
+// treatment; AdvancedMatrix has its own style factories.
