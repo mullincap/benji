@@ -148,6 +148,19 @@ function buildLogsUrl(params: Record<string, string | number | undefined>): stri
 
 // ── Formatters ──────────────────────────────────────────────────────────────
 
+// Heatmap tint — per-column normalized, capped opacity. Mirrors the
+// Advanced matrix's cellTint so the ACT column in the panel reads
+// with the same intensity grammar the operator already learned there.
+// Cap stays at 0.18 (non-negotiable per the matrix brief — higher
+// trades polish for noise).
+function cellTint(value: number, rangeAbsMax: number, cap = 0.18): string {
+  if (value === 0 || rangeAbsMax === 0) return "transparent";
+  const normalized = Math.abs(value) / rangeAbsMax;
+  const opacity = Math.min(normalized * cap, cap);
+  if (value < 0) return `rgba(239, 68, 68, ${opacity.toFixed(3)})`;
+  return `rgba(0, 200, 150, ${opacity.toFixed(3)})`;
+}
+
 function fmtPct(v: number | null | undefined, digits = 2): string {
   if (v === null || v === undefined || Number.isNaN(v)) return "—";
   const sign = v >= 0 ? "+" : "−";
@@ -504,6 +517,20 @@ export default function PortfolioSessionLogs({
 
   const items = useMemo(() => buildItems(filteredLines), [filteredLines]);
 
+  // Column abs-max for the ACT cell heatmap. Derived from the visible
+  // tick rows' roi_report.actual values; recomputes when the filter or
+  // line set changes. Matches the Advanced matrix's per-column scaling.
+  const actAbsMax = useMemo(() => {
+    let m = 0;
+    for (const item of items) {
+      if (item.type === "tick" && item.roi_report) {
+        const v = Math.abs(item.roi_report.actual);
+        if (v > m) m = v;
+      }
+    }
+    return m;
+  }, [items]);
+
   // Chip counts — computed against scopedLines (not filteredLines), so
   // each chip's count answers "how many would I see if I clicked this".
   // Note: ALL excludes system_events (they're the SYS chip's domain).
@@ -661,6 +688,7 @@ export default function PortfolioSessionLogs({
             collapsedStops={collapsedStops}
             toggleStop={toggleStop}
             error={error}
+            actAbsMax={actAbsMax}
           />
           <Footer
             paused={paused}
@@ -1085,6 +1113,7 @@ function Viewport({
   collapsedStops,
   toggleStop,
   error,
+  actAbsMax,
 }: {
   scrollRef: React.RefObject<HTMLDivElement | null>;
   onScroll: () => void;
@@ -1092,6 +1121,7 @@ function Viewport({
   collapsedStops: Set<number>;
   toggleStop: (n: number) => void;
   error: string | null;
+  actAbsMax: number;
 }) {
   return (
     <div
@@ -1156,7 +1186,13 @@ function Viewport({
 
         {items.map((item, idx) => {
           if (item.type === "tick") {
-            return <TickRow key={`tick-${item.bar}-${idx}`} item={item} />;
+            return (
+              <TickRow
+                key={`tick-${item.bar}-${idx}`}
+                item={item}
+                actAbsMax={actAbsMax}
+              />
+            );
           }
           if (item.type === "stop_event") {
             return (
@@ -1234,7 +1270,13 @@ function ColumnHeader() {
 
 // ── Tick row ────────────────────────────────────────────────────────────────
 
-function TickRow({ item }: { item: Item & { type: "tick" } }) {
+function TickRow({
+  item,
+  actAbsMax,
+}: {
+  item: Item & { type: "tick" };
+  actAbsMax: number;
+}) {
   const bu = item.bar_update;
   const ri = item.roi_report;
 
@@ -1362,6 +1404,10 @@ function TickRow({ item }: { item: Item & { type: "tick" } }) {
       >
         {expected !== null ? fmtPct(expected, 2) : "—"}
       </span>
+      {/* ACT — column-normalized red/green heatmap tint, same intensity
+          grammar as the Advanced matrix's symbol columns. Cap is 0.18
+          (matches matrix); padding tightens vs the other cells so the
+          tint reads as a contained pill rather than bleeding out. */}
       <span
         style={{
           width: 56,
@@ -1370,6 +1416,11 @@ function TickRow({ item }: { item: Item & { type: "tick" } }) {
           fontWeight: 500,
           fontVariantNumeric: "tabular-nums",
           color: actual === null ? "#52525b" : actual >= 0 ? "#00c896" : "#ef4444",
+          background:
+            actual === null ? "transparent" : cellTint(actual, actAbsMax, 0.18),
+          borderRadius: 2,
+          padding: "1px 4px",
+          marginRight: -4,  // compensate for the padding so column widths line up
         }}
       >
         {actual !== null ? fmtPct(actual, 2) : "—"}
