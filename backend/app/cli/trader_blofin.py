@@ -2750,11 +2750,12 @@ def _run_monitoring_loop(today, today_date, api: ExchangeAdapter, inst_ids,
             # the session-start fill_report key.
             if fill_report is not None:
                 _state["fill_report"] = fill_report
-            # Preserve pre_stopped_clamps so a respawn rehydrates them via
-            # the resume-path loader, keeping pre-stopped symbols clamped
-            # in every bar of the resumed session too.
-            if pre_stopped_clamps:
-                _state["pre_stopped_clamps"] = pre_stopped_clamps
+            # Persist pre_stopped_clamps unconditionally — _mark_runtime_state
+            # REPLACES the entire JSONB blob, so omitting the key when empty
+            # causes it to be silently dropped on every bar. Always-write keeps
+            # resume-path semantics deterministic (key present = authoritative
+            # state; key absent ONLY for legacy pre-fix sessions).
+            _state["pre_stopped_clamps"] = pre_stopped_clamps or {}
             _mark_runtime_state(allocation_id, _state)
 
     # ── Phase 5: Exit ─────────────────────────────────────────────────────
@@ -4139,6 +4140,15 @@ def _run_fresh_session_for_allocation(
     # destructive (forced exit + double slippage on re-entry). For symbols
     # where the operator already has a position, the trader will skip
     # placing a new entry order (handled in Phase 5 below).
+    # Operator-held basket symbols on late-entry: skip the fresh-entry
+    # order for them but KEEP them in the basket (inst_ids). Mirrors the
+    # pre_stopped_clamps pattern — zero the entry price, enter_positions's
+    # `entry_prices.get(i, 0) > 0` filter skips them, restore after. Keeping
+    # inst_ids = full basket means runtime_state.symbols + portfolio_sessions
+    # .symbols always carry the 06:00 UTC index basket, so the portfolio
+    # detail page renders all symbols (per operator's "always show full view"
+    # requirement).
+    preserved_ids: set[str] = set()
     if late_entry:
         existing = get_actual_positions(api, inst_ids)
         if existing:
@@ -4148,17 +4158,24 @@ def _run_fresh_session_for_allocation(
                 f"{len(existing)} pre-existing position(s) on this account: "
                 f"{existing_ids}. Skipping fresh-entry orders for these symbols."
             )
-            # Drop these from inst_ids so we don't re-enter on top
-            preserved = {p.inst_id for p in existing}
-            inst_ids = [i for i in inst_ids if i not in preserved]
-            if not inst_ids:
+            preserved_ids = {p.inst_id for p in existing}
+            # If every basket symbol is already held by operator AND none
+            # are pre-stopped, there's nothing for the trader to do. Same
+            # abort as before but checks the post-pre-stopped subset.
+            entry_targets = [i for i in inst_ids
+                             if i not in preserved_ids
+                             and i not in pre_stopped_clamps]
+            if not entry_targets:
                 log.warning(
                     f"Allocation {allocation_id}: LATE ENTRY — all basket "
-                    "symbols already held by operator; nothing to add."
+                    "symbols already held by operator (or pre-stopped); "
+                    "nothing to add."
                 )
                 _mark_runtime_state(allocation_id, {
                     "phase": "late_entry_all_preserved",
                     "preserved_symbols": existing_ids,
+                    "symbols": list(inst_ids),
+                    "pre_stopped_clamps": pre_stopped_clamps or {},
                     "positions": [],
                 })
                 _log_allocation_return(
@@ -4274,13 +4291,17 @@ def _run_fresh_session_for_allocation(
         # enter_positions's existing 10% MARGIN_BUFFER is applied inside,
         # on top of usdt_for_allocation. No other sizing logic here.
         #
-        # Pre-stopped symbols (late-entry pre-filter) are excluded from the
-        # entry-orders pass by zeroing their entry_price — the enter_positions
-        # tradeable filter `entry_prices.get(i, 0) > 0` skips them, so capital
-        # divides cleanly across the remaining symbols. The original
-        # entry_price is restored after for runtime_state persistence.
+        # Excluded from the entry-orders pass (without being dropped from the
+        # basket inst_ids): pre-stopped symbols (late-entry pre-filter) AND
+        # operator-preserved positions (already held on this account at
+        # late-entry). Both are excluded by zeroing their entry_price — the
+        # enter_positions tradeable filter `entry_prices.get(i, 0) > 0` skips
+        # them, so capital divides cleanly across the remaining symbols. The
+        # original entry_prices are restored after for runtime_state +
+        # ROI-math persistence (incr clamping needs the real reference price).
+        _excluded = set(pre_stopped_clamps) | preserved_ids
         _saved_entry_prices = {}
-        for inst in pre_stopped_clamps:
+        for inst in _excluded:
             if inst in entry_prices:
                 _saved_entry_prices[inst] = entry_prices[inst]
                 entry_prices[inst] = 0.0
@@ -4630,6 +4651,53 @@ def run_session_for_allocation(
             _resume_pre_stopped = state.get("pre_stopped_clamps") or {}
             if not isinstance(_resume_pre_stopped, dict):
                 _resume_pre_stopped = {}
+            # Self-heal: re-derive pre-stopped state from basket vs positions
+            # vs current prices. Defends against runtime_state corruption
+            # (operator hand-craft, partial write, etc.) so any basket symbol
+            # missing from positions whose live return is past stop_raw_pct
+            # gets reinjected as pre-stopped at its observed return.
+            #
+            # Fires only when pre_stopped_clamps + sym_stopped together miss
+            # an orphan that should clearly be marked stopped — never
+            # downgrades existing entries (resume values always win).
+            try:
+                _stop_thr = float(config.stop_raw_pct)
+                _position_iids = {p.get("inst_id") for p in state.get("positions", []) or []}
+                _known_stopped = (
+                    set(_resume_pre_stopped.keys())
+                    | (set(_resume_stopped.keys()) if isinstance(_resume_stopped, dict)
+                       else set(_resume_stopped or []))
+                )
+                _orphans = [iid for iid in _inst_ids
+                            if iid not in _position_iids
+                            and iid not in _known_stopped]
+                if _orphans:
+                    _live = get_mark_prices(api, _orphans)
+                    _healed: dict[str, float] = {}
+                    for iid in _orphans:
+                        ref = _open_prices.get(iid)
+                        cur_p = _live.get(iid)
+                        if not ref or not cur_p or float(ref) <= 0:
+                            continue
+                        _ret = (float(cur_p) - float(ref)) / float(ref)
+                        if _ret <= _stop_thr:
+                            _healed[iid] = round(float(_ret), 6)
+                    if _healed:
+                        log.warning(
+                            f"Allocation {allocation_id}: RESUME self-heal — "
+                            f"{len(_healed)} basket symbol(s) had no position "
+                            f"and current return past stop threshold "
+                            f"({_stop_thr*100:.1f}%); reinjecting as pre-stopped:"
+                        )
+                        for iid, clamp in _healed.items():
+                            log.warning(f"  {iid}: clamp={clamp*100:+.3f}%")
+                        _resume_pre_stopped = {**_resume_pre_stopped, **_healed}
+            except Exception as _e:
+                # Self-heal is best-effort — never block resume on failure.
+                log.warning(
+                    f"Allocation {allocation_id}: RESUME self-heal failed "
+                    f"({_e}); proceeding with persisted clamps as-is"
+                )
             _track_active_portfolio_session(state.get("session_id"))
             _run_monitoring_loop(
                 today, _today_date, api, _inst_ids,
