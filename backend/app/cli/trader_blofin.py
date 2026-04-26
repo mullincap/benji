@@ -2257,7 +2257,8 @@ def _run_monitoring_loop(today, today_date, api: ExchangeAdapter, inst_ids,
                          fill_report: dict | None = None,
                          conviction_roi_x: float | None = None,
                          signal_count: int | None = None,
-                         resume_sym_stopped: list[str] | None = None):
+                         resume_sym_stopped: list[str] | None = None,
+                         pre_stopped_clamps: dict[str, float] | None = None):
     """
     Intraday monitoring loop (bars 7-216).
 
@@ -2321,6 +2322,21 @@ def _run_monitoring_loop(today, today_date, api: ExchangeAdapter, inst_ids,
         log.info(
             f"{log_prefix}Rehydrated {len(sym_stopped)} stopped symbol(s) from "
             f"runtime_state: {list(sym_stopped.keys())}"
+        )
+
+    # Late-entry pre-stopped symbols: clamp at the observed pre-entry return
+    # (NOT cfg.stop_raw_pct — we record the actual cumulative return at the
+    # moment of pre-stop, which can be worse than the threshold). The bar
+    # writer's `if iid in sym_stopped: sym_returns_map_open[iid] = sym_stopped[iid]`
+    # branch then includes these symbols in every bar's symbol_returns +
+    # stopped[] without any per-bar special case.
+    if pre_stopped_clamps:
+        for _iid, _clamp_val in pre_stopped_clamps.items():
+            sym_stopped[_iid] = float(_clamp_val)
+        log.info(
+            f"{log_prefix}Seeded {len(pre_stopped_clamps)} pre-stopped symbol(s) "
+            f"(late-entry pre-filter): "
+            f"{ {k: f'{v*100:+.3f}%' for k,v in pre_stopped_clamps.items()} }"
         )
 
     # Sync runtime_state.positions[] against live exchange positions before
@@ -2684,6 +2700,11 @@ def _run_monitoring_loop(today, today_date, api: ExchangeAdapter, inst_ids,
             # the session-start fill_report key.
             if fill_report is not None:
                 _state["fill_report"] = fill_report
+            # Preserve pre_stopped_clamps so a respawn rehydrates them via
+            # the resume-path loader, keeping pre-stopped symbols clamped
+            # in every bar of the resumed session too.
+            if pre_stopped_clamps:
+                _state["pre_stopped_clamps"] = pre_stopped_clamps
             _mark_runtime_state(allocation_id, _state)
 
     # ── Phase 5: Exit ─────────────────────────────────────────────────────
@@ -3990,38 +4011,41 @@ def _run_fresh_session_for_allocation(
 
     log.info(f"Allocation {allocation_id}: conviction passed — entering at {config.l_high}x")
 
-    # ── Late-entry pre-filter: exclude symbols already past the per-symbol
-    # stop threshold ────────────────────────────────────────────────────────
+    # ── Late-entry pre-filter: track symbols already past the per-symbol
+    # stop threshold as "pre-stopped" (clamp at observed return, no entry
+    # order, but stay in the basket for matrix/portfolio observability) ────
     # Without this guard, a late-entry on a basket where one symbol has
     # already drawn down past stop_raw_pct (e.g. MIRA at -6.76% vs -6%
     # threshold) would immediately liquidate that position at session start.
-    # Compute return between the strategy's 06:35 reference and current
-    # marks; drop any symbol already across the stop line.
+    #
+    # Behaviour: keep the symbol in inst_ids so the bar writer + UI matrix
+    # render the full original basket. Skip placing entry orders for them
+    # (no real position, $0 capital allocation). Seed sym_stopped at clamp
+    # value so subsequent bars show them held at -clamp%.
+    pre_stopped_clamps: dict[str, float] = {}
     if late_entry:
         try:
             current_marks = get_mark_prices(api, inst_ids)
             stop_thr = float(config.stop_raw_pct)
-            kept, dropped_already_stopped = [], []
             for inst in inst_ids:
                 ref = bar6_prices.get(inst)
                 cur_p = current_marks.get(inst)
                 if ref is None or cur_p is None or float(ref) <= 0:
-                    kept.append(inst); continue
+                    continue
                 ret = (float(cur_p) - float(ref)) / float(ref)
                 if ret <= stop_thr:
-                    dropped_already_stopped.append((inst, ret))
-                else:
-                    kept.append(inst)
-            if dropped_already_stopped:
+                    pre_stopped_clamps[inst] = round(float(ret), 6)
+            if pre_stopped_clamps:
                 log.warning(
                     f"Allocation {allocation_id}: LATE ENTRY pre-filter — "
-                    f"{len(dropped_already_stopped)} symbol(s) already past "
-                    f"stop threshold ({stop_thr*100:.1f}%), excluding from entry:"
+                    f"{len(pre_stopped_clamps)} symbol(s) already past "
+                    f"stop threshold ({stop_thr*100:.1f}%); keeping in basket "
+                    "for observability, skipping entry orders, clamping at observed return:"
                 )
-                for inst, ret in dropped_already_stopped:
-                    log.warning(f"  {inst}: cumulative ret={ret*100:+.3f}%")
-            inst_ids = kept
-            if not inst_ids:
+                for inst, clamp in pre_stopped_clamps.items():
+                    log.warning(f"  {inst}: clamp={clamp*100:+.3f}%")
+            # When EVERY basket symbol is past stop, abort cleanly
+            if pre_stopped_clamps and len(pre_stopped_clamps) >= len(inst_ids):
                 log.error(
                     f"Allocation {allocation_id}: LATE ENTRY — all symbols past "
                     "stop threshold, no entry."
@@ -4193,9 +4217,22 @@ def _run_fresh_session_for_allocation(
 
         # enter_positions's existing 10% MARGIN_BUFFER is applied inside,
         # on top of usdt_for_allocation. No other sizing logic here.
+        #
+        # Pre-stopped symbols (late-entry pre-filter) are excluded from the
+        # entry-orders pass by zeroing their entry_price — the enter_positions
+        # tradeable filter `entry_prices.get(i, 0) > 0` skips them, so capital
+        # divides cleanly across the remaining symbols. The original
+        # entry_price is restored after for runtime_state persistence.
+        _saved_entry_prices = {}
+        for inst in pre_stopped_clamps:
+            if inst in entry_prices:
+                _saved_entry_prices[inst] = entry_prices[inst]
+                entry_prices[inst] = 0.0
         positions, fill_report = enter_positions(
             api, inst_ids, entry_prices, eff_lev, usdt_for_allocation, dry_run,
         )
+        for inst, p in _saved_entry_prices.items():
+            entry_prices[inst] = p
 
     if not positions:
         log.error(f"Allocation {allocation_id}: enter_positions returned no fills")
@@ -4254,6 +4291,10 @@ def _run_fresh_session_for_allocation(
         "symbols": list(inst_ids),
         "capital_deployed_usd": capital_deployed_usd,
         "fill_report": fill_report,
+        # Late-entry pre-stopped clamp values; the monitoring loop seeds
+        # sym_stopped from this so every bar's symbol_returns + stopped[]
+        # include the pre-stopped symbols. Empty {} on normal spawns.
+        "pre_stopped_clamps": pre_stopped_clamps,
     })
 
     # ── Phase 8: monitoring loop — parameterized shared function ─────────
@@ -4280,6 +4321,7 @@ def _run_fresh_session_for_allocation(
         fill_report=fill_report,
         conviction_roi_x=float(roi_x),
         signal_count=len(inst_ids),
+        pre_stopped_clamps=pre_stopped_clamps,
     )
 
 
@@ -4484,6 +4526,13 @@ def run_session_for_allocation(
             _resume_stopped = state.get("sym_stopped") or []
             if not isinstance(_resume_stopped, list):
                 _resume_stopped = []
+            # Rehydrate late-entry pre-stopped clamps so resumed bars also
+            # include the pre-stopped symbols in symbol_returns + stopped[].
+            # Pre-fix sessions won't have this key; {} keeps the bar writer
+            # behaviour identical to before for normal-spawn sessions.
+            _resume_pre_stopped = state.get("pre_stopped_clamps") or {}
+            if not isinstance(_resume_pre_stopped, dict):
+                _resume_pre_stopped = {}
             _track_active_portfolio_session(state.get("session_id"))
             _run_monitoring_loop(
                 today, _today_date, api, _inst_ids,
@@ -4504,6 +4553,7 @@ def run_session_for_allocation(
                 # sessions won't have this key; .get() returns None which
                 # matches the old behavior (NULL in DB).
                 fill_report=state.get("fill_report"),
+                pre_stopped_clamps={k: float(v) for k, v in _resume_pre_stopped.items()},
             )
             return
 
