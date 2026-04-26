@@ -4569,6 +4569,40 @@ def run_session_for_allocation(
                 f"Allocation {allocation_id}: resuming active session from "
                 "runtime_state."
             )
+            # Clear any stale crash markers on the portfolio_sessions row.
+            # The previous trader instance set status='closed' +
+            # exit_reason='subprocess_died' when SIGTERM hit; this resume
+            # is reopening the session so the row should reflect that.
+            # Without this, the manager UI keeps showing "subprocess died
+            # exit" even while bars are being written.
+            _resume_session_id = state.get("session_id")
+            if _resume_session_id:
+                try:
+                    _conn = _trader_db_connect()
+                    try:
+                        with _conn.cursor() as _cur:
+                            _cur.execute(
+                                """
+                                UPDATE user_mgmt.portfolio_sessions
+                                   SET status = 'active',
+                                       exit_reason = NULL,
+                                       exit_time_utc = NULL,
+                                       updated_at = NOW()
+                                 WHERE portfolio_session_id = %s::uuid
+                                   AND exit_reason IN ('subprocess_died',
+                                                       'stale_close_failed',
+                                                       'errored')
+                                """,
+                                (_resume_session_id,),
+                            )
+                        _conn.commit()
+                    finally:
+                        _conn.close()
+                except Exception as _e:
+                    log.warning(
+                        f"Allocation {allocation_id}: failed to clear stale "
+                        f"portfolio_session crash marker: {_e}"
+                    )
             # Rehydrate the positional args the shared loop expects.
             _open_prices  = {k: float(v) for k, v in state["open_prices"].items()}
             _entry_prices = {k: float(v) for k, v in state["entry_prices"].items()}

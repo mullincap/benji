@@ -2263,6 +2263,59 @@ def get_portfolio(
     candidates = cur.fetchall()
 
     if not candidates:
+        # No portfolio_sessions row → graceful fallback to allocation_returns
+        # so filtered / no_entry / errored days still render a useful detail
+        # page (basic context + late-entry button) instead of a 404. Most
+        # cases are auto-fixed once generate_no_entry_previews has run for
+        # the day, but error rows + edge cases still hit this path.
+        if allocation_id:
+            cur.execute("""
+                SELECT ar.session_date, ar.exit_reason, ar.signal_count,
+                       ar.conviction_roi_x, ar.conviction_passed,
+                       ec.exchange,
+                       s.display_name AS strategy_display_name,
+                       s.name         AS strategy_name,
+                       sv.config      AS strategy_config
+                  FROM user_mgmt.allocation_returns ar
+                  JOIN user_mgmt.allocations a ON a.allocation_id = ar.allocation_id
+                  JOIN audit.strategy_versions sv ON sv.strategy_version_id = a.strategy_version_id
+                  JOIN audit.strategies s ON s.strategy_id = sv.strategy_id
+                  JOIN user_mgmt.exchange_connections ec ON ec.connection_id = a.connection_id
+                 WHERE ar.allocation_id = %s::uuid AND ar.session_date = %s::date
+                 ORDER BY ar.logged_at DESC
+                 LIMIT 1
+            """, (allocation_id, date))
+            ar_row = cur.fetchone()
+            if ar_row is not None:
+                cfg = (TraderConfig.from_strategy_version(ar_row["strategy_config"], capital_usd=1.0)
+                       if ar_row["strategy_config"] else TraderConfig.master_defaults())
+                return {
+                    "meta": {
+                        "date":              ar_row["session_date"].isoformat(),
+                        "allocation_id":     allocation_id,
+                        "exchange":          ar_row["exchange"],
+                        "strategy_label":    ar_row["strategy_display_name"] or ar_row["strategy_name"],
+                        "status":            "closed",
+                        "session_start_utc": None,
+                        "exit_time_utc":     None,
+                        "exit_reason":       ar_row["exit_reason"],
+                        "symbols":           [],
+                        "entered":           [],
+                        "eff_lev":           0.0,
+                        "lev_int":           0,
+                        "early_fill_y":      cfg.early_fill_y,
+                        "early_fill_x":      cfg.early_fill_x,
+                        "session_start_hour": cfg.session_start_hour,
+                        "session_ret":       None,
+                        "fill_window_close_ret": None,
+                        "fill_window_close_bar": None,
+                        # Diagnostic fields surfaced for the no-portfolio view
+                        "signal_count":      ar_row["signal_count"],
+                        "conviction_roi_x":  _dec(ar_row["conviction_roi_x"]),
+                        "conviction_passed": ar_row["conviction_passed"],
+                    },
+                    "bars": [],
+                }
         raise HTTPException(status_code=404, detail="portfolio not found")
 
     if allocation_id is not None:
@@ -2345,15 +2398,36 @@ def get_portfolio(
                     fill_window_close_bar = b["bar_number"]
                 break
 
+    # Promote a closed-but-actively-being-written session to "live" when
+    # the recorded exit_reason is one of the transient/error states. The
+    # trader's session-close-on-SIGTERM marks the row 'closed' with
+    # exit_reason='subprocess_died', then a respawn keeps appending bars
+    # without reopening the session row. Without this normalization, the
+    # detail page would show "subprocess died exit" with stale heading
+    # text even while bars are landing every 5 minutes.
+    _transient_exits = {"subprocess_died", "stale_close_failed", "errored"}
+    _disp_status = session["status"]
+    _disp_exit_reason = session["exit_reason"]
+    _disp_exit_time = session["exit_time_utc"]
+    if _disp_exit_reason in _transient_exits and bar_rows:
+        latest_bar_ts = bar_rows[-1]["bar_timestamp_utc"]
+        if latest_bar_ts is not None:
+            from datetime import datetime as _dt, timezone as _tz, timedelta as _td
+            now_utc = _dt.now(_tz.utc)
+            if (now_utc - latest_bar_ts) < _td(minutes=15):
+                _disp_status = "active"
+                _disp_exit_reason = None
+                _disp_exit_time = None
+
     meta = {
         "date":              session["signal_date"].isoformat(),
         "allocation_id":     str(session["allocation_id"]) if session["allocation_id"] else None,
         "exchange":          session["exchange"],
         "strategy_label":    session["strategy_display_name"] or session["strategy_name"],
-        "status":            session["status"],
+        "status":            _disp_status,
         "session_start_utc": _fmt_utc(session["session_start_utc"]),
-        "exit_time_utc":     _fmt_utc(session["exit_time_utc"]),
-        "exit_reason":       session["exit_reason"],
+        "exit_time_utc":     _fmt_utc(_disp_exit_time),
+        "exit_reason":       _disp_exit_reason,
         "symbols":           list(session["symbols"] or []),
         "entered":           list(session["entered"] or []),
         "eff_lev":           session["eff_lev"],

@@ -139,8 +139,30 @@ function fmtTime(ts: string | null | undefined): string {
   return part.slice(0, 5);
 }
 
+// Whitelist of legitimate "final" exit reasons. subprocess_died,
+// stale_close_failed, errored, etc. are transient/error states that
+// shouldn't surface as a user-facing exit — render as LIVE if the
+// session is still being written, otherwise as a generic ENDED label.
+const TERMINAL_EXIT_REASONS: Record<string, { label: string; bg: string; fg: string }> = {
+  port_sl:                         { label: "PORT SL",        bg: "var(--red-dim)",   fg: "var(--red)" },
+  port_tsl:                        { label: "PORT TSL",       bg: "var(--red-dim)",   fg: "var(--red)" },
+  early_fill:                      { label: "EARLY FILL",     bg: "var(--green-dim)", fg: "var(--green)" },
+  session_close:                   { label: "SESSION CLOSE",  bg: "var(--bg3)",       fg: "var(--t1)" },
+  sym_stop:                        { label: "SYM STOP",       bg: "var(--amber-dim)", fg: "var(--amber)" },
+  filtered:                        { label: "FILTERED",       bg: "var(--bg3)",       fg: "var(--t2)" },
+  no_entry_conviction:             { label: "NO CONVICTION",  bg: "var(--bg3)",       fg: "var(--t2)" },
+  missed_window:                   { label: "MISSED WINDOW",  bg: "var(--bg3)",       fg: "var(--t2)" },
+  late_entry_no_eligible_symbols:  { label: "ALL STOPPED",    bg: "var(--amber-dim)", fg: "var(--amber)" },
+};
+
 function exitBadge(reason: string | null, status: string) {
-  if (status === "active") {
+  // Treat the session as LIVE whenever status is active OR the recorded
+  // exit_reason is one of the transient/error states (subprocess_died,
+  // stale_close_failed, errored). Those almost always mean the trader
+  // got interrupted but a respawn is writing bars, and surfacing a
+  // permanent-looking exit label is misleading.
+  const transientErrors = new Set(["subprocess_died", "stale_close_failed", "errored"]);
+  if (status === "active" || (reason && transientErrors.has(reason))) {
     return (
       <span
         style={{
@@ -155,19 +177,13 @@ function exitBadge(reason: string | null, status: string) {
           fontFamily: FONT_MONO,
         }}
       >
-        ACTIVE
+        LIVE
       </span>
     );
   }
   if (!reason) return <span style={{ color: "var(--t3)" }}>—</span>;
-  const map: Record<string, { bg: string; fg: string }> = {
-    port_sl:       { bg: "var(--red-dim)",   fg: "var(--red)" },
-    port_tsl:      { bg: "var(--red-dim)",   fg: "var(--red)" },
-    early_fill:    { bg: "var(--green-dim)", fg: "var(--green)" },
-    session_close: { bg: "var(--bg3)",       fg: "var(--t1)" },
-    sym_stop:      { bg: "var(--amber-dim)", fg: "var(--amber)" },
-  };
-  const s = map[reason] || { bg: "var(--bg3)", fg: "var(--t2)" };
+  const known = TERMINAL_EXIT_REASONS[reason];
+  const s = known ?? { label: reason.replace(/_/g, " ").toUpperCase(), bg: "var(--bg3)", fg: "var(--t2)" };
   return (
     <span
       style={{
@@ -182,7 +198,7 @@ function exitBadge(reason: string | null, status: string) {
         fontFamily: FONT_MONO,
       }}
     >
-      {reason.replace(/_/g, " ").toUpperCase()}
+      {s.label}
     </span>
   );
 }
@@ -1085,7 +1101,16 @@ export default function PortfolioDetailPage() {
               {live && <LivePulse />}
               {" · "}
               {bars.length} bars
-              {meta.exit_reason && ` · ${meta.exit_reason.replace(/_/g, " ")} exit`}
+              {(() => {
+                // Suppress stale/transient exit_reason text when the
+                // session is still being written. subprocess_died is a
+                // crash marker; if a respawn is updating bars, the
+                // session hasn't actually ended.
+                const transient = new Set(["subprocess_died", "stale_close_failed", "errored"]);
+                if (live) return null;
+                if (meta.exit_reason && transient.has(meta.exit_reason)) return null;
+                return meta.exit_reason ? ` · ${meta.exit_reason.replace(/_/g, " ")} exit` : null;
+              })()}
               {" · "}
               {enteredCount} symbols active
               {symStopsCount > 0 && ` (${symStopsCount} stopped)`}

@@ -13,6 +13,7 @@
  */
 
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { useSearchParams } from "next/navigation";
 import SessionLogs from "./SessionLogs";
 import { AllocationFilter } from "../_components/AllocationFilter";
 import { useLargestAllocationDefault } from "../_components/useLargestAllocationDefault";
@@ -532,6 +533,7 @@ function TabBanner({ text }: { text: string }) {
 // ─── Page ───────────────────────────────────────────────────────────────────
 
 export default function ExecutionPage() {
+  const searchParams = useSearchParams();
   const [reports, setReports] = useState<ExecutionReport[] | null>(null);
   const [summary, setSummary] = useState<ExecutionSummary | null>(null);
   const [error, setError] = useState<string | null>(null);
