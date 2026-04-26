@@ -1224,6 +1224,32 @@ export default function PortfolioDetailPage() {
     _isSymbol: false,
   };
 
+  // ── Current-value reference line ────────────────────────────────────────
+  // Flat horizontal at the latest portfolio incr; lets the user eyeball
+  // the gap to PORT SL / PORT TSL without translating between two y-values.
+  // Same dashed-line style as the threshold lines but in the warm primary
+  // text color so it reads as "where you are right now" rather than a
+  // trigger boundary.
+  const currentIncrPct = lastFilledIdx >= 0
+    ? (barAtSlot[lastFilledIdx]!.incr) * 100
+    : null;
+  const currentDataset = {
+    label: "Current",
+    data: currentIncrPct !== null
+      ? new Array(totalSlots).fill(currentIncrPct)
+      : new Array(totalSlots).fill(null),
+    borderColor: "rgba(240, 237, 230, 0.6)",
+    backgroundColor: "transparent",
+    borderWidth: 1,
+    borderDash: [2, 4],
+    pointRadius: 0,
+    pointHoverRadius: 0,
+    fill: false as const,
+    tension: 0,
+    spanGaps: true,
+    _isSymbol: false,
+  };
+
   // Datasets shown to Chart.js depend on the mode. Portfolio-only mode strips
   // symbol lines entirely (cleaner view); All Symbols mode stacks them under
   // the portfolio area. The `hidden` flag on each symbol dataset is driven by
@@ -1232,8 +1258,82 @@ export default function PortfolioDetailPage() {
   // rather than a competing line). The drawdown wedge layers between
   // portfolio and trendline so it reads behind both lines.
   const chartDatasets = view === "symbols"
-    ? [portfolioDataset, drawdownDataset, trendlineDataset, portSlDataset, portTslDataset, ...symbolDatasets]
-    : [portfolioDataset, drawdownDataset, trendlineDataset, portSlDataset, portTslDataset];
+    ? [portfolioDataset, drawdownDataset, trendlineDataset, portSlDataset, portTslDataset, currentDataset, ...symbolDatasets]
+    : [portfolioDataset, drawdownDataset, trendlineDataset, portSlDataset, portTslDataset, currentDataset];
+
+  // Right-edge value labels for the threshold + current reference lines.
+  // Inline Chart.js plugin avoids a chartjs-plugin-annotation dependency;
+  // draws on canvas after datasets so the labels float over the right
+  // margin where there's empty space (post-last-bar projection region).
+  const latestPortTslPct = lastFilledIdx >= 0 && portTslPct !== null
+    ? (barAtSlot[lastFilledIdx]!.peak + portTslPct) * 100
+    : (portTslPct !== null ? portTslPct * 100 : null);
+  const refLineLabels: { y: number; text: string; color: string }[] = [];
+  if (portSlPct !== null) {
+    refLineLabels.push({
+      y: portSlPct * 100,
+      text: `PORT SL: ${(portSlPct * 100).toFixed(1)}%`,
+      color: "rgba(255, 77, 77, 0.95)",
+    });
+  }
+  if (latestPortTslPct !== null) {
+    refLineLabels.push({
+      y: latestPortTslPct,
+      text: `PORT TSL: ${latestPortTslPct.toFixed(1)}%`,
+      color: "rgba(240, 165, 0, 0.95)",
+    });
+  }
+  if (currentIncrPct !== null) {
+    const sign = currentIncrPct >= 0 ? "+" : "";
+    refLineLabels.push({
+      y: currentIncrPct,
+      text: `NOW: ${sign}${currentIncrPct.toFixed(2)}%`,
+      color: "rgba(240, 237, 230, 0.95)",
+    });
+  }
+  const refLinePlugin = {
+    id: "refLineLabels",
+    afterDatasetsDraw(chart: ChartJS) {
+      const { ctx, chartArea, scales } = chart;
+      const yScale = scales.y;
+      if (!yScale) return;
+      ctx.save();
+      ctx.font = 'bold 9px "Space Mono", monospace';
+      ctx.textAlign = "left";
+      ctx.textBaseline = "middle";
+      // Sort by y so we can offset overlapping labels vertically. With a
+      // 12-px label height + 2-px padding, anything within 14 px is a
+      // visual collision; nudge later labels down by half-height.
+      const placed: { y: number; text: string; color: string; px: number }[] = [];
+      const sorted = [...refLineLabels].sort((a, b) => b.y - a.y);
+      for (const lbl of sorted) {
+        let px = yScale.getPixelForValue(lbl.y);
+        // Avoid rendering off-canvas if the value falls outside the y-range.
+        px = Math.max(chartArea.top + 8, Math.min(chartArea.bottom - 8, px));
+        // Push down if overlapping an already-placed label.
+        for (const p of placed) {
+          if (Math.abs(px - p.px) < 14) {
+            px = p.px + 14;
+          }
+        }
+        placed.push({ ...lbl, px });
+      }
+      // Render. Right-aligned just inside the chart's right edge.
+      const padX = 6;
+      const padY = 2;
+      const labelHeight = 12;
+      for (const { px, text, color } of placed) {
+        const metrics = ctx.measureText(text);
+        const w = metrics.width + padX * 2;
+        const x = chartArea.right - w - 4;
+        ctx.fillStyle = "rgba(14, 14, 16, 0.85)";
+        ctx.fillRect(x, px - labelHeight / 2 - padY, w, labelHeight + padY * 2);
+        ctx.fillStyle = color;
+        ctx.fillText(text, x + padX, px);
+      }
+      ctx.restore();
+    },
+  };
 
   const chartOptions: ChartOptions<"line"> = {
     responsive: true,
@@ -1252,13 +1352,15 @@ export default function PortfolioDetailPage() {
         bodyFont:  { family: "Space Mono", size: 10 },
         padding: 8,
         // Decorative overlays (pace trendline, threshold lines, peak/drawdown
-        // wedge) are visual scaffolding; suppress them from the tooltip so
-        // it stays focused on the actual symbol + portfolio rows.
+        // wedge, current-value reference) are visual scaffolding; suppress
+        // them from the tooltip so it stays focused on the actual symbol +
+        // portfolio rows.
         filter: (item) =>
           item.dataset.label !== "Pace" &&
           item.dataset.label !== "Port SL" &&
           item.dataset.label !== "Port TSL" &&
-          item.dataset.label !== "Peak",
+          item.dataset.label !== "Peak" &&
+          item.dataset.label !== "Current",
         itemSort: (a, b) => {
           // Portfolio row always first so it anchors the tooltip.
           const aPortfolio = a.dataset.label === "Portfolio" ? -1 : 0;
@@ -1556,6 +1658,7 @@ export default function PortfolioDetailPage() {
             <Line
               data={{ labels, datasets: chartDatasets }}
               options={chartOptions}
+              plugins={[refLinePlugin]}
             />
           </div>
         </div>
