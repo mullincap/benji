@@ -60,7 +60,6 @@ Usage (cron entry):
 import csv
 import datetime as _dt
 import logging
-import math
 import re
 import sys
 import time
@@ -76,24 +75,17 @@ DEPLOYMENT_START_HOUR = 6      # 06:00 UTC snapshot
 FREQ_WIDTH            = 20     # top-20 per metric
 ANCHOR_HOUR           = 0      # 00:00 UTC anchor
 
-# -- Tail Guardrail (unchanged from v1, verified against audit --------------
-TAIL_DROP_PCT         = 0.04
-TAIL_VOL_MULT         = 1.4
-TAIL_VOL_SHORT_WINDOW = 5
-TAIL_VOL_LONG_WINDOW  = 60
-
-# -- Dispersion filter (matches audit.py build_dispersion_filter) ----------
-# Cross-sectional dispersion of yesterday's daily log-returns across top-N
-# mcap symbols. Low dispersion (alts moving together) = momentum edge
-# suppressed → sit flat today.
-#
-# Lagged by 1 day: yesterday's disp_ratio gates today's trade.
-# Static universe in the live path (top-N mcap *today*) used for the full
-# baseline window — a minor approximation vs the audit's per-day universe.
-DISPERSION_N            = 40
-DISPERSION_BASELINE_WIN = 33
-DISPERSION_THRESHOLD    = 0.66
-DISPERSION_MIN_SYMBOLS  = 20
+# Tail Guardrail + Dispersion: thresholds, helpers, and the canonical
+# implementations all live in pipeline.audit_filters (extracted 2026-04-26
+# so daily_signal_v2 and pipeline/intraday_audit share one copy of the
+# filter logic). Re-exported here so existing call sites in this file
+# (e.g. `_fetch_btc_daily_closes`, `compute_tail_guardrail`) continue to
+# resolve unchanged.
+from pipeline.audit_filters import (  # noqa: E402  (sys.path is script dir)
+    fetch_btc_daily_closes as _fetch_btc_daily_closes,
+    compute_tail_guardrail,
+    compute_dispersion_filter,
+)
 
 FILTER_NAME           = "Tail Guardrail"
 
@@ -234,29 +226,9 @@ def get_blofin_symbols():
 # ranking) are preserved exactly.
 _BINANCE_FAPI   = "https://fapi.binance.com"
 
-# Binance multiplier-prefix overrides for low-priced perps.
-# market.symbols.binance_id is NULL for PEPE/SHIB and missing FLOKI/BONK
-# entirely — the symbol_registry refresh has a bug that doesn't detect
-# 1000-prefix mappings (PEPE listed as 1000PEPEUSDT, etc.). Hardcoded
-# here until that registry refresh is patched. Same set the audit
-# corrected via PR #6 (commit a204113), which fixed _load_mcap_from_db
-# to map mcap rows by coin_id instead of naive base+USDT concat.
-# Verify against: curl https://fapi.binance.com/fapi/v1/exchangeInfo
-_BINANCE_TICKER_OVERRIDES = {
-    "PEPE":  "1000PEPEUSDT",
-    "SHIB":  "1000SHIBUSDT",
-    "FLOKI": "1000FLOKIUSDT",
-    "BONK":  "1000BONKUSDT",
-}
-
-
-def _base_to_binance_ticker(base: str) -> str:
-    """Map CoinGecko base ('PEPE') to actual Binance perp ticker
-    ('1000PEPEUSDT'). Naive `f"{base}USDT"` silently drops 1000-prefix
-    perps from any kline-fetch path that takes a base symbol — observed
-    in compute_dispersion_filter, where PEPE/SHIB/FLOKI/BONK were dropped
-    despite ranking high in market.market_cap_daily."""
-    return _BINANCE_TICKER_OVERRIDES.get(base, f"{base}USDT")
+# _BINANCE_TICKER_OVERRIDES + _base_to_binance_ticker live in
+# pipeline.audit_filters (imported above). Re-exported via the import so
+# existing call sites here resolve unchanged.
 _OI_HIST_URL    = "https://fapi.binance.com/futures/data/openInterestHist"
 _REST_WORKERS   = 8
 _REST_TIMEOUT   = 10
@@ -429,292 +401,22 @@ def compute_canonical_basket(ref_date):
 
 
 # ==========================================================================
-# STEP 3 — TAIL GUARDRAIL (BTC daily returns + rvol from futures_1m)
+# STEP 3 — TAIL GUARDRAIL
 # ==========================================================================
-
-def _fetch_btc_daily_closes(ref_date):
-    """Pull BTC 1d closes for the trailing TAIL_VOL_LONG_WINDOW+5 days.
-
-    Extracted from compute_tail_guardrail so the DB round-trip happens
-    ONCE per daily_signal_v2 run even when multiple strategies (each with
-    their own threshold config) compute Tail Guardrail independently.
-
-    Returns a list of float closes in chronological order. Empty list if
-    coverage is insufficient — caller should fail-closed.
-    """
-    conn = _get_db_conn()
-    cur = conn.cursor()
-    cur.execute("""
-        WITH btc AS (
-            SELECT symbol_id FROM market.symbols WHERE binance_id = 'BTCUSDT'
-        )
-        SELECT DATE_TRUNC('day', f.timestamp_utc)::date AS day,
-               (ARRAY_AGG(f.close ORDER BY f.timestamp_utc DESC))[1] AS day_close
-        FROM market.futures_1m f
-        WHERE f.symbol_id IN (SELECT symbol_id FROM btc)
-          AND f.timestamp_utc >= %s::timestamptz - INTERVAL '%s days'
-          AND f.timestamp_utc < %s::timestamptz
-          AND f.close IS NOT NULL AND f.close > 0
-        GROUP BY 1
-        ORDER BY 1
-    """, (ref_date, TAIL_VOL_LONG_WINDOW + 6, ref_date))
-    rows = cur.fetchall()
-    cur.close()
-    conn.close()
-    return [float(r[1]) for r in rows]
-
-
-def compute_tail_guardrail(
-    ref_date,
-    closes: list | None = None,
-    tail_drop_pct: float | None = None,
-    tail_vol_mult: float | None = None,
-):
-    """Compute Tail Guardrail sit-flat decision for a given set of thresholds.
-
-    Logic matches daily_signal.py (v1):
-      - prev_day_return: BTC close at (ref_date-1) 23:59 / BTC close at
-        (ref_date-1) 00:00 - 1. Fires if < -tail_drop_pct.
-      - 5d rvol / 60d rvol ratio: std of daily log returns over the trailing
-        TAIL_VOL_SHORT_WINDOW days divided by std over the trailing
-        TAIL_VOL_LONG_WINDOW days. Fires if > tail_vol_mult.
-
-    Either gate firing → sit flat. Returns (sit_flat: bool, reason: str|None).
-
-    Thresholds fall through to the module-level defaults when the caller
-    passes None; this preserves the existing canonical-CSV write path
-    (main() uses the canonical strategy's thresholds by default). For
-    per-strategy computation in write_to_db, pass the strategy's config
-    values explicitly.
-
-    `closes` may be pre-fetched (via _fetch_btc_daily_closes) when the
-    caller is computing Tail Guardrail for multiple strategies in one
-    invocation — saves the DB round-trip. When None, fetches on demand.
-    """
-    tdp = tail_drop_pct if tail_drop_pct is not None else TAIL_DROP_PCT
-    tvm = tail_vol_mult if tail_vol_mult is not None else TAIL_VOL_MULT
-
-    log.info(f"Computing Tail Guardrail (drop={tdp*100:.1f}%  vol_mult={tvm}x)...")
-
-    if closes is None:
-        closes = _fetch_btc_daily_closes(ref_date)
-
-    if len(closes) < TAIL_VOL_LONG_WINDOW + 1:
-        log.warning(f"Tail Guardrail needs ≥{TAIL_VOL_LONG_WINDOW+1} daily closes "
-                    f"prior to {ref_date}; have {len(closes)}. Forcing sit-flat "
-                    f"(fail-closed) to avoid trading under uncertain guardrail "
-                    f"state.")
-        return True, "tail_guardrail_insufficient_history"
-
-    # Log returns (day N close / day N-1 close)
-    log_rets = []
-    for i in range(1, len(closes)):
-        if closes[i-1] > 0:
-            log_rets.append(math.log(closes[i] / closes[i-1]))
-
-    # Prev-day return = last full day's log return (ref_date - 1)
-    prev_day_logret = log_rets[-1] if log_rets else 0.0
-    prev_day_ret = math.exp(prev_day_logret) - 1.0
-
-    # Rvol ratio
-    def _stdev(xs):
-        if len(xs) < 2:
-            return 0.0
-        m = sum(xs) / len(xs)
-        return math.sqrt(sum((x - m) ** 2 for x in xs) / (len(xs) - 1))
-
-    rvol_5d  = _stdev(log_rets[-TAIL_VOL_SHORT_WINDOW:])
-    rvol_60d = _stdev(log_rets[-TAIL_VOL_LONG_WINDOW:])
-    ratio = (rvol_5d / rvol_60d) if rvol_60d > 0 else 0.0
-
-    log.info(f"  BTC prev-day: {prev_day_ret*100:.2f}%  "
-             f"5d rvol: {rvol_5d*100:.2f}%  "
-             f"60d baseline: {rvol_60d*100:.2f}%  "
-             f"ratio: {ratio:.3f}x  threshold: {tvm}x")
-
-    crash_fires = prev_day_ret < -tdp
-    vol_fires   = ratio > tvm
-
-    if crash_fires and vol_fires:
-        reason = (f"tail_guardrail_crash_and_vol: prev_day={prev_day_ret*100:.2f}% "
-                  f"rvol_ratio={ratio:.3f}x")
-        log.info(f"  Tail Guardrail: FIRE (both gates) -- SIT FLAT")
-        return True, reason
-    if crash_fires:
-        reason = f"tail_guardrail_crash: prev_day={prev_day_ret*100:.2f}% < -{tdp*100:.1f}%"
-        log.info(f"  Tail Guardrail: FIRE (crash gate) -- SIT FLAT")
-        return True, reason
-    if vol_fires:
-        reason = f"tail_guardrail_vol: rvol_ratio={ratio:.3f}x > {tvm}x"
-        log.info(f"  Tail Guardrail: FIRE (vol gate) -- SIT FLAT")
-        return True, reason
-
-    log.info(f"  Tail Guardrail: PASS -- both gates clear")
-    return False, None
+# `_fetch_btc_daily_closes` and `compute_tail_guardrail` are imported at the
+# top of this file from pipeline.audit_filters. The audit verifier
+# (pipeline/intraday_audit.py) reads the same functions, so live + verifier
+# never drift apart on the gate logic. See the 2026-04-26 extraction note
+# above the imports.
 
 
 # ==========================================================================
 # STEP 3b — DISPERSION FILTER (matches audit.py build_dispersion_filter)
 # ==========================================================================
 #
-# Live implementation of the cross-sectional dispersion gate. Port of the
-# audit's logic in pipeline/audit.py:2723 (build_dispersion_filter), adapted
-# for live same-day evaluation via Binance REST klines.
-#
-# Semantic (lagged by 1 day):
-#   yesterday_dispersion = std of yesterday's daily log-returns across the
-#                          top-N mcap symbols
-#   baseline             = rolling median over DISPERSION_BASELINE_WIN days
-#                          of dispersion values, ending yesterday
-#   disp_ratio           = yesterday_dispersion / baseline
-#   sit_flat today       if disp_ratio < threshold
-#
-# Approximation vs audit: the audit uses per-day top-N mcap universe. Live
-# uses today's top-N for the full baseline window (simpler + within a few
-# symbols of per-day). Dominant effect is yesterday's dispersion value,
-# which uses yesterday's data directly; the baseline median is more robust
-# to symbol churn.
-#
-# Returns (sit_flat, reason) matching compute_tail_guardrail shape.
-
-
-def compute_dispersion_filter(ref_date,
-                              threshold: float | None = None,
-                              baseline_win: int | None = None,
-                              n_symbols: int | None = None):
-    thr = threshold    if threshold    is not None else DISPERSION_THRESHOLD
-    win = baseline_win if baseline_win is not None else DISPERSION_BASELINE_WIN
-    n   = n_symbols    if n_symbols    is not None else DISPERSION_N
-
-    log.info(f"Computing Dispersion filter (threshold={thr}, baseline_win={win}d, n={n})...")
-
-    # 1. Today's top-N mcap symbols from DB (excludes stablecoins + non-ASCII)
-    conn = _get_db_conn()
-    cur = conn.cursor()
-    cur.execute("""
-        SELECT base
-        FROM market.market_cap_daily
-        WHERE date = %s
-          AND base NOT IN ('USDT','USDC','BUSD','DAI','TUSD','FDUSD','USDE',
-                           'USDS','PYUSD','USD1','FRAX','USDP')
-          AND base !~ '[^A-Z0-9]'
-          AND base NOT IN ('XAU','XAG','XPD','XPT')  -- non-crypto tickers
-        ORDER BY market_cap_usd DESC
-        LIMIT %s
-    """, (ref_date, n))
-    symbols = [r[0] for r in cur.fetchall()]
-    cur.close()
-    conn.close()
-
-    if len(symbols) < DISPERSION_MIN_SYMBOLS:
-        log.warning(f"  Dispersion: only {len(symbols)} eligible mcap symbols "
-                    f"for {ref_date} (< {DISPERSION_MIN_SYMBOLS} min). "
-                    f"Fail-open (not firing).")
-        return False, None
-
-    # 2. Fetch (win + buffer) days of 1d klines per symbol from Binance FAPI
-    from concurrent.futures import ThreadPoolExecutor
-    fetch_days = win + 2
-    end_dt    = _dt.datetime.combine(ref_date, _dt.time(0, 0, 0), tzinfo=_dt.timezone.utc)
-    start_dt  = end_dt - _dt.timedelta(days=fetch_days)
-    start_ms  = int(start_dt.timestamp() * 1000)
-    end_ms    = int(end_dt.timestamp()   * 1000)
-
-    def _fetch_daily(sym):
-        ticker = _base_to_binance_ticker(sym)
-        try:
-            r = requests.get(
-                f"{_BINANCE_FAPI}/fapi/v1/klines",
-                params={"symbol": ticker, "interval": "1d",
-                        "startTime": start_ms, "endTime": end_ms,
-                        "limit": fetch_days + 5},
-                timeout=_REST_TIMEOUT,
-            )
-            if r.status_code != 200:
-                return sym, None
-            klines = r.json()
-            if not klines:
-                return sym, None
-            return sym, [(k[0], float(k[4])) for k in klines]  # (open_time_ms, close)
-        except Exception:
-            return sym, None
-
-    log.info(f"  Fetching {fetch_days}d of 1d klines for {len(symbols)} symbols...")
-    results: dict = {}
-    with ThreadPoolExecutor(max_workers=_REST_WORKERS) as pool:
-        for sym, series in pool.map(_fetch_daily, symbols):
-            if series:
-                results[sym] = series
-
-    if len(results) < DISPERSION_MIN_SYMBOLS:
-        log.warning(f"  Dispersion: only {len(results)}/{len(symbols)} symbols "
-                    f"returned klines (< {DISPERSION_MIN_SYMBOLS} min). "
-                    f"Fail-open.")
-        return False, None
-
-    # 3. Build per-symbol {date: close} then compute per-day cross-sectional
-    #    std of log-returns.
-    per_symbol_closes: dict = {}
-    all_dates: set = set()
-    for sym, series in results.items():
-        d_map = {}
-        for ts_ms, close in series:
-            d = _dt.datetime.fromtimestamp(ts_ms / 1000,
-                                           tz=_dt.timezone.utc).date()
-            d_map[d] = close
-            all_dates.add(d)
-        per_symbol_closes[sym] = d_map
-
-    sorted_dates = sorted(all_dates)
-    daily_dispersion: dict = {}
-    for i in range(1, len(sorted_dates)):
-        d = sorted_dates[i]
-        d_prev = sorted_dates[i - 1]
-        rets = []
-        for sym, d_map in per_symbol_closes.items():
-            c = d_map.get(d)
-            c_prev = d_map.get(d_prev)
-            if c is not None and c_prev is not None and c_prev > 0 and c > 0:
-                rets.append(math.log(c / c_prev))
-        if len(rets) >= DISPERSION_MIN_SYMBOLS:
-            m = sum(rets) / len(rets)
-            var = sum((r - m) ** 2 for r in rets) / (len(rets) - 1)
-            daily_dispersion[d] = math.sqrt(var)
-
-    # 4. Yesterday's dispersion + baseline median
-    yesterday = ref_date - _dt.timedelta(days=1)
-    if yesterday not in daily_dispersion:
-        log.warning(f"  Dispersion: no value for yesterday ({yesterday}). "
-                    f"Fail-open.")
-        return False, None
-
-    window_start = yesterday - _dt.timedelta(days=win - 1)
-    baseline_vals = sorted(v for d, v in daily_dispersion.items()
-                           if window_start <= d <= yesterday)
-    min_for_baseline = max(5, win // 2)
-    if len(baseline_vals) < min_for_baseline:
-        log.warning(f"  Dispersion: only {len(baseline_vals)} baseline values "
-                    f"(need ≥ {min_for_baseline}). Fail-open.")
-        return False, None
-
-    n_b = len(baseline_vals)
-    baseline = (baseline_vals[n_b // 2]
-                if n_b % 2 == 1
-                else (baseline_vals[n_b // 2 - 1] + baseline_vals[n_b // 2]) / 2)
-    yesterday_disp = daily_dispersion[yesterday]
-    disp_ratio = (yesterday_disp / baseline) if baseline > 0 else 0.0
-
-    log.info(f"  Dispersion[{yesterday}]={yesterday_disp:.5f}  "
-             f"baseline_median={baseline:.5f}  "
-             f"ratio={disp_ratio:.3f}  threshold={thr}")
-
-    if disp_ratio < thr:
-        reason = f"dispersion_low: ratio={disp_ratio:.3f} < {thr}"
-        log.info(f"  Dispersion: FIRE -- SIT FLAT")
-        return True, reason
-
-    log.info(f"  Dispersion: PASS")
-    return False, None
+# `compute_dispersion_filter` is imported at the top of this file from
+# pipeline.audit_filters (extracted 2026-04-26). Same logic as before;
+# shared with the audit verifier so the two paths cannot drift.
 
 
 # ==========================================================================

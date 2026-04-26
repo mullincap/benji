@@ -68,6 +68,24 @@ PATH=/usr/local/sbin:/usr/local/bin:/sbin:/bin:/usr/sbin:/usr/bin
 # is always the latest CLOSED bar. Trade deployment at 06:35 unchanged.
 0 6 * * * . /mnt/quant-data/credentials/secrets.env && /root/benji/pipeline/.venv/bin/python /root/benji/daily_signal_v2.py >> /mnt/quant-data/logs/signal/cron.log 2>&1
 
+# ── Audit gate verifier — 06:01 UTC ──────────────────────────────────────────
+# Re-computes today's (sit_flat, filter_name) decision per published+active
+# strategy version using pipeline.audit_filters (single source of truth,
+# shared with daily_signal_v2) and diffs against the user_mgmt.daily_signals
+# row that the live path wrote at ~06:00:30. On agreement: marks
+# audit_status='verified'. On disagreement: marks audit_status='mismatch',
+# logs [GATE_MISMATCH] for cron-mailer pickup. Trader (after follow-up
+# commit) gates entry on audit_status='verified'.
+#
+# Timing: closed-bar filter inside _fetch_symbol_snapshot drops in-progress
+# bars, so 06:01 is safe (the 06:00 1m bar's open_time + 60s = 06:01:00 ==
+# now is treated as closed). The 06:00 cron's 65s sleep is belt-and-
+# suspenders for clock skew; the verifier relies on the closed-bar filter
+# alone. Typical runtime 30-60s, worst observed ~120s; window to trader
+# spawn at 06:05 is 4 minutes. [INTRADAY_AUDIT_RUNTIME] log line emitted
+# every run — universe growth from ~400 → 600 perps would tighten this.
+1 6 * * * . /mnt/quant-data/credentials/secrets.env && /root/benji/pipeline/.venv/bin/python /root/benji/pipeline/intraday_audit.py >> /mnt/quant-data/logs/signal/intraday_audit.log 2>&1
+
 # ── Signal shadow diff — 06:15 UTC (v1 vs v2 vs canonical basket diff) ───────
 15 6 * * * . /mnt/quant-data/credentials/secrets.env && /root/benji/pipeline/.venv/bin/python /root/benji/shadow_diff.py >> /mnt/quant-data/logs/signal/shadow_diff.log 2>&1
 # Reconcile tonight session capital events — quick-fix interim ; supersede by permanent reconciliation migration per docs/open_work_list.md
