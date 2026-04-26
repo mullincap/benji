@@ -17,6 +17,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { useParams, useSearchParams, useRouter } from "next/navigation";
+import PortfolioSessionLogs from "./PortfolioSessionLogs";
 import {
   Chart as ChartJS,
   CategoryScale,
@@ -1873,34 +1874,18 @@ export default function PortfolioDetailPage() {
           </div>
         </div>
 
-        {/* Subtle deep-link to the session log viewer for this allocation+date */}
-        {allocationId && (
-          <div style={{
-            display: "flex",
-            justifyContent: "flex-end",
-            marginTop: 16,
-            paddingTop: 12,
-            borderTop: "1px solid var(--line)",
-          }}>
-            <a
-              href={`/manager/execution?date=${date}&allocation_id=${allocationId}`}
-              style={{
-                fontSize: 9,
-                fontWeight: 700,
-                letterSpacing: "0.12em",
-                textTransform: "uppercase",
-                color: "var(--t3)",
-                textDecoration: "none",
-                fontFamily: FONT_MONO,
-              }}
-              onMouseEnter={(e) => { e.currentTarget.style.color = "var(--t1)"; }}
-              onMouseLeave={(e) => { e.currentTarget.style.color = "var(--t3)"; }}
-            >
-              View session logs →
-            </a>
-          </div>
-        )}
+        {/* Session-logs deep-link removed — replaced by the right-edge
+            sidebar handle (see PortfolioSessionLogs mounted below). Two
+            competing affordances for the same action read worse than
+            one strong affordance. */}
       </div>
+      <PortfolioSessionLogs
+        date={date}
+        allocationId={allocationId}
+        exchange={meta.exchange}
+        strategyLabel={meta.strategy_label}
+        sessionActive={meta.status === "active"}
+      />
     </>
   );
 }
