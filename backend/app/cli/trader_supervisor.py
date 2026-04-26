@@ -160,6 +160,55 @@ def _release_lock(conn, allocation_id: str) -> None:
     conn.commit()
 
 
+def _kill_existing_trader_processes(allocation_id: str, *, source: str) -> None:
+    """SIGKILL any in-container trader_blofin process for this allocation
+    before respawning. Defends against the hung-trader case where the
+    process is alive (so the OS PID is still valid + the lock_acquired_at
+    is still held) but no bars are being written. Without this, the
+    supervisor would spawn a new trader alongside the hung one — both
+    racing for the lock + writing duplicate bars/positions.
+
+    Best-effort: scans /proc/*/cmdline for any python process whose argv
+    contains both `trader_blofin` and the allocation_id, sends SIGKILL.
+    SIGTERM is intentionally skipped — a hung process by definition isn't
+    responding to its signal handlers, so SIGTERM would just delay us.
+    Failures are logged but don't block the respawn.
+    """
+    import os
+    import signal as _signal
+    short = allocation_id[:8]
+    proc_dir = "/proc"
+    if not os.path.isdir(proc_dir):
+        return  # not Linux / no procfs — skip silently
+    try:
+        candidates = [name for name in os.listdir(proc_dir) if name.isdigit()]
+    except OSError as e:
+        log.warning(f"  [{source}] {short}: /proc scan failed: {e!r}")
+        return
+    killed = []
+    for pid_str in candidates:
+        try:
+            with open(f"{proc_dir}/{pid_str}/cmdline", "rb") as f:
+                cmdline = f.read().decode("utf-8", errors="replace")
+        except OSError:
+            continue
+        if "trader_blofin" not in cmdline:
+            continue
+        if allocation_id not in cmdline:
+            continue
+        try:
+            pid = int(pid_str)
+            if pid == os.getpid():
+                continue  # don't kill the supervisor itself
+            os.kill(pid, _signal.SIGKILL)
+            killed.append(pid)
+        except (ProcessLookupError, PermissionError) as e:
+            log.warning(f"  [{source}] {short}: failed to kill pid {pid_str}: {e!r}")
+    if killed:
+        log.warning(f"  [{source}] {short}: killed {len(killed)} stale "
+                    f"trader process(es): {killed}")
+
+
 def _should_backoff(row: dict) -> bool:
     count = int(row.get("respawn_count") or 0)
     last = row.get("last_respawn_at")
@@ -297,6 +346,7 @@ def _attempt_respawn(conn, row: dict, *, source: str) -> bool:
         return False
 
     try:
+        _kill_existing_trader_processes(aid, source=source)
         _release_lock(conn, aid)
         pid = spawn_allocation(aid)
     except Exception as e:
@@ -400,6 +450,31 @@ def startup_recovery() -> int:
         conn = _connect()
         try:
             ensure_schema(conn)
+
+            # Reset backoff state for every active allocation. A backend
+            # container restart is the most common respawn trigger (deploys,
+            # crashes, OOM); most respawn_count entries are deploy-induced
+            # noise, not "the trader keeps dying after we tried to fix it"
+            # signal. Without this reset, an operator pushing 3+ deploys
+            # in an hour locks themselves out of auto-recovery for 60 min
+            # (observed 2026-04-26 13:05 — supervisor caught the hang at
+            # 13:14 but refused to respawn until 13:50). Container start
+            # is a clean line — anything before it isn't predictive.
+            with conn.cursor() as cur:
+                cur.execute("""
+                    UPDATE user_mgmt.trader_supervisor_state
+                       SET respawn_count = 0,
+                           last_respawn_at = NULL,
+                           stale_detected_at = NULL,
+                           last_error = NULL,
+                           updated_at = NOW()
+                """)
+                reset_n = cur.rowcount
+            conn.commit()
+            if reset_n:
+                log.info(f"startup_recovery: cleared backoff for "
+                         f"{reset_n} allocation(s)")
+
             orphans = _fetch_orphans_at_startup(conn, threshold_ts)
             log.info(f"startup_recovery: {len(orphans)} orphaned session(s) "
                      f"(runtime_state last updated before {threshold_ts.isoformat()})")
