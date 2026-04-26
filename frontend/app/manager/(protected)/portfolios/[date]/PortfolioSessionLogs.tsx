@@ -1056,17 +1056,19 @@ function Snapshot({
     },
     {
       label: "PEAK / TSL",
-      // Two-color rendering: PEAK in the default tone, TSL in amber so
-      // it pops as the live trailing-stop trigger floor. Both still
-      // share the same cell so the strip stays at 5 columns.
+      // Single-line, two-color rendering. At 470 panel width the
+      // combined value is tight; per-span fontSize 11 (down from 12)
+      // claws back enough horizontal room that "0.00% / -9.50%" fits
+      // without ellipsing. Asymmetric grid below also gives this
+      // column extra flex so the others don't have to give space.
       value: lastBar ? (
-        <>
+        <span style={{ fontSize: 11, whiteSpace: "nowrap" }}>
           {fmtPct(lastBar.peak, 2)}
           <span style={{ color: "#52525b" }}> / </span>
           <span style={{ color: "var(--amber)" }}>
             {fmtPct(lastBar.tsl, 2)}
           </span>
-        </>
+        </span>
       ) : (
         "—"
       ),
@@ -1083,7 +1085,10 @@ function Snapshot({
     <div
       style={{
         display: "grid",
-        gridTemplateColumns: "repeat(5, 1fr)",
+        // Asymmetric grid — PEAK / TSL column gets ~1.5× the room since
+        // it has to fit two formatted percentages on one line. Other
+        // four cells stay at 1fr. Total weight 1+1+1+1.5+1 = 5.5.
+        gridTemplateColumns: "1fr 1fr 1fr 1.5fr 1fr",
         gap: 8,
         padding: "11px 12px",
         borderBottom: "1px solid rgba(255,255,255,0.06)",
