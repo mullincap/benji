@@ -228,11 +228,6 @@ function MatrixHeader({
   theme: Theme;
   onThemeChange: (next: Theme) => void;
 }) {
-  const gapTooltip =
-    gapCount > 0
-      ? `${gapCount} bar gap${gapCount > 1 ? "s" : ""} in this window — bars not written by the trader during dead-process windows. Bar numbers in the table reflect the trader's bar counter, not row index.`
-      : undefined;
-
   return (
     <div
       style={{
@@ -264,14 +259,11 @@ function MatrixHeader({
         </span>
         {gapCount > 0 && (
           <span
-            title={gapTooltip}
             style={{
               marginLeft: 6,
               color: "var(--amber)",
               fontWeight: 400,
               letterSpacing: "0.06em",
-              cursor: "help",
-              borderBottom: "1px dotted var(--amber)",
             }}
           >
             · {gapCount} gap{gapCount > 1 ? "s" : ""}
