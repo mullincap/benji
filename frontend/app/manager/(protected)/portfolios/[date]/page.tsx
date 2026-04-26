@@ -716,6 +716,10 @@ export default function PortfolioDetailPage() {
   // a "best-fit pace" overlay across the full path so the user can spot
   // bars sitting above/below the line at a glance.
   const [trendlineExtended, setTrendlineExtended] = useState(false);
+  // Tracks the (date, allocationId) we've already seeded the hidden-set
+  // for, so polling refreshes don't keep clobbering the user's legend
+  // clicks. Reset when the user navigates to a different portfolio.
+  const seededHiddenRef = useRef<string | null>(null);
 
   const setView = useCallback((next: "portfolio" | "symbols") => {
     setViewState(next);
@@ -843,6 +847,25 @@ export default function PortfolioDetailPage() {
     }
     return m;
   }, [data]);
+
+  // Auto-hide stopped symbols on first load per (date, allocation). Stopped
+  // symbols are still rendered as dashed segments by default — but on a
+  // basket of 8+ symbols where 3 are flat-lined at their clamp values, the
+  // dashed lines stack up and crowd the live ones. Seeding hiddenSymbols
+  // with the stopped set defaults them to off; clicking the legend chip
+  // toggles them back on, same UX as any other symbol. Polling refreshes
+  // skip the seed (seededHiddenRef guard) so the user's choices persist.
+  useEffect(() => {
+    if (!data) return;
+    const key = `${date}|${allocationId ?? "master"}`;
+    if (seededHiddenRef.current === key) return;
+    seededHiddenRef.current = key;
+    const stoppedDisplayLabels = new Set<string>();
+    for (const sym of stoppedAtBar.keys()) {
+      stoppedDisplayLabels.add(sym.replace("-USDT", ""));
+    }
+    setHiddenSymbols(stoppedDisplayLabels);
+  }, [data, date, allocationId, stoppedAtBar]);
 
   if (ambiguity) {
     // Multiple allocations on this date. Render a picker that redirects to
