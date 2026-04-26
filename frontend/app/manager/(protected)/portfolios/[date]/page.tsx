@@ -1007,6 +1007,12 @@ export default function PortfolioDetailPage() {
       pointHoverRadius: 4,
       tension: 0.15,
       hidden: hiddenSymbols.has(displayLabel),
+      // Bridge gaps caused by missing bars (e.g. trader-down windows that
+      // the supervisor hadn't yet recovered). Each gap renders as a single
+      // straight segment between the surrounding bars, instead of a hard
+      // break — visually cleaner and the matrix below the chart still shows
+      // exactly which bars are missing for anyone who needs the truth.
+      spanGaps: true,
       // Dash the segment after the stop bar.
       segment: stoppedBar !== undefined
         ? {
@@ -1040,31 +1046,57 @@ export default function PortfolioDetailPage() {
     pointRadius: 0,
     pointHoverRadius: 5,
     tension: 0.15,
+    // Same gap-bridging rationale as the symbol datasets — missing bars
+    // (trader-down windows, etc.) are stitched across visually.
+    spanGaps: true,
     _isSymbol: false,
   };
 
-  // Faint pace trendline — straight from session start (0%) to the latest
-  // written bar's portfolio incr. Shows whether the path is outpacing or
-  // lagging its session average. Only spans 0..lastFilledIdx; the right-
-  // hand segment is reserved for forecasts/projections to be added later.
+  // Forward projection — linear-regression extrapolation from the latest
+  // bar to the deployment window close. Mirrors the Manager Overview's
+  // Intraday Equity projection (overview/page.tsx:816). Slope is OLS on
+  // all real points once we have ≥1h of history (12 bars at 5-min cadence);
+  // before that the line is flat at the latest value (insufficient signal
+  // for a directional forecast). The projection only covers slots AFTER
+  // lastFilledIdx so the dashed line lives entirely in the empty right-
+  // hand space — it doesn't overlay the actual path.
+  const realPoints: { x: number; y: number }[] = [];
+  for (let i = 0; i <= lastFilledIdx; i++) {
+    const b = barAtSlot[i];
+    if (b !== undefined) realPoints.push({ x: i, y: b.incr * 100 });
+  }
   const trendData: (number | null)[] = new Array(totalSlots).fill(null);
-  if (lastFilledIdx > 0) {
-    const lastValue = (barAtSlot[lastFilledIdx]!.incr) * 100;
-    for (let i = 0; i <= lastFilledIdx; i++) {
-      trendData[i] = (i / lastFilledIdx) * lastValue;
+  if (realPoints.length >= 2) {
+    const lastReal = realPoints[realPoints.length - 1];
+    const REGRESSION_MIN_POINTS = 12;  // ~1h of 5-min bars
+    let slope = 0;
+    if (realPoints.length >= REGRESSION_MIN_POINTS) {
+      const n = realPoints.length;
+      const sumX = realPoints.reduce((s, p) => s + p.x, 0);
+      const sumY = realPoints.reduce((s, p) => s + p.y, 0);
+      const sumXY = realPoints.reduce((s, p) => s + p.x * p.y, 0);
+      const sumX2 = realPoints.reduce((s, p) => s + p.x * p.x, 0);
+      const denom = n * sumX2 - sumX * sumX;
+      slope = denom === 0 ? 0 : (n * sumXY - sumX * sumY) / denom;
+    }
+    for (let i = lastReal.x; i < totalSlots; i++) {
+      trendData[i] = lastReal.y + slope * (i - lastReal.x);
     }
   }
   const trendlineDataset = {
     label: "Pace",
     data: trendData,
-    borderColor: "var(--t2)",
-    backgroundColor: "transparent",
-    borderWidth: 1,
-    borderDash: [4, 4],
+    borderColor: "rgba(160, 157, 150, 0.55)",
+    backgroundColor: "rgba(160, 157, 150, 0.06)",
+    borderWidth: 1.4,
+    borderDash: [6, 4],
     pointRadius: 0,
     pointHoverRadius: 0,
-    fill: false as const,
-    tension: 0,
+    // Subtle wedge under the projection — same depth treatment as the
+    // Manager Overview's intraday equity forecast. Anchors the projection
+    // visually without competing with the live portfolio gradient.
+    fill: "origin" as const,
+    tension: 0.15,
     spanGaps: false,
     _isSymbol: false,
   };
