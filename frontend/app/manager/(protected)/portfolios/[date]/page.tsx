@@ -956,12 +956,44 @@ export default function PortfolioDetailPage() {
   const symStopsCount = stoppedAtBar.size;
   const enteredCount = meta.entered.length;
 
-  // Chart datasets: one per symbol + portfolio line
-  const labels = bars.map((b) => fmtTime(b.ts));
+  // Chart spans the full deployment window: from session_start_hour:00 UTC
+  // through 23:55 UTC at 5-min cadence (matches the trader's bar interval).
+  // Building all 216-ish slots up front means the chart reserves the right-
+  // hand space for projections/forecasts after the last data point — instead
+  // of the x-axis ending at "now" and shifting as bars arrive. Bars that
+  // haven't fired yet sit as null entries; Chart.js renders them as gaps.
+  const BAR_INTERVAL_MIN = 5;
+  const SESSION_END_HOUR_UTC_EXCLUSIVE = 24;  // last bar timestamp 23:55
+  const sessionStartHour = meta.session_start_hour ?? 6;
+  const totalSlots =
+    ((SESSION_END_HOUR_UTC_EXCLUSIVE - sessionStartHour) * 60) / BAR_INTERVAL_MIN;
+  const labels: string[] = Array.from({ length: totalSlots }, (_, i) => {
+    const totalMin = i * BAR_INTERVAL_MIN;
+    const h = sessionStartHour + Math.floor(totalMin / 60);
+    const m = totalMin % 60;
+    return `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}`;
+  });
+  // Index bars into slots by parsing HH:MM out of bar.ts (UTC). Bars before
+  // session_start_hour or after 23:55 fall outside the chart and are dropped.
+  const barAtSlot: (PortfolioBar | undefined)[] = new Array(totalSlots);
+  for (const b of bars) {
+    const m = /(\d{2}):(\d{2}):/.exec(b.ts);
+    if (!m) continue;
+    const totalMin = (Number(m[1]) - sessionStartHour) * 60 + Number(m[2]);
+    if (totalMin < 0) continue;
+    const idx = Math.round(totalMin / BAR_INTERVAL_MIN);
+    if (idx >= 0 && idx < totalSlots) barAtSlot[idx] = b;
+  }
+  let lastFilledIdx = -1;
+  for (let i = totalSlots - 1; i >= 0; i--) {
+    if (barAtSlot[i] !== undefined) { lastFilledIdx = i; break; }
+  }
+
   const symbolDatasets = symbolsOrdered.map((sym, idx) => {
     const stoppedBar = stoppedAtBar.get(sym);
     const displayLabel = sym.replace("-USDT", "");
-    const data = bars.map((b) => {
+    const data = barAtSlot.map((b) => {
+      if (!b) return null;
       const v = b.sym_returns[sym];
       return v !== undefined ? v * 100 : null;
     });
@@ -979,7 +1011,7 @@ export default function PortfolioDetailPage() {
       segment: stoppedBar !== undefined
         ? {
             borderDash: (ctx: { p1DataIndex: number }) => {
-              const barNum = bars[ctx.p1DataIndex]?.bar ?? 0;
+              const barNum = barAtSlot[ctx.p1DataIndex]?.bar ?? 0;
               return barNum >= stoppedBar ? [4, 4] : undefined;
             },
           }
@@ -992,7 +1024,7 @@ export default function PortfolioDetailPage() {
   // gradient treatment so the pair reads as part of the same design system.
   const portfolioDataset = {
     label: "Portfolio",
-    data: bars.map((b) => b.incr * 100),
+    data: barAtSlot.map((b) => (b ? b.incr * 100 : null)),
     borderColor: PORTFOLIO_COLOR,
     backgroundColor: (ctx: { chart: ChartJS }) => {
       const c = ctx.chart.ctx;
@@ -1011,13 +1043,41 @@ export default function PortfolioDetailPage() {
     _isSymbol: false,
   };
 
+  // Faint pace trendline — straight from session start (0%) to the latest
+  // written bar's portfolio incr. Shows whether the path is outpacing or
+  // lagging its session average. Only spans 0..lastFilledIdx; the right-
+  // hand segment is reserved for forecasts/projections to be added later.
+  const trendData: (number | null)[] = new Array(totalSlots).fill(null);
+  if (lastFilledIdx > 0) {
+    const lastValue = (barAtSlot[lastFilledIdx]!.incr) * 100;
+    for (let i = 0; i <= lastFilledIdx; i++) {
+      trendData[i] = (i / lastFilledIdx) * lastValue;
+    }
+  }
+  const trendlineDataset = {
+    label: "Pace",
+    data: trendData,
+    borderColor: "var(--t2)",
+    backgroundColor: "transparent",
+    borderWidth: 1,
+    borderDash: [4, 4],
+    pointRadius: 0,
+    pointHoverRadius: 0,
+    fill: false as const,
+    tension: 0,
+    spanGaps: false,
+    _isSymbol: false,
+  };
+
   // Datasets shown to Chart.js depend on the mode. Portfolio-only mode strips
   // symbol lines entirely (cleaner view); All Symbols mode stacks them under
   // the portfolio area. The `hidden` flag on each symbol dataset is driven by
-  // React state so toggle visibility survives mode switches.
+  // React state so toggle visibility survives mode switches. The pace
+  // trendline appears in both modes (faint + dashed; reads as scaffolding
+  // rather than a competing line).
   const chartDatasets = view === "symbols"
-    ? [portfolioDataset, ...symbolDatasets]
-    : [portfolioDataset];
+    ? [portfolioDataset, trendlineDataset, ...symbolDatasets]
+    : [portfolioDataset, trendlineDataset];
 
   const chartOptions: ChartOptions<"line"> = {
     responsive: true,
@@ -1035,6 +1095,9 @@ export default function PortfolioDetailPage() {
         titleFont: { family: "Space Mono", size: 10, weight: "bold" },
         bodyFont:  { family: "Space Mono", size: 10 },
         padding: 8,
+        // Pace trendline is decorative scaffolding; suppress it from the
+        // tooltip body so it doesn't add a row alongside Portfolio + symbols.
+        filter: (item) => item.dataset.label !== "Pace",
         itemSort: (a, b) => {
           // Portfolio row always first so it anchors the tooltip.
           const aPortfolio = a.dataset.label === "Portfolio" ? -1 : 0;
