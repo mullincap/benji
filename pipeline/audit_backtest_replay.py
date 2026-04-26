@@ -213,12 +213,22 @@ def _recompute_filter_decision(ref_date: dt.date, config: dict) -> dict:
     """Recompute audit_filters' per-strategy decision for ref_date using
     the strategy_version's config. Returns:
         {sit_flat: bool, tg_fire: bool, dp_fire: bool,
-         tg_reason: str|None, dp_reason: str|None, error: str|None}
-    On error, sit_flat=None and error captures the failure.
+         tg_reason: str|None, dp_reason: str|None,
+         insufficient_history: bool, error: str|None}
+
+    insufficient_history=True when Tail Guardrail fail-closes due to
+    fewer than TAIL_VOL_LONG_WINDOW+1 prior BTC daily closes. These
+    recompute outputs are NOT real filter decisions — they're a
+    safety bypass — so the diff layer must skip them rather than
+    silently agree with audit's actual FLAT days (false-positive
+    agreement). Smoke-tested 2026-04-26: market.futures_1m's BTC
+    coverage starts 2025-02-13, which is ALSO the audit's first
+    date, so the first ~61 audit dates fail-close coincidentally.
     """
     out = {
         "sit_flat": None, "tg_fire": None, "dp_fire": None,
-        "tg_reason": None, "dp_reason": None, "error": None,
+        "tg_reason": None, "dp_reason": None,
+        "insufficient_history": False, "error": None,
     }
     try:
         tdp = config.get("tail_drop_pct")
@@ -229,6 +239,10 @@ def _recompute_filter_decision(ref_date: dt.date, config: dict) -> dict:
             tail_drop_pct=float(tdp) if tdp is not None else None,
             tail_vol_mult=float(tvm) if tvm is not None else None,
         )
+        if tg_reason and tg_reason.startswith("tail_guardrail_insufficient_history"):
+            out["insufficient_history"] = True
+            out["tg_reason"] = tg_reason
+            return out
         dp_flat, dp_reason = compute_dispersion_filter(ref_date)
         out["tg_fire"] = bool(tg_flat)
         out["dp_fire"] = bool(dp_flat)
@@ -244,6 +258,8 @@ def _recompute_filter_decision(ref_date: dt.date, config: dict) -> dict:
 def _diff(audit_sit_flat: bool, recomputed: dict) -> str | None:
     if recomputed["error"]:
         return f"recompute_error: {recomputed['error']}"
+    if recomputed["insufficient_history"]:
+        return None  # caller checks insufficient_history before calling _diff
     if recomputed["sit_flat"] is None:
         return "recompute_returned_null"
     if bool(audit_sit_flat) != bool(recomputed["sit_flat"]):
@@ -285,25 +301,34 @@ def _print_human(report: dict) -> None:
         print()
 
     print("─" * 72)
-    print(f"  Compared:        {report['n_compared']}")
-    print(f"  Matched:         {report['n_matched']}")
-    print(f"  Mismatched:      {len(report['mismatches'])}")
-    print(f"  Recompute fail:  {len(report['errors'])}")
-    print(f"  Audit PASS days: {report['audit_active']}  "
+    print(f"  Curve days:           {report['n_curve_days']}")
+    print(f"  Skipped (no history): {report['n_skipped_insufficient']}  "
+          f"(Tail Guardrail needs 60d BTC history; "
+          f"market.futures_1m starts 2025-02-13)")
+    print(f"  Recompute errors:     {len(report['errors'])}")
+    print(f"  Compared:             {report['n_compared']}")
+    print(f"  Matched:              {report['n_matched']}")
+    print(f"  Mismatched:           {len(report['mismatches'])}")
+    print(f"  Audit PASS days:      {report['audit_active']}  "
           f"FLAT days: {report['audit_flat']}")
-    print(f"  Elapsed:         {report['elapsed_s']:.1f}s")
+    print(f"  Elapsed:              {report['elapsed_s']:.1f}s")
     print()
     if report["mismatches"]:
         rate = 100.0 * len(report["mismatches"]) / max(report["n_compared"], 1)
         print(f"  RESULT: {len(report['mismatches'])} mismatch(es) "
-              f"({rate:.2f}% mismatch rate). Investigate before "
-              f"trusting audit_filters as audit-canonical.")
+              f"({rate:.2f}% mismatch rate over {report['n_compared']} "
+              f"comparable dates). Investigate before trusting "
+              f"audit_filters as audit-canonical.")
+    elif report["n_compared"] == 0:
+        print(f"  RESULT: 0 comparable dates — replay window has no "
+              f"real comparisons. Coverage is empty.")
     elif report["errors"]:
-        print(f"  RESULT: 0 mismatches but {len(report['errors'])} "
+        print(f"  RESULT: 0 mismatches over {report['n_compared']} "
+              f"comparable dates, but {len(report['errors'])} "
               f"recompute errors — coverage incomplete.")
     else:
         print(f"  RESULT: clean — audit_filters and audit.py agree on "
-              f"every comparable date.")
+              f"all {report['n_compared']} comparable dates.")
     print()
 
 
@@ -338,6 +363,7 @@ def main() -> int:
 
     n_compared = 0
     n_matched = 0
+    n_skipped_insufficient = 0
     mismatches: list[dict] = []
     errors: list[dict] = []
     audit_active = sum(1 for _, a in curve if a)
@@ -351,6 +377,9 @@ def main() -> int:
         recomputed = _recompute_filter_decision(d, target["config"])
         if recomputed["error"]:
             errors.append({"date": d.isoformat(), "error": recomputed["error"]})
+            continue
+        if recomputed["insufficient_history"]:
+            n_skipped_insufficient += 1
             continue
 
         diff_summary = _diff(audit_sit_flat, recomputed)
@@ -383,6 +412,7 @@ def main() -> int:
         "last_date": curve[-1][0].isoformat() if curve else None,
         "n_compared": n_compared,
         "n_matched": n_matched,
+        "n_skipped_insufficient": n_skipped_insufficient,
         "audit_active": audit_active,
         "audit_flat": audit_flat,
         "mismatches": mismatches,
