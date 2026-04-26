@@ -1672,34 +1672,21 @@ export default function PortfolioDetailPage() {
                   })}
                 </div>
               )}
-              {/* Trendline extent toggle — when off, the dashed pace line
-                  only spans the empty future region; when on, it extends
-                  backwards across the historical path too so the user can
-                  spot bars sitting above/below the line at a glance. */}
-              <button
-                type="button"
-                onClick={() => setTrendlineExtended((v) => !v)}
-                style={{
-                  fontFamily: FONT_MONO,
-                  fontSize: 9,
-                  fontWeight: 700,
-                  letterSpacing: "0.12em",
-                  textTransform: "uppercase",
-                  padding: "4px 10px",
-                  borderRadius: 3,
-                  border: `1px solid ${trendlineExtended ? "var(--line2)" : "var(--line)"}`,
-                  background: trendlineExtended ? "var(--bg3)" : "transparent",
-                  color: trendlineExtended ? "var(--t0)" : "var(--t2)",
-                  cursor: "pointer",
-                }}
-                title={
-                  trendlineExtended
-                    ? "Trendline spans the full session. Click to limit to the projection segment only."
-                    : "Trendline currently covers only the projection segment. Click to extend it backwards across the historical path too."
-                }
-              >
-                {trendlineExtended ? "Trendline · Full" : "Trendline · Projection"}
-              </button>
+              {/* Trendline extent — segmented control matching the Mode
+                  toggle pattern. Projection = forecast region only;
+                  Full = pace line extends across the historical path
+                  too. Same OLS slope + last-bar anchor either way. */}
+              <SegmentedToggle
+                ariaLabel="Trendline extent"
+                value={trendlineExtended ? "full" : "projection"}
+                onChange={(next) => setTrendlineExtended(next === "full")}
+                options={[
+                  { key: "projection", label: "Projection",
+                    title: "Pace line covers only the post-NOW projection segment." },
+                  { key: "full", label: "Full",
+                    title: "Pace line extends backwards across the historical path." },
+                ]}
+              />
               {/* Overlay toggles — color-coded chip group lets the operator
                   dim individual reference layers without losing the others.
                   Active = filled background; inactive = ghosted outline. */}
@@ -1977,6 +1964,68 @@ function OverlayChip({
       />
       {label}
     </button>
+  );
+}
+
+// Generic 2+-option segmented control. Same visual treatment as
+// ModeToggle (bordered group, filled active tab, monospace 9px); the
+// generic prop API lets any toolbar pair adopt the same control without
+// duplicating the styling block. Used for the trendline extent toggle
+// (Projection / Full) and any future binary chart switches.
+function SegmentedToggle<T extends string>({
+  value,
+  onChange,
+  options,
+  ariaLabel,
+}: {
+  value: T;
+  onChange: (next: T) => void;
+  options: { key: T; label: string; title?: string }[];
+  ariaLabel: string;
+}) {
+  return (
+    <div
+      role="tablist"
+      aria-label={ariaLabel}
+      style={{
+        display: "inline-flex",
+        border: "1px solid var(--line)",
+        borderRadius: 4,
+        overflow: "hidden",
+        fontFamily: FONT_MONO,
+      }}
+    >
+      {options.map((opt, i) => {
+        const active = opt.key === value;
+        return (
+          <button
+            key={opt.key}
+            type="button"
+            role="tab"
+            aria-selected={active}
+            title={opt.title}
+            onClick={() => onChange(opt.key)}
+            style={{
+              padding: "4px 10px",
+              fontSize: 9,
+              fontWeight: 700,
+              letterSpacing: "0.08em",
+              textTransform: "uppercase",
+              background: active ? "var(--bg4)" : "transparent",
+              color: active ? "var(--t0)" : "var(--t2)",
+              border: "none",
+              borderLeft: i === 0 ? "none" : "1px solid var(--line)",
+              cursor: "pointer",
+              transition: "background 0.15s, color 0.15s",
+            }}
+            onMouseEnter={(e) => { if (!active) e.currentTarget.style.color = "var(--t1)"; }}
+            onMouseLeave={(e) => { if (!active) e.currentTarget.style.color = "var(--t2)"; }}
+          >
+            {opt.label}
+          </button>
+        );
+      })}
+    </div>
   );
 }
 
