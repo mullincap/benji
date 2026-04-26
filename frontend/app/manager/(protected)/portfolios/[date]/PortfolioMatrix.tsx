@@ -251,7 +251,7 @@ function MatrixHeader({
           textTransform: "uppercase",
         }}
       >
-        5-min ROI Matrix
+        ROI Matrix
         <span
           style={{
             marginLeft: 10,
