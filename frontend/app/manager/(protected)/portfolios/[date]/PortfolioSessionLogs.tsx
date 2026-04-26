@@ -1175,7 +1175,10 @@ function ColumnHeader() {
   const headerCellStyle: React.CSSProperties = {
     fontSize: 8.5,
     letterSpacing: "0.12em",
-    color: "#52525b",
+    // Bumped from #52525b (very dim) to the panel's primary text tone
+    // — column labels are referenced often enough that the readability
+    // win outweighs the visual hierarchy "let data dominate" argument.
+    color: "#d4d4d8",
     textTransform: "uppercase",
     fontFamily: FONT_MONO,
   };
