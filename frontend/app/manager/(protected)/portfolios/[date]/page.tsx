@@ -1257,6 +1257,36 @@ export default function PortfolioDetailPage() {
     _isSymbol: false,
   };
 
+  // Session-low marker — lowest portfolio incr seen this session. Very
+  // subtle: 0.30-opacity muted-red dashed line. Always rendered when at
+  // least one bar exists; not exposed via the overlay chip group since
+  // it's meant to be ambient context, not an interactive layer.
+  const sessionLowPct = (() => {
+    if (lastFilledIdx < 0) return null;
+    let lo = Infinity;
+    for (let i = 0; i <= lastFilledIdx; i++) {
+      const b = barAtSlot[i];
+      if (b !== undefined && b.incr * 100 < lo) lo = b.incr * 100;
+    }
+    return lo === Infinity ? null : lo;
+  })();
+  const sessionLowDataset = {
+    label: "Low",
+    data: sessionLowPct !== null
+      ? new Array(totalSlots).fill(sessionLowPct)
+      : new Array(totalSlots).fill(null),
+    borderColor: "rgba(160, 116, 116, 0.30)",
+    backgroundColor: "transparent",
+    borderWidth: 1,
+    borderDash: [1, 3],
+    pointRadius: 0,
+    pointHoverRadius: 0,
+    fill: false as const,
+    tension: 0,
+    spanGaps: true,
+    _isSymbol: false,
+  };
+
   // Datasets shown to Chart.js depend on the mode. Portfolio-only mode strips
   // symbol lines entirely (cleaner view); All Symbols mode stacks them under
   // the portfolio area. The `hidden` flag on each symbol dataset is driven by
@@ -1265,8 +1295,8 @@ export default function PortfolioDetailPage() {
   // rather than a competing line). The drawdown wedge layers between
   // portfolio and trendline so it reads behind both lines.
   const chartDatasets = overlays.symbols
-    ? [portfolioDataset, drawdownDataset, trendlineDataset, portSlDataset, portTslDataset, currentDataset, ...symbolDatasets]
-    : [portfolioDataset, drawdownDataset, trendlineDataset, portSlDataset, portTslDataset, currentDataset];
+    ? [portfolioDataset, drawdownDataset, trendlineDataset, portSlDataset, portTslDataset, currentDataset, sessionLowDataset, ...symbolDatasets]
+    : [portfolioDataset, drawdownDataset, trendlineDataset, portSlDataset, portTslDataset, currentDataset, sessionLowDataset];
 
   // Right-edge value labels for the threshold + current reference lines.
   // Inline Chart.js plugin avoids a chartjs-plugin-annotation dependency;
@@ -1298,6 +1328,15 @@ export default function PortfolioDetailPage() {
       color: "rgba(240, 237, 230, 0.95)",
     });
   }
+  // Session-low label — very subtle, no overlay-chip control. Sits next
+  // to its dashed line at the lowest portfolio incr seen so far.
+  if (sessionLowPct !== null) {
+    refLineLabels.push({
+      y: sessionLowPct,
+      text: `LOW: ${sessionLowPct.toFixed(2)}%`,
+      color: "rgba(160, 116, 116, 0.55)",
+    });
+  }
   // Slot index where the early-fill window closes. After this bar, the
   // EARLY_FILL trigger can no longer fire (trader_blofin.py:2614 —
   // `while utcnow() <= session_open + early_fill_x`). Drawing a vertical
@@ -1306,6 +1345,26 @@ export default function PortfolioDetailPage() {
   const fillWindowSlot = meta.early_fill_x !== null && meta.early_fill_x !== undefined
     ? meta.early_fill_x / BAR_INTERVAL_MIN
     : null;
+  // Once the fill window has actually passed wall-clock-wise, drop the
+  // "FILL WINDOW CLOSE" label — operators don't need a deadline marker
+  // for a deadline that's already gone. The vertical line itself stays
+  // (still a useful historical reference point).
+  const fillWindowPassed = (() => {
+    if (meta.early_fill_x === null || meta.early_fill_x === undefined) return false;
+    const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(meta.date);
+    if (!m) return false;
+    const sessionOpenMs = Date.UTC(
+      Number(m[1]),
+      Number(m[2]) - 1,
+      Number(m[3]),
+      sessionStartHour,
+      0,
+      0,
+      0,
+    );
+    const closeMs = sessionOpenMs + meta.early_fill_x * 60_000;
+    return Date.now() >= closeMs;
+  })();
   const refLinePlugin = {
     id: "refLineLabels",
     afterDatasetsDraw(chart: ChartJS) {
@@ -1326,21 +1385,26 @@ export default function PortfolioDetailPage() {
           ctx.lineTo(xPx, chartArea.bottom);
           ctx.stroke();
           ctx.setLineDash([]);
-          // Top-anchored label so it doesn't collide with the right-edge
-          // y-value pills (which sit centered at their respective rows).
-          ctx.font = 'bold 9px "Space Mono", monospace';
-          ctx.textAlign = "left";
-          ctx.textBaseline = "top";
-          const text = "FILL WINDOW CLOSE";
-          const metrics = ctx.measureText(text);
-          const padX = 5;
-          const padY = 2;
-          const w = metrics.width + padX * 2;
-          const h = 12 + padY * 2;
-          ctx.fillStyle = "rgba(14, 14, 16, 0.85)";
-          ctx.fillRect(xPx + 4, chartArea.top + 4, w, h);
-          ctx.fillStyle = "rgba(0, 200, 150, 0.95)";
-          ctx.fillText(text, xPx + 4 + padX, chartArea.top + 4 + padY);
+          // Top-anchored label only while the window is still open. Once
+          // the deadline has passed wall-clock-wise the label is just
+          // visual chatter — operators don't need a deadline marker for
+          // a deadline already gone. Vertical line itself stays as a
+          // historical reference.
+          if (!fillWindowPassed) {
+            ctx.font = 'bold 9px "Space Mono", monospace';
+            ctx.textAlign = "left";
+            ctx.textBaseline = "top";
+            const text = "FILL WINDOW CLOSE";
+            const metrics = ctx.measureText(text);
+            const padX = 5;
+            const padY = 2;
+            const w = metrics.width + padX * 2;
+            const h = 12 + padY * 2;
+            ctx.fillStyle = "rgba(14, 14, 16, 0.85)";
+            ctx.fillRect(xPx + 4, chartArea.top + 4, w, h);
+            ctx.fillStyle = "rgba(0, 200, 150, 0.95)";
+            ctx.fillText(text, xPx + 4 + padX, chartArea.top + 4 + padY);
+          }
         }
       }
       // ── Right-edge value pills for horizontal lines ─────────────────
@@ -1406,7 +1470,8 @@ export default function PortfolioDetailPage() {
           item.dataset.label !== "Port SL" &&
           item.dataset.label !== "Port TSL" &&
           item.dataset.label !== "Peak" &&
-          item.dataset.label !== "Current",
+          item.dataset.label !== "Current" &&
+          item.dataset.label !== "Low",
         itemSort: (a, b) => {
           // Portfolio row always first so it anchors the tooltip.
           const aPortfolio = a.dataset.label === "Portfolio" ? -1 : 0;
