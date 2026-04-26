@@ -2258,6 +2258,7 @@ def _run_monitoring_loop(today, today_date, api: ExchangeAdapter, inst_ids,
                          conviction_roi_x: float | None = None,
                          signal_count: int | None = None,
                          resume_sym_stopped: "list[str] | dict[str, float] | None" = None,
+                         resume_sym_observed: dict[str, float] | None = None,
                          pre_stopped_clamps: dict[str, float] | None = None):
     """
     Intraday monitoring loop (bars 7-216).
@@ -2315,11 +2316,15 @@ def _run_monitoring_loop(today, today_date, api: ExchangeAdapter, inst_ids,
     # previously port_sl_pct (-7.5% for ALTS MAIN) by mistake; now correctly
     # uses stop_raw_pct (-6%) matching audit's apply_raw_stop.
     sym_stopped: dict[str, float] = {}
+    # Display-only mirror of sym_stopped that holds the *observed* return
+    # at the crossing bar (vs the audit threshold value in sym_stopped).
+    # Read by sym_returns_map_open for portfolio_bars.symbol_returns.
+    sym_observed: dict[str, float] = {}
     if resume_sym_stopped:
-        # New format: dict {inst_id: clamp_value} preserves observed return.
-        # Legacy format: list of inst_ids; clamp at threshold (best we can
-        # do — actual return wasn't recorded). Mixed handling guards against
-        # JSON deserialization edge cases.
+        # Newest format: sym_stopped is dict {iid: cfg.stop_raw_pct} (math),
+        # paired with resume_sym_observed dict {iid: observed} (display).
+        # Older format: sym_stopped persisted observed value into the same
+        # dict (no separate sym_observed). Legacy: list of iids only.
         if isinstance(resume_sym_stopped, dict):
             for _iid, _clamp_val in resume_sym_stopped.items():
                 sym_stopped[_iid] = float(_clamp_val)
@@ -2327,24 +2332,31 @@ def _run_monitoring_loop(today, today_date, api: ExchangeAdapter, inst_ids,
             _clamp = float(cfg.stop_raw_pct)
             for _iid in resume_sym_stopped:
                 sym_stopped[_iid] = _clamp
+        # Load display clamps if present. Falls back to sym_stopped value
+        # for any iid missing from the observed dict (handles older state).
+        if resume_sym_observed:
+            for _iid, _obs in resume_sym_observed.items():
+                sym_observed[_iid] = float(_obs)
         log.info(
             f"{log_prefix}Rehydrated {len(sym_stopped)} stopped symbol(s) from "
-            f"runtime_state: { {k: f'{v*100:+.3f}%' for k,v in sym_stopped.items()} }"
+            f"runtime_state: math={ {k: f'{v*100:+.3f}%' for k,v in sym_stopped.items()} }"
+            f"  display={ {k: f'{v*100:+.3f}%' for k,v in sym_observed.items()} }"
         )
 
-    # Late-entry pre-stopped symbols: clamp at the observed pre-entry return
-    # (NOT cfg.stop_raw_pct — we record the actual cumulative return at the
-    # moment of pre-stop, which can be worse than the threshold). The bar
-    # writer's `if iid in sym_stopped: sym_returns_map_open[iid] = sym_stopped[iid]`
-    # branch then includes these symbols in every bar's symbol_returns +
-    # stopped[] without any per-bar special case.
+    # Late-entry pre-stopped symbols: split clamp values across math + display.
+    #   sym_stopped[iid]  = cfg.stop_raw_pct  → math (audit-consistent incr)
+    #   sym_observed[iid] = the observed pre-entry return  → display
+    # Without the split, late-entry incr math would diverge from the audit's
+    # apply_raw_stop semantics (audit always clamps at threshold).
     if pre_stopped_clamps:
         for _iid, _clamp_val in pre_stopped_clamps.items():
-            sym_stopped[_iid] = float(_clamp_val)
+            sym_stopped[_iid] = float(cfg.stop_raw_pct)
+            sym_observed[_iid] = float(_clamp_val)
         log.info(
             f"{log_prefix}Seeded {len(pre_stopped_clamps)} pre-stopped symbol(s) "
-            f"(late-entry pre-filter): "
+            f"(late-entry pre-filter): observed clamps "
             f"{ {k: f'{v*100:+.3f}%' for k,v in pre_stopped_clamps.items()} }"
+            f"  math clamp at {cfg.stop_raw_pct*100:.1f}% (audit-consistent)"
         )
 
     # Sync runtime_state.positions[] against live exchange positions before
@@ -2516,19 +2528,29 @@ def _run_monitoring_loop(today, today_date, api: ExchangeAdapter, inst_ids,
                 continue
             sym_ret = price / ref - 1.0
             if sym_ret <= cfg.stop_raw_pct:
-                # Clamp at the observed return at the bar where the stop
-                # triggered, NOT the threshold. The position exits at this
-                # bar's close price, which is typically slightly worse than
-                # the threshold (e.g. -6.76% on MIRA when threshold is -6%).
-                # Clamping at threshold creates a 5-bar drift between the
-                # matrix display and what BloFin actually filled at.
-                clamp = float(sym_ret)
+                # Audit-consistent semantics — TWO separate clamp values:
+                #
+                #   sym_stopped[iid]  = cfg.stop_raw_pct (-6%)
+                #     → drives sym_returns_map → incr → port_sl, port_tsl,
+                #       early_fill checks. MUST match the audit's
+                #       apply_raw_stop, which clamps at the threshold.
+                #       Otherwise live triggers fire at different bars
+                #       than the backtest predicted, breaking the
+                #       audit-vs-live comparison.
+                #
+                #   sym_observed[iid] = sym_ret (e.g. -6.76%)
+                #     → drives sym_returns_map_open → display in
+                #       portfolio_bars.symbol_returns. Reflects the actual
+                #       fill price at the crossing bar so the matrix
+                #       shows what BloFin executed, not a synthetic -6%.
                 log.warning(
                     f"{log_prefix}  SYM STOP: {iid} ret={sym_ret*100:.3f}% "
-                    f"<= {cfg.stop_raw_pct*100:.1f}% -- closing symbol and "
-                    f"clamping at observed {clamp*100:.3f}%"
+                    f"<= {cfg.stop_raw_pct*100:.1f}% -- closing symbol; "
+                    f"math clamp={cfg.stop_raw_pct*100:.1f}% (audit), "
+                    f"display clamp={sym_ret*100:.3f}% (observed)"
                 )
-                sym_stopped[iid] = clamp
+                sym_stopped[iid] = float(cfg.stop_raw_pct)
+                sym_observed[iid] = float(sym_ret)
                 sym_exit_prices[iid] = price
                 newly_stopped.append(pos)
                 active_positions = [p for p in active_positions if p["inst_id"] != iid]
@@ -2539,6 +2561,7 @@ def _run_monitoring_loop(today, today_date, api: ExchangeAdapter, inst_ids,
                 # If close failed, keep in active pool and don't clamp
                 for p in failed:
                     del sym_stopped[p["inst_id"]]
+                    sym_observed.pop(p["inst_id"], None)
                     sym_exit_prices.pop(p["inst_id"], None)
                     active_positions.append(p)
                     log.warning(f"{log_prefix}  {p['inst_id']}: sym stop close failed -- keeping in pool")
@@ -2567,7 +2590,10 @@ def _run_monitoring_loop(today, today_date, api: ExchangeAdapter, inst_ids,
         sym_returns_map_open = {}
         for iid in inst_ids:
             if iid in sym_stopped:
-                sym_returns_map_open[iid] = sym_stopped[iid]
+                # Display: observed return at crossing bar; falls back to
+                # threshold for legacy/resume sessions where observed
+                # value wasn't recorded.
+                sym_returns_map_open[iid] = sym_observed.get(iid, sym_stopped[iid])
             elif iid in current and open_prices.get(iid, 0) > 0:
                 sym_returns_map_open[iid] = current[iid] / open_prices[iid] - 1.0
 
@@ -2694,11 +2720,15 @@ def _run_monitoring_loop(today, today_date, api: ExchangeAdapter, inst_ids,
             "date": today, "phase": "active", "bar": b,
             "incr": round(incr, 6), "peak": round(peak, 6),
             "session_ret": round(session_ret, 6),
-            # Persist as {inst_id: clamp_value} so a respawn rehydrates the
-            # exact observed return at stop trigger (not just the threshold).
-            # Legacy resumes that loaded `sym_stopped` as a list are still
-            # supported in the resume path via isinstance check.
+            # Math clamp values per-symbol — used by the resumed loop's incr
+            # calc. Audit-consistent (cfg.stop_raw_pct). Legacy list format
+            # still supported in the resume path via isinstance check.
             "sym_stopped": {k: float(v) for k, v in sym_stopped.items()},
+            # Display clamp values — observed return at the crossing bar
+            # (or at the late-entry pre-filter check). Used by sym_returns_
+            # map_open for portfolio_bars.symbol_returns. Empty when no
+            # symbols have stopped yet.
+            "sym_observed": {k: float(v) for k, v in sym_observed.items()},
             "effective_leverage": eff_lev, "entry_1x": round(entry_1x, 6),
             "open_prices":  {k: v for k, v in open_prices.items()},
             "entry_prices": {k: v for k, v in entry_prices.items()},
@@ -4549,12 +4579,16 @@ def run_session_for_allocation(
             # per-symbol stop earlier in the session; rehydrate so incr
             # math keeps including their clamped contribution and the
             # active=X/Y display stays truthful across restarts.
-            # sym_stopped is persisted as dict {inst_id: clamp_value} in
-            # post-fix sessions, list[inst_id] in pre-fix sessions. Pass
-            # through unchanged; the monitoring loop branches on type.
+            # sym_stopped persists math clamps (or legacy observed-as-math).
+            # sym_observed (post-display-split) persists display clamps.
+            # Both fall back to {} on pre-fix sessions; the monitoring loop
+            # handles missing/empty observed dict gracefully.
             _resume_stopped = state.get("sym_stopped") or {}
             if not isinstance(_resume_stopped, (list, dict)):
                 _resume_stopped = {}
+            _resume_observed = state.get("sym_observed") or {}
+            if not isinstance(_resume_observed, dict):
+                _resume_observed = {}
             # Rehydrate late-entry pre-stopped clamps so resumed bars also
             # include the pre-stopped symbols in symbol_returns + stopped[].
             # Pre-fix sessions won't have this key; {} keeps the bar writer
@@ -4579,6 +4613,7 @@ def run_session_for_allocation(
                 # Pass dict (post-fix) or list (legacy) directly; the loop
                 # handles both shapes via isinstance check.
                 resume_sym_stopped=_resume_stopped,
+                resume_sym_observed={k: float(v) for k, v in _resume_observed.items()},
                 # Rehydrate fill_report from runtime_state so fill_rate +
                 # retries_used survive a subprocess respawn. Pre-fix
                 # sessions won't have this key; .get() returns None which
