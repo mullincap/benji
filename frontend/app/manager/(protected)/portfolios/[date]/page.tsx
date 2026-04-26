@@ -1445,6 +1445,40 @@ export default function PortfolioDetailPage() {
     },
   };
 
+  // Crosshair plugin — when the operator hovers anywhere over the chart,
+  // draw a vertical dashed guide at the active bar's x position. Pairs
+  // with the existing tooltip (interaction.mode="index", intersect=false)
+  // so the tooltip already shows the column's series values; the
+  // crosshair adds the missing visual anchor that points the eye to
+  // exactly which bar the tooltip's reading from.
+  const crosshairPlugin = {
+    id: "crosshair",
+    afterDatasetsDraw(chart: ChartJS) {
+      // chart.tooltip is the public tooltip controller; getActiveElements()
+      // returns [] when no hover is active, so the no-op falls out fast.
+      const tt = (chart as unknown as { tooltip?: {
+        opacity?: number;
+        getActiveElements?: () => Array<{ element: { x: number } }>;
+      }}).tooltip;
+      if (!tt || !tt.getActiveElements) return;
+      if (!tt.opacity) return;
+      const active = tt.getActiveElements();
+      if (!active.length) return;
+      const x = active[0].element.x;
+      const { ctx, chartArea } = chart;
+      ctx.save();
+      ctx.strokeStyle = "rgba(240, 237, 230, 0.30)";
+      ctx.lineWidth = 1;
+      ctx.setLineDash([3, 3]);
+      ctx.beginPath();
+      ctx.moveTo(x, chartArea.top);
+      ctx.lineTo(x, chartArea.bottom);
+      ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.restore();
+    },
+  };
+
   const chartOptions: ChartOptions<"line"> = {
     responsive: true,
     maintainAspectRatio: false,
@@ -1479,6 +1513,19 @@ export default function PortfolioDetailPage() {
           return aPortfolio - bPortfolio;
         },
         callbacks: {
+          // Title — the slot's clock time + bar number (when present).
+          // `barAtSlot[idx].bar` is the trader's bar counter for this
+          // 5-min slot; lets the operator cross-reference the matrix
+          // table directly. Falls back to the x-axis label (HH:MM) only
+          // when no real bar lives at this slot (post-last-bar projection).
+          title: (items) => {
+            if (!items.length) return "";
+            const idx = items[0].dataIndex;
+            const slot = barAtSlot[idx];
+            const time = items[0].label ?? "";
+            if (slot) return `BAR ${slot.bar} · ${time} UTC`;
+            return time ? `${time} UTC` : "";
+          },
           labelColor: (ctx) => {
             const isPortfolio = ctx.dataset.label === "Portfolio";
             return {
@@ -1808,7 +1855,7 @@ export default function PortfolioDetailPage() {
             <Line
               data={{ labels, datasets: chartDatasets }}
               options={chartOptions}
-              plugins={[refLinePlugin]}
+              plugins={[refLinePlugin, crosshairPlugin]}
             />
           </div>
         </div>
