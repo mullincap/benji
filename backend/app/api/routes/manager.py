@@ -2146,15 +2146,13 @@ def late_entry_portfolio(
         cwd="/app/backend",
     )
 
-    # Clear any preview portfolio_sessions row so the fresh session writes
-    # in cleanly. exit_reason='preview_late_entry' is the marker we set on
-    # backfilled rows; real sessions never use that value.
-    cur.execute("""
-        DELETE FROM user_mgmt.portfolio_sessions
-         WHERE allocation_id = %s::uuid
-           AND signal_date  = %s::date
-           AND exit_reason  = 'preview_late_entry'
-    """, (body.allocation_id, date))
+    # No DELETE: the trader's _init_portfolio_session_for_allocation_inline
+    # UPSERTs on (signal_date, allocation_id), clears exit_reason +
+    # status='active', and reuses the existing portfolio_session_id. This
+    # keeps preview portfolio_bars (06:35 → entry-time) attached to the
+    # live session — the matrix shows continuous bars from preview through
+    # actual entry instead of a gap. Cascading DELETE here was destructive
+    # (bars 1-23 were lost on the 2026-04-26 first late-entry test).
 
     return {
         "status": "spawned",

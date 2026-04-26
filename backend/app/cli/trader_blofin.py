@@ -2257,7 +2257,7 @@ def _run_monitoring_loop(today, today_date, api: ExchangeAdapter, inst_ids,
                          fill_report: dict | None = None,
                          conviction_roi_x: float | None = None,
                          signal_count: int | None = None,
-                         resume_sym_stopped: list[str] | None = None,
+                         resume_sym_stopped: "list[str] | dict[str, float] | None" = None,
                          pre_stopped_clamps: dict[str, float] | None = None):
     """
     Intraday monitoring loop (bars 7-216).
@@ -2316,12 +2316,20 @@ def _run_monitoring_loop(today, today_date, api: ExchangeAdapter, inst_ids,
     # uses stop_raw_pct (-6%) matching audit's apply_raw_stop.
     sym_stopped: dict[str, float] = {}
     if resume_sym_stopped:
-        _clamp = float(cfg.stop_raw_pct)
-        for _iid in resume_sym_stopped:
-            sym_stopped[_iid] = _clamp
+        # New format: dict {inst_id: clamp_value} preserves observed return.
+        # Legacy format: list of inst_ids; clamp at threshold (best we can
+        # do — actual return wasn't recorded). Mixed handling guards against
+        # JSON deserialization edge cases.
+        if isinstance(resume_sym_stopped, dict):
+            for _iid, _clamp_val in resume_sym_stopped.items():
+                sym_stopped[_iid] = float(_clamp_val)
+        else:
+            _clamp = float(cfg.stop_raw_pct)
+            for _iid in resume_sym_stopped:
+                sym_stopped[_iid] = _clamp
         log.info(
             f"{log_prefix}Rehydrated {len(sym_stopped)} stopped symbol(s) from "
-            f"runtime_state: {list(sym_stopped.keys())}"
+            f"runtime_state: { {k: f'{v*100:+.3f}%' for k,v in sym_stopped.items()} }"
         )
 
     # Late-entry pre-stopped symbols: clamp at the observed pre-entry return
@@ -2508,11 +2516,19 @@ def _run_monitoring_loop(today, today_date, api: ExchangeAdapter, inst_ids,
                 continue
             sym_ret = price / ref - 1.0
             if sym_ret <= cfg.stop_raw_pct:
+                # Clamp at the observed return at the bar where the stop
+                # triggered, NOT the threshold. The position exits at this
+                # bar's close price, which is typically slightly worse than
+                # the threshold (e.g. -6.76% on MIRA when threshold is -6%).
+                # Clamping at threshold creates a 5-bar drift between the
+                # matrix display and what BloFin actually filled at.
+                clamp = float(sym_ret)
                 log.warning(
-                    f"{log_prefix}  SYM STOP: {iid} ret={sym_ret*100:.3f}% <= {cfg.stop_raw_pct*100:.1f}%"
-                    f" -- closing symbol and clamping at {cfg.stop_raw_pct*100:.1f}%"
+                    f"{log_prefix}  SYM STOP: {iid} ret={sym_ret*100:.3f}% "
+                    f"<= {cfg.stop_raw_pct*100:.1f}% -- closing symbol and "
+                    f"clamping at observed {clamp*100:.3f}%"
                 )
-                sym_stopped[iid] = cfg.stop_raw_pct
+                sym_stopped[iid] = clamp
                 sym_exit_prices[iid] = price
                 newly_stopped.append(pos)
                 active_positions = [p for p in active_positions if p["inst_id"] != iid]
@@ -2678,7 +2694,11 @@ def _run_monitoring_loop(today, today_date, api: ExchangeAdapter, inst_ids,
             "date": today, "phase": "active", "bar": b,
             "incr": round(incr, 6), "peak": round(peak, 6),
             "session_ret": round(session_ret, 6),
-            "sym_stopped": list(sym_stopped.keys()),
+            # Persist as {inst_id: clamp_value} so a respawn rehydrates the
+            # exact observed return at stop trigger (not just the threshold).
+            # Legacy resumes that loaded `sym_stopped` as a list are still
+            # supported in the resume path via isinstance check.
+            "sym_stopped": {k: float(v) for k, v in sym_stopped.items()},
             "effective_leverage": eff_lev, "entry_1x": round(entry_1x, 6),
             "open_prices":  {k: v for k, v in open_prices.items()},
             "entry_prices": {k: v for k, v in entry_prices.items()},
@@ -3759,6 +3779,12 @@ def _init_portfolio_session_for_allocation_inline(
                     entered           = EXCLUDED.entered,
                     eff_lev           = EXCLUDED.eff_lev,
                     lev_int           = EXCLUDED.lev_int,
+                    -- Clear preview markers so the row transitions cleanly
+                    -- from "preview" → "live session". Existing portfolio_bars
+                    -- stay attached via the unchanged portfolio_session_id.
+                    status            = 'active',
+                    exit_reason       = NULL,
+                    exit_time_utc     = NULL,
                     updated_at        = NOW()
                 RETURNING portfolio_session_id
                 """,
@@ -4523,9 +4549,12 @@ def run_session_for_allocation(
             # per-symbol stop earlier in the session; rehydrate so incr
             # math keeps including their clamped contribution and the
             # active=X/Y display stays truthful across restarts.
-            _resume_stopped = state.get("sym_stopped") or []
-            if not isinstance(_resume_stopped, list):
-                _resume_stopped = []
+            # sym_stopped is persisted as dict {inst_id: clamp_value} in
+            # post-fix sessions, list[inst_id] in pre-fix sessions. Pass
+            # through unchanged; the monitoring loop branches on type.
+            _resume_stopped = state.get("sym_stopped") or {}
+            if not isinstance(_resume_stopped, (list, dict)):
+                _resume_stopped = {}
             # Rehydrate late-entry pre-stopped clamps so resumed bars also
             # include the pre-stopped symbols in symbol_returns + stopped[].
             # Pre-fix sessions won't have this key; {} keeps the bar writer
@@ -4547,7 +4576,9 @@ def run_session_for_allocation(
                 config=config,
                 session_id=state.get("session_id"),
                 capital_deployed_usd=float(state.get("capital_deployed_usd", 0.0)),
-                resume_sym_stopped=list(_resume_stopped),
+                # Pass dict (post-fix) or list (legacy) directly; the loop
+                # handles both shapes via isinstance check.
+                resume_sym_stopped=_resume_stopped,
                 # Rehydrate fill_report from runtime_state so fill_rate +
                 # retries_used survive a subprocess respawn. Pre-fix
                 # sessions won't have this key; .get() returns None which
