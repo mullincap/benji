@@ -2952,13 +2952,21 @@ def execution_logs(
         start = max(0, since_line + 1)
     end = min(total, start + limit)
 
-    lines = [
-        {"n": start + i,
-         "ts": e["ts"],
-         "level": e["level"],
-         "text": e["text"]}
-        for i, e in enumerate(window[start:end])
-    ]
+    lines = []
+    for i, e in enumerate(window[start:end]):
+        row: dict[str, Any] = {
+            "n":     start + i,
+            "ts":    e["ts"],
+            "level": e["level"],
+            "text":  e["text"],
+        }
+        # Pass through the semantic-event annotation when _read_log_file
+        # classified the line. Optional — absent on lines that didn't
+        # match any pattern; the frontend ignores absent fields.
+        if "kind" in e:
+            row["kind"] = e["kind"]
+            row["data"] = e.get("data")
+        lines.append(row)
 
     session_active = False
     if session_date:
