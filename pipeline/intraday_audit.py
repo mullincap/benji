@@ -137,9 +137,16 @@ def _compute_audit_decisions(ref_date: dt.date) -> tuple[list[str], list[dict]]:
 
 def _fetch_live_rows(ref_date: dt.date, sv_ids: list[str]) -> dict:
     """Return {strategy_version_id: {sit_flat, filter_name, filter_reason,
-                                     audit_status, signal_batch_id}}
-    for the given date and strategy versions. Strategies missing a row
-    are absent from the result.
+                                     signal_batch_id}} for the given date
+    and strategy versions. Strategies missing a row are absent from the
+    result.
+
+    Intentionally does NOT select audit_status: the verifier always
+    overwrites the prior status on every run (no read-modify-write
+    semantics on that field), and the replay tool needs to run BEFORE
+    migration 017 introduces the column. Querying it here would tie
+    the read to the migration order — exactly the chicken/egg the
+    replay-before-migrate validation is meant to avoid.
     """
     conn = get_conn()
     try:
@@ -150,7 +157,6 @@ def _fetch_live_rows(ref_date: dt.date, sv_ids: list[str]) -> dict:
                    sit_flat,
                    filter_name,
                    filter_reason,
-                   audit_status,
                    signal_batch_id::text
               FROM user_mgmt.daily_signals
              WHERE signal_date = %s::date
@@ -163,8 +169,7 @@ def _fetch_live_rows(ref_date: dt.date, sv_ids: list[str]) -> dict:
                 "sit_flat": bool(r[1]),
                 "filter_name": r[2],
                 "filter_reason": r[3],
-                "audit_status": r[4],
-                "signal_batch_id": r[5],
+                "signal_batch_id": r[4],
             }
             for r in cur.fetchall()
         }
