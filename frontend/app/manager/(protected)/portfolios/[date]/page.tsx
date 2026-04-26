@@ -757,10 +757,12 @@ export default function PortfolioDetailPage() {
     return () => clearInterval(id);
   }, [lateEntrySpawning, load]);
 
-  // Detect spawn-complete transition (preview_late_entry → live).
+  // Detect spawn-complete transition (any "preview_*" → live).
   useEffect(() => {
     if (!lateEntrySpawning) return;
-    if (data && data.meta.exit_reason !== "preview_late_entry") {
+    const er = data?.meta.exit_reason;
+    const isPreview = er === "preview_late_entry" || er === "preview_no_entry";
+    if (data && !isPreview) {
       setLateEntrySpawning(false);
     }
   }, [data, lateEntrySpawning]);
@@ -1094,7 +1096,7 @@ export default function PortfolioDetailPage() {
               LAST UPDATED · {lastUpdated.toISOString().slice(11, 19)} UTC
             </div>
           )}
-          {meta.exit_reason === "preview_late_entry" && (
+          {(meta.exit_reason === "preview_late_entry" || meta.exit_reason === "preview_no_entry") && (
             <div style={{ marginTop: 10, display: "flex", flexDirection: "column", gap: 6 }}>
               <button
                 onClick={fireLateEntry}
