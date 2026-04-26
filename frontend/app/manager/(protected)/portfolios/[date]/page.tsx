@@ -79,6 +79,11 @@ interface PortfolioMeta {
   // open. session_start_hour drives the elapsed/remaining countdown.
   early_fill_y: number;
   early_fill_x: number;
+  // Risk-floor params for the chart's reference-line overlays. Decimal
+  // fractions (e.g. -0.075 = -7.5% hard portfolio floor). Both negative.
+  // port_tsl_pct is the offset from peak — live trigger is peak+port_tsl_pct.
+  port_sl_pct?: number | null;
+  port_tsl_pct?: number | null;
   session_start_hour: number;
   // Latest open-anchored session_ret from the trader's runtime_state.
   // This is the exact value EARLY_FILL compares against. Prefer this
@@ -1135,15 +1140,100 @@ export default function PortfolioDetailPage() {
     _isSymbol: false,
   };
 
+  // ── Risk-threshold reference lines ──────────────────────────────────────
+  // Faint horizontal/dynamic markers showing where the trader's exit
+  // triggers fire. Operator can read distance-to-trigger off the chart
+  // without cross-checking the KPI cards.
+  //   port_sl: hard floor — static horizontal line at port_sl_pct.
+  //   port_tsl: trailing stop — dynamic, tracks peak[i] + port_tsl_pct
+  //     per bar so the user sees the live trigger floor rising with peak.
+  //     Where bars are missing the value falls back to the most recent peak.
+  const portSlPct = meta.port_sl_pct ?? null;
+  const portTslPct = meta.port_tsl_pct ?? null;
+  const portSlData: (number | null)[] = portSlPct !== null
+    ? new Array(totalSlots).fill(portSlPct * 100)
+    : new Array(totalSlots).fill(null);
+  let portTslData: (number | null)[] = new Array(totalSlots).fill(null);
+  if (portTslPct !== null) {
+    let runningPeak = 0;
+    for (let i = 0; i < totalSlots; i++) {
+      const b = barAtSlot[i];
+      if (b !== undefined) runningPeak = b.peak;
+      // Show the trigger floor from session start onwards (peak starts at 0).
+      // After the last real bar we extend the latest known peak forward —
+      // this is the level the trader will trip if the current peak holds.
+      if (i <= lastFilledIdx || lastFilledIdx === -1) {
+        portTslData[i] = (runningPeak + portTslPct) * 100;
+      } else {
+        portTslData[i] = (runningPeak + portTslPct) * 100;
+      }
+    }
+  }
+  const portSlDataset = {
+    label: "Port SL",
+    data: portSlData,
+    borderColor: "rgba(255, 77, 77, 0.4)",
+    backgroundColor: "transparent",
+    borderWidth: 1,
+    borderDash: [2, 4],
+    pointRadius: 0,
+    pointHoverRadius: 0,
+    fill: false as const,
+    tension: 0,
+    spanGaps: true,
+    _isSymbol: false,
+  };
+  const portTslDataset = {
+    label: "Port TSL",
+    data: portTslData,
+    borderColor: "rgba(240, 165, 0, 0.4)",
+    backgroundColor: "transparent",
+    borderWidth: 1,
+    borderDash: [2, 4],
+    pointRadius: 0,
+    pointHoverRadius: 0,
+    fill: false as const,
+    tension: 0,
+    spanGaps: true,
+    stepped: "before" as const,
+    _isSymbol: false,
+  };
+
+  // ── Drawdown wedge ──────────────────────────────────────────────────────
+  // Subtle red overlay between the running peak and the current portfolio
+  // path — visualizes how deep below peak the path has drifted. Rendered
+  // as the running-peak series with a fill back to the portfolio dataset
+  // (filling the underwater region only when path < peak).
+  const peakData: (number | null)[] = barAtSlot.map((b) =>
+    b !== undefined ? b.peak * 100 : null,
+  );
+  const drawdownDataset = {
+    label: "Peak",
+    data: peakData,
+    borderColor: "rgba(255, 77, 77, 0.18)",
+    backgroundColor: "rgba(255, 77, 77, 0.07)",
+    borderWidth: 1,
+    pointRadius: 0,
+    pointHoverRadius: 0,
+    // Fill back to the portfolio dataset (index 0). When peak > portfolio
+    // (always true for stopped/trailing-down sessions), the area between
+    // peak and path fills red — instant read of drawdown depth.
+    fill: { target: "0", below: "rgba(255, 77, 77, 0.10)" } as const,
+    tension: 0.15,
+    spanGaps: true,
+    _isSymbol: false,
+  };
+
   // Datasets shown to Chart.js depend on the mode. Portfolio-only mode strips
   // symbol lines entirely (cleaner view); All Symbols mode stacks them under
   // the portfolio area. The `hidden` flag on each symbol dataset is driven by
   // React state so toggle visibility survives mode switches. The pace
   // trendline appears in both modes (faint + dashed; reads as scaffolding
-  // rather than a competing line).
+  // rather than a competing line). The drawdown wedge layers between
+  // portfolio and trendline so it reads behind both lines.
   const chartDatasets = view === "symbols"
-    ? [portfolioDataset, trendlineDataset, ...symbolDatasets]
-    : [portfolioDataset, trendlineDataset];
+    ? [portfolioDataset, drawdownDataset, trendlineDataset, portSlDataset, portTslDataset, ...symbolDatasets]
+    : [portfolioDataset, drawdownDataset, trendlineDataset, portSlDataset, portTslDataset];
 
   const chartOptions: ChartOptions<"line"> = {
     responsive: true,
@@ -1161,9 +1251,14 @@ export default function PortfolioDetailPage() {
         titleFont: { family: "Space Mono", size: 10, weight: "bold" },
         bodyFont:  { family: "Space Mono", size: 10 },
         padding: 8,
-        // Pace trendline is decorative scaffolding; suppress it from the
-        // tooltip body so it doesn't add a row alongside Portfolio + symbols.
-        filter: (item) => item.dataset.label !== "Pace",
+        // Decorative overlays (pace trendline, threshold lines, peak/drawdown
+        // wedge) are visual scaffolding; suppress them from the tooltip so
+        // it stays focused on the actual symbol + portfolio rows.
+        filter: (item) =>
+          item.dataset.label !== "Pace" &&
+          item.dataset.label !== "Port SL" &&
+          item.dataset.label !== "Port TSL" &&
+          item.dataset.label !== "Peak",
         itemSort: (a, b) => {
           // Portfolio row always first so it anchors the tooltip.
           const aPortfolio = a.dataset.label === "Portfolio" ? -1 : 0;

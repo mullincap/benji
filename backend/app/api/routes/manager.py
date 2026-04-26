@@ -2359,6 +2359,8 @@ def get_portfolio(
                     "lev_int":           0,
                     "early_fill_y":      cfg.early_fill_y,
                     "early_fill_x":      cfg.early_fill_x,
+                    "port_sl_pct":       cfg.port_sl_pct,
+                    "port_tsl_pct":      cfg.port_tsl_pct,
                     "session_start_hour": cfg.session_start_hour,
                     "session_ret":       None,
                     "fill_window_close_ret": None,
@@ -2387,6 +2389,8 @@ def get_portfolio(
                 "lev_int":           0,
                 "early_fill_y":      cfg.early_fill_y,
                 "early_fill_x":      cfg.early_fill_x,
+                "port_sl_pct":       cfg.port_sl_pct,
+                "port_tsl_pct":      cfg.port_tsl_pct,
                 "session_start_hour": cfg.session_start_hour,
                 "session_ret":       None,
                 "fill_window_close_ret": None,
@@ -2532,6 +2536,14 @@ def get_portfolio(
         # remaining time in the fill window.
         "early_fill_y":       cfg.early_fill_y,
         "early_fill_x":       cfg.early_fill_x,
+        # Risk-floor params used by the chart's reference-line overlays.
+        # port_sl_pct: hard portfolio floor (e.g. -0.075 = -7.5%); fires when
+        #   incr ≤ port_sl_pct.
+        # port_tsl_pct: trailing-stop offset from peak (e.g. -0.095 = -9.5%);
+        #   fires when (incr - peak) ≤ port_tsl_pct, so the live trigger is
+        #   peak + port_tsl_pct (rises with peak).
+        "port_sl_pct":        cfg.port_sl_pct,
+        "port_tsl_pct":       cfg.port_tsl_pct,
         "session_start_hour": cfg.session_start_hour,
         # Latest open-anchored session_ret as written by the trader to its
         # runtime_state (see trader_blofin.py:2613). This is the exact value
