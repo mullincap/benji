@@ -155,14 +155,38 @@ const TERMINAL_EXIT_REASONS: Record<string, { label: string; bg: string; fg: str
   late_entry_no_eligible_symbols:  { label: "ALL STOPPED",    bg: "var(--amber-dim)", fg: "var(--amber)" },
 };
 
-function exitBadge(reason: string | null, status: string) {
+function exitBadge(reason: string | null, status: string, isStale: boolean = false) {
   // Treat the session as LIVE whenever status is active OR the recorded
   // exit_reason is one of the transient/error states (subprocess_died,
   // stale_close_failed, errored). Those almost always mean the trader
   // got interrupted but a respawn is writing bars, and surfacing a
   // permanent-looking exit label is misleading.
   const transientErrors = new Set(["subprocess_died", "stale_close_failed", "errored"]);
-  if (status === "active" || (reason && transientErrors.has(reason))) {
+  const isLiveBySession = status === "active" || (reason && transientErrors.has(reason));
+  if (isLiveBySession && isStale) {
+    // Status says active but bars haven't flowed in > STALE_THRESHOLD_SEC.
+    // Supervisor will respawn shortly; surface this honestly so the operator
+    // doesn't think they're seeing live data.
+    return (
+      <span
+        style={{
+          display: "inline-block",
+          fontSize: 9,
+          fontWeight: 700,
+          letterSpacing: "0.06em",
+          padding: "2px 6px",
+          borderRadius: 3,
+          background: "var(--amber-dim)",
+          color: "var(--amber)",
+          fontFamily: FONT_MONO,
+        }}
+        title="No new bars in the last 7 minutes; auto-recovery is queued."
+      >
+        STALE
+      </span>
+    );
+  }
+  if (isLiveBySession) {
     return (
       <span
         style={{
@@ -886,8 +910,27 @@ export default function PortfolioDetailPage() {
   }
 
   const { meta, bars } = data;
-  const live = meta.status === "active";
   const lastBar = bars[bars.length - 1];
+  // Liveness = "bars are actually flowing right now". Bar interval is 5 min,
+  // so anything older than ~7 min means the trader stopped writing — even
+  // if portfolio_sessions.status is still 'active', we don't claim LIVE.
+  // The supervisor (STALE_THRESHOLD_MIN=7) treats the same age as stale and
+  // schedules a respawn; the UI signal mirrors that exact decision so the
+  // operator sees STALE the moment auto-recovery is queued.
+  const STALE_THRESHOLD_SEC = 7 * 60;
+  const lastBarAgeSec = (() => {
+    if (!lastBar?.ts) return null;
+    // ts format: "YYYY-MM-DD HH:MM:SS" (UTC, no timezone marker).
+    const parsed = Date.parse(lastBar.ts.replace(" ", "T") + "Z");
+    if (Number.isNaN(parsed)) return null;
+    return Math.max(0, (Date.now() - parsed) / 1000);
+  })();
+  const isFresh = lastBarAgeSec !== null && lastBarAgeSec <= STALE_THRESHOLD_SEC;
+  const live = meta.status === "active" && isFresh;
+  const isStale =
+    meta.status === "active" &&
+    lastBarAgeSec !== null &&
+    lastBarAgeSec > STALE_THRESHOLD_SEC;
   const final = lastBar ? lastBar.incr * 100 : 0;
   const peak = lastBar ? lastBar.peak * 100 : 0;
   // Open-anchored portfolio return — what the trader's EARLY_FILL trigger
@@ -905,7 +948,11 @@ export default function PortfolioDetailPage() {
     ? Math.min(...bars.map((b) => b.incr - b.peak)) * 100
     : 0;
   const startTime = fmtTime(meta.session_start_utc);
-  const endTime = live ? "LIVE" : fmtTime(meta.exit_time_utc);
+  const endTime = live
+    ? "LIVE"
+    : isStale
+      ? "STALE"
+      : fmtTime(meta.exit_time_utc);
   const symStopsCount = stoppedAtBar.size;
   const enteredCount = meta.entered.length;
 
@@ -1175,7 +1222,7 @@ export default function PortfolioDetailPage() {
             subtitle={symStopsCount > 0 ? `${symStopsCount} stopped` : undefined}
           />
           <KpiCard label="Eff Leverage" value={`${meta.eff_lev.toFixed(2)}x`} />
-          <KpiCard label="Exit" value={exitBadge(meta.exit_reason, meta.status)} />
+          <KpiCard label="Exit" value={exitBadge(meta.exit_reason, meta.status, isStale)} />
         </div>
 
         {/* Early-fill take-profit progress */}

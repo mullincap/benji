@@ -51,17 +51,19 @@ log = logging.getLogger("trader_supervisor")
 
 # ── Tuning constants ────────────────────────────────────────────────────────
 # Heartbeat threshold: runtime_state.updated_at older than this → stale.
-# 15 min is 3 missed bar-writes; a single 5-min gap is within one heartbeat
-# of a healthy trader, so two consecutive ticks are required (below) before
-# we act on staleness.
-STALE_THRESHOLD_MIN = 15
+# Bar interval is 5 min; one missed bar puts staleness at ~5–7 min. Threshold
+# of 7 min flags after a single missed bar (with ~2 min slack), reducing
+# detection latency vs the prior 15-min threshold without spuriously firing
+# on healthy traders' inter-bar gaps. Two-tick confirmation (below) still
+# guards against transient blips before respawn.
+STALE_THRESHOLD_MIN = 7
 
-# Two-tick confirmation window: supervisor runs every 5 min, so a
-# previous stale marker must be within ~1-2 ticks to count as a
+# Two-tick confirmation window: supervisor runs every 2 min, so a
+# previous stale marker must be within ~1-3 ticks to count as a
 # "consecutive" observation. Past this, treat as a new first-detection
 # rather than respawning on stale data carried over from an earlier
 # session or a day-old marker.
-STALE_CONFIRMATION_MAX_MIN = 12
+STALE_CONFIRMATION_MAX_MIN = 6
 
 # Exponential backoff: N respawns in WINDOW → refuse further respawns.
 # Persistent failure = human intervention, not infinite loop.

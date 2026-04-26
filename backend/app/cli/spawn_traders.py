@@ -257,6 +257,15 @@ def spawn_allocation(allocation_id, *, dry_run: bool = False) -> int | None:
     # start_new_session=True creates a new process group so SIGHUP from the
     # parent's exit doesn't kill the subprocess. Within the same long-lived
     # container, this is sufficient for ~17h survival.
+    #
+    # PYTHONUNBUFFERED=1: forces Python's stdout/stderr to be unbuffered so
+    # every log line hits the per-allocation log file immediately. Without
+    # this, a SIGKILL or hard crash can lose the most recent buffered lines —
+    # exactly the "trader died with no logged cause" pattern that bit us
+    # 2026-04-26 12:05–12:19. The buffering=1 on the log_file handle alone
+    # only helps after Python flushes its own stdout, which doesn't happen
+    # cold-killed.
+    spawn_env = {**os.environ, "PYTHONUNBUFFERED": "1"}
     p = subprocess.Popen(
         cmd,
         stdout=log_file,
@@ -264,6 +273,7 @@ def spawn_allocation(allocation_id, *, dry_run: bool = False) -> int | None:
         stdin=subprocess.DEVNULL,
         start_new_session=True,
         cwd="/app/backend",   # PYTHONPATH=/app/backend per Dockerfile.backend
+        env=spawn_env,
     )
     log.info(f"Spawned allocation {short_id}: pid={p.pid}, log={log_path}")
     return p.pid
