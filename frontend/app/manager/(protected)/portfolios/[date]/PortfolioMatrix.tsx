@@ -459,7 +459,17 @@ function SimpleMatrix({
         >
           <tr>
             <th style={matrixThStyle}>Bar</th>
-            <th style={matrixThStyle}>Time</th>
+            {/* Time column gets a thick right border that mirrors the
+                PORTFOLIO column's left border — gives the index columns
+                (Bar/Time) a visual gutter from the symbol grid. */}
+            <th
+              style={{
+                ...matrixThStyle,
+                borderRight: "2px solid var(--line2)",
+              }}
+            >
+              Time
+            </th>
             {symbolsOrdered.map((sym) => (
               <th key={sym} style={matrixThStyle}>
                 {sym.replace("-USDT", "")}
@@ -480,7 +490,13 @@ function SimpleMatrix({
           {bars.map((b) => (
             <tr key={b.bar}>
               <td style={{ ...matrixTdStyle, color: "var(--t2)" }}>{b.bar}</td>
-              <td style={{ ...matrixTdStyle, color: "var(--t2)" }}>
+              <td
+                style={{
+                  ...matrixTdStyle,
+                  color: "var(--t2)",
+                  borderRight: "2px solid var(--line2)",
+                }}
+              >
                 {fmtTimeShort(b.ts)}
               </td>
               {symbolsOrdered.map((sym) => {
