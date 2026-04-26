@@ -2667,12 +2667,23 @@ _CLOSE_CONFIRM_RE = re.compile(
 # dim rows + filter them off in one chip click. These run AFTER the
 # seven typed patterns so genuine typed lines never get reclassified.
 _TRADER_CONFIG_RE   = re.compile(r"^TraderConfig:\s+")
+# Resume-session heartbeat — written by the trader every time the
+# subprocess restarts and re-loads runtime_state. Fires periodically
+# in practice (~every supervisor respawn / startup_recovery / manual
+# bounce), so it's runtime chatter, not config/init. Split as its own
+# subtype so a future iteration can hide heartbeats permanently even
+# while SYS is on. Must come BEFORE _ALLOCATION_INIT_RE because both
+# patterns start with "Allocation ...".
+_HEARTBEAT_RE       = re.compile(
+    r"^Allocation\s+\S+:\s+resuming active session from runtime_state"
+)
 _ALLOCATION_INIT_RE = re.compile(r"^Allocation\s+[\w-]+\s+(strategy_version|resuming)")
 _REHYDRATE_RE       = re.compile(r"^Rehydrated\s+\d+\s+stopped\s+symbol")
 _SESSION_BOUNDARY_RE = re.compile(
     r"^={5,}$|^Spawn at\s+|^Entering\s+\d+-min monitoring loop"
 )
 _SYSTEM_EVENT_PATTERNS: list[tuple[re.Pattern[str], str]] = [
+    (_HEARTBEAT_RE,        "heartbeat"),
     (_TRADER_CONFIG_RE,    "config"),
     (_ALLOCATION_INIT_RE,  "allocation"),
     (_REHYDRATE_RE,        "rehydrate"),
