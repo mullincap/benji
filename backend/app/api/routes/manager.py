@@ -2660,6 +2660,25 @@ _CLOSE_CONFIRM_RE = re.compile(
     r"^✅\s+(?P<symbol>\S+)\s+closed via blofin"
 )
 
+# System-event patterns — bootstrap, lifecycle, and config noise that's
+# useful to keep in the file (forensics) but doesn't belong in the
+# operator's live monitoring view by default. Each match returns
+# kind="system_event" with a subtype so the frontend can render compact
+# dim rows + filter them off in one chip click. These run AFTER the
+# seven typed patterns so genuine typed lines never get reclassified.
+_TRADER_CONFIG_RE   = re.compile(r"^TraderConfig:\s+")
+_ALLOCATION_INIT_RE = re.compile(r"^Allocation\s+[\w-]+\s+(strategy_version|resuming)")
+_REHYDRATE_RE       = re.compile(r"^Rehydrated\s+\d+\s+stopped\s+symbol")
+_SESSION_BOUNDARY_RE = re.compile(
+    r"^={5,}$|^Spawn at\s+|^Entering\s+\d+-min monitoring loop"
+)
+_SYSTEM_EVENT_PATTERNS: list[tuple[re.Pattern[str], str]] = [
+    (_TRADER_CONFIG_RE,    "config"),
+    (_ALLOCATION_INIT_RE,  "allocation"),
+    (_REHYDRATE_RE,        "rehydrate"),
+    (_SESSION_BOUNDARY_RE, "boundary"),
+]
+
 
 def _annotate_event(text: str, state: dict) -> tuple[str | None, dict | None]:
     """Classify a log line by content. Returns (kind, data) or (None, None).
@@ -2741,6 +2760,15 @@ def _annotate_event(text: str, state: dict) -> tuple[str | None, dict | None]:
             "symbol": m["symbol"],
             "allocation_id": alloc_id,
         }
+    # System / bootstrap noise — runs LAST so genuine typed lines above
+    # never get reclassified. Frontend hides these by default behind a
+    # SYS chip; the operator can opt in to see them.
+    for pattern, subtype in _SYSTEM_EVENT_PATTERNS:
+        if pattern.match(t):
+            return "system_event", {
+                "subtype": subtype,
+                "allocation_id": alloc_id,
+            }
     return None, None
 
 
