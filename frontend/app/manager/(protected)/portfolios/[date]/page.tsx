@@ -86,6 +86,10 @@ interface PortfolioMeta {
   // port_tsl_pct is the offset from peak — live trigger is peak+port_tsl_pct.
   port_sl_pct?: number | null;
   port_tsl_pct?: number | null;
+  // Allocation capital_usd at the time of session creation. Drives the
+  // Portfolio ROI tile's USD subtitle (capital × leveraged_incr).
+  // Optional — fallback meta paths don't surface a real value.
+  capital_usd?: number | null;
   session_start_hour: number;
   // Latest open-anchored session_ret from the trader's runtime_state.
   // This is the exact value EARLY_FILL compares against. Prefer this
@@ -1708,18 +1712,81 @@ export default function PortfolioDetailPage() {
         </div>
 
         {/* KPI cards */}
-        <div style={{ display: "flex", gap: 10 }}>
-          <KpiCard
-            label="Portfolio ROI"
-            value={fmtPct(final)}
-            color={final >= 0 ? "var(--green)" : "var(--red)"}
-          />
-          <KpiCard label="Peak ROI" value={fmtPct(peak)} />
-          <KpiCard
-            label="Max Drawdown"
-            value={fmtPct(dd)}
-            color={dd <= -2 ? "var(--red)" : undefined}
-          />
+        {(() => {
+          // ── Subtitle derivations ─────────────────────────────────────────
+          // All three derived from `bars` + meta; no extra fetches needed.
+          // PORTFOLIO ROI subtitle: live USD P&L. Uses the leveraged-actual
+          //   formula (capital × incr × eff_lev × 0.90) — same the trader
+          //   logs as expected_roi and what the EFF LEVERAGE tile's
+          //   "deployed: 90%" caption documents.
+          const cap = meta.capital_usd ?? null;
+          const lev = meta.eff_lev ?? 0;
+          const DEPLOY_RATIO = 0.90;
+          const finalUSD =
+            cap !== null && cap > 0 && lev > 0
+              ? cap * (final / 100) * lev * DEPLOY_RATIO
+              : null;
+          const usdSubtitle = (() => {
+            if (finalUSD === null) return undefined;
+            const sign = finalUSD < 0 ? "−" : "";
+            const abs = Math.abs(finalUSD).toLocaleString("en-US", {
+              minimumFractionDigits: 0,
+              maximumFractionDigits: 0,
+            });
+            return `${sign}$${abs}`;
+          })();
+          // PEAK ROI subtitle: how long ago the peak was hit. Walk bars to
+          //   find the first bar whose b.peak equals max(b.peak); compare
+          //   to wall clock. Fresh peak (within 1 bar) reads as "now".
+          const peakAgeSubtitle = (() => {
+            if (bars.length === 0 || peak === 0) return undefined;
+            let peakBarTs: string | null = null;
+            const peakDecimal = peak / 100;
+            for (const b of bars) {
+              if (b.peak >= peakDecimal - 1e-9) {
+                peakBarTs = b.ts;
+                break;
+              }
+            }
+            if (!peakBarTs) return undefined;
+            const ms = Date.parse(peakBarTs.replace(" ", "T") + "Z");
+            if (Number.isNaN(ms)) return undefined;
+            const diff = Math.max(0, Date.now() - ms);
+            const mins = Math.round(diff / 60000);
+            if (mins < 5) return "just now";
+            if (mins < 60) return `${mins}m ago`;
+            const h = Math.floor(mins / 60);
+            const m = mins % 60;
+            return m === 0 ? `${h}h ago` : `${h}h ${m}m ago`;
+          })();
+          // MAX DRAWDOWN subtitle: distance from current ROI back to the
+          //   trough. Positive = recovered N pp from the bottom. Useful
+          //   "how far above the floor are we" read.
+          const recovery = final - dd;
+          const ddSubtitle = (() => {
+            if (bars.length === 0 || dd === 0) return undefined;
+            const sign = recovery >= 0 ? "+" : "";
+            return `now ${sign}${recovery.toFixed(2)}% vs DD`;
+          })();
+          return (
+            <div style={{ display: "flex", gap: 10 }}>
+              <KpiCard
+                label="Portfolio ROI"
+                value={fmtPct(final)}
+                color={final >= 0 ? "var(--green)" : "var(--red)"}
+                subtitle={usdSubtitle}
+              />
+              <KpiCard
+                label="Peak ROI"
+                value={fmtPct(peak)}
+                subtitle={peakAgeSubtitle}
+              />
+              <KpiCard
+                label="Max Drawdown"
+                value={fmtPct(dd)}
+                color={dd <= -2 ? "var(--red)" : undefined}
+                subtitle={ddSubtitle}
+              />
           <KpiCard
             label="Symbols"
             value={`${enteredCount - symStopsCount} / ${enteredCount}`}
@@ -1769,7 +1836,9 @@ export default function PortfolioDetailPage() {
               />
             );
           })()}
-        </div>
+            </div>
+          );
+        })()}
 
         {/* Early-fill take-profit progress */}
         <EarlyFillProgressBar

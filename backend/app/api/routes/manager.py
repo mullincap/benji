@@ -2281,6 +2281,7 @@ def get_portfolio(
                ps.eff_lev::double precision AS eff_lev,
                ps.lev_int,
                ps.allocation_id,
+               a.capital_usd,
                ec.exchange,
                s.display_name AS strategy_display_name,
                s.name         AS strategy_name,
@@ -2544,6 +2545,12 @@ def get_portfolio(
         #   peak + port_tsl_pct (rises with peak).
         "port_sl_pct":        cfg.port_sl_pct,
         "port_tsl_pct":       cfg.port_tsl_pct,
+        # Allocation capital baseline — drives the Portfolio ROI tile's
+        # USD subtitle on the frontend (capital × incr × eff_lev × 0.90).
+        # Optional in the response: null/missing on legacy meta builds
+        # (the no-PS-row fallback paths set it via capital_usd=1.0 and
+        # we deliberately don't surface that synthetic value).
+        "capital_usd":        _dec(session.get("capital_usd")),
         "session_start_hour": cfg.session_start_hour,
         # Latest open-anchored session_ret as written by the trader to its
         # runtime_state (see trader_blofin.py:2613). This is the exact value

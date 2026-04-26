@@ -505,7 +505,7 @@ function SimpleMatrix({
                         pct === null
                           ? "var(--t3)"
                           : isStopped
-                          ? "var(--t3)"
+                          ? "var(--amber)"
                           : pct >= 0
                           ? "var(--green)"
                           : "var(--red)",
