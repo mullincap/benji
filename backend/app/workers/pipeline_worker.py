@@ -11,7 +11,6 @@ Celery task that orchestrates the full audit pipeline chain:
 import csv
 import json
 import logging
-import os
 import shutil
 from pathlib import Path
 from typing import Optional
@@ -59,12 +58,19 @@ def _is_cancelled(job_id: str) -> bool:
 # bases — but the `eligible` STRING is not updated. To get the
 # actually-traded basket we must compute  eligible_set - dropped_set.
 #
-# The CSV at /mnt/quant-data/eligibility_gate_report.csv is shared
-# across audits; we snapshot it into job_dir immediately after the
-# subprocess returns so a concurrent audit can't overwrite it before
-# we ingest. See pipeline_worker.run_pipeline().
+# rebuild_portfolio_matrix.py writes the file with a relative path
+# (`OUTPUT_GATE_REPORT = "eligibility_gate_report.csv"`), so it lands
+# in the cwd of the audit subprocess — which is settings.PIPELINE_DIR
+# (= /app/pipeline in container). Despite overlap_analysis.py:2264
+# referencing BASE_DIR / "eligibility_gate_report.csv", that path is
+# only used as an "expected location" for output_files reporting; the
+# actual write target is the script's cwd. Confirmed empirically on
+# 2026-04-26 with audit job d4df15e1.
+#
+# The file is shared across audits in pipeline_dir; we snapshot it
+# into job_dir immediately after the subprocess returns so a
+# concurrent audit can't overwrite it before we ingest.
 
-_BASE_DATA_DIR = os.environ.get("BASE_DATA_DIR", "/mnt/quant-data")
 _GATE_REPORT_NAME = "eligibility_gate_report.csv"
 
 
@@ -198,10 +204,10 @@ def run_pipeline(self, job_id: str, params: dict) -> dict:
 
     # Snapshot the gate report into job_dir BEFORE ingestion so a
     # concurrent audit can't overwrite the shared file at
-    # $BASE_DATA_DIR/eligibility_gate_report.csv between when this
+    # $PIPELINE_DIR/eligibility_gate_report.csv between when this
     # subprocess finished and when we read it. The job-dir copy is
     # also retained for diagnostics.
-    src_gate_report = Path(_BASE_DATA_DIR) / _GATE_REPORT_NAME
+    src_gate_report = Path(settings.PIPELINE_DIR) / _GATE_REPORT_NAME
     if src_gate_report.exists():
         try:
             job_gate_report = job_dir / _GATE_REPORT_NAME
