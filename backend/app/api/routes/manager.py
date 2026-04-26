@@ -18,6 +18,8 @@ from __future__ import annotations
 import os
 import re
 import json
+import sys
+import subprocess
 import datetime
 from decimal import Decimal
 from pathlib import Path
@@ -2054,6 +2056,112 @@ def list_portfolios(
     return {
         "available_allocations": available_allocations,
         "portfolios":            portfolios,
+    }
+
+
+# ── Late-entry override ──────────────────────────────────────────────────────
+# Operator-initiated entry after the trader's normal 06:35 conviction window
+# has passed. Use cases:
+#  - Strategy's filter sat the day flat but a fallback filter has symbols
+#  - Trader missed its spawn window (allocation created post-06:05)
+#  - Recovery from an early crash where conviction was never evaluated
+# Spawns trader_blofin with --late-entry, replacing any preview row when the
+# real session writes its first state checkpoint.
+
+class LateEntryBody(BaseModel):
+    allocation_id: str
+    filter_override: str | None = None  # e.g. "Tail Guardrail"; falls back to strategy default
+    confirm: bool = False               # require explicit confirmation
+
+
+_TRADER_LOG_DIR = Path("/mnt/quant-data/logs/trader")
+
+
+@router.post("/portfolios/{date}/late-entry")
+def late_entry_portfolio(
+    date: str,
+    body: LateEntryBody,
+    cur=Depends(get_cursor),
+) -> dict[str, Any]:
+    """Spawn the trader subprocess in late-entry mode for one allocation.
+
+    The trader skips the 06:35 sleep + past-cutoff check + conviction gate.
+    Conviction roi_x is still computed and logged for the audit trail. The
+    spawned process detaches; this endpoint returns immediately with the
+    PID + log path so the operator can follow progress.
+    """
+    if not body.confirm:
+        raise HTTPException(status_code=400, detail="confirm=true required to fire late entry")
+
+    # Validate date format (YYYY-MM-DD)
+    try:
+        target_date = datetime.datetime.strptime(date, "%Y-%m-%d").date()
+    except ValueError:
+        raise HTTPException(status_code=400, detail=f"Invalid date format: {date}")
+
+    today = datetime.datetime.now(datetime.timezone.utc).date()
+    if target_date != today:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Late entry only valid for today ({today}); got {target_date}",
+        )
+
+    # Validate allocation is active and on a supported exchange
+    cur.execute("""
+        SELECT a.allocation_id, a.status, ec.exchange
+          FROM user_mgmt.allocations a
+          JOIN user_mgmt.exchange_connections ec ON ec.connection_id = a.connection_id
+         WHERE a.allocation_id = %s::uuid
+    """, (body.allocation_id,))
+    row = cur.fetchone()
+    if row is None:
+        raise HTTPException(status_code=404, detail=f"Allocation {body.allocation_id} not found")
+    if row["status"] != "active":
+        raise HTTPException(status_code=400, detail=f"Allocation status={row['status']}; must be active")
+
+    # Spawn the subprocess (mirrors spawn_traders._spawn_one_trader pattern)
+    cmd = [
+        sys.executable, "-m", "app.cli.trader_blofin",
+        "--allocation-id", body.allocation_id,
+        "--late-entry",
+    ]
+    if body.filter_override:
+        cmd.extend(["--filter-override", body.filter_override])
+
+    log_path = _TRADER_LOG_DIR / f"allocation_{body.allocation_id}_{date}.log"
+    _TRADER_LOG_DIR.mkdir(parents=True, exist_ok=True)
+    log_file = open(log_path, "a", buffering=1)
+    log_file.write(
+        f"\n{'=' * 70}\n"
+        f"LATE ENTRY spawn at {datetime.datetime.now(datetime.timezone.utc).isoformat()} "
+        f"for allocation {body.allocation_id} (filter_override={body.filter_override})\n"
+        f"{'=' * 70}\n"
+    )
+    proc = subprocess.Popen(
+        cmd,
+        stdout=log_file,
+        stderr=subprocess.STDOUT,
+        stdin=subprocess.DEVNULL,
+        start_new_session=True,
+        cwd="/app/backend",
+    )
+
+    # Clear any preview portfolio_sessions row so the fresh session writes
+    # in cleanly. exit_reason='preview_late_entry' is the marker we set on
+    # backfilled rows; real sessions never use that value.
+    cur.execute("""
+        DELETE FROM user_mgmt.portfolio_sessions
+         WHERE allocation_id = %s::uuid
+           AND signal_date  = %s::date
+           AND exit_reason  = 'preview_late_entry'
+    """, (body.allocation_id, date))
+
+    return {
+        "status": "spawned",
+        "pid": proc.pid,
+        "log_path": str(log_path),
+        "allocation_id": body.allocation_id,
+        "filter_override": body.filter_override,
     }
 
 

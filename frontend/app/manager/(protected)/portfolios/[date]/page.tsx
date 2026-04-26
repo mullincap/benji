@@ -612,6 +612,50 @@ export default function PortfolioDetailPage() {
   const [ambiguity, setAmbiguity] = useState<AmbiguityDetail | null>(null);
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
 
+  // Late-entry override state
+  const [lateEntryFiring, setLateEntryFiring] = useState(false);
+  const [lateEntryError, setLateEntryError] = useState<string | null>(null);
+
+  const fireLateEntry = useCallback(async () => {
+    if (!data || !allocationId) return;
+    if (!confirm(
+      `Spawn the trader in late-entry mode now?\n\n` +
+      `Allocation: ${allocationId.slice(0, 8)}\n` +
+      `Date: ${date}\n` +
+      `Current preview portfolio: ${(data.meta.final_portfolio_return * 100).toFixed(2)}%\n\n` +
+      `The trader will skip conviction gates and enter at current marks. ` +
+      `This bypasses the strategy's filter — your live performance will diverge from the audit's backtest for today.`
+    )) return;
+    setLateEntryFiring(true);
+    setLateEntryError(null);
+    try {
+      const resp = await fetch(
+        `${API_BASE}/api/manager/portfolios/${date}/late-entry`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          credentials: "include",
+          body: JSON.stringify({
+            allocation_id: allocationId,
+            confirm: true,
+          }),
+        },
+      );
+      if (!resp.ok) {
+        const txt = await resp.text();
+        throw new Error(`HTTP ${resp.status}: ${txt}`);
+      }
+      const json = await resp.json();
+      alert(`Trader spawned (pid=${json.pid}). The page will refresh shortly with the live session.`);
+      // Reload to pick up the new session row
+      setTimeout(() => window.location.reload(), 2000);
+    } catch (e) {
+      setLateEntryError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setLateEntryFiring(false);
+    }
+  }, [data, allocationId, date]);
+
   // Chart view mode persisted in the URL so users can share links to a
   // specific layout. Hidden-symbol state is local-only and resets on
   // navigation — too granular to belong in the URL.
@@ -1013,6 +1057,36 @@ export default function PortfolioDetailPage() {
           {lastUpdated && live && (
             <div style={{ fontSize: 9, color: "var(--t3)", marginTop: 4 }}>
               LAST UPDATED · {lastUpdated.toISOString().slice(11, 19)} UTC
+            </div>
+          )}
+          {meta.exit_reason === "preview_late_entry" && (
+            <div style={{ marginTop: 10, display: "flex", flexDirection: "column", gap: 6 }}>
+              <button
+                onClick={fireLateEntry}
+                disabled={lateEntryFiring}
+                style={{
+                  background: "var(--green)",
+                  color: "var(--bg0)",
+                  fontWeight: 700,
+                  fontSize: 11,
+                  letterSpacing: "0.08em",
+                  textTransform: "uppercase",
+                  padding: "10px 18px",
+                  border: "none",
+                  cursor: lateEntryFiring ? "not-allowed" : "pointer",
+                  opacity: lateEntryFiring ? 0.5 : 1,
+                  fontFamily: "inherit",
+                }}
+              >
+                {lateEntryFiring ? "Spawning trader…" : "▸ Manual Override · Enter Now"}
+              </button>
+              <div style={{ fontSize: 9, color: "var(--t3)", maxWidth: 360 }}>
+                Preview portfolio. Click to spawn the trader in late-entry mode. The
+                trader will bypass conviction gates and enter at current marks.
+              </div>
+              {lateEntryError && (
+                <div style={{ fontSize: 10, color: "var(--red)" }}>{lateEntryError}</div>
+              )}
             </div>
           )}
         </div>

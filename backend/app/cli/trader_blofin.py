@@ -3736,6 +3736,8 @@ def _run_fresh_session_for_allocation(
     connection_id: str,
     vol_boost: float,
     dry_run: bool = False,
+    late_entry: bool = False,
+    filter_override: str | None = None,
 ) -> None:
     """Entry + monitoring-loop-handoff for one user allocation.
 
@@ -3753,11 +3755,19 @@ def _run_fresh_session_for_allocation(
     # TODO(open-work-list): replace CSV with per-strategy-version signal
     # source once a second strategy version exists. All published versions
     # today route through the same CSV filter-column path.
-    symbols = get_today_symbols(today, active_filter=config.active_filter)
+    # Late-entry override: replace the strategy's default filter for this run
+    # only. The strategy_version config stays untouched on disk.
+    active_filter = filter_override or config.active_filter
+    if filter_override:
+        log.info(
+            f"Allocation {allocation_id}: LATE ENTRY filter override — "
+            f"using {active_filter!r} instead of {config.active_filter!r}"
+        )
+    symbols = get_today_symbols(today, active_filter=active_filter)
     if not symbols:
         log.info(
             f"Allocation {allocation_id}: A -- Filtered, no symbols for "
-            f"{today} (filter={config.active_filter!r})"
+            f"{today} (filter={active_filter!r})"
         )
         _mark_runtime_state(allocation_id, {"phase": "filtered", "positions": []})
         _log_allocation_return(
@@ -3818,9 +3828,15 @@ def _run_fresh_session_for_allocation(
         minutes=config.conviction_exec_buffer_min
     )
 
-    sleep_until(conviction_dt, f"conviction bar (allocation {allocation_id})")
+    if late_entry:
+        log.info(
+            f"Allocation {allocation_id}: LATE ENTRY — skipping sleep to "
+            f"{conviction_dt.strftime('%H:%M')} UTC (now={utcnow().strftime('%H:%M:%S')} UTC)"
+        )
+    else:
+        sleep_until(conviction_dt, f"conviction bar (allocation {allocation_id})")
     now = utcnow()
-    past_cutoff = now > exec_cutoff_dt
+    past_cutoff = (now > exec_cutoff_dt) and not late_entry
 
     log.info(
         f"Allocation {allocation_id}: fetching 06:00 + {conviction_dt.strftime('%H:%M')} "
@@ -3921,7 +3937,13 @@ def _run_fresh_session_for_allocation(
         return
 
     # ── Phase 2b: conviction gate ────────────────────────────────────────
-    if roi_x < config.kill_y:
+    if late_entry and roi_x < config.kill_y:
+        log.warning(
+            f"Allocation {allocation_id}: LATE ENTRY — bypassing conviction "
+            f"gate (roi_x={roi_x*100:+.4f}% < kill_y={config.kill_y*100:.2f}%). "
+            "Operator override; entering anyway."
+        )
+    elif roi_x < config.kill_y:
         log.info(
             f"Allocation {allocation_id}: B -- No Entry  roi_x < kill_y  "
             "(return=0%, no fees)"
@@ -3943,6 +3965,63 @@ def _run_fresh_session_for_allocation(
         return
 
     log.info(f"Allocation {allocation_id}: conviction passed — entering at {config.l_high}x")
+
+    # ── Late-entry pre-filter: exclude symbols already past the per-symbol
+    # stop threshold ────────────────────────────────────────────────────────
+    # Without this guard, a late-entry on a basket where one symbol has
+    # already drawn down past stop_raw_pct (e.g. MIRA at -6.76% vs -6%
+    # threshold) would immediately liquidate that position at session start.
+    # Compute return between the strategy's 06:35 reference and current
+    # marks; drop any symbol already across the stop line.
+    if late_entry:
+        try:
+            current_marks = get_mark_prices(api, inst_ids)
+            stop_thr = float(config.stop_raw_pct)
+            kept, dropped_already_stopped = [], []
+            for inst in inst_ids:
+                ref = bar6_prices.get(inst)
+                cur_p = current_marks.get(inst)
+                if ref is None or cur_p is None or float(ref) <= 0:
+                    kept.append(inst); continue
+                ret = (float(cur_p) - float(ref)) / float(ref)
+                if ret <= stop_thr:
+                    dropped_already_stopped.append((inst, ret))
+                else:
+                    kept.append(inst)
+            if dropped_already_stopped:
+                log.warning(
+                    f"Allocation {allocation_id}: LATE ENTRY pre-filter — "
+                    f"{len(dropped_already_stopped)} symbol(s) already past "
+                    f"stop threshold ({stop_thr*100:.1f}%), excluding from entry:"
+                )
+                for inst, ret in dropped_already_stopped:
+                    log.warning(f"  {inst}: cumulative ret={ret*100:+.3f}%")
+            inst_ids = kept
+            if not inst_ids:
+                log.error(
+                    f"Allocation {allocation_id}: LATE ENTRY — all symbols past "
+                    "stop threshold, no entry."
+                )
+                _mark_runtime_state(allocation_id, {
+                    "phase": "late_entry_aborted",
+                    "reason": "all_symbols_past_stop",
+                    "positions": [],
+                })
+                _log_allocation_return(
+                    allocation_id, today,
+                    net_return_pct=0.0,
+                    exit_reason="late_entry_no_eligible_symbols",
+                    effective_leverage=0.0, capital_deployed_usd=0.0,
+                    config=config,
+                    signal_count=len(inst_ids),
+                    conviction_roi_x=float(roi_x),
+                )
+                return
+        except Exception as e:
+            log.warning(
+                f"Allocation {allocation_id}: LATE ENTRY pre-filter failed "
+                f"({e}); proceeding without exclusion"
+            )
 
     # ── Phase 3: stale-position sweep (this account only) ────────────────
     # Mirrors master lines 1904-1939. Uses per-allocation api so only this
@@ -4236,12 +4315,21 @@ def _close_portfolio_session_for_allocation(
 
 
 
-def run_session_for_allocation(allocation_id: str, dry_run: bool = False) -> None:
+def run_session_for_allocation(
+    allocation_id: str,
+    dry_run: bool = False,
+    late_entry: bool = False,
+    filter_override: str | None = None,
+) -> None:
     """Execute one session for one user allocation.
 
     Replaces module-level credentials, filesystem state, and hardcoded strategy
     constants with per-allocation DB-backed equivalents. Otherwise follows the
     same phase sequence as master's run_session().
+
+    late_entry=True is operator-initiated: skips conviction sleep + past-cutoff
+    check + conviction gate. filter_override (with late_entry) replaces the
+    strategy_version's active_filter for this single run.
     """
     # 1. Acquire per-allocation lock (24-hour staleness threshold).
     if not _acquire_allocation_lock(allocation_id):
@@ -4374,6 +4462,8 @@ def run_session_for_allocation(allocation_id: str, dry_run: bool = False) -> Non
             connection_id=str(alloc["connection_id"]),
             vol_boost=vol_boost,
             dry_run=dry_run,
+            late_entry=late_entry,
+            filter_override=filter_override,
         )
 
     finally:
@@ -4400,6 +4490,21 @@ if __name__ == "__main__":
              "multi-tenant mode: decrypts per-user credentials, uses per-"
              "allocation runtime_state, writes with allocation_id. When unset, "
              "runs master account mode (legacy, unchanged).",
+    )
+    parser.add_argument(
+        "--late-entry", action="store_true",
+        help="Operator-initiated late entry. Skips the conviction sleep, "
+             "skips the past-cutoff check, and bypasses the conviction gate "
+             "(roi_x < kill_y). Conviction values are still computed and "
+             "logged for the audit trail. Use when the original session was "
+             "filter-flat or the trader missed the spawn window.",
+    )
+    parser.add_argument(
+        "--filter-override", type=str, default=None,
+        help="Override the strategy_version's active_filter for this run. "
+             "E.g. --filter-override 'Tail Guardrail' when the strategy's "
+             "default filter sat the day out. Only takes effect with "
+             "--late-entry; otherwise the strategy_version's filter wins.",
     )
     args = parser.parse_args()
 
@@ -4431,7 +4536,12 @@ if __name__ == "__main__":
         # Multi-tenant mode: per-allocation lock (DB-backed) instead of the
         # filesystem LOCK_FILE. Master-account path below is unchanged.
         try:
-            run_session_for_allocation(args.allocation_id, dry_run=args.dry_run)
+            run_session_for_allocation(
+                args.allocation_id,
+                dry_run=args.dry_run,
+                late_entry=args.late_entry,
+                filter_override=args.filter_override,
+            )
         except KeyboardInterrupt:
             log.warning(f"Allocation {args.allocation_id}: interrupted by user.")
         except Exception as e:
