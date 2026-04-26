@@ -566,6 +566,24 @@ export default function ExecutionPage() {
     summary?.available_allocations,
   );
 
+  // Deep-link from the portfolio detail page: ?date=YYYY-MM-DD
+  // &allocation_id=UUID prefills the session-log selector + scrolls to
+  // the logs panel. Only consumes the params once on first render so
+  // user-driven row clicks afterwards aren't fought by URL state.
+  useEffect(() => {
+    const dParam = searchParams.get("date");
+    const aParam = searchParams.get("allocation_id");
+    if (dParam) setSelectedLogDate(dParam);
+    if (aParam) {
+      setSelectedLogAllocationId(aParam);
+      setAllocFilter(aParam);
+    }
+    if (dParam || aParam) {
+      setActiveSection("logs");
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   // Master-history fetch: only active when "Include master history" is ON.
   // Legacy /api/manager/execution-reports path — retire once master cron
   // is retired per docs/open_work_list.md Phase 2 gate.

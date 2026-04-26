@@ -678,20 +678,18 @@ export default function PortfolioDetailPage() {
     }
   }, [data, allocationId, date]);
 
-  // Chart view mode persisted in the URL so users can share links to a
-  // specific layout. Hidden-symbol state is local-only and resets on
-  // navigation — too granular to belong in the URL.
-  const view: "portfolio" | "symbols" =
-    searchParams.get("view") === "symbols" ? "symbols" : "portfolio";
+  // Chart view mode is local state, defaulting to "portfolio" on every
+  // page load. Earlier this was URL-persisted via ?view=symbols, but
+  // bookmarking/sharing a URL while in symbols mode meant fresh visitors
+  // landed on the busier all-symbols chart instead of the cleaner
+  // portfolio-only view. Forcing local state ensures the default never
+  // drifts from "portfolio" regardless of how the page is reached.
+  const [view, setViewState] = useState<"portfolio" | "symbols">("portfolio");
   const [hiddenSymbols, setHiddenSymbols] = useState<Set<string>>(new Set());
 
   const setView = useCallback((next: "portfolio" | "symbols") => {
-    const params = new URLSearchParams(searchParams.toString());
-    if (next === "symbols") params.set("view", "symbols");
-    else params.delete("view");
-    const qs = params.toString();
-    router.replace(qs ? `?${qs}` : "?", { scroll: false });
-  }, [router, searchParams]);
+    setViewState(next);
+  }, []);
 
   const toggleSymbolHidden = useCallback((label: string) => {
     setHiddenSymbols((prev) => {
@@ -1397,6 +1395,34 @@ export default function PortfolioDetailPage() {
             </table>
           </div>
         </div>
+
+        {/* Subtle deep-link to the session log viewer for this allocation+date */}
+        {allocationId && (
+          <div style={{
+            display: "flex",
+            justifyContent: "flex-end",
+            marginTop: 16,
+            paddingTop: 12,
+            borderTop: "1px solid var(--line)",
+          }}>
+            <a
+              href={`/manager/execution?date=${date}&allocation_id=${allocationId}`}
+              style={{
+                fontSize: 9,
+                fontWeight: 700,
+                letterSpacing: "0.12em",
+                textTransform: "uppercase",
+                color: "var(--t3)",
+                textDecoration: "none",
+                fontFamily: FONT_MONO,
+              }}
+              onMouseEnter={(e) => { e.currentTarget.style.color = "var(--t1)"; }}
+              onMouseLeave={(e) => { e.currentTarget.style.color = "var(--t3)"; }}
+            >
+              View session logs →
+            </a>
+          </div>
+        )}
       </div>
     </>
   );
