@@ -713,7 +713,6 @@ export default function PortfolioDetailPage() {
   // landed on the busier all-symbols chart instead of the cleaner
   // portfolio-only view. Forcing local state ensures the default never
   // drifts from "portfolio" regardless of how the page is reached.
-  const [view, setViewState] = useState<"portfolio" | "symbols">("portfolio");
   const [hiddenSymbols, setHiddenSymbols] = useState<Set<string>>(new Set());
   // When true, the pace trendline extends across the historical region
   // too (bar 0 → end of session) instead of only the projection segment.
@@ -725,18 +724,17 @@ export default function PortfolioDetailPage() {
   // for, so polling refreshes don't keep clobbering the user's legend
   // clicks. Reset when the user navigates to a different portfolio.
   const seededHiddenRef = useRef<string | null>(null);
-  // Overlay visibility toggles. All start on so a fresh load is the most
-  // informative view; user can dim any individual layer they don't need.
+  // Overlay visibility toggles. portSl/portTsl/now/fillWindow start on
+  // (most informative default); symbols starts off (clean portfolio
+  // view, matches the prior page default). User can flip any layer
+  // independently from the chart toolbar's chip group.
   const [overlays, setOverlays] = useState({
     portSl: true,
     portTsl: true,
     now: true,
     fillWindow: true,
+    symbols: false,
   });
-
-  const setView = useCallback((next: "portfolio" | "symbols") => {
-    setViewState(next);
-  }, []);
 
   const toggleSymbolHidden = useCallback((label: string) => {
     setHiddenSymbols((prev) => {
@@ -1268,7 +1266,7 @@ export default function PortfolioDetailPage() {
   // trendline appears in both modes (faint + dashed; reads as scaffolding
   // rather than a competing line). The drawdown wedge layers between
   // portfolio and trendline so it reads behind both lines.
-  const chartDatasets = view === "symbols"
+  const chartDatasets = overlays.symbols
     ? [portfolioDataset, drawdownDataset, trendlineDataset, portSlDataset, portTslDataset, currentDataset, ...symbolDatasets]
     : [portfolioDataset, drawdownDataset, trendlineDataset, portSlDataset, portTslDataset, currentDataset];
 
@@ -1640,13 +1638,13 @@ export default function PortfolioDetailPage() {
                 textTransform: "uppercase",
               }}
             >
-              Cumulative ROI {view === "symbols" ? "by Symbol" : ""}
+              Cumulative ROI
             </div>
             <div style={{ display: "flex", alignItems: "center", gap: 14, flexWrap: "wrap" }}>
-              {/* Custom legend — only shown in All Symbols mode. Symbols are
-                  clickable to toggle visibility; Portfolio is always visible
-                  and rendered non-interactive. */}
-              {view === "symbols" && (
+              {/* Custom legend — surfaces only when the SYMBOLS overlay is
+                  on. Each symbol chip is clickable to toggle visibility;
+                  Portfolio is always rendered as a non-interactive header. */}
+              {overlays.symbols && (
                 <div
                   style={{
                     display: "flex",
@@ -1719,9 +1717,16 @@ export default function PortfolioDetailPage() {
                   title={overlays.fillWindow ? "Hide fill-window marker" : "Show fill-window marker"}
                   onClick={() => setOverlays((o) => ({ ...o, fillWindow: !o.fillWindow }))}
                 />
+                <OverlayChip
+                  label="SYMBOLS"
+                  active={overlays.symbols}
+                  color="var(--t1)"
+                  title={overlays.symbols
+                    ? "Hide per-symbol lines (portfolio-only view)"
+                    : "Overlay per-symbol lines and the legend below"}
+                  onClick={() => setOverlays((o) => ({ ...o, symbols: !o.symbols }))}
+                />
               </div>
-              {/* Mode toggle */}
-              <ModeToggle value={view} onChange={setView} />
             </div>
           </div>
           <div style={{ height: 320 }}>
@@ -1967,11 +1972,10 @@ function OverlayChip({
   );
 }
 
-// Generic 2+-option segmented control. Same visual treatment as
-// ModeToggle (bordered group, filled active tab, monospace 9px); the
-// generic prop API lets any toolbar pair adopt the same control without
-// duplicating the styling block. Used for the trendline extent toggle
-// (Projection / Full) and any future binary chart switches.
+// Generic 2+-option segmented control. Bordered group, filled active
+// tab, monospace 9px — same treatment as the chart toolbar's other
+// controls. Used for the trendline extent toggle (Projection / Full)
+// and any future binary chart switches.
 function SegmentedToggle<T extends string>({
   value,
   onChange,
@@ -2029,60 +2033,6 @@ function SegmentedToggle<T extends string>({
   );
 }
 
-function ModeToggle({
-  value,
-  onChange,
-}: {
-  value: "portfolio" | "symbols";
-  onChange: (next: "portfolio" | "symbols") => void;
-}) {
-  const opts: { key: "portfolio" | "symbols"; label: string }[] = [
-    { key: "portfolio", label: "PORTFOLIO" },
-    { key: "symbols",   label: "ALL SYMBOLS" },
-  ];
-  return (
-    <div
-      role="tablist"
-      aria-label="Chart view mode"
-      style={{
-        display: "inline-flex",
-        border: "1px solid var(--line)",
-        borderRadius: 4,
-        overflow: "hidden",
-        fontFamily: FONT_MONO,
-      }}
-    >
-      {opts.map((opt, i) => {
-        const active = opt.key === value;
-        return (
-          <button
-            key={opt.key}
-            type="button"
-            role="tab"
-            aria-selected={active}
-            onClick={() => onChange(opt.key)}
-            style={{
-              padding: "4px 10px",
-              fontSize: 9,
-              fontWeight: 700,
-              letterSpacing: "0.08em",
-              background: active ? "var(--bg4)" : "transparent",
-              color: active ? "var(--t0)" : "var(--t2)",
-              border: "none",
-              borderLeft: i === 0 ? "none" : "1px solid var(--line)",
-              cursor: "pointer",
-              transition: "background 0.15s, color 0.15s",
-            }}
-            onMouseEnter={(e) => { if (!active) e.currentTarget.style.color = "var(--t1)"; }}
-            onMouseLeave={(e) => { if (!active) e.currentTarget.style.color = "var(--t2)"; }}
-          >
-            {opt.label}
-          </button>
-        );
-      })}
-    </div>
-  );
-}
 
 function LegendChip({
   label,
