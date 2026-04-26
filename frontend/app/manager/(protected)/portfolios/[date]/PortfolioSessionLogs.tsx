@@ -1265,8 +1265,24 @@ function ColumnHeader() {
       <span style={{ ...headerCellStyle, width: 50 }}>BAR</span>
       <span style={{ ...headerCellStyle, width: 54, textAlign: "right" }}>WIN</span>
       <span style={{ ...headerCellStyle, width: 56, textAlign: "right" }}>LIVE</span>
-      <span style={{ ...headerCellStyle, width: 56, textAlign: "right" }}>EXP</span>
-      <span style={{ ...headerCellStyle, width: 56, textAlign: "right" }}>ACT</span>
+      {/* Tracking band wraps EXP + ACT — these are the leveraged-actual
+          pair the operator reads as a unit (expected vs realized). */}
+      <span
+        style={{
+          ...headerCellStyle,
+          display: "flex",
+          alignItems: "center",
+          gap: 5,
+          padding: "6px 8px",
+          background: "rgba(255,255,255,0.04)",
+          borderRadius: 2,
+          margin: "-6px 4px -6px 2px",
+          boxSizing: "border-box",
+        }}
+      >
+        <span style={{ width: 56, textAlign: "right" }}>EXP</span>
+        <span style={{ width: 56, textAlign: "right" }}>ACT</span>
+      </span>
       <span style={{ ...headerCellStyle, flex: 1, textAlign: "right" }}>Δ</span>
     </div>
   );
@@ -1332,66 +1348,92 @@ function TickRow({
           strip above. Keeps the row narrower and lets WIN/LIVE/EXP/ACT/Δ
           breathe. */}
 
+      {/* WIN — uncolored neutral tone regardless of sign. Reads as
+          context (the open-anchored window return) rather than the
+          headline metric. */}
       <span
         style={{
           width: 54,
           textAlign: "right",
           fontSize: 10.5,
           fontVariantNumeric: "tabular-nums",
-          color:
-            sess === null
-              ? "#52525b"
-              : sess < 0
-              ? "#a07474"
-              : sess > 0
-              ? "#71b88a"
-              : "#71717a",
+          color: sess === null ? "#52525b" : "#a1a1aa",
         }}
       >
         {sess !== null ? fmtPct(sess, 2) : "—"}
       </span>
+      {/* LIVE — picks up the red/green sign treatment WIN used to have.
+          Per-bar 1x portfolio incr, the headline of the entry-anchored
+          path; sign matters more here than on WIN. */}
       <span
         style={{
           width: 56,
           textAlign: "right",
           fontSize: 10.5,
           fontVariantNumeric: "tabular-nums",
-          color: incr !== null && incr > 0 ? "#71b88a" : "#71717a",
+          color:
+            incr === null
+              ? "#52525b"
+              : incr < 0
+              ? "#a07474"
+              : incr > 0
+              ? "#71b88a"
+              : "#71717a",
         }}
       >
         {incr !== null ? fmtPct(incr, 2) : "—"}
       </span>
+      {/* EXP + ACT tracking band — light tint groups the leveraged-
+          actual pair (expected vs realized) the operator reads as a
+          unit. ACT inside still carries its own per-cell heatmap pill
+          on top of the band. */}
       <span
         style={{
-          width: 56,
-          textAlign: "right",
-          fontSize: 10.5,
-          fontVariantNumeric: "tabular-nums",
-          color: expected !== null && expected > 0 ? "#9ad6b5" : "#a1a1aa",
-        }}
-      >
-        {expected !== null ? fmtPct(expected, 2) : "—"}
-      </span>
-      {/* ACT — column-normalized red/green heatmap tint, same intensity
-          grammar as the Advanced matrix's symbol columns. Cap is 0.18
-          (matches matrix); padding tightens vs the other cells so the
-          tint reads as a contained pill rather than bleeding out. */}
-      <span
-        style={{
-          width: 56,
-          textAlign: "right",
-          fontSize: 10.5,
-          fontWeight: 500,
-          fontVariantNumeric: "tabular-nums",
-          color: actual === null ? "#52525b" : actual >= 0 ? "#00c896" : "#ef4444",
-          background:
-            actual === null ? "transparent" : cellTint(actual, actAbsMax, 0.18),
+          display: "flex",
+          alignItems: "center",
+          gap: 5,
+          padding: "3px 8px",
+          background: "rgba(255,255,255,0.04)",
           borderRadius: 2,
-          padding: "1px 4px",
-          marginRight: -4,  // compensate for the padding so column widths line up
+          alignSelf: "stretch",
+          margin: "-3px 4px -3px 2px",
+          boxSizing: "border-box",
         }}
       >
-        {actual !== null ? fmtPct(actual, 2) : "—"}
+        <span
+          style={{
+            width: 56,
+            textAlign: "right",
+            fontSize: 10.5,
+            fontVariantNumeric: "tabular-nums",
+            color: expected !== null && expected > 0 ? "#9ad6b5" : "#a1a1aa",
+          }}
+        >
+          {expected !== null ? fmtPct(expected, 2) : "—"}
+        </span>
+        {/* ACT — column-normalized red/green heatmap tint, same
+            intensity grammar as the Advanced matrix's symbol columns.
+            Cap is 0.18 (matches matrix); padding tightens vs the other
+            cells so the tint reads as a contained pill on top of the
+            tracking band. */}
+        <span
+          style={{
+            width: 56,
+            textAlign: "right",
+            fontSize: 10.5,
+            fontWeight: 500,
+            fontVariantNumeric: "tabular-nums",
+            color:
+              actual === null ? "#52525b" : actual >= 0 ? "#00c896" : "#ef4444",
+            background:
+              actual === null ? "transparent" : cellTint(actual, actAbsMax, 0.18),
+            borderRadius: 2,
+            padding: "1px 4px",
+            marginRight: -4,
+          }}
+        >
+          {actual !== null ? fmtPct(actual, 2) : "—"}
+        </span>
       </span>
       <span style={{ flex: 1, textAlign: "right" }}>
         {delta !== null ? (
