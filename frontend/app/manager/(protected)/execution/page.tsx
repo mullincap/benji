@@ -733,8 +733,8 @@ export default function ExecutionPage() {
         />
         <KpiCard
           label="Avg Total Slip"
-          value={fmtBps(tripCostBps(kpis.avg_entry_slip_bps, kpis.avg_exit_slip_bps))}
-          color={totalSlipColor(tripCostBps(kpis.avg_entry_slip_bps, kpis.avg_exit_slip_bps))}
+          value={fmtBps(kpis.avg_total_slip_bps)}
+          color={totalSlipColor(kpis.avg_total_slip_bps)}
         />
         <KpiCard
           label="Avg PnL Gap"

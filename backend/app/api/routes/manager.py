@@ -70,6 +70,31 @@ def _iso(val: Any) -> str | None:
     return str(val)
 
 
+def _pnl_usd_with_fallback(
+    *, pnl_sum_aes: float | None, net_ret_pct: float | None,
+    cap_deployed: float | None, cap_alloc: float | None,
+) -> float | None:
+    """Daily pnl_usd resolution. Prefer the SUM of per-symbol pnl_usd from
+    allocation_execution_symbols. When that's NULL (sessions before the
+    aes writer extension or sessions skipped during backfill), fall back to
+    net_ret_pct × capital_deployed_usd. For stale-filtered rows where
+    capital_deployed=0 (subprocess-died-then-recovered pattern), use the
+    allocation's capital_usd × DEPLOY_RATIO=0.90 as an approximation. The
+    fallback intentionally over-estimates by the small drift that has
+    accumulated since the session — better than showing "—" on rows where
+    the session truly traded."""
+    if pnl_sum_aes is not None:
+        return pnl_sum_aes
+    if net_ret_pct is None:
+        return None
+    cap = cap_deployed if (cap_deployed is not None and cap_deployed > 0) else None
+    if cap is None and cap_alloc is not None and cap_alloc > 0:
+        cap = float(cap_alloc) * 0.90
+    if cap is None or cap <= 0:
+        return None
+    return float(net_ret_pct) / 100.0 * cap
+
+
 def _fetch_portfolio_context(cur) -> dict[str, Any]:
     """Build the full portfolio context dict used by overview and chat."""
 
@@ -1683,7 +1708,11 @@ def execution_summary(
                 # Captures the full transaction-cost drag in one number; null
                 # when either leg is missing.
                 "total_slip_bps": (
-                    float(_dec(r["avg_entry_slip_bps"])) + float(_dec(r["avg_exit_slip_bps"]))
+                    # Round-trip "cost" = entry_slip - exit_slip with stored
+                    # sign convention. Negative = both legs favourable
+                    # (bought cheaper, sold higher). Only set when both legs
+                    # are known so weighted KPI avg doesn't mix session sets.
+                    float(_dec(r["avg_entry_slip_bps"])) - float(_dec(r["avg_exit_slip_bps"]))
                     if r["avg_entry_slip_bps"] is not None and r["avg_exit_slip_bps"] is not None
                     else None
                 ),
@@ -1702,7 +1731,17 @@ def execution_summary(
                 "capital_deployed_usd":       _dec(r["capital_deployed_usd"]),
                 "order_fees_usd":             _dec(r["order_fees_usd"]),
                 "funding_fees_usd":           _dec(r["funding_fees_usd"]),
-                "pnl_usd":                    _dec(r["pnl_usd_sum"]),
+                # pnl_usd: prefer SUM(aes.pnl_usd) when per-symbol rows are
+                # populated. Fallback to net_ret × capital_deployed (or
+                # a.capital_usd × DEPLOY_RATIO for stale-filtered rows where
+                # capital_deployed = 0) so historical sessions without aes
+                # backfill still show a daily total.
+                "pnl_usd":                    _pnl_usd_with_fallback(
+                    pnl_sum_aes  = _dec(r["pnl_usd_sum"]),
+                    net_ret_pct  = net_ret,
+                    cap_deployed = _dec(r["capital_deployed_usd"]),
+                    cap_alloc    = _dec(r["capital_usd"]),
+                ),
                 "total_notional_usd":         _dec(r["total_notional_usd"]),
                 "exit_reason":                er_effective,
             })
@@ -1842,12 +1881,14 @@ def execution_summary_positions(
             else None
         )
 
-        # Total round-trip slippage = entry + exit (sign-preserving). Negative
-        # = both legs favourable; positive = both adverse; mixed cancels out.
+        # Round-trip "cost" = entry_slip - exit_slip with stored sign
+        # convention. Negative = both legs favourable (bought cheaper, sold
+        # higher). Matches the daily-row total_slip_bps formula so KPI
+        # weighted averages roll up consistently.
         ent_slip = _dec(r["entry_slippage_bps"])
         ext_slip = _dec(r["exit_slippage_bps"])
         total_slip_bps = (
-            float(ent_slip) + float(ext_slip)
+            float(ent_slip) - float(ext_slip)
             if ent_slip is not None and ext_slip is not None
             else None
         )
