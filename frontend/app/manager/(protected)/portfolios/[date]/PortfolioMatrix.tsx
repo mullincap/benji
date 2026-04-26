@@ -479,7 +479,10 @@ function SimpleMatrix({
           </tr>
         </thead>
         <tbody>
-          {bars.map((b) => (
+          {/* Latest bar at top — matches the Advanced view + Bloomberg
+              convention. Operator opening the page sees the most recent
+              state immediately without scrolling. */}
+          {[...bars].reverse().map((b) => (
             <tr key={b.bar}>
               <td style={{ ...matrixTdStyle, color: "var(--t2)" }}>{b.bar}</td>
               <td
@@ -505,11 +508,12 @@ function SimpleMatrix({
                         pct === null
                           ? "var(--t3)"
                           : isStopped
-                          // Faint pale-yellow — reads as amber-family
-                          // ("frozen at clamp") without the saturation
-                          // of var(--amber), which was pulling more
-                          // attention than a static stopped row warrants.
-                          ? "rgba(240, 200, 120, 0.45)"
+                          // Faint light gray — even quieter than the
+                          // earlier pale-yellow. Stopped rows are
+                          // ambient context (clamp values that don't
+                          // change), so they shouldn't read as a
+                          // signal at all.
+                          ? "rgba(200, 200, 210, 0.45)"
                           : pct >= 0
                           ? "var(--green)"
                           : "var(--red)",
