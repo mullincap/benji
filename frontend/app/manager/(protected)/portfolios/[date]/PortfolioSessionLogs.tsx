@@ -117,6 +117,7 @@ type Item =
       roi_report?: RoiReportData;
     }
   | { type: "stop_event"; ts: string; n: number; lines: LogLine[] }
+  | { type: "system"; line: LogLine }
   | { type: "generic"; line: LogLine };
 
 interface Props {
@@ -285,7 +286,13 @@ function buildItems(lines: LogLine[]): Item[] {
       continue;
     }
     flushStop();
-    out.push({ type: "generic", line: l });
+    // system_event rows render compact via SystemRow; everything else
+    // unmatched falls back to GenericRow with multi-line wrap.
+    if (l.kind === "system_event") {
+      out.push({ type: "system", line: l });
+    } else {
+      out.push({ type: "generic", line: l });
+    }
   }
   flushStop();
   return out;
@@ -314,6 +321,12 @@ export default function PortfolioSessionLogs({
   const [lines, setLines] = useState<LogLine[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [filter, setFilter] = useState<FilterKey>("all");
+  // Independent SYS toggle — orthogonal to the exclusive filter chips.
+  // Off by default so bootstrap noise (TraderConfig, allocation init,
+  // rehydrate, session boundaries) doesn't dominate the viewport. The
+  // chip count reveals what's hidden so the operator gets a "there's
+  // stuff here you're not seeing" cue without having to look.
+  const [sysShown, setSysShown] = useState<boolean>(false);
   const [hasUnreadStop, setHasUnreadStop] = useState<boolean>(false);
   const [paused, setPaused] = useState<boolean>(() =>
     readBoolStorage(STORAGE_KEYS.animatePaused, false),
@@ -460,13 +473,19 @@ export default function PortfolioSessionLogs({
   );
 
   const filteredLines = useMemo(() => {
-    if (filter === "all") return scopedLines;
     return scopedLines.filter((l) => {
+      // SYS gate first — independent of the exclusive filter chip.
+      // system_events stay hidden unless the operator opts in.
+      if (l.kind === "system_event" && !sysShown) return false;
+      // Exclusive filter chip
+      if (filter === "all") return true;
       if (filter === "bars") return l.kind === "bar_update";
       if (filter === "events") {
+        // EVENTS = non-tick, non-system events. The SYS chip is the
+        // dedicated path for system_events; don't double-count them.
         return (
           l.kind &&
-          !["bar_update", "roi_report"].includes(l.kind)
+          !["bar_update", "roi_report", "system_event"].includes(l.kind)
         );
       }
       if (filter === "stops") return l.kind === "sym_stop";
@@ -481,19 +500,29 @@ export default function PortfolioSessionLogs({
       }
       return true;
     });
-  }, [scopedLines, filter]);
+  }, [scopedLines, filter, sysShown]);
 
   const items = useMemo(() => buildItems(filteredLines), [filteredLines]);
 
   // Chip counts — computed against scopedLines (not filteredLines), so
   // each chip's count answers "how many would I see if I clicked this".
+  // Note: ALL excludes system_events (they're the SYS chip's domain).
   const counts = useMemo(() => {
     let bars = 0;
     let events = 0;
     let stopGroups = 0;
     let warn = 0;
+    let sys = 0;
+    let allCount = 0;
     let inStop = false;
     for (const l of scopedLines) {
+      if (l.kind === "system_event") {
+        sys++;
+        // system_events don't count against ALL — operator opts in via SYS.
+        inStop = false;
+        continue;
+      }
+      allCount++;
       if (l.kind === "bar_update") {
         bars++;
         inStop = false;
@@ -529,7 +558,7 @@ export default function PortfolioSessionLogs({
         warn++;
       }
     }
-    return { all: scopedLines.length, bars, events, stops: stopGroups, warn };
+    return { all: allCount, bars, events, stops: stopGroups, warn, sys };
   }, [scopedLines]);
 
   // Latest-bar metrics for header + snapshot + footer typing template.
@@ -614,7 +643,13 @@ export default function PortfolioSessionLogs({
             sessionActive={sessionActive}
             onClose={() => setExpanded(false)}
           />
-          <ChipToolbar filter={filter} setFilter={setFilter} counts={counts} />
+          <ChipToolbar
+            filter={filter}
+            setFilter={setFilter}
+            sysShown={sysShown}
+            setSysShown={setSysShown}
+            counts={counts}
+          />
           <Snapshot
             lastBar={latestSnapshot.lastBar}
             lastRoi={latestSnapshot.lastRoi}
@@ -828,11 +863,15 @@ function PanelHeader({
 function ChipToolbar({
   filter,
   setFilter,
+  sysShown,
+  setSysShown,
   counts,
 }: {
   filter: FilterKey;
   setFilter: (k: FilterKey) => void;
-  counts: { all: number; bars: number; events: number; stops: number; warn: number };
+  sysShown: boolean;
+  setSysShown: (next: boolean | ((prev: boolean) => boolean)) => void;
+  counts: { all: number; bars: number; events: number; stops: number; warn: number; sys: number };
 }) {
   const chips: { key: FilterKey; label: string; count: number; tone: "neutral" | "stop" | "warn" }[] = [
     { key: "all", label: "ALL", count: counts.all, tone: "neutral" },
@@ -895,6 +934,45 @@ function ChipToolbar({
           </button>
         );
       })}
+      {/* SYS — independent toggle (NOT mutually exclusive with the
+          filter chips above). Off by default so bootstrap noise stays
+          collapsed; the count exposes how much is hidden. */}
+      <button
+        type="button"
+        role="switch"
+        aria-checked={sysShown}
+        title={
+          sysShown
+            ? "Hide system bootstrap & config lines"
+            : "Show system bootstrap & config lines"
+        }
+        onClick={() => setSysShown((s) => !s)}
+        style={{
+          fontFamily: FONT_MONO,
+          fontSize: 9.5,
+          letterSpacing: "0.04em",
+          padding: "3px 6px",
+          borderRadius: 3,
+          background: sysShown ? "rgba(255,255,255,0.06)" : "transparent",
+          color: sysShown ? "#d4d4d8" : "#71717a",
+          border: `1px solid ${
+            sysShown ? "rgba(255,255,255,0.16)" : "rgba(255,255,255,0.08)"
+          }`,
+          cursor: "pointer",
+          whiteSpace: "nowrap",
+        }}
+      >
+        SYS
+        <span
+          style={{
+            marginLeft: 4,
+            color: sysShown ? "rgba(255,255,255,0.6)" : "rgba(255,255,255,0.4)",
+            fontWeight: 400,
+          }}
+        >
+          {counts.sys}
+        </span>
+      </button>
     </div>
   );
 }
@@ -1080,6 +1158,9 @@ function Viewport({
                 onToggle={() => toggleStop(item.n)}
               />
             );
+          }
+          if (item.type === "system") {
+            return <SystemRow key={`sys-${item.line.n}`} line={item.line} />;
           }
           return <GenericRow key={`g-${item.line.n}`} line={item.line} />;
         })}
@@ -1587,6 +1668,86 @@ function StopEventLine({ line }: { line: LogLine }) {
 }
 
 // ── Generic row (unmatched lines) ───────────────────────────────────────────
+
+// Compact dim row for system_event lines (TraderConfig, allocation
+// init/resume, rehydrate, session boundary). Single-line layout: time,
+// dim SYS pill, truncated body. Click to expand the full text. Stays
+// out of the column grid so bootstrap noise never claims tick-row
+// real estate even when SYS visibility is toggled on.
+function SystemRow({ line }: { line: LogLine }) {
+  const [expanded, setExpanded] = useState(false);
+  const subtype =
+    (line.data as { subtype?: string } | undefined)?.subtype ?? "sys";
+  return (
+    <div
+      role="button"
+      tabIndex={0}
+      onClick={() => setExpanded((v) => !v)}
+      onKeyDown={(e) => {
+        if (e.key === " " || e.key === "Enter") {
+          e.preventDefault();
+          setExpanded((v) => !v);
+        }
+      }}
+      style={{
+        display: "flex",
+        alignItems: "baseline",
+        gap: 7,
+        padding: "1px 0",
+        fontSize: 9.5,
+        color: "#71717a",
+        fontFamily: FONT_MONO,
+        lineHeight: 1.55,
+        cursor: "pointer",
+        userSelect: "none",
+      }}
+    >
+      <span
+        style={{
+          width: 38,
+          color: "#42424a",
+          fontSize: 9.5,
+          flexShrink: 0,
+          fontVariantNumeric: "tabular-nums",
+        }}
+      >
+        {fmtTimeShort(line.ts)}
+      </span>
+      <span
+        style={{
+          background: "#1a1a1d",
+          color: "#a1a1aa",
+          fontSize: 8,
+          letterSpacing: "0.10em",
+          padding: "1px 5px",
+          borderRadius: 2,
+          flexShrink: 0,
+          textTransform: "uppercase",
+          fontFamily: FONT_MONO,
+        }}
+        title={`subtype: ${subtype}`}
+      >
+        SYS
+      </span>
+      <span
+        style={{
+          flex: 1,
+          color: "#71717a",
+          minWidth: 0,
+          ...(expanded
+            ? { whiteSpace: "pre-wrap", wordBreak: "break-word" }
+            : {
+                overflow: "hidden",
+                textOverflow: "ellipsis",
+                whiteSpace: "nowrap",
+              }),
+        }}
+      >
+        {line.text}
+      </span>
+    </div>
+  );
+}
 
 function GenericRow({ line }: { line: LogLine }) {
   const lvlColor =
