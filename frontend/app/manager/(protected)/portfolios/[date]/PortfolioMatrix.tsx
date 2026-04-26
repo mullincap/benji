@@ -462,11 +462,26 @@ function SimpleMatrix({
             >
               Time
             </th>
-            {symbolsOrdered.map((sym) => (
-              <th key={sym} style={matrixThStyle}>
-                {sym.replace("-USDT", "")}
-              </th>
-            ))}
+            {symbolsOrdered.map((sym) => {
+              // Stopped-symbol header gets the same faint cool-gray as
+              // its body cells so the column reads as a single muted
+              // unit ("frozen at clamp") rather than a live one with
+              // dim values.
+              const isStopped = stoppedAtBar.has(sym);
+              return (
+                <th
+                  key={sym}
+                  style={{
+                    ...matrixThStyle,
+                    ...(isStopped
+                      ? { color: "rgba(200, 200, 210, 0.45)" }
+                      : null),
+                  }}
+                >
+                  {sym.replace("-USDT", "")}
+                </th>
+              );
+            })}
             <th
               style={{
                 ...matrixThStyle,
