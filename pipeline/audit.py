@@ -7019,6 +7019,12 @@ def simulate(df_4x: pd.DataFrame,
     raw_efx = params.get("EARLY_FILL_X", None)
     efx_val = int(raw_efx) if (raw_efx is not None and raw_efx != 0) else 0
 
+    raw_dd_x = params.get("DD_STOP_X", 9999)
+    raw_dd_y = params.get("DD_STOP_Y", -0.99)
+    en_dd    = raw_dd_y is not None and float(raw_dd_y) > -0.98 and int(raw_dd_x) < 9999
+    dd_x_val = int(raw_dd_x) if en_dd else 0
+    dd_y_val = float(raw_dd_y) if en_dd else -999.0
+
     daily = []
     flat_days = 0
     first_flat_logged = False
@@ -7345,6 +7351,9 @@ def simulate(df_4x: pd.DataFrame,
             enable_portfolio_stop    = en_ps,
             enable_early_fill        = en_ef,
             early_fill_max_minutes   = efx_val,
+            enable_dd_stop           = en_dd,
+            dd_stop_threshold_1x     = dd_y_val,
+            dd_stop_min_minutes      = dd_x_val,
             trial_purchases          = TRIAL_PURCHASES,
             return_exit_bar          = True,
         )

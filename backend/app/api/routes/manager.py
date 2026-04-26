@@ -1512,6 +1512,16 @@ def execution_summary(
                 ar.signal_count      AS ar_signal_count,
                 ar.conviction_roi_x,
                 ar.alerts_fired,
+                ar.order_fees_usd,
+                ar.funding_fees_usd,
+                (SELECT SUM(pnl_usd)
+                   FROM user_mgmt.allocation_execution_symbols aes
+                  WHERE aes.allocation_id = ar.allocation_id
+                    AND aes.session_date  = ar.session_date) AS pnl_usd_sum,
+                (SELECT SUM(filled_contracts * fill_entry_price * COALESCE(ctval, 1.0))
+                   FROM user_mgmt.allocation_execution_symbols aes
+                  WHERE aes.allocation_id = ar.allocation_id
+                    AND aes.session_date  = ar.session_date) AS total_notional_usd,
                 ps.symbols,
                 ps.entered,
                 ps.bars_count,
@@ -1566,12 +1576,19 @@ def execution_summary(
             # exchange-leverage ceiling). Using lev_int=3 when eff_lev=2.14
             # over-states est by 40% and made the gap-vs-actual look like a
             # 9-point miss when it's really a 1-point fee+slippage drag.
+            #
+            # DEPLOY_RATIO=0.90 mirrors the per-bar expected_roi scaling in
+            # trader_blofin.py:2557-2558 — only ~90% of total equity goes
+            # into leveraged positions due to the 10% MARGIN_BUFFER held back
+            # by enter_positions. Without this factor, est over-states by
+            # ~11% and the gap reads as drag that's actually structural.
+            DEPLOY_RATIO = 0.90
             fpr = _dec(r["final_portfolio_return"])
             eff_lev_dec = _dec(r["effective_leverage"])
             lev_int = int(r["lev_int"]) if r["lev_int"] is not None else None
             est_return_pct = (
-                fpr * eff_lev_dec * 100 if fpr is not None and eff_lev_dec is not None
-                else (fpr * lev_int * 100 if fpr is not None and lev_int is not None else None)
+                fpr * eff_lev_dec * DEPLOY_RATIO * 100 if fpr is not None and eff_lev_dec is not None
+                else (fpr * lev_int * DEPLOY_RATIO * 100 if fpr is not None and lev_int is not None else None)
             )
 
             if ar_is_stale_filtered:
@@ -1683,6 +1700,10 @@ def execution_summary(
                 "peak_portfolio_return":      _dec(r["peak_portfolio_return"]),
                 "max_dd_from_peak":           _dec(r["max_dd_from_peak"]),
                 "capital_deployed_usd":       _dec(r["capital_deployed_usd"]),
+                "order_fees_usd":             _dec(r["order_fees_usd"]),
+                "funding_fees_usd":           _dec(r["funding_fees_usd"]),
+                "pnl_usd":                    _dec(r["pnl_usd_sum"]),
+                "total_notional_usd":         _dec(r["total_notional_usd"]),
                 "exit_reason":                er_effective,
             })
 
@@ -1769,7 +1790,7 @@ def execution_summary_positions(
                est_entry_price, fill_entry_price, entry_slippage_bps,
                est_exit_price, fill_exit_price, exit_slippage_bps,
                pnl_usd, pnl_pct, exit_reason, retry_rounds, sym_stopped,
-               ctval
+               ctval, order_fees_usd, funding_fees_usd, operator_intervened
           FROM user_mgmt.allocation_execution_symbols
          WHERE allocation_id = %s::uuid
            AND session_date  = %s::date
@@ -1853,6 +1874,9 @@ def execution_summary_positions(
             "sym_stopped":        r["sym_stopped"],
             "notional_usd":       notional_usd,
             "leverage":           session_lev,
+            "order_fees_usd":     _dec(r["order_fees_usd"]),
+            "funding_fees_usd":   _dec(r["funding_fees_usd"]),
+            "operator_intervened": bool(r["operator_intervened"]) if r["operator_intervened"] is not None else False,
         })
     return {
         "allocation_id": allocation_id,

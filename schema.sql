@@ -924,6 +924,8 @@ CREATE TABLE IF NOT EXISTS user_mgmt.allocation_returns (
     exit_reason          TEXT,
     effective_leverage   NUMERIC(10,4),
     capital_deployed_usd NUMERIC(18,2),
+    order_fees_usd       NUMERIC,
+    funding_fees_usd     NUMERIC,
     logged_at            TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     PRIMARY KEY (allocation_id, session_date)
 );

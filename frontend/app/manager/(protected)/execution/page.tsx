@@ -151,6 +151,10 @@ interface SummaryDaily {
   peak_portfolio_return: number | null;
   max_dd_from_peak: number | null;
   capital_deployed_usd: number | null;
+  pnl_usd: number | null;
+  total_notional_usd: number | null;
+  order_fees_usd: number | null;
+  funding_fees_usd: number | null;
   exit_reason: string | null;
   alerts: number | null;
 }
@@ -218,28 +222,40 @@ function fmtPriceBare(v: number | string | null | undefined): string {
 // Color thresholds ----------------------------------------------------------
 
 function entrySlipColor(bps: number | null | undefined): string {
-  if (bps === null || bps === undefined) return "var(--t2)";
-  const abs = Math.abs(bps);
-  if (abs <= 5) return "var(--green)";
-  if (abs <= 15) return "var(--amber)";
-  return "var(--red)";
-}
-
-function exitSlipColor(bps: number | null | undefined): string {
+  // Entry slip = (fill - est) / est × 10000.
+  // Negative = filled cheaper than estimate = favorable (good for a buy).
   if (bps === null || bps === undefined) return "var(--t2)";
   if (bps <= 0) return "var(--green)";
   if (bps <= 10) return "var(--amber)";
   return "var(--red)";
 }
 
-/** Total round-trip slip (entry + exit) — symmetric magnitude scale.
- *  Net favourable execution → green, near zero (typical fee floor) → amber,
- *  meaningfully adverse → red. */
+function exitSlipColor(bps: number | null | undefined): string {
+  // Exit slip is displayed as -1 × stored value so that negative = favorable
+  // matches the entry-slip convention (i.e. lower-than-estimated cost is good).
+  // After negation, negative = good (sold higher than est) → green; positive
+  // = bad (sold lower than est) → red.
+  if (bps === null || bps === undefined) return "var(--t2)";
+  if (bps <= 0) return "var(--green)";
+  if (bps <= 10) return "var(--amber)";
+  return "var(--red)";
+}
+
+/** Total round-trip slip — interpreted as "round-trip cost" with negative =
+ *  favourable. The displayed value should be entry_slip - exit_slip (i.e.
+ *  entry_slip + negated_exit_slip), so the unified sign convention holds:
+ *  bought-cheaper + sold-higher = both legs negative = net negative = green. */
 function totalSlipColor(bps: number | null | undefined): string {
   if (bps === null || bps === undefined) return "var(--t2)";
   if (bps <= 0) return "var(--green)";
   if (bps <= 20) return "var(--amber)";
   return "var(--red)";
+}
+
+/** Helper: round-trip "cost" bps from entry + exit slip with new sign convention. */
+function tripCostBps(entry: number | null | undefined, exit: number | null | undefined): number | null {
+  if (entry == null || exit == null) return null;
+  return entry - exit;  // = entry_slip + (-exit_slip), positive = adverse round trip
 }
 
 function pnlGapColor(pct: number | null | undefined): string {
@@ -712,13 +728,13 @@ export default function ExecutionPage() {
         />
         <KpiCard
           label="Avg Exit Slip"
-          value={fmtBps(kpis.avg_exit_slip_bps)}
-          color={exitSlipColor(kpis.avg_exit_slip_bps)}
+          value={fmtBps(kpis.avg_exit_slip_bps == null ? null : -kpis.avg_exit_slip_bps)}
+          color={exitSlipColor(kpis.avg_exit_slip_bps == null ? null : -kpis.avg_exit_slip_bps)}
         />
         <KpiCard
           label="Avg Total Slip"
-          value={fmtBps(kpis.avg_total_slip_bps)}
-          color={totalSlipColor(kpis.avg_total_slip_bps)}
+          value={fmtBps(tripCostBps(kpis.avg_entry_slip_bps, kpis.avg_exit_slip_bps))}
+          color={totalSlipColor(tripCostBps(kpis.avg_entry_slip_bps, kpis.avg_exit_slip_bps))}
         />
         <KpiCard
           label="Avg PnL Gap"
@@ -883,6 +899,10 @@ export default function ExecutionPage() {
                   "Est Ret",
                   "Actual Ret",
                   "PnL Gap",
+                  "PnL USD",
+                  "Notional",
+                  "Order Fees",
+                  "Funding",
                   "Lev",
                   "Exit",
                   "Alerts",
@@ -957,6 +977,9 @@ interface ExecPositionRow {
   sym_stopped: boolean;
   notional_usd: number | null;
   leverage: number | null;
+  order_fees_usd: number | null;
+  funding_fees_usd: number | null;
+  operator_intervened: boolean;
 }
 
 function AllocationDayRow({
@@ -1016,7 +1039,7 @@ function AllocationDayRow({
     return () => { cancelled = true; };
   }, [expanded, positions, row.date, row.allocation_id]);
 
-  const totalCols = (showAllocCol ? 17 : 16);
+  const totalCols = (showAllocCol ? 21 : 20);
 
   const allocCell = showAllocCol ? (
     <td style={{ ...tdStyle, color: "var(--t1)" }}>
@@ -1085,16 +1108,28 @@ function AllocationDayRow({
         <td style={{ ...tdStyle, color: entrySlipColor(row.entry_slip_bps) }}>
           {fmtBps(row.entry_slip_bps)}
         </td>
-        <td style={{ ...tdStyle, color: exitSlipColor(row.exit_slip_bps) }}>
-          {fmtBps(row.exit_slip_bps)}
+        <td style={{ ...tdStyle, color: exitSlipColor(row.exit_slip_bps == null ? null : -row.exit_slip_bps) }}>
+          {fmtBps(row.exit_slip_bps == null ? null : -row.exit_slip_bps)}
         </td>
-        <td style={{ ...tdStyle, color: totalSlipColor(row.total_slip_bps) }}>
-          {fmtBps(row.total_slip_bps)}
+        <td style={{ ...tdStyle, color: totalSlipColor(tripCostBps(row.entry_slip_bps, row.exit_slip_bps)) }}>
+          {fmtBps(tripCostBps(row.entry_slip_bps, row.exit_slip_bps))}
         </td>
         <td style={tdStyle}>{fmtPct(row.est_return_pct)}</td>
         <td style={tdStyle}>{fmtPct(row.actual_return_pct)}</td>
         <td style={{ ...tdStyle, color: pnlGapColor(row.pnl_gap_pct_from_gross) }}>
           {fmtPct(row.pnl_gap_pct_from_gross)}
+        </td>
+        <td style={{ ...tdStyle, color: (row.pnl_usd ?? 0) >= 0 ? "var(--green)" : "var(--red)" }}>
+          {row.pnl_usd === null ? "—" : `$${row.pnl_usd.toFixed(2)}`}
+        </td>
+        <td style={tdStyle}>
+          {row.total_notional_usd === null ? "—" : `$${row.total_notional_usd.toFixed(0)}`}
+        </td>
+        <td style={tdStyle}>
+          {row.order_fees_usd === null ? "—" : `$${Number(row.order_fees_usd).toFixed(2)}`}
+        </td>
+        <td style={tdStyle}>
+          {row.funding_fees_usd === null ? "—" : `$${Number(row.funding_fees_usd).toFixed(2)}`}
         </td>
         <td style={tdStyle}>
           {row.leverage_applied ? `${row.leverage_applied.toFixed(2)}x` : "—"}
@@ -1150,6 +1185,7 @@ function PositionsSubRow({
                     "ENTRY EST", "ENTRY FILL", "ENTRY SLIP",
                     "EXIT EST", "EXIT FILL", "EXIT SLIP", "TOTAL SLIP",
                     "EST PNL %", "PNL %", "PNL GAP", "PNL USD",
+                    "ORDER FEES", "FUNDING",
                     "EXIT", "RETRIES",
                   ].map((h) => (
                     <th key={h} style={{ ...thStyle, fontSize: 8 }}>{h}</th>
@@ -1161,6 +1197,12 @@ function PositionsSubRow({
                   <tr key={p.inst_id}>
                     <td style={{ ...tdStyle, color: "var(--t0)", fontWeight: 700 }}>
                       {p.inst_id.replace(/-USDT(-SWAP)?$/, "")}
+                      {p.operator_intervened && (
+                        <span title="Operator manually traded this symbol mid-session"
+                              style={{ color: "var(--amber)", marginLeft: 4, fontSize: 10 }}>
+                          *
+                        </span>
+                      )}
                     </td>
                     <td style={{ ...tdStyle, color: "var(--t2)" }}>{p.side ?? "—"}</td>
                     <td style={tdStyle}>{p.filled_contracts ?? "—"}</td>
@@ -1179,11 +1221,11 @@ function PositionsSubRow({
                     </td>
                     <td style={tdStyle}>{fmtPriceBare(p.est_exit_price)}</td>
                     <td style={tdStyle}>{fmtPriceBare(p.fill_exit_price)}</td>
-                    <td style={{ ...tdStyle, color: exitSlipColor(p.exit_slippage_bps) }}>
-                      {fmtBps(p.exit_slippage_bps)}
+                    <td style={{ ...tdStyle, color: exitSlipColor(p.exit_slippage_bps == null ? null : -p.exit_slippage_bps) }}>
+                      {fmtBps(p.exit_slippage_bps == null ? null : -p.exit_slippage_bps)}
                     </td>
-                    <td style={{ ...tdStyle, color: totalSlipColor(p.total_slip_bps) }}>
-                      {fmtBps(p.total_slip_bps)}
+                    <td style={{ ...tdStyle, color: totalSlipColor(tripCostBps(p.entry_slippage_bps, p.exit_slippage_bps)) }}>
+                      {fmtBps(tripCostBps(p.entry_slippage_bps, p.exit_slippage_bps))}
                     </td>
                     <td style={{ ...tdStyle, color: (p.est_pnl_pct ?? 0) >= 0 ? "var(--green)" : "var(--red)" }}>
                       {fmtPct(p.est_pnl_pct)}
@@ -1196,6 +1238,12 @@ function PositionsSubRow({
                     </td>
                     <td style={{ ...tdStyle, color: (p.pnl_usd ?? 0) >= 0 ? "var(--green)" : "var(--red)" }}>
                       {p.pnl_usd === null ? "—" : `${p.pnl_usd >= 0 ? "+" : ""}$${p.pnl_usd.toFixed(2)}`}
+                    </td>
+                    <td style={tdStyle}>
+                      {p.order_fees_usd === null ? "—" : `$${Number(p.order_fees_usd).toFixed(2)}`}
+                    </td>
+                    <td style={tdStyle}>
+                      {p.funding_fees_usd === null ? "—" : `$${Number(p.funding_fees_usd).toFixed(2)}`}
                     </td>
                     <td style={{ ...tdStyle, color: p.sym_stopped ? "var(--amber)" : "var(--t2)" }}>
                       {p.exit_reason ?? "—"}
@@ -1232,8 +1280,13 @@ function DayRow({
       Master (pre-multi-tenant)
     </span>
   );
-  const flatColSpan = showAllocCol ? 11 : 11; // allocation col is inserted pre-fill/conviction; fill run starts after conviction
-  const detailColSpan = showAllocCol ? 16 : 15;
+  // Daily row has 20 cols (chevron + date + signal + conviction + ... + alerts)
+  // or 21 with the Allocation column. The flat-row "exit reason" td spans
+  // everything from after Conviction onward: 20 - (chevron+date+signal+conviction)
+  // = 16, plus the allocation col when present, but it sits BEFORE signal so
+  // only the post-conviction span varies — keep 16 in both.
+  const flatColSpan = 16;
+  const detailColSpan = showAllocCol ? 21 : 20;
 
   if (flat) {
     return (
@@ -1321,10 +1374,10 @@ function DayRow({
         <td
           style={{
             ...tdStyle,
-            color: exitSlipColor(exitBlk?.avg_exit_slippage_bps),
+            color: exitSlipColor(exitBlk?.avg_exit_slippage_bps == null ? null : -exitBlk.avg_exit_slippage_bps),
           }}
         >
-          {fmtBps(exitBlk?.avg_exit_slippage_bps)}
+          {fmtBps(exitBlk?.avg_exit_slippage_bps == null ? null : -exitBlk.avg_exit_slippage_bps)}
         </td>
         <td style={tdStyle}>{fmtPct(exitBlk?.est_net_return_pct)}</td>
         <td style={tdStyle}>{fmtPct(exitBlk?.actual_return_pct)}</td>
