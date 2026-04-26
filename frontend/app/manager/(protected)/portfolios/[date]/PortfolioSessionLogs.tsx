@@ -125,6 +125,12 @@ interface Props {
   exchange: string | null;
   strategyLabel: string | null;
   sessionActive: boolean;
+  // Controlled expansion state — lifted to the page so it can reflow
+  // its main content (margin-right transition) instead of overlaying
+  // the panel over the chart and matrix. Page reads the same localStorage
+  // key on mount so initial render carries no flash.
+  expanded: boolean;
+  onExpandedChange: (next: boolean) => void;
 }
 
 // ── URL builder ────────────────────────────────────────────────────────────
@@ -293,9 +299,17 @@ export default function PortfolioSessionLogs({
   exchange,
   strategyLabel,
   sessionActive,
+  expanded,
+  onExpandedChange,
 }: Props) {
-  const [expanded, setExpanded] = useState<boolean>(() =>
-    readBoolStorage(STORAGE_KEYS.expanded, false),
+  // Local setter that also persists to localStorage. The controlled
+  // prop drives rendering; the page reads the same key on mount.
+  const setExpanded = useCallback(
+    (next: boolean) => {
+      writeBoolStorage(STORAGE_KEYS.expanded, next);
+      onExpandedChange(next);
+    },
+    [onExpandedChange],
   );
   const [lines, setLines] = useState<LogLine[]>([]);
   const [error, setError] = useState<string | null>(null);
@@ -312,8 +326,9 @@ export default function PortfolioSessionLogs({
   const wasAtBottomRef = useRef<boolean>(true);
   const lastViewedRef = useRef<number | null>(readIntStorage(STORAGE_KEYS.lastViewedLineN));
 
-  // Persist toggleable flags
-  useEffect(() => writeBoolStorage(STORAGE_KEYS.expanded, expanded), [expanded]);
+  // Persist paused state. (Expanded persistence is handled by the
+  // controlled setter so the page mounts with the right margin-right
+  // before the panel even renders, avoiding a layout flash.)
   useEffect(() => writeBoolStorage(STORAGE_KEYS.animatePaused, paused), [paused]);
 
   // Tab visibility tracking — animations auto-pause when hidden.

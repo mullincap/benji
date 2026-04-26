@@ -715,6 +715,15 @@ export default function PortfolioDetailPage() {
   // portfolio-only view. Forcing local state ensures the default never
   // drifts from "portfolio" regardless of how the page is reached.
   const [hiddenSymbols, setHiddenSymbols] = useState<Set<string>>(new Set());
+  // Right-edge session-logs panel state — lifted from the panel component
+  // so the page wrapper can reflow its main content via a margin-right
+  // transition. Initial value reads from the same localStorage key the
+  // panel writes (portfolio.sessionLogs.expanded), so the page mounts
+  // with the correct margin and there's no layout flash on reload.
+  const [logsExpanded, setLogsExpanded] = useState<boolean>(() => {
+    if (typeof window === "undefined") return false;
+    return window.localStorage.getItem("portfolio.sessionLogs.expanded") === "true";
+  });
   // When true, the pace trendline extends across the historical region
   // too (bar 0 → end of session) instead of only the projection segment.
   // Default off so the trendline reads as a forecast; on, it doubles as
@@ -1465,6 +1474,16 @@ export default function PortfolioDetailPage() {
   // and the table already scrolls inside a fixed-height container.
   const matrixBars = bars;
 
+  // Reflow geometry — the right-edge session-logs panel takes either
+  // 16 px (collapsed handle) or 640 px (expanded). Main content slides
+  // its right edge over via margin-right + a 300 ms transition so the
+  // chart and matrix never get covered. ResizeObserver in Chart.js
+  // (responsive: true + maintainAspectRatio: false) handles the chart
+  // re-layout cleanly mid-transition.
+  const LOGS_PANEL_WIDTH = 640;
+  const LOGS_HANDLE_WIDTH = 16;
+  const reflowMargin = logsExpanded ? LOGS_PANEL_WIDTH : LOGS_HANDLE_WIDTH;
+
   return (
     <>
       <style jsx global>{`
@@ -1478,6 +1497,8 @@ export default function PortfolioDetailPage() {
           padding: 20,
           display: "flex",
           flexDirection: "column",
+          marginRight: reflowMargin,
+          transition: "margin-right 300ms ease",
           gap: 14,
           height: "100%",
           overflow: "auto",
@@ -1885,6 +1906,8 @@ export default function PortfolioDetailPage() {
         exchange={meta.exchange}
         strategyLabel={meta.strategy_label}
         sessionActive={meta.status === "active"}
+        expanded={logsExpanded}
+        onExpandedChange={setLogsExpanded}
       />
     </>
   );
