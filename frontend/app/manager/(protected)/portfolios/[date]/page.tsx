@@ -618,13 +618,16 @@ export default function PortfolioDetailPage() {
 
   const fireLateEntry = useCallback(async () => {
     if (!data || !allocationId) return;
+    const lastBar = data.bars.length > 0 ? data.bars[data.bars.length - 1] : null;
+    const previewPct = lastBar ? lastBar.incr * 100 : 0;
     if (!confirm(
       `Spawn the trader in late-entry mode now?\n\n` +
       `Allocation: ${allocationId.slice(0, 8)}\n` +
       `Date: ${date}\n` +
-      `Current preview portfolio: ${(data.meta.final_portfolio_return * 100).toFixed(2)}%\n\n` +
+      `Current preview portfolio: ${previewPct.toFixed(2)}%\n\n` +
       `The trader will skip conviction gates and enter at current marks. ` +
-      `This bypasses the strategy's filter — your live performance will diverge from the audit's backtest for today.`
+      `Symbols already past the per-symbol stop threshold will be excluded automatically. ` +
+      `Your live performance will diverge from the audit's backtest for today.`
     )) return;
     setLateEntryFiring(true);
     setLateEntryError(null);
