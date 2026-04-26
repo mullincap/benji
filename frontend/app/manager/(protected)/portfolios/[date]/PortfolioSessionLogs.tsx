@@ -998,9 +998,13 @@ function Snapshot({
       tone: lastRoi && lastRoi.pnl < 0 ? "down" : "default",
     },
     {
-      label: "WINDOW",
-      value: lastBar ? fmtPct(lastBar.sess) : "—",
-      tone: lastBar && lastBar.sess < 0 ? "down" : "default",
+      label: "ROI",
+      // Live 1x portfolio incr — entry-anchored, what the chart's NOW
+      // line tracks against. Switched from sess (open-anchored window
+      // return) to keep the snapshot aligned with the chart + KPI tile
+      // above it. sess still drives the WIN column in the log table.
+      value: lastBar ? fmtPct(lastBar.incr) : "—",
+      tone: lastBar && lastBar.incr < 0 ? "down" : "default",
     },
     {
       label: "PEAK / TSL",
