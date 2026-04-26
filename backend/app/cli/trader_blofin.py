@@ -572,11 +572,21 @@ def update_portfolio_meta_sql(date: str, **fields) -> None:
 # SIGNAL READER
 # ==========================================================================
 
-def get_today_symbols(date_str: str, active_filter: str | None = None) -> list:
+def get_today_symbols(
+    date_str: str,
+    active_filter: str | None = None,
+    *,
+    bypass_sit_flat: bool = False,
+) -> list:
     # Master path passes no active_filter → use module constant. Allocation
     # mode passes its per-strategy filter from TraderConfig.active_filter.
     # Behavior on the master path is bit-for-bit identical when called with
     # one positional arg, since active_filter falls through to ACTIVE_FILTER.
+    #
+    # bypass_sit_flat=True is for operator-initiated late-entry overrides:
+    # the CSV writer emits the candidate basket even on sit_flat days
+    # (so the UI can render a preview portfolio), but normal trader spawns
+    # must still respect sit_flat = sit out. Only --late-entry sets this.
     filter_name = active_filter if active_filter is not None else ACTIVE_FILTER
 
     if not DEPLOYS_CSV.exists():
@@ -597,6 +607,20 @@ def get_today_symbols(date_str: str, active_filter: str | None = None) -> list:
                       if r.get("filter", "").strip().lower() == filter_name.strip().lower()]
         if not today_rows:
             log.info(f"Filter '{filter_name}' blocked today -> A: Filtered (0%, no fees)")
+            return []
+
+    # Normal spawn path: gate on sit_flat. Late-entry overrides bypass.
+    if not bypass_sit_flat:
+        sit_flat_rows = [r for r in today_rows
+                         if str(r.get("sit_flat", "")).strip().lower() == "true"]
+        if sit_flat_rows:
+            reasons = ", ".join(
+                r.get("filter_reason", "") for r in sit_flat_rows
+            ) or "(no reason given)"
+            log.info(
+                f"Filter '{filter_name}' sit_flat=True for {date_str} "
+                f"({reasons}) -> A: Filtered (0%, no fees)"
+            )
             return []
 
     symbols = set()
@@ -3763,7 +3787,7 @@ def _run_fresh_session_for_allocation(
             f"Allocation {allocation_id}: LATE ENTRY filter override — "
             f"using {active_filter!r} instead of {config.active_filter!r}"
         )
-    symbols = get_today_symbols(today, active_filter=active_filter)
+    symbols = get_today_symbols(today, active_filter=active_filter, bypass_sit_flat=late_entry)
     if not symbols:
         log.info(
             f"Allocation {allocation_id}: A -- Filtered, no symbols for "

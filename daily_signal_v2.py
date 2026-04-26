@@ -758,10 +758,17 @@ def write_deploys_csv(date_str, filter_entries, overlap_pool):
         fn       = entry["filter_name"]
         sflat    = entry["sit_flat"]
         freason  = entry.get("filter_reason") or ("pass" if not sflat else "")
+        # Always emit the candidate basket when one exists, even when
+        # sit_flat=True. The basket is what the strategy WOULD have entered
+        # under a non-blocking filter — surfacing it lets the manager UI
+        # render a preview portfolio so the operator can choose to override
+        # via the late-entry button. The trader's get_today_symbols() gates
+        # entry on sit_flat separately, so emitting symbols here does NOT
+        # cause the normal 06:05 spawn to enter on a sit-flat day.
         new_rows.append({
             "date":          date_str,
             "filter":        fn,
-            "symbols":       " ".join(overlap_pool) if overlap_pool and not sflat else "",
+            "symbols":       " ".join(overlap_pool) if overlap_pool else "",
             "sit_flat":      "True" if sflat else "False",
             "filter_reason": freason,
         })
