@@ -725,6 +725,14 @@ export default function PortfolioDetailPage() {
   // for, so polling refreshes don't keep clobbering the user's legend
   // clicks. Reset when the user navigates to a different portfolio.
   const seededHiddenRef = useRef<string | null>(null);
+  // Overlay visibility toggles. All start on so a fresh load is the most
+  // informative view; user can dim any individual layer they don't need.
+  const [overlays, setOverlays] = useState({
+    portSl: true,
+    portTsl: true,
+    now: true,
+    fillWindow: true,
+  });
 
   const setView = useCallback((next: "portfolio" | "symbols") => {
     setViewState(next);
@@ -1181,6 +1189,7 @@ export default function PortfolioDetailPage() {
     fill: false as const,
     tension: 0,
     spanGaps: true,
+    hidden: !overlays.portSl,
     _isSymbol: false,
   };
   const portTslDataset = {
@@ -1196,6 +1205,7 @@ export default function PortfolioDetailPage() {
     tension: 0,
     spanGaps: true,
     stepped: "before" as const,
+    hidden: !overlays.portTsl,
     _isSymbol: false,
   };
 
@@ -1247,6 +1257,7 @@ export default function PortfolioDetailPage() {
     fill: false as const,
     tension: 0,
     spanGaps: true,
+    hidden: !overlays.now,
     _isSymbol: false,
   };
 
@@ -1269,21 +1280,21 @@ export default function PortfolioDetailPage() {
     ? (barAtSlot[lastFilledIdx]!.peak + portTslPct) * 100
     : (portTslPct !== null ? portTslPct * 100 : null);
   const refLineLabels: { y: number; text: string; color: string }[] = [];
-  if (portSlPct !== null) {
+  if (portSlPct !== null && overlays.portSl) {
     refLineLabels.push({
       y: portSlPct * 100,
       text: `PORT SL: ${(portSlPct * 100).toFixed(1)}%`,
       color: "rgba(255, 77, 77, 0.95)",
     });
   }
-  if (latestPortTslPct !== null) {
+  if (latestPortTslPct !== null && overlays.portTsl) {
     refLineLabels.push({
       y: latestPortTslPct,
       text: `PORT TSL: ${latestPortTslPct.toFixed(1)}%`,
       color: "rgba(240, 165, 0, 0.95)",
     });
   }
-  if (currentIncrPct !== null) {
+  if (currentIncrPct !== null && overlays.now) {
     const sign = currentIncrPct >= 0 ? "+" : "";
     refLineLabels.push({
       y: currentIncrPct,
@@ -1291,13 +1302,52 @@ export default function PortfolioDetailPage() {
       color: "rgba(240, 237, 230, 0.95)",
     });
   }
+  // Slot index where the early-fill window closes. After this bar, the
+  // EARLY_FILL trigger can no longer fire (trader_blofin.py:2614 —
+  // `while utcnow() <= session_open + early_fill_x`). Drawing a vertical
+  // dashed marker here gives the operator a visual deadline: anything
+  // past this x is "no early fill possible" territory.
+  const fillWindowSlot = meta.early_fill_x !== null && meta.early_fill_x !== undefined
+    ? meta.early_fill_x / BAR_INTERVAL_MIN
+    : null;
   const refLinePlugin = {
     id: "refLineLabels",
     afterDatasetsDraw(chart: ChartJS) {
       const { ctx, chartArea, scales } = chart;
       const yScale = scales.y;
-      if (!yScale) return;
+      const xScale = scales.x;
+      if (!yScale || !xScale) return;
       ctx.save();
+      // ── Vertical marker: fill-window close ──────────────────────────
+      if (overlays.fillWindow && fillWindowSlot !== null && fillWindowSlot >= 0 && fillWindowSlot < totalSlots) {
+        const xPx = xScale.getPixelForValue(fillWindowSlot);
+        if (xPx >= chartArea.left && xPx <= chartArea.right) {
+          ctx.strokeStyle = "rgba(0, 200, 150, 0.45)";
+          ctx.lineWidth = 1;
+          ctx.setLineDash([3, 3]);
+          ctx.beginPath();
+          ctx.moveTo(xPx, chartArea.top);
+          ctx.lineTo(xPx, chartArea.bottom);
+          ctx.stroke();
+          ctx.setLineDash([]);
+          // Top-anchored label so it doesn't collide with the right-edge
+          // y-value pills (which sit centered at their respective rows).
+          ctx.font = 'bold 9px "Space Mono", monospace';
+          ctx.textAlign = "left";
+          ctx.textBaseline = "top";
+          const text = "FILL WINDOW CLOSE";
+          const metrics = ctx.measureText(text);
+          const padX = 5;
+          const padY = 2;
+          const w = metrics.width + padX * 2;
+          const h = 12 + padY * 2;
+          ctx.fillStyle = "rgba(14, 14, 16, 0.85)";
+          ctx.fillRect(xPx + 4, chartArea.top + 4, w, h);
+          ctx.fillStyle = "rgba(0, 200, 150, 0.95)";
+          ctx.fillText(text, xPx + 4 + padX, chartArea.top + 4 + padY);
+        }
+      }
+      // ── Right-edge value pills for horizontal lines ─────────────────
       ctx.font = 'bold 9px "Space Mono", monospace';
       ctx.textAlign = "left";
       ctx.textBaseline = "middle";
@@ -1650,6 +1700,39 @@ export default function PortfolioDetailPage() {
               >
                 {trendlineExtended ? "Trendline · Full" : "Trendline · Projection"}
               </button>
+              {/* Overlay toggles — color-coded chip group lets the operator
+                  dim individual reference layers without losing the others.
+                  Active = filled background; inactive = ghosted outline. */}
+              <div style={{ display: "flex", gap: 4 }}>
+                <OverlayChip
+                  label="SL"
+                  active={overlays.portSl}
+                  color="var(--red)"
+                  title={overlays.portSl ? "Hide PORT SL line" : "Show PORT SL line"}
+                  onClick={() => setOverlays((o) => ({ ...o, portSl: !o.portSl }))}
+                />
+                <OverlayChip
+                  label="TSL"
+                  active={overlays.portTsl}
+                  color="var(--amber)"
+                  title={overlays.portTsl ? "Hide PORT TSL line" : "Show PORT TSL line"}
+                  onClick={() => setOverlays((o) => ({ ...o, portTsl: !o.portTsl }))}
+                />
+                <OverlayChip
+                  label="NOW"
+                  active={overlays.now}
+                  color="var(--t0)"
+                  title={overlays.now ? "Hide NOW line" : "Show NOW line"}
+                  onClick={() => setOverlays((o) => ({ ...o, now: !o.now }))}
+                />
+                <OverlayChip
+                  label="WIN"
+                  active={overlays.fillWindow}
+                  color="var(--green)"
+                  title={overlays.fillWindow ? "Hide fill-window marker" : "Show fill-window marker"}
+                  onClick={() => setOverlays((o) => ({ ...o, fillWindow: !o.fillWindow }))}
+                />
+              </div>
               {/* Mode toggle */}
               <ModeToggle value={view} onChange={setView} />
             </div>
@@ -1831,6 +1914,71 @@ export default function PortfolioDetailPage() {
 }
 
 // ─── Legend chip ────────────────────────────────────────────────────────────
+
+// Compact color-coded toggle chip for overlay layers (SL / TSL / NOW /
+// WIN). Active state lights the dot in the layer's color and the label
+// in primary text; inactive ghosts both. Same monospace + tight tracking
+// as the rest of the chart toolbar so the chips read as part of the
+// same control row, not a competing UI.
+function OverlayChip({
+  label,
+  active,
+  color,
+  title,
+  onClick,
+}: {
+  label: string;
+  active: boolean;
+  color: string;
+  title?: string;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      role="switch"
+      aria-checked={active}
+      title={title}
+      onClick={onClick}
+      style={{
+        display: "inline-flex",
+        alignItems: "center",
+        gap: 5,
+        padding: "3px 8px",
+        fontFamily: FONT_MONO,
+        fontSize: 9,
+        fontWeight: 700,
+        letterSpacing: "0.10em",
+        textTransform: "uppercase",
+        borderRadius: 3,
+        border: `1px solid ${active ? "var(--line2)" : "var(--line)"}`,
+        background: active ? "var(--bg3)" : "transparent",
+        color: active ? "var(--t0)" : "var(--t3)",
+        cursor: "pointer",
+        transition: "background 0.15s, color 0.15s, border-color 0.15s",
+      }}
+      onMouseEnter={(e) => {
+        if (!active) e.currentTarget.style.color = "var(--t1)";
+      }}
+      onMouseLeave={(e) => {
+        if (!active) e.currentTarget.style.color = "var(--t3)";
+      }}
+    >
+      <span
+        style={{
+          width: 6,
+          height: 6,
+          borderRadius: "50%",
+          background: active ? color : "transparent",
+          border: `1px solid ${color}`,
+          opacity: active ? 1 : 0.4,
+          flexShrink: 0,
+        }}
+      />
+      {label}
+    </button>
+  );
+}
 
 function ModeToggle({
   value,
