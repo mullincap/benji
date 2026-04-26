@@ -39,7 +39,11 @@ const API_BASE = process.env.NEXT_PUBLIC_API_BASE || "";
 const FONT_MONO = `var(--font-space-mono), ui-monospace, "SF Mono", Menlo, Consolas, monospace`;
 
 const PANEL_WIDTH_PX = 640;
-const HANDLE_WIDTH_PX = 16;
+// Collapsed handle target. Bumped from 16 → 28 for discoverability —
+// 16 was visible but read as a thin border, hard to spot as a control.
+// 28 gives a real click target while still reading as "edge tab" not
+// "panel". Page wrapper's reflow margin in page.tsx must match.
+const HANDLE_WIDTH_PX = 28;
 const POLL_INTERVAL_MS = 15_000;
 const BOTTOM_THRESHOLD_PX = 24;
 const LOAD_LIMIT = 500;
@@ -790,7 +794,8 @@ function EdgeHandle({
           marginTop: "auto",
           marginBottom: "auto",
           color: alert ? "#ef4444" : hover ? "#d4d4d8" : "#71717a",
-          fontSize: 14,
+          fontSize: 18,
+          fontWeight: 500,
           lineHeight: 1,
           fontFamily: FONT_MONO,
         }}

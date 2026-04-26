@@ -261,7 +261,7 @@ function MatrixHeader({
           <span
             style={{
               marginLeft: 6,
-              color: "var(--amber)",
+              color: "var(--t2)",
               fontWeight: 400,
               letterSpacing: "0.06em",
             }}

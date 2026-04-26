@@ -1104,6 +1104,11 @@ export default function PortfolioDetailPage() {
     if (b !== undefined) realPoints.push({ x: i, y: b.incr * 100 });
   }
   const trendData: (number | null)[] = new Array(totalSlots).fill(null);
+  // Projected portfolio incr at the deployment-window close (last slot).
+  // Same regression endpoint the chart's pace trendline lands on at the
+  // right edge — surfaced separately here so the Exit KPI can swap to
+  // an "Est. Close" tile while the session is still LIVE.
+  let projectedCloseIncrPct: number | null = null;
   if (realPoints.length >= 2) {
     const lastReal = realPoints[realPoints.length - 1];
     const REGRESSION_MIN_POINTS = 12;  // ~1h of 5-min bars
@@ -1123,6 +1128,8 @@ export default function PortfolioDetailPage() {
     for (let i = startX; i < totalSlots; i++) {
       trendData[i] = lastReal.y + slope * (i - lastReal.x);
     }
+    // Endpoint at session close = same regression line at slot totalSlots-1.
+    projectedCloseIncrPct = lastReal.y + slope * (totalSlots - 1 - lastReal.x);
   }
   const trendlineDataset = {
     label: "Pace",
@@ -1582,7 +1589,7 @@ export default function PortfolioDetailPage() {
   // (responsive: true + maintainAspectRatio: false) handles the chart
   // re-layout cleanly mid-transition.
   const LOGS_PANEL_WIDTH = 640;
-  const LOGS_HANDLE_WIDTH = 16;
+  const LOGS_HANDLE_WIDTH = 28;
   const reflowMargin = logsExpanded ? LOGS_PANEL_WIDTH : LOGS_HANDLE_WIDTH;
 
   return (
@@ -1719,7 +1726,37 @@ export default function PortfolioDetailPage() {
             subtitle={symStopsCount > 0 ? `${symStopsCount} stopped` : undefined}
           />
           <KpiCard label="Eff Leverage" value={`${meta.eff_lev.toFixed(2)}x`} />
-          <KpiCard label="Exit" value={exitBadge(meta.exit_reason, meta.status, isStale)} />
+          {/* When the session is LIVE and we have enough data to project
+              an endpoint, swap the Exit badge for an Est. Close tile —
+              same regression endpoint as the chart's pace trendline at
+              the right edge. Lev × DEPLOY_RATIO mirrors the trader's own
+              expected_roi formula (trader_blofin.py, ~bar log). When the
+              session has actually exited (or gone stale), the Exit badge
+              is the right answer. */}
+          {(() => {
+            const showProjection = live && projectedCloseIncrPct !== null;
+            if (!showProjection) {
+              return (
+                <KpiCard
+                  label="Exit"
+                  value={exitBadge(meta.exit_reason, meta.status, isStale)}
+                />
+              );
+            }
+            const oneX = projectedCloseIncrPct as number;
+            const lev = meta.eff_lev ?? 0;
+            const DEPLOY_RATIO = 0.90;
+            const leveraged = oneX * lev * DEPLOY_RATIO;
+            const sign = leveraged >= 0 ? "+" : "";
+            return (
+              <KpiCard
+                label="Est. Close"
+                value={`${sign}${leveraged.toFixed(2)}%`}
+                color={leveraged >= 0 ? "var(--green)" : "var(--red)"}
+                subtitle={`1x pace ${oneX >= 0 ? "+" : ""}${oneX.toFixed(2)}%`}
+              />
+            );
+          })()}
         </div>
 
         {/* Early-fill take-profit progress */}
