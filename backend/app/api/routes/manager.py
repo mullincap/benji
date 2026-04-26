@@ -2589,6 +2589,161 @@ _LOG_LINE_RE = re.compile(
 _SESSION_HEADER_RE = re.compile(r"^\s*SESSION\s+(\d{4}-\d{2}-\d{2})")
 
 
+# ── Semantic event classifier ────────────────────────────────────────────────
+# Each parsed log line is also classified into one of seven recognized
+# event kinds with extracted typed fields. The frontend renders typed
+# rows (tick row, stop event group, etc.) instead of regex-parsing
+# strings — single source of truth for log shape lives here.
+#
+# Backward compat: existing SessionLogs.tsx ignores `kind` and `data`.
+# Both fields are absent on lines that don't match any pattern.
+
+_ALLOC_PREFIX_RE = re.compile(r"^\s*\[alloc\s+(?P<alloc>[0-9a-fA-F]+)\]\s*")
+
+# Bar update — written every 5 minutes by the trader's monitoring loop.
+# Real format (post-strip): "Bar 100 | incr=-3.235% peak=0.000% tsl=...
+#   sess=-2.138% active=5/8 stopped=3 fill=open"
+# fill is either "open" or "closed" (not "ok" as the v1 prompt assumed).
+_BAR_UPDATE_RE = re.compile(
+    r"^Bar\s+(?P<bar>\d+)\s*\|\s*"
+    r"incr=(?P<incr>[-+]?\d+\.\d+)%\s+"
+    r"peak=(?P<peak>[-+]?\d+\.\d+)%\s+"
+    r"tsl=(?P<tsl>[-+]?\d+\.\d+)%\s+"
+    r"sess=(?P<sess>[-+]?\d+\.\d+)%\s+"
+    r"active=(?P<active>\d+)/(?P<universe>\d+)\s+"
+    r"stopped=(?P<stopped>\d+)\s+"
+    r"fill=(?P<fill>\w+)"
+)
+
+# ROI report continuation line — emitted immediately after each bar_update.
+# Real format (post-strip of alloc prefix): "         | actual_roi=-6.412%
+#   equity=$5,405.59  pnl=$-370.34  expected=-11.645% (incr×lev×0.90)
+#   delta=+5.233%"
+# No "Bar N:" anchor — bar number is carried over from the preceding
+# bar_update via the parser's allocation-keyed state dict. equity/pnl
+# strings include $ + comma thousands separator + sign-after-dollar
+# (e.g. "$-370.34"); the regex captures the numeric portion.
+_ROI_REPORT_RE = re.compile(
+    r"^\|\s*"
+    r"actual_roi=(?P<actual>[-+]?\d+\.\d+)%\s+"
+    r"equity=\$(?P<equity>-?[\d,]+\.\d+)\s+"
+    r"pnl=\$(?P<pnl>[-+]?[\d,]+\.\d+)\s+"
+    r"expected=(?P<expected>[-+]?\d+\.\d+)%\s+"
+    r"\(incr×lev×[\d.]+\)\s+"
+    r"delta=(?P<delta>[-+]?\d+\.\d+)%"
+)
+
+# Trader log_prefix may add 2 leading spaces ("  SYM STOP: ..."); the
+# top-level strip handles that.
+_SYM_STOP_RE = re.compile(
+    r"^SYM STOP:\s+(?P<symbol>\S+)\s+"
+    r"ret=(?P<ret>[-+]?\d+\.\d+)%\s+<=\s+"
+    r"(?P<threshold>[-+]?\d+\.\d+)%"
+)
+
+_CLOSE_ALL_RE = re.compile(
+    r"^CLOSE ALL\s+--\s+reason:\s+(?P<reason>\S+)"
+)
+
+_POSITION_CHECK_RE = re.compile(
+    r"^Position:\s+(?P<symbol>\S+)\s+=\s+"
+    r"(?P<size>[-+]?\d+(?:\.\d+)?)\s+contracts"
+)
+
+_SIZE_MISMATCH_RE = re.compile(
+    r"^(?P<symbol>\S+):\s+size mismatch\s+--\s+"
+    r"state=(?P<state>[-+]?\d+(?:\.\d+)?)\s+"
+    r"BloFin=(?P<blofin>[-+]?\d+(?:\.\d+)?)"
+)
+
+_CLOSE_CONFIRM_RE = re.compile(
+    r"^✅\s+(?P<symbol>\S+)\s+closed via blofin"
+)
+
+
+def _annotate_event(text: str, state: dict) -> tuple[str | None, dict | None]:
+    """Classify a log line by content. Returns (kind, data) or (None, None).
+
+    `state` is a parser-scoped dict {alloc_key: {"bar": int, "incr": float}}
+    that carries the latest bar metadata per allocation across line
+    iterations — the roi_report continuation line has no embedded bar
+    number, so it inherits from the most recent bar_update for the same
+    alloc. alloc_key is the allocation_id from the [alloc XXX] prefix when
+    present, else "__master__" for legacy single-account log lines.
+    """
+    t = text.strip()
+
+    alloc_id: str | None = None
+    m_alloc = _ALLOC_PREFIX_RE.match(t)
+    if m_alloc:
+        alloc_id = m_alloc.group("alloc")
+        t = t[m_alloc.end():].lstrip()
+    state_key = alloc_id or "__master__"
+
+    if m := _BAR_UPDATE_RE.match(t):
+        bar_n = int(m["bar"])
+        incr = float(m["incr"])
+        # Carry forward for the matching roi_report continuation line.
+        state[state_key] = {"bar": bar_n, "incr": incr}
+        return "bar_update", {
+            "bar": bar_n,
+            "incr": incr,
+            "peak": float(m["peak"]),
+            "tsl": float(m["tsl"]),
+            "sess": float(m["sess"]),
+            "active": int(m["active"]),
+            "universe": int(m["universe"]),
+            "stopped": int(m["stopped"]),
+            "fill": m["fill"],
+            "allocation_id": alloc_id,
+        }
+    if m := _ROI_REPORT_RE.match(t):
+        prev = state.get(state_key, {})
+        return "roi_report", {
+            # Bar carryover — null if this roi_report appears before any
+            # bar_update for this allocation (first line ever / post-restart).
+            "bar": prev.get("bar"),
+            "incr": prev.get("incr"),
+            "actual": float(m["actual"]),
+            "expected": float(m["expected"]),
+            "delta": float(m["delta"]),
+            "equity": float(m["equity"].replace(",", "")),
+            "pnl": float(m["pnl"].replace(",", "")),
+            "allocation_id": alloc_id,
+        }
+    if m := _SYM_STOP_RE.match(t):
+        return "sym_stop", {
+            "symbol": m["symbol"],
+            "ret": float(m["ret"]),
+            "threshold": float(m["threshold"]),
+            "allocation_id": alloc_id,
+        }
+    if m := _CLOSE_ALL_RE.match(t):
+        return "close_all", {
+            "reason": m["reason"],
+            "allocation_id": alloc_id,
+        }
+    if m := _POSITION_CHECK_RE.match(t):
+        return "position_check", {
+            "symbol": m["symbol"],
+            "size": float(m["size"]),
+            "allocation_id": alloc_id,
+        }
+    if m := _SIZE_MISMATCH_RE.match(t):
+        return "size_mismatch", {
+            "symbol": m["symbol"],
+            "state": float(m["state"]),
+            "blofin": float(m["blofin"]),
+            "allocation_id": alloc_id,
+        }
+    if m := _CLOSE_CONFIRM_RE.match(t):
+        return "close_confirm", {
+            "symbol": m["symbol"],
+            "allocation_id": alloc_id,
+        }
+    return None, None
+
+
 def _resolve_log_path() -> Path:
     """
     Master log path. BLOFIN_LOG_FILE env override, else project-root-relative
@@ -2693,11 +2848,19 @@ def _session_window(
     return date, entries[start_idx:end_idx]
 
 
-def _read_log_file(path: Path) -> list[dict[str, str]]:
-    """Parse one log file, folding continuation lines into the previous entry."""
+def _read_log_file(path: Path) -> list[dict[str, Any]]:
+    """Parse one log file, folding continuation lines into the previous entry.
+
+    Each well-formed entry is also classified into a typed event via
+    `_annotate_event`; matching lines gain `kind` + `data` fields. The
+    annotator carries per-allocation bar state across iterations so
+    ROI-report continuation lines inherit `bar` from the preceding
+    bar_update for the same allocation.
+    """
     if not path.exists():
         return []
-    out: list[dict[str, str]] = []
+    out: list[dict[str, Any]] = []
+    state: dict = {}  # {alloc_key: {"bar": int, "incr": float}}
     with open(path, encoding="utf-8", errors="replace") as f:
         for raw in f:
             raw = raw.rstrip("\n")
@@ -2705,6 +2868,10 @@ def _read_log_file(path: Path) -> list[dict[str, str]]:
                 continue
             ent = _parse_log_line(raw)
             if ent is not None:
+                kind, data = _annotate_event(ent["text"], state)
+                if kind is not None:
+                    ent["kind"] = kind
+                    ent["data"] = data
                 out.append(ent)
             elif out:
                 out[-1]["text"] = out[-1]["text"] + "\n" + raw
