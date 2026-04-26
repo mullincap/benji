@@ -216,22 +216,18 @@ function ManagerSidebar({
       <NavItem
         label="Portfolios"
         href="/manager/portfolios"
-        active={pathname === "/manager/portfolios"}
+        // Highlight on both the list view and any drilled-in detail page
+        // (`/manager/portfolios/<date>`) so the operator stays oriented.
+        active={pathname.startsWith("/manager/portfolios")}
       />
 
-      {/* Divider */}
+      {/* Divider — separates top nav from the conversations panel below. */}
       <div
         style={{
           height: 1,
           background: "var(--line)",
           margin: "8px 16px",
         }}
-      />
-
-      <NavItem
-        label="Chat"
-        href="/manager/chat"
-        active={pathname === "/manager/chat" && !activeConvId}
       />
 
       {/* Conversations header */}
