@@ -1024,7 +1024,11 @@ function Snapshot({
   lastBar?: BarUpdateData;
   lastRoi?: RoiReportData;
 }) {
-  const cells: { label: string; value: string; tone: "default" | "down" | "hl" }[] = [
+  const cells: {
+    label: string;
+    value: React.ReactNode;
+    tone: "default" | "down" | "hl";
+  }[] = [
     {
       label: "EQUITY",
       value: lastRoi ? fmtUSD(lastRoi.equity) : "—",
@@ -1046,9 +1050,20 @@ function Snapshot({
     },
     {
       label: "PEAK / TSL",
-      value: lastBar
-        ? `${fmtPct(lastBar.peak, 2)} / ${fmtPct(lastBar.tsl, 2)}`
-        : "—",
+      // Two-color rendering: PEAK in the default tone, TSL in amber so
+      // it pops as the live trailing-stop trigger floor. Both still
+      // share the same cell so the strip stays at 5 columns.
+      value: lastBar ? (
+        <>
+          {fmtPct(lastBar.peak, 2)}
+          <span style={{ color: "#52525b" }}> / </span>
+          <span style={{ color: "var(--amber)" }}>
+            {fmtPct(lastBar.tsl, 2)}
+          </span>
+        </>
+      ) : (
+        "—"
+      ),
       tone: "default",
     },
     {
@@ -1248,22 +1263,6 @@ function ColumnHeader() {
     >
       <span style={{ ...headerCellStyle, width: 38 }}>TIME</span>
       <span style={{ ...headerCellStyle, width: 50 }}>BAR</span>
-      <span
-        style={{
-          ...headerCellStyle,
-          display: "flex",
-          alignItems: "center",
-          gap: 5,
-          padding: "6px 8px",
-          background: "rgba(255,255,255,0.04)",
-          borderRadius: 2,
-          margin: "-6px 4px -6px 2px",
-          boxSizing: "border-box",
-        }}
-      >
-        <span style={{ width: 50, textAlign: "right" }}>PEAK</span>
-        <span style={{ width: 54, textAlign: "right" }}>TSL</span>
-      </span>
       <span style={{ ...headerCellStyle, width: 54, textAlign: "right" }}>WIN</span>
       <span style={{ ...headerCellStyle, width: 56, textAlign: "right" }}>LIVE</span>
       <span style={{ ...headerCellStyle, width: 56, textAlign: "right" }}>EXP</span>
@@ -1285,8 +1284,6 @@ function TickRow({
   const bu = item.bar_update;
   const ri = item.roi_report;
 
-  const peak = bu?.peak ?? null;
-  const tsl = bu?.tsl ?? null;
   const sess = bu?.sess ?? null;
   const incr = bu?.incr ?? null;
   const expected = ri?.expected ?? null;
@@ -1331,43 +1328,9 @@ function TickRow({
         </span>
       </span>
 
-      {/* Tracking band — wraps PEAK + TSL only. */}
-      <span
-        style={{
-          display: "flex",
-          alignItems: "center",
-          gap: 5,
-          padding: "3px 8px",
-          background: "rgba(255,255,255,0.04)",
-          borderRadius: 2,
-          alignSelf: "stretch",
-          margin: "-3px 4px -3px 2px",
-          boxSizing: "border-box",
-        }}
-      >
-        <span
-          style={{
-            width: 50,
-            textAlign: "right",
-            fontSize: 10,
-            fontVariantNumeric: "tabular-nums",
-            color: peak !== null && peak > 0 ? "#5e8a73" : "#42424a",
-          }}
-        >
-          {peak !== null ? fmtPct(peak, 2) : "—"}
-        </span>
-        <span
-          style={{
-            width: 54,
-            textAlign: "right",
-            fontSize: 10,
-            fontVariantNumeric: "tabular-nums",
-            color: tsl !== null && tsl < 0 ? "#835656" : "#5e5e64",
-          }}
-        >
-          {tsl !== null ? fmtPct(tsl, 2) : "—"}
-        </span>
-      </span>
+      {/* PEAK + TSL columns removed — surfaced only in the snapshot
+          strip above. Keeps the row narrower and lets WIN/LIVE/EXP/ACT/Δ
+          breathe. */}
 
       <span
         style={{
