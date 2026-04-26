@@ -4026,39 +4026,81 @@ def _run_fresh_session_for_allocation(
     # ── Phase 3: stale-position sweep (this account only) ────────────────
     # Mirrors master lines 1904-1939. Uses per-allocation api so only this
     # user's BloFin account is touched.
-    existing = get_actual_positions(api, inst_ids)
-    if existing:
-        existing_ids = [p.inst_id for p in existing]
-        log.warning(
-            f"Allocation {allocation_id}: {len(existing)} stale position(s) "
-            f"found before entry: {existing_ids}. Closing them first."
-        )
-        stale = [{"inst_id": p.inst_id, "contracts": int(p.contracts),
-                  "marginMode": config.margin_mode,
-                  "positionSide": config.position_side}
-                 for p in existing]
-        failed_stale = close_all_positions(api, stale, "pre_entry_cleanup", dry_run)
-        if failed_stale:
-            log.error(
-                f"Allocation {allocation_id}: could not close all stale positions. "
-                "Aborting entry to avoid double exposure."
+    #
+    # LATE ENTRY: skip the sweep. On a normal 06:00 spawn, "stale" means
+    # leftover from a prior session (real cleanup). On a late-entry spawn
+    # initiated by the operator, those positions are NOT stale — they are
+    # the operator's intentional manual longs/shorts on the same symbols,
+    # placed precisely BECAUSE the operator wanted them. Closing them is
+    # destructive (forced exit + double slippage on re-entry). For symbols
+    # where the operator already has a position, the trader will skip
+    # placing a new entry order (handled in Phase 5 below).
+    if late_entry:
+        existing = get_actual_positions(api, inst_ids)
+        if existing:
+            existing_ids = [p.inst_id for p in existing]
+            log.warning(
+                f"Allocation {allocation_id}: LATE ENTRY — preserving "
+                f"{len(existing)} pre-existing position(s) on this account: "
+                f"{existing_ids}. Skipping fresh-entry orders for these symbols."
             )
-            _mark_runtime_state(allocation_id, {
-                "phase": "stale_close_failed",
-                "positions": failed_stale,
-                "unclosed_count": len(failed_stale),
-            })
-            _log_allocation_return(
-                allocation_id, today,
-                net_return_pct=0.0,
-                exit_reason="stale_close_failed",
-                effective_leverage=0.0, capital_deployed_usd=0.0,
-                config=config,
-                signal_count=len(inst_ids),
-                conviction_roi_x=float(roi_x),
+            # Drop these from inst_ids so we don't re-enter on top
+            preserved = {p.inst_id for p in existing}
+            inst_ids = [i for i in inst_ids if i not in preserved]
+            if not inst_ids:
+                log.warning(
+                    f"Allocation {allocation_id}: LATE ENTRY — all basket "
+                    "symbols already held by operator; nothing to add."
+                )
+                _mark_runtime_state(allocation_id, {
+                    "phase": "late_entry_all_preserved",
+                    "preserved_symbols": existing_ids,
+                    "positions": [],
+                })
+                _log_allocation_return(
+                    allocation_id, today,
+                    net_return_pct=0.0,
+                    exit_reason="late_entry_all_preserved",
+                    effective_leverage=0.0, capital_deployed_usd=0.0,
+                    config=config,
+                    signal_count=0,
+                    conviction_roi_x=float(roi_x),
+                )
+                return
+    else:
+        existing = get_actual_positions(api, inst_ids)
+        if existing:
+            existing_ids = [p.inst_id for p in existing]
+            log.warning(
+                f"Allocation {allocation_id}: {len(existing)} stale position(s) "
+                f"found before entry: {existing_ids}. Closing them first."
             )
-            return
-        log.info(f"Allocation {allocation_id}: stale positions closed")
+            stale = [{"inst_id": p.inst_id, "contracts": int(p.contracts),
+                      "marginMode": config.margin_mode,
+                      "positionSide": config.position_side}
+                     for p in existing]
+            failed_stale = close_all_positions(api, stale, "pre_entry_cleanup", dry_run)
+            if failed_stale:
+                log.error(
+                    f"Allocation {allocation_id}: could not close all stale positions. "
+                    "Aborting entry to avoid double exposure."
+                )
+                _mark_runtime_state(allocation_id, {
+                    "phase": "stale_close_failed",
+                    "positions": failed_stale,
+                    "unclosed_count": len(failed_stale),
+                })
+                _log_allocation_return(
+                    allocation_id, today,
+                    net_return_pct=0.0,
+                    exit_reason="stale_close_failed",
+                    effective_leverage=0.0, capital_deployed_usd=0.0,
+                    config=config,
+                    signal_count=len(inst_ids),
+                    conviction_roi_x=float(roi_x),
+                )
+                return
+            log.info(f"Allocation {allocation_id}: stale positions closed")
 
     # ── Phase 4: compute leverage (vol_boost from nightly refresh) ───────
     # vol_boost is read once at session entry by the caller and passed in
