@@ -1328,13 +1328,14 @@ export default function PortfolioDetailPage() {
       color: "rgba(240, 237, 230, 0.95)",
     });
   }
-  // Session-low label — very subtle, no overlay-chip control. Sits next
-  // to its dashed line at the lowest portfolio incr seen so far.
+  // Session-low label — line stays subtle (0.30 alpha) so it doesn't
+  // compete with the data, but the LABEL itself reads at full opacity
+  // against the dark pill so the percentage is actually legible.
   if (sessionLowPct !== null) {
     refLineLabels.push({
       y: sessionLowPct,
       text: `LOW: ${sessionLowPct.toFixed(2)}%`,
-      color: "rgba(160, 116, 116, 0.55)",
+      color: "rgba(200, 150, 150, 0.95)",
     });
   }
   // Slot index where the early-fill window closes. After this bar, the
