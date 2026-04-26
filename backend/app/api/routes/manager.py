@@ -2013,13 +2013,34 @@ def list_portfolios(
 
     portfolios: list[dict[str, Any]] = []
     if scope_ids:
-        # Drive from allocation_returns (one row per session_date regardless
-        # of outcome) so filtered / no-entry / errored days appear too. Use
-        # the stale-filtered detection from the execution route to surface
-        # the recovered-trader portfolio rather than the pre-trade ar row
-        # in subprocess-died-then-recovered cases.
+        # Union (allocation_id, date) keys from BOTH allocation_returns AND
+        # portfolio_sessions, so days appear when either source has data:
+        #   - AR-only: pre-entry conviction outcomes (filtered, no_entry,
+        #     missed_window) on days the trader didn't open positions.
+        #   - PS-only: late-entry sessions and host-cron preview rows where
+        #     the trader booked a session without a corresponding AR write
+        #     (e.g. operator-initiated late entry mid-day).
+        # Without the union, PS-only days drop entirely (regression observed
+        # 2026-04-26: ALTS MAX showed empty after a late-entry override).
         cur.execute("""
-            SELECT ar.session_date,
+            WITH dates AS (
+                SELECT allocation_id, session_date AS d
+                  FROM user_mgmt.allocation_returns
+                 WHERE allocation_id = ANY(%s::uuid[])
+                UNION
+                SELECT allocation_id, signal_date AS d
+                  FROM user_mgmt.portfolio_sessions
+                 WHERE allocation_id = ANY(%s::uuid[])
+            ),
+            ar_latest AS (
+                SELECT DISTINCT ON (allocation_id, session_date)
+                       allocation_id, session_date,
+                       exit_reason, signal_count, conviction_roi_x, logged_at
+                  FROM user_mgmt.allocation_returns
+                 WHERE allocation_id = ANY(%s::uuid[])
+                 ORDER BY allocation_id, session_date, logged_at DESC
+            )
+            SELECT d.d                                     AS session_date,
                    ar.exit_reason                          AS ar_exit_reason,
                    ar.signal_count                         AS ar_signal_count,
                    ar.conviction_roi_x,
@@ -2027,7 +2048,7 @@ def list_portfolios(
                        'filtered', 'no_entry_conviction', 'missed_window',
                        'stale_close_failed', 'no_entry', 'errored', 'entry_failed'
                    ))                                      AS conviction_passed,
-                   ar.allocation_id,
+                   d.allocation_id,
                    ps.status                               AS ps_status,
                    ps.session_start_utc,
                    ps.exit_time_utc,
@@ -2044,17 +2065,19 @@ def list_portfolios(
                    ec.exchange,
                    s.display_name AS strategy_display_name,
                    s.name         AS strategy_name
-            FROM user_mgmt.allocation_returns ar
-            JOIN user_mgmt.allocations a ON a.allocation_id = ar.allocation_id
+            FROM dates d
+            JOIN user_mgmt.allocations a ON a.allocation_id = d.allocation_id
             JOIN audit.strategy_versions sv ON sv.strategy_version_id = a.strategy_version_id
             JOIN audit.strategies s ON s.strategy_id = sv.strategy_id
             JOIN user_mgmt.exchange_connections ec ON ec.connection_id = a.connection_id
+            LEFT JOIN ar_latest ar
+                   ON ar.allocation_id = d.allocation_id
+                  AND ar.session_date  = d.d
             LEFT JOIN user_mgmt.portfolio_sessions ps
-                   ON ps.allocation_id = ar.allocation_id
-                  AND ps.signal_date   = ar.session_date
-            WHERE ar.allocation_id = ANY(%s::uuid[])
-            ORDER BY ar.session_date DESC, ar.allocation_id ASC, ar.logged_at DESC
-        """, (scope_ids,))
+                   ON ps.allocation_id = d.allocation_id
+                  AND ps.signal_date   = d.d
+            ORDER BY d.d DESC, d.allocation_id ASC
+        """, (scope_ids, scope_ids, scope_ids))
 
         # Stale-filtered dedup: when both a 'filtered' ar row + a real ps row
         # exist for the same (allocation, date), prefer the row that has
@@ -2273,64 +2296,112 @@ def get_portfolio(
     """, (date,))
     candidates = cur.fetchall()
 
-    if not candidates:
-        # No portfolio_sessions row → graceful fallback to allocation_returns
-        # so filtered / no_entry / errored days still render a useful detail
-        # page (basic context + late-entry button) instead of a 404. Most
-        # cases are auto-fixed once generate_no_entry_previews has run for
-        # the day, but error rows + edge cases still hit this path.
-        if allocation_id:
+    def _fallback_no_session_meta() -> dict | None:
+        """Synthesize meta from allocation_returns when no PS row exists for
+        (allocation_id, date). Returns None if AR is also empty for this key.
+        Lets filtered / no_entry / errored days render a useful detail page
+        (basic context + late-entry button) instead of 404."""
+        if not allocation_id:
+            return None
+        cur.execute("""
+            SELECT ar.session_date, ar.exit_reason, ar.signal_count,
+                   ar.conviction_roi_x,
+                   (ar.exit_reason NOT IN (
+                       'filtered', 'no_entry_conviction', 'missed_window',
+                       'stale_close_failed', 'no_entry', 'errored', 'entry_failed'
+                   )) AS conviction_passed,
+                   ec.exchange,
+                   s.display_name AS strategy_display_name,
+                   s.name         AS strategy_name,
+                   sv.config      AS strategy_config
+              FROM user_mgmt.allocation_returns ar
+              JOIN user_mgmt.allocations a ON a.allocation_id = ar.allocation_id
+              JOIN audit.strategy_versions sv ON sv.strategy_version_id = a.strategy_version_id
+              JOIN audit.strategies s ON s.strategy_id = sv.strategy_id
+              JOIN user_mgmt.exchange_connections ec ON ec.connection_id = a.connection_id
+             WHERE ar.allocation_id = %s::uuid AND ar.session_date = %s::date
+             ORDER BY ar.logged_at DESC
+             LIMIT 1
+        """, (allocation_id, date))
+        ar_row = cur.fetchone()
+        if ar_row is None:
+            # AR is also empty — synthesize a minimal "no data yet" payload
+            # rather than 404, so the page renders with the late-entry button.
             cur.execute("""
-                SELECT ar.session_date, ar.exit_reason, ar.signal_count,
-                       ar.conviction_roi_x,
-                       (ar.exit_reason NOT IN (
-                           'filtered', 'no_entry_conviction', 'missed_window',
-                           'stale_close_failed', 'no_entry', 'errored', 'entry_failed'
-                       )) AS conviction_passed,
-                       ec.exchange,
+                SELECT ec.exchange,
                        s.display_name AS strategy_display_name,
                        s.name         AS strategy_name,
                        sv.config      AS strategy_config
-                  FROM user_mgmt.allocation_returns ar
-                  JOIN user_mgmt.allocations a ON a.allocation_id = ar.allocation_id
+                  FROM user_mgmt.allocations a
                   JOIN audit.strategy_versions sv ON sv.strategy_version_id = a.strategy_version_id
                   JOIN audit.strategies s ON s.strategy_id = sv.strategy_id
                   JOIN user_mgmt.exchange_connections ec ON ec.connection_id = a.connection_id
-                 WHERE ar.allocation_id = %s::uuid AND ar.session_date = %s::date
-                 ORDER BY ar.logged_at DESC
-                 LIMIT 1
-            """, (allocation_id, date))
-            ar_row = cur.fetchone()
-            if ar_row is not None:
-                cfg = (TraderConfig.from_strategy_version(ar_row["strategy_config"], capital_usd=1.0)
-                       if ar_row["strategy_config"] else TraderConfig.master_defaults())
-                return {
-                    "meta": {
-                        "date":              ar_row["session_date"].isoformat(),
-                        "allocation_id":     allocation_id,
-                        "exchange":          ar_row["exchange"],
-                        "strategy_label":    ar_row["strategy_display_name"] or ar_row["strategy_name"],
-                        "status":            "closed",
-                        "session_start_utc": None,
-                        "exit_time_utc":     None,
-                        "exit_reason":       ar_row["exit_reason"],
-                        "symbols":           [],
-                        "entered":           [],
-                        "eff_lev":           0.0,
-                        "lev_int":           0,
-                        "early_fill_y":      cfg.early_fill_y,
-                        "early_fill_x":      cfg.early_fill_x,
-                        "session_start_hour": cfg.session_start_hour,
-                        "session_ret":       None,
-                        "fill_window_close_ret": None,
-                        "fill_window_close_bar": None,
-                        # Diagnostic fields surfaced for the no-portfolio view
-                        "signal_count":      ar_row["signal_count"],
-                        "conviction_roi_x":  _dec(ar_row["conviction_roi_x"]),
-                        "conviction_passed": ar_row["conviction_passed"],
-                    },
-                    "bars": [],
-                }
+                 WHERE a.allocation_id = %s::uuid
+            """, (allocation_id,))
+            a_row = cur.fetchone()
+            if a_row is None:
+                return None
+            cfg = (TraderConfig.from_strategy_version(a_row["strategy_config"], capital_usd=1.0)
+                   if a_row["strategy_config"] else TraderConfig.master_defaults())
+            return {
+                "meta": {
+                    "date":              date,
+                    "allocation_id":     allocation_id,
+                    "exchange":          a_row["exchange"],
+                    "strategy_label":    a_row["strategy_display_name"] or a_row["strategy_name"],
+                    "status":            "closed",
+                    "session_start_utc": None,
+                    "exit_time_utc":     None,
+                    "exit_reason":       None,
+                    "symbols":           [],
+                    "entered":           [],
+                    "eff_lev":           0.0,
+                    "lev_int":           0,
+                    "early_fill_y":      cfg.early_fill_y,
+                    "early_fill_x":      cfg.early_fill_x,
+                    "session_start_hour": cfg.session_start_hour,
+                    "session_ret":       None,
+                    "fill_window_close_ret": None,
+                    "fill_window_close_bar": None,
+                    "signal_count":      None,
+                    "conviction_roi_x":  None,
+                    "conviction_passed": None,
+                },
+                "bars": [],
+            }
+        cfg = (TraderConfig.from_strategy_version(ar_row["strategy_config"], capital_usd=1.0)
+               if ar_row["strategy_config"] else TraderConfig.master_defaults())
+        return {
+            "meta": {
+                "date":              ar_row["session_date"].isoformat(),
+                "allocation_id":     allocation_id,
+                "exchange":          ar_row["exchange"],
+                "strategy_label":    ar_row["strategy_display_name"] or ar_row["strategy_name"],
+                "status":            "closed",
+                "session_start_utc": None,
+                "exit_time_utc":     None,
+                "exit_reason":       ar_row["exit_reason"],
+                "symbols":           [],
+                "entered":           [],
+                "eff_lev":           0.0,
+                "lev_int":           0,
+                "early_fill_y":      cfg.early_fill_y,
+                "early_fill_x":      cfg.early_fill_x,
+                "session_start_hour": cfg.session_start_hour,
+                "session_ret":       None,
+                "fill_window_close_ret": None,
+                "fill_window_close_bar": None,
+                "signal_count":      ar_row["signal_count"],
+                "conviction_roi_x":  _dec(ar_row["conviction_roi_x"]),
+                "conviction_passed": ar_row["conviction_passed"],
+            },
+            "bars": [],
+        }
+
+    if not candidates:
+        fallback = _fallback_no_session_meta()
+        if fallback is not None:
+            return fallback
         raise HTTPException(status_code=404, detail="portfolio not found")
 
     if allocation_id is not None:
@@ -2339,6 +2410,12 @@ def get_portfolio(
             None,
         )
         if match is None:
+            # Other allocations have a PS row for this date but the requested
+            # one doesn't — fall through to the AR fallback so the no-entry /
+            # filtered detail page still renders for the requested allocation.
+            fallback = _fallback_no_session_meta()
+            if fallback is not None:
+                return fallback
             raise HTTPException(
                 status_code=404,
                 detail=f"No portfolio session for allocation_id={allocation_id} on {date}",
