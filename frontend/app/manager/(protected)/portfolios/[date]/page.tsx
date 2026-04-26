@@ -1725,14 +1725,25 @@ export default function PortfolioDetailPage() {
             value={`${enteredCount - symStopsCount} / ${enteredCount}`}
             subtitle={symStopsCount > 0 ? `${symStopsCount} stopped` : undefined}
           />
-          <KpiCard label="Eff Leverage" value={`${meta.eff_lev.toFixed(2)}x`} />
+          <KpiCard
+            label="Eff Leverage"
+            value={`${meta.eff_lev.toFixed(2)}x`}
+            // Surface the trader's deploy-ratio constant so the operator
+            // can read the leveraged headline in context: "4x but only
+            // 90% of capital is actually deployed; the 10% margin
+            // buffer keeps the wallet from auto-liquidating on a
+            // sideways tick."
+            subtitle="deployed: 90%"
+          />
           {/* When the session is LIVE and we have enough data to project
               an endpoint, swap the Exit badge for an Est. Close tile —
               same regression endpoint as the chart's pace trendline at
-              the right edge. Lev × DEPLOY_RATIO mirrors the trader's own
-              expected_roi formula (trader_blofin.py, ~bar log). When the
-              session has actually exited (or gone stale), the Exit badge
-              is the right answer. */}
+              the right edge, in 1x (unleveraged) terms so the headline
+              matches what the chart visually projects. Subtitle carries
+              the leveraged-actual estimate (1x × eff_lev × 0.90) for
+              cross-reference against the live PNL tile. When the
+              session has actually exited (or gone stale), the Exit
+              badge is the right answer. */}
           {(() => {
             const showProjection = live && projectedCloseIncrPct !== null;
             if (!showProjection) {
@@ -1747,13 +1758,14 @@ export default function PortfolioDetailPage() {
             const lev = meta.eff_lev ?? 0;
             const DEPLOY_RATIO = 0.90;
             const leveraged = oneX * lev * DEPLOY_RATIO;
-            const sign = leveraged >= 0 ? "+" : "";
+            const sign = oneX >= 0 ? "+" : "";
+            const levSign = leveraged >= 0 ? "+" : "";
             return (
               <KpiCard
                 label="Est. Close"
-                value={`${sign}${leveraged.toFixed(2)}%`}
-                color={leveraged >= 0 ? "var(--green)" : "var(--red)"}
-                subtitle={`1x pace ${oneX >= 0 ? "+" : ""}${oneX.toFixed(2)}%`}
+                value={`${sign}${oneX.toFixed(2)}%`}
+                color={oneX >= 0 ? "var(--green)" : "var(--red)"}
+                subtitle={`lev ${levSign}${leveraged.toFixed(2)}%`}
               />
             );
           })()}
