@@ -28,6 +28,13 @@ interface PortfolioSummary {
   session_start_utc: string | null;
   exit_time_utc: string | null;
   exit_reason: string | null;
+  // Pass/fail classification: 'passed' = trader entered, 'no_entry' =
+  // filter or conviction blocked entry by design, 'error' = operational
+  // failure. Populated server-side from allocation_returns + ps data.
+  entry_status: "passed" | "no_entry" | "error";
+  conviction_roi_x: number | null;
+  conviction_passed: boolean | null;
+  signal_count: number | null;
   eff_lev: number;
   lev_int: number;
   symbols: string[];
@@ -264,6 +271,7 @@ export default function PortfoliosListPage() {
                 <tr>
                   {[
                     "Date",
+                    "",  // entry_status badge column
                     ...(showAllocCol ? ["Allocation"] : []),
                     "Symbols",
                     "Lev",
@@ -273,8 +281,8 @@ export default function PortfoliosListPage() {
                     "Bars",
                     "Exit",
                     "Status",
-                  ].map((h) => (
-                    <th key={h} style={thStyle}>
+                  ].map((h, i) => (
+                    <th key={`${h}-${i}`} style={thStyle}>
                       {h}
                     </th>
                   ))}
@@ -305,8 +313,49 @@ export default function PortfoliosListPage() {
                         e.currentTarget.style.background = "";
                       }}
                     >
-                      <td style={{ ...tdStyle, color: "var(--t0)" }}>
+                      <td style={{
+                        ...tdStyle,
+                        color: p.entry_status === "passed" ? "var(--t0)"
+                             : p.entry_status === "no_entry" ? "var(--t2)"
+                             : "var(--t1)"
+                      }}>
                         {p.date}
+                      </td>
+                      <td style={tdStyle}>
+                        {p.entry_status === "passed" ? (
+                          <span style={{
+                            display: "inline-block",
+                            padding: "2px 8px",
+                            fontSize: 9,
+                            fontWeight: 700,
+                            letterSpacing: "0.08em",
+                            background: "var(--green-dim)",
+                            color: "var(--green)",
+                            border: "1px solid var(--green-mid)",
+                          }}>PASS</span>
+                        ) : p.entry_status === "no_entry" ? (
+                          <span style={{
+                            display: "inline-block",
+                            padding: "2px 8px",
+                            fontSize: 9,
+                            fontWeight: 700,
+                            letterSpacing: "0.08em",
+                            background: "var(--amber-dim)",
+                            color: "var(--amber)",
+                            border: "1px solid var(--amber-dim)",
+                          }}>NO ENTRY</span>
+                        ) : (
+                          <span style={{
+                            display: "inline-block",
+                            padding: "2px 8px",
+                            fontSize: 9,
+                            fontWeight: 700,
+                            letterSpacing: "0.08em",
+                            background: "var(--red-dim)",
+                            color: "var(--red)",
+                            border: "1px solid var(--red-dim)",
+                          }}>ERROR</span>
+                        )}
                       </td>
                       {showAllocCol && (
                         <td style={{ ...tdStyle, color: "var(--t1)" }}>

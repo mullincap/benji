@@ -2005,13 +2005,23 @@ def list_portfolios(
 
     portfolios: list[dict[str, Any]] = []
     if scope_ids:
+        # Drive from allocation_returns (one row per session_date regardless
+        # of outcome) so filtered / no-entry / errored days appear too. Use
+        # the stale-filtered detection from the execution route to surface
+        # the recovered-trader portfolio rather than the pre-trade ar row
+        # in subprocess-died-then-recovered cases.
         cur.execute("""
-            SELECT ps.signal_date,
-                   ps.status,
+            SELECT ar.session_date,
+                   ar.exit_reason                          AS ar_exit_reason,
+                   ar.signal_count                         AS ar_signal_count,
+                   ar.conviction_roi_x,
+                   ar.conviction_passed,
+                   ar.allocation_id,
+                   ps.status                               AS ps_status,
                    ps.session_start_utc,
                    ps.exit_time_utc,
-                   ps.exit_reason,
-                   ps.eff_lev::double precision                         AS eff_lev,
+                   ps.exit_reason                          AS ps_exit_reason,
+                   ps.eff_lev::double precision            AS eff_lev,
                    ps.lev_int,
                    ps.symbols,
                    ps.entered,
@@ -2020,33 +2030,77 @@ def list_portfolios(
                    COALESCE(ps.peak_portfolio_return,  0)::double precision AS peak,
                    COALESCE(ps.max_dd_from_peak,       0)::double precision AS max_dd_from_peak,
                    ps.sym_stops,
-                   ps.allocation_id,
                    ec.exchange,
                    s.display_name AS strategy_display_name,
                    s.name         AS strategy_name
-            FROM user_mgmt.portfolio_sessions ps
-            JOIN user_mgmt.allocations a ON a.allocation_id = ps.allocation_id
+            FROM user_mgmt.allocation_returns ar
+            JOIN user_mgmt.allocations a ON a.allocation_id = ar.allocation_id
             JOIN audit.strategy_versions sv ON sv.strategy_version_id = a.strategy_version_id
             JOIN audit.strategies s ON s.strategy_id = sv.strategy_id
             JOIN user_mgmt.exchange_connections ec ON ec.connection_id = a.connection_id
-            WHERE ps.allocation_id = ANY(%s::uuid[])
-            ORDER BY ps.signal_date DESC, ps.allocation_id ASC
+            LEFT JOIN user_mgmt.portfolio_sessions ps
+                   ON ps.allocation_id = ar.allocation_id
+                  AND ps.signal_date   = ar.session_date
+            WHERE ar.allocation_id = ANY(%s::uuid[])
+            ORDER BY ar.session_date DESC, ar.allocation_id ASC, ar.logged_at DESC
         """, (scope_ids,))
+
+        # Stale-filtered dedup: when both a 'filtered' ar row + a real ps row
+        # exist for the same (allocation, date), prefer the row that has
+        # ps data. Iterate in DESC-by-logged_at and skip dup keys with the
+        # earlier (filtered) row already taken. Practical upshot: each
+        # (allocation, date) appears exactly once with the most-informative
+        # data.
+        seen_keys: set[tuple[str, str]] = set()
         for r in cur.fetchall():
+            key = (str(r["allocation_id"]), r["session_date"].isoformat())
+            ar_exit = r["ar_exit_reason"]
+            ps_exit = r["ps_exit_reason"]
+            entered_arr = r["entered"] or []
+            symbols_arr = r["symbols"] or []
+            # Prefer ps_exit when present; falls back to ar_exit.
+            effective_exit = ps_exit or ar_exit
+            # Stale-filtered: ar='filtered' but ps shows real session — use ps.
+            ar_is_stale = ar_exit in ("filtered", "no_entry_conviction") and len(entered_arr) > 0
+            if ar_is_stale:
+                # Suppress the stale ar exit_reason in display
+                effective_exit = ps_exit or "session_close"
+            if key in seen_keys:
+                continue
+            seen_keys.add(key)
+
+            # entry_status: simple 3-way classification for the UI badge.
+            #   passed     → trader entered + held positions
+            #   no_entry   → conviction or filter blocked entry (by design)
+            #   error      → entry failed for an operational reason
+            if entered_arr or ps_exit in ("session_close", "early_fill", "port_sl",
+                                           "port_tsl", "sym_stop", "subprocess_died"):
+                entry_status = "passed"
+            elif effective_exit in ("filtered", "no_entry_conviction", "missed_window"):
+                entry_status = "no_entry"
+            elif effective_exit in ("errored", "stale_close_failed", "entry_failed"):
+                entry_status = "error"
+            else:
+                entry_status = "no_entry"
+
             portfolios.append({
-                "date":              r["signal_date"].isoformat(),
+                "date":              r["session_date"].isoformat(),
                 "allocation_id":     str(r["allocation_id"]),
                 "exchange":          r["exchange"],
                 "strategy_label":    r["strategy_display_name"] or r["strategy_name"],
-                "status":            r["status"],
+                "status":            r["ps_status"] or "closed",
                 "session_start_utc": _fmt_utc(r["session_start_utc"]),
                 "exit_time_utc":     _fmt_utc(r["exit_time_utc"]),
-                "exit_reason":       r["exit_reason"],
-                "eff_lev":           r["eff_lev"],
-                "lev_int":           r["lev_int"],
-                "symbols":           list(r["symbols"] or []),
-                "entered":           list(r["entered"] or []),
-                "bars_count":        r["bars_count"],
+                "exit_reason":       effective_exit,
+                "entry_status":      entry_status,
+                "conviction_roi_x":  _dec(r["conviction_roi_x"]),
+                "conviction_passed": r["conviction_passed"],
+                "signal_count":      r["ar_signal_count"],
+                "eff_lev":           r["eff_lev"] or 0.0,
+                "lev_int":           r["lev_int"] or 0,
+                "symbols":           list(symbols_arr),
+                "entered":           list(entered_arr),
+                "bars_count":        r["bars_count"] or 0,
                 "final_incr":        r["final_incr"],
                 "peak":              r["peak"],
                 "max_dd_from_peak":  r["max_dd_from_peak"],
