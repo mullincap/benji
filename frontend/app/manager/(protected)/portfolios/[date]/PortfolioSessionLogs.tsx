@@ -792,9 +792,14 @@ function PanelHeader({
         display: "flex",
         alignItems: "center",
         justifyContent: "space-between",
-        padding: "9px 12px",
+        // Match the web app's topbar height (Topbar.tsx → 46px) so the
+        // panel header sits flush with the topbar baseline. Vertical
+        // centering carries the content; padding-x stays the same.
+        height: 46,
+        padding: "0 12px",
         borderBottom: "1px solid rgba(255,255,255,0.08)",
         background: "#0c0c0e",
+        flexShrink: 0,
       }}
     >
       <div style={{ display: "flex", alignItems: "center", gap: 9 }}>
