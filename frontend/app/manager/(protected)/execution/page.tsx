@@ -14,6 +14,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useSearchParams } from "next/navigation";
+import Link from "next/link";
 import SessionLogs from "./SessionLogs";
 import { AllocationFilter } from "../_components/AllocationFilter";
 import { useLargestAllocationDefault } from "../_components/useLargestAllocationDefault";
@@ -964,6 +965,41 @@ export default function ExecutionPage() {
         </div>
         )}
       </div>
+
+      {/* Subtle footer link to today's portfolio detail for the currently
+          scoped allocation. Resolves the allocation in this priority:
+          (1) row click in the summary table (selectedLogAllocationId)
+          (2) the AllocationFilter dropdown when set to a specific UUID.
+          When neither is present (filter = "all" and no row selected),
+          the link is hidden — there's no unambiguous "active" target. */}
+      {(() => {
+        const targetAllocId = selectedLogAllocationId
+          ?? (allocFilter !== "all" ? allocFilter : null);
+        if (!targetAllocId) return null;
+        const todayUtc = new Date().toISOString().slice(0, 10);
+        return (
+          <div style={{ display: "flex", justifyContent: "flex-end", paddingTop: 4 }}>
+            <Link
+              href={`/manager/portfolios/${todayUtc}?allocation_id=${targetAllocId}`}
+              style={{
+                fontFamily: FONT_MONO,
+                fontSize: 10,
+                color: "var(--t2)",
+                textDecoration: "none",
+                letterSpacing: "0.06em",
+              }}
+              onMouseEnter={(e) => {
+                (e.currentTarget as HTMLAnchorElement).style.color = "var(--t0)";
+              }}
+              onMouseLeave={(e) => {
+                (e.currentTarget as HTMLAnchorElement).style.color = "var(--t2)";
+              }}
+            >
+              View active portfolio →
+            </Link>
+          </div>
+        );
+      })()}
 
     </div>
   );
