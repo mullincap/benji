@@ -264,6 +264,15 @@ def _fetch_stale_rows(conn) -> list[dict]:
     Staleness is computed inside the DB query against NOW() so cron and
     DB share the same clock — no wall-clock drift between supervisor
     and the trader's per-bar writes.
+
+    Lock-grace clause: if `lock_acquired_at` is within STALE_THRESHOLD_MIN
+    of NOW(), skip — a freshly-spawned trader hasn't yet had its first
+    bar tick and runtime_state.updated_at carries the prior bar's value.
+    Without this clause the supervisor sees the inherited stale timestamp,
+    confirms via two-tick, kills + respawns the new trader, and the loop
+    repeats forever (observed 2026-04-26 13:50–13:58 UTC). The grace is
+    bounded by the same STALE_THRESHOLD_MIN so a trader that hangs
+    immediately on spawn is still caught — just one tick later.
     """
     today_str = datetime.now(timezone.utc).date().isoformat()
     with conn.cursor(cursor_factory=RealDictCursor) as cur:
@@ -282,8 +291,11 @@ def _fetch_stale_rows(conn) -> list[dict]:
               AND a.runtime_state->>'date'  = %s
               AND (NOW() - (a.runtime_state->>'updated_at')::timestamptz)
                   > make_interval(mins => %s)
+              AND (a.lock_acquired_at IS NULL
+                   OR (NOW() - a.lock_acquired_at)
+                      > make_interval(mins => %s))
             """,
-            (today_str, STALE_THRESHOLD_MIN),
+            (today_str, STALE_THRESHOLD_MIN, STALE_THRESHOLD_MIN),
         )
         return [dict(r) for r in cur.fetchall()]
 
