@@ -669,19 +669,27 @@ def _fetch_portfolio_context(cur) -> dict[str, Any]:
         day_row = cur.fetchone()
         if day_row:
             intraday_date = day_row["day"].isoformat()
+            # Dedupe per (connection_id, bucket) — exchange_snapshots are
+            # per-connection, so two allocations on the same connection (e.g.
+            # blofin ALTS MAIN + ALTS MAX) would otherwise double-count the
+            # same snapshot equity. Restrict to connections that have at least
+            # one active allocation in scope.
             cur.execute("""
-                SELECT DISTINCT ON (a.allocation_id, bucket)
+                SELECT DISTINCT ON (es.connection_id, bucket)
                     date_trunc('hour', es.snapshot_at) +
                       INTERVAL '15 min' * FLOOR(EXTRACT(MINUTE FROM es.snapshot_at) / 15)
                       AS bucket,
-                    a.allocation_id,
+                    es.connection_id,
                     es.total_equity_usd AS equity_usd
                 FROM user_mgmt.exchange_snapshots es
-                JOIN user_mgmt.allocations a ON a.connection_id = es.connection_id
-                WHERE a.allocation_id = ANY(%s::uuid[])
+                WHERE es.connection_id IN (
+                        SELECT DISTINCT a.connection_id
+                          FROM user_mgmt.allocations a
+                         WHERE a.allocation_id = ANY(%s::uuid[])
+                      )
                   AND es.fetch_ok = TRUE
                   AND date_trunc('day', es.snapshot_at)::date = %s::date
-                ORDER BY a.allocation_id, bucket, es.snapshot_at DESC
+                ORDER BY es.connection_id, bucket, es.snapshot_at DESC
             """, (all_alloc_ids, intraday_date))
 
             from collections import defaultdict
@@ -2015,7 +2023,10 @@ def list_portfolios(
                    ar.exit_reason                          AS ar_exit_reason,
                    ar.signal_count                         AS ar_signal_count,
                    ar.conviction_roi_x,
-                   ar.conviction_passed,
+                   (ar.exit_reason NOT IN (
+                       'filtered', 'no_entry_conviction', 'missed_window',
+                       'stale_close_failed', 'no_entry', 'errored', 'entry_failed'
+                   ))                                      AS conviction_passed,
                    ar.allocation_id,
                    ps.status                               AS ps_status,
                    ps.session_start_utc,
@@ -2271,7 +2282,11 @@ def get_portfolio(
         if allocation_id:
             cur.execute("""
                 SELECT ar.session_date, ar.exit_reason, ar.signal_count,
-                       ar.conviction_roi_x, ar.conviction_passed,
+                       ar.conviction_roi_x,
+                       (ar.exit_reason NOT IN (
+                           'filtered', 'no_entry_conviction', 'missed_window',
+                           'stale_close_failed', 'no_entry', 'errored', 'entry_failed'
+                       )) AS conviction_passed,
                        ec.exchange,
                        s.display_name AS strategy_display_name,
                        s.name         AS strategy_name,
