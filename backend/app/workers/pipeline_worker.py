@@ -1,12 +1,20 @@
 """
 Celery task that orchestrates the full audit pipeline chain:
   1. run_audit() — prestage + overlap_analysis.py --audit + metrics scrape
-  2. Persist results to job store + audit.jobs row
+  2. Ingest per-day baskets from eligibility_gate_report.csv into
+     audit.daily_baskets (added 2026-04-26 — closes the gap where the
+     audit pipeline produced the trusted symbol-per-day list but never
+     persisted it to a queryable table)
+  3. Persist results to job store + audit.jobs row
 """
 
+import csv
 import json
 import logging
+import os
+import shutil
 from pathlib import Path
+from typing import Optional
 
 from celery import Celery
 
@@ -32,6 +40,115 @@ def _is_cancelled(job_id: str) -> bool:
     if not job:
         return False
     return str(job.get("status", "")).lower() in {"cancelled", "canceled"}
+
+
+# ---------------------------------------------------------------------------
+# Daily basket ingestion
+# ---------------------------------------------------------------------------
+#
+# rebuild_portfolio_matrix.py writes eligibility_gate_report.csv to
+# $BASE_DATA_DIR (= /mnt/quant-data in container) at the end of the
+# audit subprocess. It contains per-day:
+#   date, col_name, n_deployed, n_eligible, n_dropped,
+#   deployed (pipe-joined), eligible (pipe-joined),
+#   dropped (pipe-joined), drop_reasons
+#
+# IMPORTANT: the `eligible` column string is set BEFORE the no-data
+# filter pass (rebuild_portfolio_matrix.py:597-598). After that pass,
+# `n_eligible` is decremented and `dropped` is appended with no-data
+# bases — but the `eligible` STRING is not updated. To get the
+# actually-traded basket we must compute  eligible_set - dropped_set.
+#
+# The CSV at /mnt/quant-data/eligibility_gate_report.csv is shared
+# across audits; we snapshot it into job_dir immediately after the
+# subprocess returns so a concurrent audit can't overwrite it before
+# we ingest. See pipeline_worker.run_pipeline().
+
+_BASE_DATA_DIR = os.environ.get("BASE_DATA_DIR", "/mnt/quant-data")
+_GATE_REPORT_NAME = "eligibility_gate_report.csv"
+
+
+def _split_pipe(value: Optional[str]) -> list[str]:
+    """Split a pipe-joined string into a list of bases, dropping empties."""
+    if not value:
+        return []
+    return [b for b in value.split("|") if b]
+
+
+def _read_baskets(gate_report_path: Path) -> list[tuple[str, list[str]]]:
+    """Parse eligibility_gate_report.csv and return [(date, basket), ...].
+
+    basket = sorted(set(eligible) - set(dropped)) so the no-data drop
+    that's NOT reflected in the `eligible` string is excluded.
+    """
+    rows: list[tuple[str, list[str]]] = []
+    with gate_report_path.open(newline="") as fh:
+        reader = csv.DictReader(fh)
+        for r in reader:
+            date_str = (r.get("date") or "").strip()
+            if not date_str:
+                continue
+            eligible = set(_split_pipe(r.get("eligible")))
+            dropped = set(_split_pipe(r.get("dropped")))
+            traded = sorted(eligible - dropped)
+            rows.append((date_str, traded))
+    return rows
+
+
+def _ingest_daily_baskets(job_id: str, gate_report_path: Path) -> int:
+    """UPSERT one row per (job_id, date) into audit.daily_baskets.
+
+    Returns the number of rows written. Best-effort: any DB error is
+    logged and swallowed so the audit job is still marked complete
+    (basket persistence is observability, not load-bearing for the
+    audit's own metrics).
+    """
+    try:
+        baskets = _read_baskets(gate_report_path)
+    except Exception as e:
+        _worker_log.warning(
+            "audit.daily_baskets: failed reading %s for job %s: %s",
+            gate_report_path, job_id, e,
+        )
+        return 0
+    if not baskets:
+        _worker_log.warning(
+            "audit.daily_baskets: %s for job %s contained 0 rows",
+            gate_report_path, job_id,
+        )
+        return 0
+
+    written = 0
+    try:
+        conn = get_worker_conn()
+        try:
+            with conn.cursor() as cur:
+                for date_str, basket in baskets:
+                    cur.execute(
+                        """
+                        INSERT INTO audit.daily_baskets (job_id, date, basket)
+                        VALUES (%s::uuid, %s::date, %s)
+                        ON CONFLICT (job_id, date) DO UPDATE
+                           SET basket     = EXCLUDED.basket,
+                               created_at = NOW()
+                        """,
+                        (job_id, date_str, basket),
+                    )
+                    written += 1
+            conn.commit()
+        finally:
+            conn.close()
+    except Exception as e:
+        _worker_log.warning(
+            "audit.daily_baskets: insert failed for job %s after %d rows: %s",
+            job_id, written, e,
+        )
+        return written
+
+    _worker_log.info(
+        "audit.daily_baskets: wrote %d row(s) for job %s", written, job_id,
+    )
+    return written
 
 
 @celery_app.task(bind=True, name="pipeline_worker.run_pipeline")
@@ -78,6 +195,28 @@ def run_pipeline(self, job_id: str, params: dict) -> dict:
     if _is_cancelled(job_id):
         update_job(job_id, status="cancelled", stage="done", error="Cancelled by user.")
         return {}
+
+    # Snapshot the gate report into job_dir BEFORE ingestion so a
+    # concurrent audit can't overwrite the shared file at
+    # $BASE_DATA_DIR/eligibility_gate_report.csv between when this
+    # subprocess finished and when we read it. The job-dir copy is
+    # also retained for diagnostics.
+    src_gate_report = Path(_BASE_DATA_DIR) / _GATE_REPORT_NAME
+    if src_gate_report.exists():
+        try:
+            job_gate_report = job_dir / _GATE_REPORT_NAME
+            shutil.copy2(src_gate_report, job_gate_report)
+            _ingest_daily_baskets(job_id, job_gate_report)
+        except Exception as e:
+            _worker_log.warning(
+                "audit.daily_baskets: snapshot/ingest failed for %s: %s",
+                job_id, e,
+            )
+    else:
+        _worker_log.warning(
+            "audit.daily_baskets: %s missing after subprocess for job %s — "
+            "skipping basket ingestion", src_gate_report, job_id,
+        )
 
     results = {
         "metrics":            metrics,
