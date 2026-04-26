@@ -38,7 +38,13 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE || "";
 const FONT_MONO = `var(--font-space-mono), ui-monospace, "SF Mono", Menlo, Consolas, monospace`;
 
-const PANEL_WIDTH_PX = 640;
+// Tightened from 640 → 470 after the PEAK/TSL row columns came out.
+// At 640 the post-Δ pill area was leaving a ~170px empty stripe along
+// the right edge of every tick row; the column layout (TIME 38 + BAR
+// 50 + WIN 54 + LIVE 56 + EXP/ACT band 132 + Δ pill ~80 + paddings)
+// fits inside ~470 with the same breathing room. Page reflow margin
+// in page.tsx tracks this constant.
+const PANEL_WIDTH_PX = 470;
 // Collapsed handle target. Bumped from 16 → 28 for discoverability —
 // 16 was visible but read as a thin border, hard to spot as a control.
 // 28 gives a real click target while still reading as "edge tab" not

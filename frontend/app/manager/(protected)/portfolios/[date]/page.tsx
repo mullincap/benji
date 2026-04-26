@@ -1588,7 +1588,7 @@ export default function PortfolioDetailPage() {
   // chart and matrix never get covered. ResizeObserver in Chart.js
   // (responsive: true + maintainAspectRatio: false) handles the chart
   // re-layout cleanly mid-transition.
-  const LOGS_PANEL_WIDTH = 640;
+  const LOGS_PANEL_WIDTH = 470;
   const LOGS_HANDLE_WIDTH = 28;
   const reflowMargin = logsExpanded ? LOGS_PANEL_WIDTH : LOGS_HANDLE_WIDTH;
 
