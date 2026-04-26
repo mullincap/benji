@@ -505,7 +505,11 @@ function SimpleMatrix({
                         pct === null
                           ? "var(--t3)"
                           : isStopped
-                          ? "var(--amber)"
+                          // Faint pale-yellow — reads as amber-family
+                          // ("frozen at clamp") without the saturation
+                          // of var(--amber), which was pulling more
+                          // attention than a static stopped row warrants.
+                          ? "rgba(240, 200, 120, 0.45)"
                           : pct >= 0
                           ? "var(--green)"
                           : "var(--red)",
