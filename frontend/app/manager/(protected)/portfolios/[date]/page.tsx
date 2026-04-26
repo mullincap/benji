@@ -1719,27 +1719,32 @@ export default function PortfolioDetailPage() {
           //   formula (capital × incr × eff_lev × 0.90) — same the trader
           //   logs as expected_roi and what the EFF LEVERAGE tile's
           //   "deployed: 90%" caption documents.
-          const cap = meta.capital_usd ?? null;
           const lev = meta.eff_lev ?? 0;
+          const levInt = meta.lev_int ?? 0;
           const DEPLOY_RATIO = 0.90;
-          const finalUSD =
-            cap !== null && cap > 0 && lev > 0
-              ? cap * (final / 100) * lev * DEPLOY_RATIO
-              : null;
-          const usdSubtitle = (() => {
-            if (finalUSD === null) return undefined;
-            const sign = finalUSD < 0 ? "−" : "";
-            const abs = Math.abs(finalUSD).toLocaleString("en-US", {
-              minimumFractionDigits: 0,
-              maximumFractionDigits: 0,
-            });
-            return `${sign}$${abs}`;
-          })();
+          // Leveraged headline format used by both Portfolio ROI and
+          // Est. Close subtitles: "-17.42% (4x)". Leveraged = 1x × lev
+          // × deploy_ratio (the trader's expected_roi formula). The
+          // "(Nx)" suffix uses the rounded integer leverage so the
+          // operator reads it the same way the trader logs it.
+          const fmtLev = (oneXPct: number): string | undefined => {
+            if (lev <= 0) return undefined;
+            const leveraged = oneXPct * lev * DEPLOY_RATIO;
+            const sign = leveraged >= 0 ? "+" : "";
+            const levSuffix = levInt > 0 ? ` (${levInt}x)` : "";
+            return `${sign}${leveraged.toFixed(2)}%${levSuffix}`;
+          };
+          const portfolioLevSubtitle = fmtLev(final);
           // PEAK ROI subtitle: how long ago the peak was hit. Walk bars to
           //   find the first bar whose b.peak equals max(b.peak); compare
           //   to wall clock. Fresh peak (within 1 bar) reads as "now".
           const peakAgeSubtitle = (() => {
-            if (bars.length === 0 || peak === 0) return undefined;
+            if (bars.length === 0) return undefined;
+            // Find the FIRST bar that hit the running peak. Walks
+            // chronological order so "peak was at session start"
+            // (today's case — portfolio never crossed positive,
+            // peak stays at 0%) renders honestly as "Nh Nm ago"
+            // pointing at bar 1.
             let peakBarTs: string | null = null;
             const peakDecimal = peak / 100;
             for (const b of bars) {
@@ -1757,7 +1762,7 @@ export default function PortfolioDetailPage() {
             if (mins < 60) return `${mins}m ago`;
             const h = Math.floor(mins / 60);
             const m = mins % 60;
-            return m === 0 ? `${h}h ago` : `${h}h ${m}m ago`;
+            return m === 0 ? `${h}hrs ago` : `${h}hrs ${m}mins ago`;
           })();
           // MAX DRAWDOWN subtitle: distance from current ROI back to the
           //   trough. Positive = recovered N pp from the bottom. Useful
@@ -1774,7 +1779,7 @@ export default function PortfolioDetailPage() {
                 label="Portfolio ROI"
                 value={fmtPct(final)}
                 color={final >= 0 ? "var(--green)" : "var(--red)"}
-                subtitle={usdSubtitle}
+                subtitle={portfolioLevSubtitle}
               />
               <KpiCard
                 label="Peak ROI"
@@ -1823,16 +1828,23 @@ export default function PortfolioDetailPage() {
             }
             const oneX = projectedCloseIncrPct as number;
             const lev = meta.eff_lev ?? 0;
+            const levInt = meta.lev_int ?? 0;
             const DEPLOY_RATIO = 0.90;
             const leveraged = oneX * lev * DEPLOY_RATIO;
             const sign = oneX >= 0 ? "+" : "";
+            // Match the Portfolio ROI subtitle format: "-17.42% (4x)".
             const levSign = leveraged >= 0 ? "+" : "";
+            const levSuffix = levInt > 0 ? ` (${levInt}x)` : "";
+            const subtitle =
+              lev > 0
+                ? `${levSign}${leveraged.toFixed(2)}%${levSuffix}`
+                : undefined;
             return (
               <KpiCard
                 label="Est. Close"
                 value={`${sign}${oneX.toFixed(2)}%`}
                 color={oneX >= 0 ? "var(--green)" : "var(--red)"}
-                subtitle={`lev ${levSign}${leveraged.toFixed(2)}%`}
+                subtitle={subtitle}
               />
             );
           })()}
