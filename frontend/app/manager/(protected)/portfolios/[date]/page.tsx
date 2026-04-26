@@ -614,6 +614,7 @@ export default function PortfolioDetailPage() {
 
   // Late-entry override state
   const [lateEntryFiring, setLateEntryFiring] = useState(false);
+  const [lateEntrySpawning, setLateEntrySpawning] = useState(false);
   const [lateEntryError, setLateEntryError] = useState<string | null>(null);
 
   const fireLateEntry = useCallback(async () => {
@@ -648,10 +649,12 @@ export default function PortfolioDetailPage() {
         const txt = await resp.text();
         throw new Error(`HTTP ${resp.status}: ${txt}`);
       }
-      const json = await resp.json();
-      alert(`Trader spawned (pid=${json.pid}). The page will refresh shortly with the live session.`);
-      // Reload to pick up the new session row
-      setTimeout(() => window.location.reload(), 2000);
+      // Hand off to the fast-poll effect which watches for the trader's
+      // first runtime_state write (exit_reason transitions away from
+      // preview_late_entry). Avoid window.location.reload() — it dropped
+      // users on a "not found" page when the URL lost its allocation_id
+      // search param.
+      setLateEntrySpawning(true);
     } catch (e) {
       setLateEntryError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -732,6 +735,35 @@ export default function PortfolioDetailPage() {
     const id = setInterval(load, POLL_MS);
     return () => clearInterval(id);
   }, [data, load]);
+
+  // Late-entry fast-poll: while the trader is starting, hit the detail
+  // endpoint every 3s for up to 3 minutes. Trader entry typically takes
+  // 60-120s (signal load + pre-filter + entry order placement). When
+  // exit_reason flips off "preview_late_entry", spawn is complete and the
+  // regular active-session 30s poll takes over.
+  useEffect(() => {
+    if (!lateEntrySpawning) return;
+    const start = Date.now();
+    const id = setInterval(() => {
+      if (Date.now() - start > 180_000) {
+        setLateEntryError(
+          "Trader didn't transition to live within 3 min. Check the trader log for errors."
+        );
+        setLateEntrySpawning(false);
+        return;
+      }
+      load();
+    }, 3000);
+    return () => clearInterval(id);
+  }, [lateEntrySpawning, load]);
+
+  // Detect spawn-complete transition (preview_late_entry → live).
+  useEffect(() => {
+    if (!lateEntrySpawning) return;
+    if (data && data.meta.exit_reason !== "preview_late_entry") {
+      setLateEntrySpawning(false);
+    }
+  }, [data, lateEntrySpawning]);
 
   // Auto-scroll matrix to bottom when new bars arrive (only if user was already at bottom)
   useEffect(() => {
@@ -1066,9 +1098,9 @@ export default function PortfolioDetailPage() {
             <div style={{ marginTop: 10, display: "flex", flexDirection: "column", gap: 6 }}>
               <button
                 onClick={fireLateEntry}
-                disabled={lateEntryFiring}
+                disabled={lateEntryFiring || lateEntrySpawning}
                 style={{
-                  background: "var(--green)",
+                  background: lateEntrySpawning ? "var(--amber)" : "var(--green)",
                   color: "var(--bg0)",
                   fontWeight: 700,
                   fontSize: 11,
@@ -1076,16 +1108,21 @@ export default function PortfolioDetailPage() {
                   textTransform: "uppercase",
                   padding: "10px 18px",
                   border: "none",
-                  cursor: lateEntryFiring ? "not-allowed" : "pointer",
+                  cursor: (lateEntryFiring || lateEntrySpawning) ? "wait" : "pointer",
                   opacity: lateEntryFiring ? 0.5 : 1,
                   fontFamily: "inherit",
                 }}
               >
-                {lateEntryFiring ? "Spawning trader…" : "▸ Manual Override · Enter Now"}
+                {lateEntryFiring
+                  ? "Sending request…"
+                  : lateEntrySpawning
+                    ? "Trader spawning… (waiting for first bar)"
+                    : "▸ Manual Override · Enter Now"}
               </button>
               <div style={{ fontSize: 9, color: "var(--t3)", maxWidth: 360 }}>
-                Preview portfolio. Click to spawn the trader in late-entry mode. The
-                trader will bypass conviction gates and enter at current marks.
+                {lateEntrySpawning
+                  ? "Polling every 3s. Page updates automatically when the trader writes its first bar (~60-120s)."
+                  : "Preview portfolio. Click to spawn the trader in late-entry mode. The trader will bypass conviction gates and enter at current marks."}
               </div>
               {lateEntryError && (
                 <div style={{ fontSize: 10, color: "var(--red)" }}>{lateEntryError}</div>
