@@ -951,6 +951,56 @@ def _get_prices_at_timestamp(inst_ids: list,
     return prices
 
 
+def _first_stop_crossing_observed(
+    inst_ids: list,
+    refs: dict,
+    stop_thr: float,
+    session_open_dt: datetime.datetime,
+) -> dict:
+    """Audit-consistent observed return at the FIRST 5m bar close that crosses
+    `stop_thr` for each symbol, anchored at refs[iid] (the 06:00 UTC open).
+    Returns {inst_id: observed_decimal} for symbols that crossed; symbols that
+    never crossed are omitted.
+
+    Used by the late-entry pre-filter and the resume-time self-heal so the
+    persisted clamp matches what apply_raw_stop in rebuild_portfolio_matrix.py
+    would have written if the trader had run normally from 06:00. Walking the
+    full 5m history (vs reading current price) is the only way to recover the
+    crossing-bar value when the trader spawn was delayed.
+    """
+    import calendar as _cal
+    out: dict[str, float] = {}
+    start_ms = _cal.timegm(session_open_dt.timetuple()) * 1000
+    for inst_id in inst_ids:
+        ref = refs.get(inst_id)
+        if not ref or float(ref) <= 0:
+            continue
+        binance_sym = inst_id.replace("-USDT", "USDT").replace("-", "")
+        try:
+            resp = requests.get(
+                f"{BINANCE_BASE}/fapi/v1/klines",
+                params={
+                    "symbol":    binance_sym,
+                    "interval":  "5m",
+                    "startTime": start_ms,
+                    "limit":     500,   # ~41h of 5m bars; covers any session day
+                },
+                timeout=10,
+            )
+            resp.raise_for_status()
+            bars = resp.json()
+        except Exception as e:
+            log.debug(f"  {inst_id}: 5m kline fetch for stop-crossing failed: {e}")
+            continue
+        for bar in bars:
+            close_p = float(bar[4])
+            ret = (close_p - float(ref)) / float(ref)
+            if ret <= stop_thr:
+                out[inst_id] = round(float(ret), 6)
+                break
+    return out
+
+
 def _safe_float(val, default):
     try:
         if val is None or val == "":
@@ -4082,22 +4132,24 @@ def _run_fresh_session_for_allocation(
     pre_stopped_clamps: dict[str, float] = {}
     if late_entry:
         try:
-            current_marks = get_mark_prices(api, inst_ids)
             stop_thr = float(config.stop_raw_pct)
-            for inst in inst_ids:
-                ref = bar6_prices.get(inst)
-                cur_p = current_marks.get(inst)
-                if ref is None or cur_p is None or float(ref) <= 0:
-                    continue
-                ret = (float(cur_p) - float(ref)) / float(ref)
-                if ret <= stop_thr:
-                    pre_stopped_clamps[inst] = round(float(ret), 6)
+            # Audit-consistent: the clamp is the observed return at the FIRST
+            # 5m bar close that crossed -stop_thr, anchored at the 06:00 UTC
+            # open (mirrors apply_raw_stop in rebuild_portfolio_matrix.py).
+            # Reading current_marks would clamp at the late-entry-time drift
+            # (e.g. -11.29%) instead of the first-cross close (e.g. -6.76%) —
+            # the live-running trader writes the latter, so the late-entry
+            # spawn must too for audit parity.
+            pre_stopped_clamps = _first_stop_crossing_observed(
+                inst_ids, open_prices, stop_thr, session_open,
+            )
             if pre_stopped_clamps:
                 log.warning(
                     f"Allocation {allocation_id}: LATE ENTRY pre-filter — "
                     f"{len(pre_stopped_clamps)} symbol(s) already past "
                     f"stop threshold ({stop_thr*100:.1f}%); keeping in basket "
-                    "for observability, skipping entry orders, clamping at observed return:"
+                    "for observability, skipping entry orders, clamping at "
+                    "first-crossing observed return (audit-consistent):"
                 )
                 for inst, clamp in pre_stopped_clamps.items():
                     log.warning(f"  {inst}: clamp={clamp*100:+.3f}%")
@@ -4651,7 +4703,65 @@ def run_session_for_allocation(
             _resume_pre_stopped = state.get("pre_stopped_clamps") or {}
             if not isinstance(_resume_pre_stopped, dict):
                 _resume_pre_stopped = {}
-            # Self-heal: re-derive pre-stopped state from basket vs positions
+            # Self-heal #1: recover missing sym_observed entries for symbols
+            # already in sym_stopped. portfolio_bars carries the per-bar
+            # symbol_returns history; the most recent value for a stopped
+            # symbol IS the observed clamp at the crossing bar (frozen by
+            # the audit-clamp path). Reinjecting it ensures new bars don't
+            # regress to the math threshold (-6%) display when runtime_state
+            # was hand-crafted/edited and lost the observed dict.
+            try:
+                _stopped_iids = (
+                    set(_resume_stopped.keys()) if isinstance(_resume_stopped, dict)
+                    else set(_resume_stopped or [])
+                )
+                _missing_obs = [iid for iid in _stopped_iids
+                                if iid not in _resume_observed]
+                if _missing_obs and state.get("session_id"):
+                    # Query the FIRST bar where each missing iid appears in
+                    # stopped[]. The symbol_returns at that bar is the
+                    # observed return at the crossing close — audit-consistent
+                    # with apply_raw_stop. Querying the latest bar would
+                    # incorrectly use a later patched/manual value.
+                    _recovered = {}
+                    _heal_conn = _trader_db_connect()
+                    try:
+                        with _heal_conn.cursor() as _hcur:
+                            for iid in _missing_obs:
+                                _hcur.execute(
+                                    """
+                                    SELECT symbol_returns
+                                      FROM user_mgmt.portfolio_bars
+                                     WHERE portfolio_session_id = %s::uuid
+                                       AND %s = ANY(stopped)
+                                     ORDER BY bar_number ASC
+                                     LIMIT 1
+                                    """,
+                                    (state["session_id"], iid),
+                                )
+                                _row = _hcur.fetchone()
+                                _sr = (_row[0] if _row else None) or {}
+                                v = _sr.get(iid)
+                                if v is not None:
+                                    _recovered[iid] = float(v)
+                    finally:
+                        _heal_conn.close()
+                    if _recovered:
+                        log.warning(
+                            f"Allocation {allocation_id}: RESUME self-heal — "
+                            f"recovering {len(_recovered)} sym_observed value(s) "
+                            f"from portfolio_bars history (runtime_state had "
+                            f"sym_stopped without paired sym_observed):"
+                        )
+                        for iid, v in _recovered.items():
+                            log.warning(f"  {iid}: observed={v*100:+.3f}%")
+                        _resume_observed = {**_resume_observed, **_recovered}
+            except Exception as _e:
+                log.warning(
+                    f"Allocation {allocation_id}: RESUME sym_observed heal "
+                    f"failed ({_e}); proceeding with persisted observed dict"
+                )
+            # Self-heal #2: re-derive pre-stopped state from basket vs positions
             # vs current prices. Defends against runtime_state corruption
             # (operator hand-craft, partial write, etc.) so any basket symbol
             # missing from positions whose live return is past stop_raw_pct
@@ -4672,16 +4782,19 @@ def run_session_for_allocation(
                             if iid not in _position_iids
                             and iid not in _known_stopped]
                 if _orphans:
-                    _live = get_mark_prices(api, _orphans)
-                    _healed: dict[str, float] = {}
-                    for iid in _orphans:
-                        ref = _open_prices.get(iid)
-                        cur_p = _live.get(iid)
-                        if not ref or not cur_p or float(ref) <= 0:
-                            continue
-                        _ret = (float(cur_p) - float(ref)) / float(ref)
-                        if _ret <= _stop_thr:
-                            _healed[iid] = round(float(_ret), 6)
+                    # First-crossing observed (audit-consistent): walk 5m
+                    # klines from 06:00 UTC and find the first bar where
+                    # close/open <= -stop_thr. Same semantics as the live
+                    # trader's apply_raw_stop trigger — clamps at the bar
+                    # where the symbol first crossed the threshold, not at
+                    # whatever the current cumulative drift happens to be.
+                    _session_open = datetime.datetime.combine(
+                        utcnow().date(),
+                        datetime.time(config.session_start_hour, 0, 0),
+                    )
+                    _healed = _first_stop_crossing_observed(
+                        _orphans, _open_prices, _stop_thr, _session_open,
+                    )
                     if _healed:
                         log.warning(
                             f"Allocation {allocation_id}: RESUME self-heal — "
