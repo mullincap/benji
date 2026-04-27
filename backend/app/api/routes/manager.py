@@ -2165,6 +2165,90 @@ class LateEntryBody(BaseModel):
 _TRADER_LOG_DIR = Path("/mnt/quant-data/logs/trader")
 
 
+@router.get("/portfolios/{date}/symbol-anchors")
+def symbol_anchors(
+    date: str,
+    inst_ids: str,
+) -> dict[str, Any]:
+    """Return Binance kline closes at 06:00 and 06:35 UTC for each
+    requested inst_id on the given date. Used by the matrix's
+    per-symbol anchor modal — operator clicks a column header and
+    sees the two anchor prices + the two stop levels (-6% from the
+    06:35 entry anchor, -8.5% from the 06:00 open anchor).
+
+    `inst_ids`: comma-separated list, e.g. "CLO-USDT,NAORIS-USDT".
+    Date must be ≤ today; future dates have no kline data yet.
+
+    Response:
+        {
+          "date": "2026-04-27",
+          "anchors": {
+            "CLO-USDT": {"open_0600": 0.13593, "entry_0635": 0.13821},
+            "NAORIS-USDT": {"open_0600": 0.09472, "entry_0635": 0.09327},
+            ...
+          },
+          "errors": []   # per-symbol fetch failures, non-fatal
+        }
+    """
+    if len(date) != 10 or date[4] != "-" or date[7] != "-":
+        raise HTTPException(status_code=400, detail="invalid date format")
+    try:
+        target_date = datetime.datetime.strptime(date, "%Y-%m-%d").date()
+    except ValueError:
+        raise HTTPException(status_code=400, detail=f"invalid date: {date}")
+    iid_list = [s.strip() for s in inst_ids.split(",") if s.strip()]
+    if not iid_list:
+        raise HTTPException(status_code=400, detail="inst_ids required")
+
+    # Convert each inst_id to its Binance perp ticker. Mirrors the
+    # preview generator's _binance_ticker_for: "CLO-USDT" → "CLOUSDT".
+    def _binance_sym(iid: str) -> str:
+        return iid.replace("-", "")
+
+    # Fetch the 1m kline close at the requested timestamp. Binance
+    # returns startTime-aligned bars; querying with a precise ms gets
+    # the bar whose open equals that ms. The close field [4] is what
+    # _get_prices_at_timestamp + _kline_close_at use throughout the
+    # codebase.
+    import calendar as _cal
+    BINANCE_FAPI = "https://fapi.binance.com/fapi/v1/klines"
+    def _fetch_close(binance_sym: str, dt: datetime.datetime) -> float | None:
+        ts_ms = _cal.timegm(dt.timetuple()) * 1000
+        try:
+            with httpx.Client(timeout=8.0) as c:
+                r = c.get(BINANCE_FAPI, params={
+                    "symbol": binance_sym,
+                    "interval": "1m",
+                    "startTime": ts_ms,
+                    "limit": 1,
+                })
+                r.raise_for_status()
+                bars = r.json()
+                if not bars:
+                    return None
+                return float(bars[0][4])
+        except Exception:
+            return None
+
+    open_dt  = datetime.datetime.combine(target_date, datetime.time(6,  0, 0))
+    entry_dt = datetime.datetime.combine(target_date, datetime.time(6, 35, 0))
+
+    anchors: dict[str, dict[str, float | None]] = {}
+    errors: list[str] = []
+    for iid in iid_list:
+        bs = _binance_sym(iid)
+        opn = _fetch_close(bs, open_dt)
+        ent = _fetch_close(bs, entry_dt)
+        anchors[iid] = {"open_0600": opn, "entry_0635": ent}
+        if opn is None and ent is None:
+            errors.append(f"{iid}: no kline data for either anchor on {date}")
+        elif opn is None:
+            errors.append(f"{iid}: missing 06:00 kline")
+        elif ent is None:
+            errors.append(f"{iid}: missing 06:35 kline")
+    return {"date": date, "anchors": anchors, "errors": errors}
+
+
 @router.get("/portfolios/{date}/late-entry-plan")
 def late_entry_plan(
     date: str,
