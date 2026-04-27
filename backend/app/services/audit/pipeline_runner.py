@@ -441,6 +441,7 @@ def _ensure_today_in_db(
     *,
     pipeline_env: dict,
     pipeline_dir: Path,
+    overlap_dimensions: str = "price_oi",
     progress_cb: Optional[Callable[[bytes], None]] = None,
 ) -> dict:
     """Mid-session ingest pre-flight for live_today=True.
@@ -450,19 +451,29 @@ def _ensure_today_in_db(
 
        metl ingest  (today's 1m bars → market.futures_1m)
             ↓
-       indexer      (today's 06:00 anchor → market.leaderboards × 3 metrics)
+       indexer      (today's 06:00 anchor → market.leaderboards × needed metrics)
             ↓
        overlap_analysis (today's basket → deploys_overlap CSV)
 
     Skips any step whose output already exists in the DB — re-running
-    after the nightly cron has caught up is a no-op. Long-running:
-    metl can take 5-10 min, each indexer metric 5-15 min. Total
-    pre-flight may exceed 30 min on a fully-cold DB; expected to be
-    much faster (or no-op) once the morning crons have run.
+    after the nightly cron has caught up is a no-op.
+
+    Speedups vs naive sequential x3:
+      • Only runs the indexer metrics that overlap_dimensions actually
+        consumes (canonical "price_oi" needs price + open_interest;
+        volume skipped — saves 5-15 min)
+      • Runs the remaining indexer metrics CONCURRENTLY via thread pool.
+        Each subprocess opens its own DB connection; they read from
+        market.futures_1m (concurrent reads OK) and write to disjoint
+        (metric, …) keys in market.leaderboards (no row contention).
+
+    Total wall-clock now bounded by max(metl, max-indexer-metric)
+    rather than metl + sum(indexers). Typical mid-session run on a
+    cold DB: ~10-20 min vs the naive ~30-50 min.
 
     Returns a dict with status of each step for the caller to log /
     surface in the job UI:
-        {"metl": "ran"|"skipped"|"failed", "indexer": ..., "errors": [...]}
+        {"metl": "ran"|"skipped"|"failed", "indexer": {metric: ...}, "errors": [...]}
     """
     import datetime as _dt
     sys.path.insert(0, str(Path(__file__).resolve().parents[4]))
@@ -551,10 +562,29 @@ def _ensure_today_in_db(
         lb_rows = 0
 
     if lb_rows == 0:
-        _emit(f"leaderboards has 0 rows for {today_str}; running indexer × 3 metrics…")
+        # Only run the indexer metrics that overlap_dimensions actually
+        # consumes. Canonical "price_oi" → {price, open_interest}; volume
+        # skipped (saves 5-15 min). overlap_analysis enforces this in
+        # its OVERLAP_DIMENSIONS_CHOICES tuple.
+        dim_str = (overlap_dimensions or "price_oi").lower()
+        needed_metrics: list[str] = []
+        if "price" in dim_str:
+            needed_metrics.append("price")
+        if "oi" in dim_str:
+            needed_metrics.append("open_interest")
+        if "volume" in dim_str:
+            needed_metrics.append("volume")
+        if not needed_metrics:
+            needed_metrics = ["price", "open_interest"]  # safe canonical
+        _emit(
+            f"leaderboards has 0 rows for {today_str}; running indexer × "
+            f"{len(needed_metrics)} metric(s) ({', '.join(needed_metrics)}) "
+            f"in parallel…"
+        )
         indexer_script = pipeline_dir / "indexer" / "build_intraday_leaderboard.py"
-        indexer_results: list[str] = []
-        for metric in ("price", "open_interest", "volume"):
+
+        def _run_one_metric(metric: str) -> tuple[str, str]:
+            """Run indexer for one metric. Returns (metric, status)."""
             ix_cmd = [
                 _PIPELINE_PYTHON, str(indexer_script),
                 "--metric", metric,
@@ -564,21 +594,34 @@ def _ensure_today_in_db(
                 "--triggered-by", "cli",
                 "--run-tag", "live_today_preflight",
             ]
-            _emit(f"  indexer metric={metric}…")
             try:
                 subprocess.run(
                     ix_cmd, cwd=str(pipeline_dir), env=pipeline_env,
-                    capture_output=True, timeout=1800,  # 30 min per metric
+                    capture_output=True, timeout=1800,
                 )
-                indexer_results.append(f"{metric}=ok")
+                return (metric, "ok")
             except subprocess.TimeoutExpired:
-                indexer_results.append(f"{metric}=timeout")
-                status["errors"].append(f"indexer metric={metric} timed out")
+                return (metric, "timeout")
             except Exception as e:
-                indexer_results.append(f"{metric}=failed")
-                status["errors"].append(f"indexer metric={metric}: {e}")
-        status["indexer"] = ", ".join(indexer_results)
-        _emit(f"indexer results: {status['indexer']}")
+                return (metric, f"failed:{e}")
+
+        # Concurrent execution — independent metric writes to
+        # market.leaderboards on disjoint (metric, …) keys; reads from
+        # market.futures_1m are pure SELECTs. No row contention; DB
+        # handles concurrent connections without issue. Total wall-
+        # clock = max(per-metric duration) instead of sum.
+        import concurrent.futures as _cf
+        indexer_results: dict[str, str] = {}
+        with _cf.ThreadPoolExecutor(max_workers=len(needed_metrics)) as ex:
+            futures = {ex.submit(_run_one_metric, m): m for m in needed_metrics}
+            for fut in _cf.as_completed(futures):
+                metric, result = fut.result()
+                indexer_results[metric] = result
+                _emit(f"  indexer metric={metric}: {result}")
+                if result not in ("ok",):
+                    status["errors"].append(f"indexer metric={metric}: {result}")
+        status["indexer"] = indexer_results
+        _emit(f"indexer complete (parallel): {indexer_results}")
     else:
         status["indexer"] = "skipped"
         _emit(f"leaderboards already has {lb_rows} rows for {today_str}; skipping indexer")
@@ -623,6 +666,7 @@ def run_audit(
         _ensure_today_in_db(
             pipeline_env=pipeline_env,
             pipeline_dir=pipeline_dir,
+            overlap_dimensions=params.get("overlap_dimensions") or "price_oi",
             progress_cb=progress_cb,
         )
 
