@@ -2097,16 +2097,27 @@ _ADDED_90 = [
     "DYDXUSDT",   "ENSUSDT",    "STGUSDT",     "CFXUSDT",    "BLURUSDT",
 ]
 
+DISPERSION_SYMBOLS_40 = DISPERSION_SYMBOLS_30 + _ADDED_60[:10]
 DISPERSION_SYMBOLS_60 = DISPERSION_SYMBOLS_30 + _ADDED_60
 DISPERSION_SYMBOLS_90 = DISPERSION_SYMBOLS_60 + _ADDED_90
 # ──────────────────────────────────────────────────────────────────────
 # Convenience map — pass universe size as a parameter
 # ──────────────────────────────────────────────────────────────────────
+# 40 added 2026-04-27: strategy configs were silently coerced from 40 → 90
+# (the prior fallback) which produced a different dispersion ratio than
+# the live path's compute_dispersion_filter (which honors N=40 per
+# config). Same threshold, different universe → different fire decisions
+# on borderline days. With 40 in the map, audit and live now use the
+# same N for the same strategy versions; live still uses dynamic top-N
+# from market.market_cap_daily while audit uses this static slice, so
+# residual divergence on universe-membership is possible but no longer
+# size-driven.
 DISPERSION_UNIVERSE = {
     5: DISPERSION_SYMBOLS_5,
     10: DISPERSION_SYMBOLS_10,
     20: DISPERSION_SYMBOLS_20,
     30: DISPERSION_SYMBOLS_30,
+    40: DISPERSION_SYMBOLS_40,
     60: DISPERSION_SYMBOLS_60,
     90: DISPERSION_SYMBOLS_90,
 }
