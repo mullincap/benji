@@ -1295,9 +1295,13 @@ export default function PortfolioDetailPage() {
         const denom = n * sumX2 - sumX * sumX;
         symSlope = denom === 0 ? 0 : (n * sumXY - sumX * sumY) / denom;
       }
+      // Symbol trendlines always span the full chart — from session
+      // open through deployment-window close — independent of the
+      // portfolio Pace's projection/full toggle. Symbol pace lines
+      // are most useful as a per-symbol drift summary across the
+      // whole session, not just the post-NOW projection segment.
       const symTrendData: (number | null)[] = new Array(totalSlots).fill(null);
-      const symStartX = trendlineExtended ? 0 : lastReal.x;
-      for (let i = symStartX; i < totalSlots; i++) {
+      for (let i = 0; i < totalSlots; i++) {
         symTrendData[i] = lastReal.y + symSlope * (i - lastReal.x);
       }
       // Match the symbol's primary line color for visual association
