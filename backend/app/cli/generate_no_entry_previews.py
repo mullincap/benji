@@ -41,6 +41,19 @@ ENTRY_REF_HOUR = 6
 ENTRY_REF_MIN = 35
 SESSION_END_HOUR = 23
 SESSION_END_MIN = 55
+# Log dir for the session-logs panel — same path the live trader writes to,
+# read by /api/manager/execution-logs. Each (allocation, date) gets its own
+# file. Preview lines append to the existing file alongside the trader's
+# own spawn/filter messages, so the panel reads as one continuous session.
+# Inside the celery/backend containers this is bind-mounted at the same path.
+TRADER_LOG_DIR = Path("/mnt/quant-data/logs/trader")
+# Default deploy ratio used by the live trader (10% margin buffer holds
+# 90% of capital in leveraged positions). expected_roi = incr × lev × 0.90.
+DEPLOY_RATIO = 0.90
+# Preview's actual_roi mirrors expected_roi — there's no real account
+# equity to read since no positions opened. Setting actual = expected
+# means the delta column reads as 0, which is the correct semantic for
+# "if we had traded this basket, we'd be at the model-predicted P&L."
 
 # Stop threshold (per-symbol). Currently hardcoded at -6% to match every
 # active strategy version's stop_raw_pct. If a strategy with a different
@@ -112,6 +125,131 @@ def _read_csv_basket(date_str: str, filter_name: str) -> tuple[list[str], bool]:
             symbols = [s.strip() for s in symbols_str.replace(",", " ").split() if s.strip()]
             return symbols, sit_flat
     return [], False
+
+
+def _existing_logged_bars(log_path: Path) -> set[int]:
+    """Scan an allocation log file for already-emitted preview bar lines.
+    Idempotency guard: re-running the cron won't duplicate lines for bars
+    we already logged. Looks for "Bar  N |" anchored at any depth past the
+    timestamp+level prefix; trader-spawn block doesn't contain those, so
+    matching in the body alone is safe."""
+    if not log_path.exists():
+        return set()
+    seen: set[int] = set()
+    try:
+        with log_path.open("r", encoding="utf-8", errors="replace") as f:
+            for line in f:
+                # Cheap match — the BAR_UPDATE_RE is anchored after a
+                # potential alloc prefix; we just need any bar number.
+                idx = line.find("Bar ")
+                if idx < 0:
+                    continue
+                rest = line[idx + 4:].lstrip()
+                # bar number is up to first space or pipe
+                end = 0
+                while end < len(rest) and rest[end].isdigit():
+                    end += 1
+                if end == 0:
+                    continue
+                try:
+                    seen.add(int(rest[:end]))
+                except ValueError:
+                    continue
+    except Exception:
+        # File-read failures shouldn't block bar generation; treat as
+        # "no bars logged yet" so we re-emit (worst case = a few dupes
+        # parsed identically by the frontend).
+        return set()
+    return seen
+
+
+def _write_preview_log_lines(
+    *,
+    allocation_id: str,
+    today_str: str,
+    bars_payload: list[dict],
+    inst_ids: list[str],
+    capital_usd: float,
+    eff_lev: float,
+    fill_gate_dt: datetime,
+) -> int:
+    """Append trader-format log lines for each preview bar to the
+    per-allocation log file at /mnt/quant-data/logs/trader/.
+
+    The session-logs UI panel reads this file via the
+    /api/manager/execution-logs endpoint and parses lines into typed
+    events (`bar_update`, `roi_report`). Without these lines the panel
+    on a sit-flat day shows only the 06:05 filter-decision messages
+    even though portfolio_bars has 50+ rows of preview data.
+
+    Two lines per bar — same shape the live trader emits, so the
+    parser regexes (_BAR_UPDATE_RE / _ROI_REPORT_RE) classify them
+    identically:
+        2026-04-27 06:35:00,000 [INFO] [alloc XXXXXXXX] Bar   7 | incr=...
+        2026-04-27 06:35:00,000 [INFO] [alloc XXXXXXXX]         | actual_roi=...
+
+    Idempotent: skips bars already present in the file.
+    """
+    log_path = TRADER_LOG_DIR / f"allocation_{allocation_id}_{today_str}.log"
+    already_logged = _existing_logged_bars(log_path)
+    new_bars = [b for b in bars_payload if b["bar_number"] not in already_logged]
+    if not new_bars:
+        return 0
+
+    # Trader's log_prefix uses the first 8 hex chars of the alloc id —
+    # mirror that so the parser's _ALLOC_PREFIX_RE matches identically.
+    short_alloc = allocation_id.split("-")[0][:8]
+    n_universe = len(inst_ids)
+    lines: list[str] = []
+    for b in new_bars:
+        bar_n  = b["bar_number"]
+        ts_str = b["bar_dt"].strftime("%Y-%m-%d %H:%M:%S,000")
+        incr   = float(b["portfolio_return"])
+        peak   = float(b["peak_return"])
+        tsl    = incr - peak
+        sess   = incr  # open-anchored already; same as portfolio_return
+        n_stop = len(b["stopped"])
+        n_act  = n_universe - n_stop
+        fill   = "open" if b["bar_dt"] <= fill_gate_dt else "closed"
+        # Set actual = expected so the delta reads 0. Equity/pnl
+        # computed from actual so the snapshot tile shows non-zero
+        # numbers consistent with the model.
+        expected = incr * eff_lev * DEPLOY_RATIO
+        actual   = expected
+        equity   = capital_usd * (1.0 + actual)
+        pnl      = capital_usd * actual
+        # Bar update line (incr/peak summary).
+        lines.append(
+            f"{ts_str} [INFO] [alloc {short_alloc}] "
+            f"Bar {bar_n:3d} | incr={incr*100:+.3f}%  peak={peak*100:.3f}%  "
+            f"tsl={tsl*100:+.3f}%  sess={sess*100:+.3f}%  "
+            f"active={n_act}/{n_universe}  stopped={n_stop}  "
+            f"fill={fill}\n"
+        )
+        # ROI report continuation line. Leading spaces + "|" — the
+        # parser's _ROI_REPORT_RE anchors on the pipe (whitespace
+        # absorbed by lstrip after alloc-prefix strip).
+        pnl_sign = "+" if pnl >= 0 else "-"
+        lines.append(
+            f"{ts_str} [INFO] [alloc {short_alloc}]         "
+            f"| actual_roi={actual*100:+.3f}%  "
+            f"equity=${equity:,.2f}  "
+            f"pnl=${pnl_sign}{abs(pnl):,.2f}  "
+            f"expected={expected*100:+.3f}% (incr×lev×0.90)  "
+            f"delta=+0.000%\n"
+        )
+
+    # Append (create-if-missing). Mode 'a' is the standard concurrent-
+    # safe append on POSIX for short writes; cron runs single-threaded
+    # so contention isn't a concern.
+    try:
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        with log_path.open("a", encoding="utf-8") as f:
+            f.writelines(lines)
+    except Exception as e:
+        print(f"  alloc {allocation_id[:8]}: log-line append failed: {e}")
+        return 0
+    return len(new_bars)
 
 
 def _eligible_allocations() -> list[dict]:
@@ -348,6 +486,55 @@ def _build_preview(allocation_id: str, basket: list[str], filter_name: str, l_hi
 
         conn.commit()
         cur.close()
+
+        # Append trader-format log lines so the session-logs panel
+        # renders bar_update + roi_report events for the preview, not
+        # just the morning's filter-decision message. Idempotent;
+        # already-logged bars are skipped.
+        try:
+            cur2 = conn.cursor()
+            cur2.execute(
+                """
+                SELECT capital_usd, sv.config->>'early_fill_x'
+                  FROM user_mgmt.allocations a
+                  JOIN audit.strategy_versions sv
+                    ON sv.strategy_version_id = a.strategy_version_id
+                 WHERE a.allocation_id = %s::uuid
+                """,
+                (allocation_id,),
+            )
+            row = cur2.fetchone()
+            cur2.close()
+            cap_usd = float(row[0]) if row and row[0] is not None else 0.0
+            efx_min = int(row[1]) if row and row[1] not in (None, "") else 90
+            session_open_dt = datetime.combine(
+                today, dtime(0, 0, 0), tzinfo=timezone.utc,
+            ).replace(hour=ENTRY_REF_HOUR - 0)  # session open = entry_ref hour
+            # Trader uses session_open + early_fill_x (in minutes) as
+            # the fill_gate. Mirror that here so the fill=open|closed
+            # column reads the same on previews as it would live.
+            session_open_dt = entry_ref.replace(
+                hour=entry_ref.hour, minute=0, second=0, microsecond=0,
+            )
+            from datetime import timedelta as _td
+            fill_gate_dt = session_open_dt + _td(minutes=efx_min)
+            eff_lev = float(l_high * 2.0)
+            n_logged = _write_preview_log_lines(
+                allocation_id=allocation_id,
+                today_str=today_str,
+                bars_payload=bars_payload,
+                inst_ids=inst_ids,
+                capital_usd=cap_usd,
+                eff_lev=eff_lev,
+                fill_gate_dt=fill_gate_dt,
+            )
+            if n_logged:
+                print(f"  alloc {allocation_id[:8]}: appended {n_logged} log line-pairs")
+        except Exception as _e:
+            # Best-effort — DB rows are the source of truth; log lines
+            # are the cosmetic layer.
+            print(f"  alloc {allocation_id[:8]}: log-line write skipped: {_e}")
+
         return inserted
     except Exception as e:
         conn.rollback()
