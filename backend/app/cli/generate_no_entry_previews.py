@@ -355,8 +355,53 @@ def _build_preview(allocation_id: str, basket: list[str], filter_name: str, l_hi
     # Build per-bar timeline. Stop tracking per inst_id when its return
     # crosses STOP_THRESHOLD; subsequent bars hold the observed clamp.
     all_ts = sorted({t for s in series.values() for (t, _) in s})
+    # Seed cumulative state from the prior run's portfolio_bars so a
+    # transient Binance hiccup (missing kline for one symbol on one bar)
+    # doesn't drop a previously-stopped symbol's clamp out of every bar
+    # in the current pass. Without this, each */5 cron rebuild walks the
+    # kline series fresh — if a stop-detection bar's kline is missing,
+    # the symbol never lands in stopped_at and falls off the dict
+    # entirely from then on.
     stopped_at: dict[str, int] = {}
     clamp_value: dict[str, float] = {}
+    last_observed_ret: dict[str, float] = {}
+    try:
+        seed_conn = get_worker_conn()
+        try:
+            seed_cur = seed_conn.cursor()
+            seed_cur.execute(
+                """
+                SELECT pb.bar_number, pb.symbol_returns, pb.stopped
+                  FROM user_mgmt.portfolio_bars pb
+                  JOIN user_mgmt.portfolio_sessions ps
+                    ON ps.portfolio_session_id = pb.portfolio_session_id
+                 WHERE ps.allocation_id = %s::uuid
+                   AND ps.signal_date = %s::date
+                 ORDER BY pb.bar_number ASC
+                """,
+                (allocation_id, today_str),
+            )
+            for sb_bar, sb_sr, sb_stop in seed_cur.fetchall():
+                sr = sb_sr or {}
+                st = sb_stop or []
+                for k, v in sr.items():
+                    if v is None:
+                        continue
+                    last_observed_ret[k] = float(v)
+                for k in st:
+                    if k in stopped_at:
+                        continue
+                    if k in sr and sr[k] is not None:
+                        stopped_at[k] = int(sb_bar)
+                        clamp_value[k] = float(sr[k])
+            seed_cur.close()
+        finally:
+            seed_conn.close()
+    except Exception as _seed_e:
+        # Best-effort seed — if it fails, fall back to clean-slate
+        # behavior (the original bug pattern, but at least not a hard
+        # crash on a write that was working before).
+        print(f"  alloc {allocation_id[:8]}: state-seed skipped: {_seed_e}")
 
     bars_payload: list[dict] = []
     for ts in all_ts:
@@ -368,24 +413,43 @@ def _build_preview(allocation_id: str, basket: list[str], filter_name: str, l_hi
 
         sym_returns: dict[str, float] = {}
         stopped_now: list[str] = []
-        for inst, bars in series.items():
-            match = next((p for (t, p) in bars if t == ts), None)
-            if match is None:
-                continue
-            entry_p = entry_prices[inst]
-            if entry_p <= 0:
-                continue
-            raw_ret = (match - entry_p) / entry_p
+        # Iterate over the FULL inst_id list (not just series.keys()) so
+        # symbols whose entire kline series is missing this run still
+        # get their clamp/last-known value emitted. Without this, a
+        # symbol that had Binance data yesterday but not today drops
+        # out of the matrix entirely — even though we know it's
+        # stopped from the seeded state above.
+        for inst in inst_ids:
+            entry_p = entry_prices.get(inst, 0)
+            bars = series.get(inst, [])
+            match = next((p for (t, p) in bars if t == ts), None) if bars else None
+
+            # Stopped: always emit clamp regardless of live kline
+            # availability. Stopped symbols don't move; their clamp is
+            # the post-stop value forever.
             if inst in stopped_at:
                 sym_returns[inst] = clamp_value[inst]
                 stopped_now.append(inst)
-            elif raw_ret <= STOP_THRESHOLD:
-                stopped_at[inst] = bar_number
-                clamp_value[inst] = raw_ret
-                sym_returns[inst] = raw_ret
-                stopped_now.append(inst)
-            else:
-                sym_returns[inst] = raw_ret
+                continue
+
+            # Active with live kline data — compute fresh return.
+            if match is not None and entry_p > 0:
+                raw_ret = (match - entry_p) / entry_p
+                if raw_ret <= STOP_THRESHOLD:
+                    stopped_at[inst] = bar_number
+                    clamp_value[inst] = raw_ret
+                    sym_returns[inst] = raw_ret
+                    stopped_now.append(inst)
+                else:
+                    sym_returns[inst] = raw_ret
+                last_observed_ret[inst] = sym_returns[inst]
+                continue
+
+            # No live data this bar — fall back to last-known. Keeps
+            # the dict dense so the matrix doesn't have "—" gaps and
+            # the portfolio mean isn't computed off a partial subset.
+            if inst in last_observed_ret:
+                sym_returns[inst] = last_observed_ret[inst]
 
         if not sym_returns:
             continue
@@ -465,7 +529,13 @@ def _build_preview(allocation_id: str, basket: list[str], filter_name: str, l_hi
                  stopped_full),
             )
 
-        # Insert bars (skip if exists)
+        # Upsert bars. Was DO NOTHING; switched to DO UPDATE so re-runs
+        # heal stale sparse-dict rows from the pre-fix code path. The
+        # carry-forward + cumulative state above is the source of truth
+        # — any prior row's symbol_returns/stopped should be overwritten
+        # with the dense version. Cheap: same row count, same indexes,
+        # and rowcount=1 fires for both new + updated so the "+0 bars"
+        # log line stops being misleading.
         inserted = 0
         for b in bars_payload:
             cur.execute(
@@ -475,7 +545,12 @@ def _build_preview(allocation_id: str, basket: list[str], filter_name: str, l_hi
                      portfolio_return, peak_return, symbol_returns,
                      stopped, logged_at)
                 VALUES (%s::uuid, %s, %s, %s, %s, %s::jsonb, %s, NOW())
-                ON CONFLICT (portfolio_session_id, bar_number) DO NOTHING
+                ON CONFLICT (portfolio_session_id, bar_number) DO UPDATE
+                   SET portfolio_return = EXCLUDED.portfolio_return,
+                       peak_return      = EXCLUDED.peak_return,
+                       symbol_returns   = EXCLUDED.symbol_returns,
+                       stopped          = EXCLUDED.stopped,
+                       logged_at        = NOW()
                 """,
                 (session_id, b["bar_number"], b["bar_dt"],
                  b["portfolio_return"], b["peak_return"],
