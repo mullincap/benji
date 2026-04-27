@@ -667,20 +667,76 @@ export default function PortfolioDetailPage() {
   const [lateEntryFiring, setLateEntryFiring] = useState(false);
   const [lateEntrySpawning, setLateEntrySpawning] = useState(false);
   const [lateEntryError, setLateEntryError] = useState<string | null>(null);
+  // Plan-modal state. The button now fetches a dry-run plan first
+  // (GET /late-entry-plan) and displays it in a confirmation modal so
+  // the operator sees exactly what will happen — close_foreign,
+  // open_fresh, top_up, or just hold-everything (the manual-position
+  // safe-default case) — before committing. Confirm fires the
+  // existing POST /late-entry; cancel closes the modal.
+  type LateEntryAction = {
+    inst_id: string;
+    action: string;
+    owned_by: string;
+    current: { contracts: number; notional_usd: number; margin_usd: number };
+    target:  { contracts: number; notional_usd: number; margin_usd: number };
+    delta:   { contracts: number; notional_usd: number };
+    reason: string;
+  };
+  type LateEntryPlanResponse = {
+    allocation_id: string;
+    errors: string[];
+    plan: {
+      summary: Record<string, number>;
+      actions: LateEntryAction[];
+      capital_to_deploy_usd: number;
+      capital_to_release_usd: number;
+      net_capital_change_usd: number;
+    } | null;
+    basket: string[];
+    pre_stopped_clamps: Record<string, number>;
+    capital_usd: number;
+    eff_lev: number;
+    active_filter: string | null;
+    trader_owned_iids: string[];
+  };
+  const [lateEntryPlan, setLateEntryPlan] = useState<LateEntryPlanResponse | null>(null);
+  const [lateEntryPlanLoading, setLateEntryPlanLoading] = useState(false);
+  const [lateEntryPlanFetchError, setLateEntryPlanFetchError] = useState<string | null>(null);
+
+  // Open the modal + fetch the plan. Modal closes on cancel or
+  // successful spawn; opening again triggers a fresh fetch (live
+  // marks may have moved).
+  const openLateEntryModal = useCallback(async () => {
+    if (!allocationId) return;
+    setLateEntryPlan(null);
+    setLateEntryPlanFetchError(null);
+    setLateEntryError(null);
+    setLateEntryPlanLoading(true);
+    try {
+      const resp = await fetch(
+        `${API_BASE}/api/manager/portfolios/${date}/late-entry-plan?allocation_id=${encodeURIComponent(allocationId)}`,
+        { credentials: "include" },
+      );
+      if (!resp.ok) {
+        const txt = await resp.text();
+        throw new Error(`HTTP ${resp.status}: ${txt}`);
+      }
+      const body = await resp.json() as LateEntryPlanResponse;
+      setLateEntryPlan(body);
+    } catch (e) {
+      setLateEntryPlanFetchError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setLateEntryPlanLoading(false);
+    }
+  }, [allocationId, date]);
+
+  const closeLateEntryModal = useCallback(() => {
+    setLateEntryPlan(null);
+    setLateEntryPlanFetchError(null);
+  }, []);
 
   const fireLateEntry = useCallback(async () => {
     if (!data || !allocationId) return;
-    const lastBar = data.bars.length > 0 ? data.bars[data.bars.length - 1] : null;
-    const previewPct = lastBar ? lastBar.incr * 100 : 0;
-    if (!confirm(
-      `Spawn the trader in late-entry mode now?\n\n` +
-      `Allocation: ${allocationId.slice(0, 8)}\n` +
-      `Date: ${date}\n` +
-      `Current preview portfolio: ${previewPct.toFixed(2)}%\n\n` +
-      `The trader will skip conviction gates and enter at current marks. ` +
-      `Symbols already past the per-symbol stop threshold will be excluded automatically. ` +
-      `Your live performance will diverge from the audit's backtest for today.`
-    )) return;
     setLateEntryFiring(true);
     setLateEntryError(null);
     try {
@@ -701,10 +757,9 @@ export default function PortfolioDetailPage() {
         throw new Error(`HTTP ${resp.status}: ${txt}`);
       }
       // Hand off to the fast-poll effect which watches for the trader's
-      // first runtime_state write (exit_reason transitions away from
-      // preview_late_entry). Avoid window.location.reload() — it dropped
-      // users on a "not found" page when the URL lost its allocation_id
-      // search param.
+      // first runtime_state write. Close the modal so the user sees
+      // the page transition to spawning state.
+      setLateEntryPlan(null);
       setLateEntrySpawning(true);
     } catch (e) {
       setLateEntryError(e instanceof Error ? e.message : String(e));
@@ -1674,42 +1729,76 @@ export default function PortfolioDetailPage() {
               LAST UPDATED · {lastUpdated.toISOString().slice(11, 19)} UTC
             </div>
           )}
-          {(meta.exit_reason === "preview_late_entry" || meta.exit_reason === "preview_no_entry") && (
-            <div style={{ marginTop: 10, display: "flex", flexDirection: "column", gap: 6 }}>
-              <button
-                onClick={fireLateEntry}
-                disabled={lateEntryFiring || lateEntrySpawning}
-                style={{
-                  background: lateEntrySpawning ? "var(--amber)" : "var(--green)",
-                  color: "var(--bg0)",
-                  fontWeight: 700,
-                  fontSize: 11,
-                  letterSpacing: "0.08em",
-                  textTransform: "uppercase",
-                  padding: "10px 18px",
-                  border: "none",
-                  cursor: (lateEntryFiring || lateEntrySpawning) ? "wait" : "pointer",
-                  opacity: lateEntryFiring ? 0.5 : 1,
-                  fontFamily: "inherit",
-                }}
-              >
-                {lateEntryFiring
-                  ? "Sending request…"
-                  : lateEntrySpawning
-                    ? "Trader spawning… (waiting for first bar)"
-                    : "▸ Manual Override · Enter Now"}
-              </button>
-              <div style={{ fontSize: 9, color: "var(--t3)", maxWidth: 360 }}>
-                {lateEntrySpawning
-                  ? "Polling every 3s. Page updates automatically when the trader writes its first bar (~60-120s)."
-                  : "Preview portfolio. Click to spawn the trader in late-entry mode. The trader will bypass conviction gates and enter at current marks."}
+          {(() => {
+            // Late-entry button trigger: any sit-flat / preview state.
+            // Older 'preview_late_entry' / 'preview_no_entry' are kept
+            // so existing flows still work; 'filtered' is the post-fix
+            // marker the trader writes on graceful sit-flat shutdown
+            // (see _mark_portfolio_session_filtered_if_exists in
+            // trader_blofin.py).
+            const buttonStates = new Set([
+              "preview_late_entry", "preview_no_entry", "filtered",
+            ]);
+            if (!meta.exit_reason || !buttonStates.has(meta.exit_reason)) {
+              return null;
+            }
+            return (
+              <div style={{ marginTop: 10, display: "flex", flexDirection: "column", gap: 6 }}>
+                <button
+                  onClick={openLateEntryModal}
+                  disabled={lateEntryFiring || lateEntrySpawning || lateEntryPlanLoading}
+                  style={{
+                    background: lateEntrySpawning ? "var(--amber)" : "var(--green)",
+                    color: "var(--bg0)",
+                    fontWeight: 700,
+                    fontSize: 11,
+                    letterSpacing: "0.08em",
+                    textTransform: "uppercase",
+                    padding: "10px 18px",
+                    border: "none",
+                    cursor: (lateEntryFiring || lateEntrySpawning || lateEntryPlanLoading) ? "wait" : "pointer",
+                    opacity: (lateEntryFiring || lateEntryPlanLoading) ? 0.5 : 1,
+                    fontFamily: "inherit",
+                    alignSelf: "flex-start",
+                  }}
+                >
+                  {lateEntryPlanLoading
+                    ? "Computing plan…"
+                    : lateEntryFiring
+                      ? "Sending request…"
+                      : lateEntrySpawning
+                        ? "Trader spawning… (waiting for first bar)"
+                        : "▸ Manual Override · Enter Now"}
+                </button>
+                <div style={{ fontSize: 9, color: "var(--t3)", maxWidth: 420 }}>
+                  {lateEntrySpawning
+                    ? "Polling every 3s. Page updates automatically when the trader writes its first bar (~60-120s)."
+                    : "Click to compute a state-aware reconcile plan. You'll see exactly what will happen — close foreign positions, open fresh, top up under-target legs, or just hold manual positions — before committing."}
+                </div>
+                {lateEntryPlanFetchError && (
+                  <div style={{ fontSize: 10, color: "var(--red)" }}>
+                    Plan fetch failed: {lateEntryPlanFetchError}
+                  </div>
+                )}
+                {lateEntryError && (
+                  <div style={{ fontSize: 10, color: "var(--red)" }}>{lateEntryError}</div>
+                )}
               </div>
-              {lateEntryError && (
-                <div style={{ fontSize: 10, color: "var(--red)" }}>{lateEntryError}</div>
-              )}
-            </div>
-          )}
+            );
+          })()}
         </div>
+
+        {/* Late-entry confirmation modal — overlay shown when
+            lateEntryPlan is set. Renders the dry-run plan as a table
+            so the operator confirms exactly which orders will fire. */}
+        {lateEntryPlan && (
+          <LateEntryPlanModal
+            response={lateEntryPlan}
+            firing={lateEntryFiring}
+            onCancel={closeLateEntryModal}
+            onConfirm={fireLateEntry}
+          />
+        )}
 
         {/* KPI cards */}
         {(() => {
@@ -2022,6 +2111,239 @@ export default function PortfolioDetailPage() {
 }
 
 // ─── Legend chip ────────────────────────────────────────────────────────────
+
+// ─── Late-entry confirmation modal ─────────────────────────────────────────
+
+// Renders the dry-run reconcile plan as a table so the operator sees
+// exactly which orders will fire before the spawn. Manual / hold rows
+// are rendered dim; close_foreign / open_fresh / top_up / replace rows
+// stand out with their action color. Cancel just closes; Confirm fires
+// the existing POST /late-entry.
+const LATE_ENTRY_ACTION_COLORS: Record<string, string> = {
+  open_fresh:        "var(--green)",
+  top_up:            "var(--green)",
+  close_foreign:     "var(--red)",
+  replace:           "var(--amber)",
+  hold:              "var(--t1)",
+  manual_in_basket:  "var(--t2)",
+  manual_foreign:    "var(--t2)",
+  skip_pre_stopped:  "var(--t2)",
+};
+
+function LateEntryPlanModal({
+  response,
+  firing,
+  onCancel,
+  onConfirm,
+}: {
+  response: {
+    allocation_id: string;
+    errors: string[];
+    plan: {
+      summary: Record<string, number>;
+      actions: Array<{
+        inst_id: string;
+        action: string;
+        owned_by: string;
+        current: { contracts: number; notional_usd: number; margin_usd: number };
+        target:  { contracts: number; notional_usd: number; margin_usd: number };
+        delta:   { contracts: number; notional_usd: number };
+        reason: string;
+      }>;
+      capital_to_deploy_usd: number;
+      capital_to_release_usd: number;
+      net_capital_change_usd: number;
+    } | null;
+    basket: string[];
+    pre_stopped_clamps: Record<string, number>;
+    capital_usd: number;
+    eff_lev: number;
+    active_filter: string | null;
+    trader_owned_iids: string[];
+  };
+  firing: boolean;
+  onCancel: () => void;
+  onConfirm: () => void;
+}) {
+  const plan = response.plan;
+  const actionableActions = ["open_fresh", "top_up", "close_foreign", "replace"];
+  const actionableCount = plan
+    ? actionableActions.reduce((n, k) => n + (plan.summary[k] || 0), 0)
+    : 0;
+  const fmtPctMod = (v: number, digits = 2) => `${v >= 0 ? "+" : ""}${v.toFixed(digits)}%`;
+  const fmtUsd = (v: number) => `$${v.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+
+  return (
+    <div
+      style={{
+        position: "fixed", inset: 0, background: "rgba(0,0,0,0.7)",
+        display: "flex", alignItems: "center", justifyContent: "center",
+        zIndex: 100, fontFamily: "var(--font-space-mono), Space Mono, monospace",
+      }}
+      onClick={(e) => { if (e.target === e.currentTarget && !firing) onCancel(); }}
+    >
+      <div
+        style={{
+          background: "var(--bg1)", border: "1px solid var(--line)",
+          borderRadius: 4, padding: "20px 24px",
+          maxWidth: 920, width: "92%", maxHeight: "88vh",
+          overflowY: "auto", color: "var(--t0)",
+          display: "flex", flexDirection: "column", gap: 14,
+        }}
+      >
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
+          <div>
+            <div style={{ fontSize: 14, fontWeight: 700, letterSpacing: "0.04em" }}>
+              LATE ENTRY · RECONCILE PLAN
+            </div>
+            <div style={{ fontSize: 9, color: "var(--t3)", marginTop: 4 }}>
+              alloc {response.allocation_id.slice(0, 8)} · capital ${response.capital_usd.toLocaleString()} · lev {response.eff_lev}x · filter {response.active_filter}
+            </div>
+          </div>
+          <button
+            onClick={onCancel}
+            disabled={firing}
+            style={{
+              background: "transparent", border: "1px solid var(--line)",
+              color: "var(--t1)", padding: "6px 12px", borderRadius: 3,
+              fontSize: 10, cursor: firing ? "wait" : "pointer",
+              fontFamily: "inherit",
+            }}
+          >
+            Close
+          </button>
+        </div>
+
+        {response.errors.length > 0 && (
+          <div style={{
+            background: "var(--amber-dim)", border: "1px solid var(--amber)",
+            borderRadius: 3, padding: "8px 10px", fontSize: 10, color: "var(--amber)",
+          }}>
+            {response.errors.map((e, i) => <div key={i}>· {e}</div>)}
+          </div>
+        )}
+
+        {plan && (
+          <>
+            {/* Summary cards */}
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 8 }}>
+              <SummaryCell label="ACTIONS"      value={String(actionableCount)} accent={actionableCount > 0 ? "var(--green)" : "var(--t1)"} />
+              <SummaryCell label="DEPLOY"       value={fmtUsd(plan.capital_to_deploy_usd)} accent="var(--green)" />
+              <SummaryCell label="RELEASE"      value={fmtUsd(plan.capital_to_release_usd)} accent="var(--red)" />
+              <SummaryCell label="NET CHANGE"   value={fmtUsd(plan.net_capital_change_usd)} accent={plan.net_capital_change_usd >= 0 ? "var(--green)" : "var(--red)"} />
+            </div>
+
+            {/* Per-action table */}
+            <div style={{ overflowX: "auto", border: "1px solid var(--line)", borderRadius: 3 }}>
+              <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 10 }}>
+                <thead>
+                  <tr style={{ background: "var(--bg2)" }}>
+                    {["Symbol", "Action", "Owned by", "Current", "Target", "Delta", "Reason"].map(h => (
+                      <th key={h} style={{
+                        textAlign: "left", padding: "6px 8px",
+                        fontSize: 9, color: "var(--t3)",
+                        textTransform: "uppercase", letterSpacing: "0.08em",
+                        borderBottom: "1px solid var(--line)",
+                      }}>{h}</th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {plan.actions.map((a, i) => {
+                    const color = LATE_ENTRY_ACTION_COLORS[a.action] || "var(--t1)";
+                    return (
+                      <tr key={i} style={{ borderBottom: "1px solid var(--line)" }}>
+                        <td style={{ padding: "6px 8px", color: "var(--t0)", fontWeight: 700 }}>
+                          {a.inst_id.replace("-USDT", "")}
+                        </td>
+                        <td style={{ padding: "6px 8px", color }}>{a.action}</td>
+                        <td style={{ padding: "6px 8px", color: "var(--t2)" }}>{a.owned_by}</td>
+                        <td style={{ padding: "6px 8px", color: "var(--t1)" }}>
+                          {a.current.contracts === 0 ? "—" : `${a.current.contracts.toLocaleString()} ct · ${fmtUsd(a.current.notional_usd)}`}
+                        </td>
+                        <td style={{ padding: "6px 8px", color: "var(--t1)" }}>
+                          {a.target.contracts === 0 ? "—" : `${a.target.contracts.toLocaleString()} ct · ${fmtUsd(a.target.notional_usd)}`}
+                        </td>
+                        <td style={{ padding: "6px 8px", color: a.delta.notional_usd > 0 ? "var(--green)" : a.delta.notional_usd < 0 ? "var(--red)" : "var(--t3)" }}>
+                          {a.delta.notional_usd === 0 ? "—" : (a.delta.notional_usd > 0 ? `+${fmtUsd(a.delta.notional_usd)}` : `-${fmtUsd(Math.abs(a.delta.notional_usd))}`)}
+                        </td>
+                        <td style={{ padding: "6px 8px", color: "var(--t2)", fontSize: 9, maxWidth: 280 }}>
+                          {a.reason}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+
+            {/* Pre-stopped + manual notes */}
+            {Object.keys(response.pre_stopped_clamps).length > 0 && (
+              <div style={{ fontSize: 9, color: "var(--t2)" }}>
+                Pre-stopped (already past -6%, will be excluded from entries):{" "}
+                {Object.entries(response.pre_stopped_clamps)
+                  .map(([iid, v]) => `${iid.replace("-USDT", "")} ${fmtPctMod(v * 100)}`)
+                  .join(", ")}
+              </div>
+            )}
+          </>
+        )}
+
+        <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 4 }}>
+          <button
+            onClick={onCancel}
+            disabled={firing}
+            style={{
+              background: "transparent", border: "1px solid var(--line)",
+              color: "var(--t1)", padding: "8px 16px", borderRadius: 3,
+              fontSize: 10, cursor: firing ? "wait" : "pointer",
+              textTransform: "uppercase", letterSpacing: "0.08em",
+              fontFamily: "inherit",
+            }}
+          >
+            Cancel
+          </button>
+          <button
+            onClick={onConfirm}
+            disabled={firing || !plan}
+            style={{
+              background: actionableCount > 0 ? "var(--green)" : "var(--amber)",
+              color: "var(--bg0)", border: "none",
+              padding: "8px 18px", borderRadius: 3,
+              fontSize: 10, fontWeight: 700,
+              cursor: firing ? "wait" : "pointer",
+              textTransform: "uppercase", letterSpacing: "0.08em",
+              fontFamily: "inherit",
+              opacity: firing ? 0.5 : 1,
+            }}
+          >
+            {firing
+              ? "Spawning…"
+              : actionableCount > 0
+                ? `Confirm · ${actionableCount} action${actionableCount > 1 ? "s" : ""}`
+                : "Spawn (no orders to place)"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function SummaryCell({ label, value, accent }: { label: string; value: string; accent: string }) {
+  return (
+    <div style={{
+      background: "var(--bg2)", border: "1px solid var(--line)",
+      borderRadius: 3, padding: "8px 10px",
+    }}>
+      <div style={{
+        fontSize: 8, fontWeight: 700, letterSpacing: "0.12em",
+        color: "var(--t3)", textTransform: "uppercase",
+      }}>{label}</div>
+      <div style={{ fontSize: 14, fontWeight: 700, color: accent, marginTop: 2 }}>{value}</div>
+    </div>
+  );
+}
+
 
 // Compact color-coded toggle chip for overlay layers (SL / TSL / NOW /
 // WIN). Active state lights the dot in the layer's color and the label
