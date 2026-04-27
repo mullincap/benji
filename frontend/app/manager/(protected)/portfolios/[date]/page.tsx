@@ -779,6 +779,56 @@ export default function PortfolioDetailPage() {
     setLateEntryPlanFetchError(null);
   }, []);
 
+  // Symbol anchors modal — fetches 06:00 + 06:35 UTC kline closes for
+  // a single symbol on click of its matrix column header. Renders the
+  // four numbers operators want at a glance: open price, entry price,
+  // -8.5% stop level off open, -6% stop level off entry.
+  type SymbolAnchorsResponse = {
+    date: string;
+    anchors: Record<string, { open_0600: number | null; entry_0635: number | null }>;
+    errors: string[];
+  };
+  const [anchorModalSymbol, setAnchorModalSymbol] = useState<string | null>(null);
+  const [anchorData, setAnchorData] = useState<SymbolAnchorsResponse | null>(null);
+  const [anchorLoading, setAnchorLoading] = useState(false);
+  const [anchorError, setAnchorError] = useState<string | null>(null);
+
+  const openSymbolAnchorsModal = useCallback(async (sym: string) => {
+    setAnchorModalSymbol(sym);
+    // Reuse cached anchors if already fetched for this date — anchors
+    // don't change after session open. Only re-fetch on a fresh click
+    // to a different date (page navigation handles that via re-mount).
+    if (anchorData && anchorData.anchors[sym]) return;
+    if (!data?.meta?.symbols?.length) return;
+    setAnchorLoading(true);
+    setAnchorError(null);
+    try {
+      // Read basket from meta.symbols rather than the derived
+      // symbolsOrdered (which is declared later in this component);
+      // order doesn't matter for the fetch — the endpoint just needs
+      // the list of inst_ids.
+      const inst = encodeURIComponent(data.meta.symbols.join(","));
+      const resp = await fetch(
+        `${API_BASE}/api/manager/portfolios/${date}/symbol-anchors?inst_ids=${inst}`,
+        { credentials: "include" },
+      );
+      if (!resp.ok) {
+        const txt = await resp.text();
+        throw new Error(`HTTP ${resp.status}: ${txt}`);
+      }
+      const body = await resp.json() as SymbolAnchorsResponse;
+      setAnchorData(body);
+    } catch (e) {
+      setAnchorError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setAnchorLoading(false);
+    }
+  }, [date, data, anchorData]);
+
+  const closeAnchorsModal = useCallback(() => {
+    setAnchorModalSymbol(null);
+  }, []);
+
   const fireLateEntry = useCallback(async () => {
     if (!data || !allocationId) return;
     setLateEntryFiring(true);
@@ -1939,6 +1989,20 @@ export default function PortfolioDetailPage() {
           />
         )}
 
+        {/* Symbol-anchors modal — opens when an operator clicks a
+            symbol column header in the ROI matrix. Shows the two
+            anchor prices (06:00 + 06:35 UTC kline closes) and the
+            two stop levels (-6% off entry, -8.5% off open). */}
+        {anchorModalSymbol && (
+          <SymbolAnchorsModal
+            symbol={anchorModalSymbol}
+            data={anchorData}
+            loading={anchorLoading}
+            error={anchorError}
+            onClose={closeAnchorsModal}
+          />
+        )}
+
         {/* KPI cards */}
         {(() => {
           // ── Subtitle derivations ─────────────────────────────────────────
@@ -2238,6 +2302,7 @@ export default function PortfolioDetailPage() {
           symbolsOrdered={symbolsOrdered}
           stoppedAtBar={stoppedAtBar}
           symStopsCount={symStopsCount}
+          onSymbolClick={openSymbolAnchorsModal}
         />
 
         {/* Session-logs deep-link removed — replaced by the right-edge
@@ -2476,6 +2541,167 @@ function LateEntryPlanModal({
     </div>
   );
 }
+
+// ─── Symbol anchor modal ────────────────────────────────────────────────────
+//
+// Compact modal showing the four numbers an operator typically wants
+// when inspecting a basket symbol: the two anchor prices (06:00 +
+// 06:35 UTC) and the two stop levels (-6% off entry_0635, -8.5% off
+// open_0600). Renders ‘—’ for any anchor whose kline fetch failed
+// (e.g. a recently-listed symbol with no 06:00 bar yet).
+function SymbolAnchorsModal({
+  symbol,
+  data,
+  loading,
+  error,
+  onClose,
+}: {
+  symbol: string;
+  data: { date: string; anchors: Record<string, { open_0600: number | null; entry_0635: number | null }>; errors: string[] } | null;
+  loading: boolean;
+  error: string | null;
+  onClose: () => void;
+}) {
+  const display = symbol.replace("-USDT", "");
+  const anchors = data?.anchors?.[symbol] ?? null;
+  const open0600 = anchors?.open_0600 ?? null;
+  const entry0635 = anchors?.entry_0635 ?? null;
+
+  // Stop levels:
+  //   -6%   off the 06:35 entry anchor
+  //   -8.5% off the 06:00 open anchor
+  const stop_neg6_off_entry  = entry0635 !== null ? entry0635 * (1 - 0.06)  : null;
+  const stop_neg85_off_open  = open0600  !== null ? open0600  * (1 - 0.085) : null;
+
+  // Significant-figures formatter — keeps cents-priced symbols
+  // readable ($0.13593) without padding $1+ symbols with too many
+  // decimals ($1.23). Falls back to 6 sig-figs for very small caps.
+  const fmtPrice = (v: number | null): string => {
+    if (v === null || !Number.isFinite(v)) return "—";
+    if (v >= 100)  return `$${v.toFixed(2)}`;
+    if (v >= 1)    return `$${v.toFixed(4)}`;
+    if (v >= 0.01) return `$${v.toFixed(5)}`;
+    if (v >= 0.0001) return `$${v.toFixed(6)}`;
+    return `$${v.toExponential(3)}`;
+  };
+
+  return (
+    <div
+      style={{
+        position: "fixed", inset: 0, background: "rgba(0,0,0,0.7)",
+        display: "flex", alignItems: "center", justifyContent: "center",
+        zIndex: 100, fontFamily: "var(--font-space-mono), Space Mono, monospace",
+      }}
+      onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}
+    >
+      <div
+        style={{
+          background: "var(--bg1)", border: "1px solid var(--line)",
+          borderRadius: 4, padding: "20px 24px",
+          maxWidth: 520, width: "92%",
+          color: "var(--t0)",
+          display: "flex", flexDirection: "column", gap: 14,
+        }}
+      >
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
+          <div>
+            <div style={{ fontSize: 14, fontWeight: 700, letterSpacing: "0.04em" }}>
+              {display} · ANCHOR PRICES
+            </div>
+            <div style={{ fontSize: 9, color: "var(--t3)", marginTop: 4 }}>
+              {data?.date ?? ""} · session anchors + stop levels
+            </div>
+          </div>
+          <button
+            onClick={onClose}
+            style={{
+              background: "transparent", border: "1px solid var(--line)",
+              color: "var(--t1)", padding: "6px 12px", borderRadius: 3,
+              fontSize: 10, cursor: "pointer", fontFamily: "inherit",
+            }}
+          >
+            Close
+          </button>
+        </div>
+
+        {loading && (
+          <div style={{ fontSize: 10, color: "var(--t2)" }}>Fetching kline closes from Binance…</div>
+        )}
+
+        {error && (
+          <div style={{
+            background: "var(--red-dim)", border: "1px solid var(--red)",
+            borderRadius: 3, padding: "8px 10px", fontSize: 10, color: "var(--red)",
+          }}>
+            Fetch failed: {error}
+          </div>
+        )}
+
+        {!loading && !error && (
+          <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 11 }}>
+            <thead>
+              <tr style={{ background: "var(--bg2)" }}>
+                <th style={{
+                  textAlign: "left", padding: "8px 10px",
+                  fontSize: 9, color: "var(--t3)",
+                  textTransform: "uppercase", letterSpacing: "0.08em",
+                  borderBottom: "1px solid var(--line)",
+                }}>Anchor / Level</th>
+                <th style={{
+                  textAlign: "right", padding: "8px 10px",
+                  fontSize: 9, color: "var(--t3)",
+                  textTransform: "uppercase", letterSpacing: "0.08em",
+                  borderBottom: "1px solid var(--line)",
+                }}>Price</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr style={{ borderBottom: "1px solid var(--line)" }}>
+                <td style={{ padding: "8px 10px", color: "var(--t1)" }}>
+                  Open <span style={{ color: "var(--t3)" }}>(06:00 UTC)</span>
+                </td>
+                <td style={{ padding: "8px 10px", textAlign: "right", color: "var(--t0)", fontWeight: 700 }}>
+                  {fmtPrice(open0600)}
+                </td>
+              </tr>
+              <tr style={{ borderBottom: "1px solid var(--line)" }}>
+                <td style={{ padding: "8px 10px", color: "var(--t1)" }}>
+                  Entry <span style={{ color: "var(--t3)" }}>(06:35 UTC)</span>
+                </td>
+                <td style={{ padding: "8px 10px", textAlign: "right", color: "var(--t0)", fontWeight: 700 }}>
+                  {fmtPrice(entry0635)}
+                </td>
+              </tr>
+              <tr style={{ borderBottom: "1px solid var(--line)", background: "var(--red-dim)" }}>
+                <td style={{ padding: "8px 10px", color: "var(--red)" }}>
+                  Stop −6% off entry <span style={{ color: "var(--t3)" }}>(06:35 × 0.94)</span>
+                </td>
+                <td style={{ padding: "8px 10px", textAlign: "right", color: "var(--red)", fontWeight: 700 }}>
+                  {fmtPrice(stop_neg6_off_entry)}
+                </td>
+              </tr>
+              <tr style={{ background: "var(--red-dim)" }}>
+                <td style={{ padding: "8px 10px", color: "var(--red)" }}>
+                  Stop −8.5% off open <span style={{ color: "var(--t3)" }}>(06:00 × 0.915)</span>
+                </td>
+                <td style={{ padding: "8px 10px", textAlign: "right", color: "var(--red)", fontWeight: 700 }}>
+                  {fmtPrice(stop_neg85_off_open)}
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        )}
+
+        {data?.errors && data.errors.length > 0 && (
+          <div style={{ fontSize: 9, color: "var(--t3)" }}>
+            {data.errors.filter(e => e.startsWith(symbol)).map((e, i) => <div key={i}>· {e}</div>)}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 
 function SummaryCell({ label, value, accent }: { label: string; value: string; accent: string }) {
   return (

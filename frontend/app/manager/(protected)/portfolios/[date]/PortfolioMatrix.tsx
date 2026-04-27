@@ -47,6 +47,11 @@ interface Props {
   symbolsOrdered: string[];
   stoppedAtBar: Map<string, number>;
   symStopsCount: number;
+  // Optional click handler for symbol column headers — when set,
+  // headers render as clickable buttons. Used by the parent page to
+  // open the per-symbol anchor-prices modal (06:00 / 06:35 closes
+  // + computed stop levels). Omit to keep headers static text.
+  onSymbolClick?: (sym: string) => void;
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
@@ -139,6 +144,7 @@ export default function MatrixContainer({
   symbolsOrdered,
   stoppedAtBar,
   symStopsCount,
+  onSymbolClick,
 }: Props) {
   const [theme, setTheme] = useState<Theme>(() => {
     if (typeof window === "undefined") return "simple";
@@ -198,6 +204,7 @@ export default function MatrixContainer({
           bars={bars}
           symbolsOrdered={symbolsOrdered}
           stoppedAtBar={stoppedAtBar}
+          onSymbolClick={onSymbolClick}
         />
       ) : (
         <AdvancedMatrix
@@ -205,6 +212,7 @@ export default function MatrixContainer({
           allBars={bars}
           symbolsOrdered={symbolsOrdered}
           stoppedAtBar={stoppedAtBar}
+          onSymbolClick={onSymbolClick}
         />
       )}
     </div>
@@ -400,10 +408,12 @@ function SimpleMatrix({
   bars,
   symbolsOrdered,
   stoppedAtBar,
+  onSymbolClick,
 }: {
   bars: PortfolioBar[];
   symbolsOrdered: string[];
   stoppedAtBar: Map<string, number>;
+  onSymbolClick?: (sym: string) => void;
 }) {
   const matrixThStyle: React.CSSProperties = {
     fontSize: 9,
@@ -468,6 +478,37 @@ function SimpleMatrix({
               // unit ("frozen at clamp") rather than a live one with
               // dim values.
               const isStopped = stoppedAtBar.has(sym);
+              const display = sym.replace("-USDT", "");
+              const baseColor = isStopped
+                ? "rgba(200, 200, 210, 0.45)"
+                : (matrixThStyle.color as string) || "var(--t3)";
+              const inner = onSymbolClick ? (
+                <button
+                  type="button"
+                  onClick={() => onSymbolClick(sym)}
+                  title={`Show 06:00 + 06:35 anchor prices and stop levels for ${display}`}
+                  style={{
+                    background: "transparent",
+                    border: "none",
+                    padding: 0,
+                    margin: 0,
+                    color: baseColor,
+                    fontFamily: "inherit",
+                    fontSize: "inherit",
+                    fontWeight: "inherit",
+                    letterSpacing: "inherit",
+                    textTransform: "inherit",
+                    cursor: "pointer",
+                    textDecoration: "underline dotted transparent",
+                    textUnderlineOffset: 3,
+                    transition: "text-decoration-color 120ms ease",
+                  }}
+                  onMouseEnter={(e) => { e.currentTarget.style.textDecorationColor = baseColor; }}
+                  onMouseLeave={(e) => { e.currentTarget.style.textDecorationColor = "transparent"; }}
+                >
+                  {display}
+                </button>
+              ) : display;
               return (
                 <th
                   key={sym}
@@ -478,7 +519,7 @@ function SimpleMatrix({
                       : null),
                   }}
                 >
-                  {sym.replace("-USDT", "")}
+                  {inner}
                 </th>
               );
             })}
@@ -564,11 +605,13 @@ function AdvancedMatrix({
   allBars: _allBars,
   symbolsOrdered,
   stoppedAtBar,
+  onSymbolClick,
 }: {
   bars: PortfolioBar[];
   allBars: PortfolioBar[];
   symbolsOrdered: string[];
   stoppedAtBar: Map<string, number>;
+  onSymbolClick?: (sym: string) => void;
 }) {
   // Latest-first. Sparkline data still walks the chronological array
   // separately so the time-series chart goes left-to-right oldest→newest
@@ -689,6 +732,33 @@ function AdvancedMatrix({
             {symbolsOrdered.map((sym) => {
               const stats = columnStats[sym];
               const display = sym.replace("-USDT", "");
+              const labelColor = stats?.isStopped ? "#a07474" : "#a1a1aa";
+              const labelInner = onSymbolClick ? (
+                <button
+                  type="button"
+                  onClick={() => onSymbolClick(sym)}
+                  title={`Show 06:00 + 06:35 anchor prices and stop levels for ${display}`}
+                  style={{
+                    background: "transparent",
+                    border: "none",
+                    padding: 0,
+                    margin: 0,
+                    color: labelColor,
+                    fontFamily: "inherit",
+                    fontSize: "inherit",
+                    fontWeight: "inherit",
+                    letterSpacing: "inherit",
+                    cursor: "pointer",
+                    textDecoration: "underline dotted transparent",
+                    textUnderlineOffset: 3,
+                    transition: "text-decoration-color 120ms ease",
+                  }}
+                  onMouseEnter={(e) => { e.currentTarget.style.textDecorationColor = labelColor; }}
+                  onMouseLeave={(e) => { e.currentTarget.style.textDecorationColor = "transparent"; }}
+                >
+                  {display}
+                </button>
+              ) : display;
               return (
                 <th
                   key={sym}
@@ -699,7 +769,7 @@ function AdvancedMatrix({
                   })}
                 >
                   {stats?.isStopped && <StopChip />}
-                  {display}
+                  {labelInner}
                 </th>
               );
             })}
