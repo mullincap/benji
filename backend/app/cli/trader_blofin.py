@@ -3295,6 +3295,14 @@ def _release_held_lock_on_shutdown() -> None:
             conn = _trader_db_connect()
             try:
                 with conn.cursor() as cur:
+                    # Only stamp subprocess_died when no other exit_reason
+                    # is set. Preserves intentional markers — 'filtered',
+                    # 'preview_no_entry', 'preview_late_entry' — that
+                    # were written by graceful exit paths or the preview
+                    # generator. Without this guard, a SIGTERM during a
+                    # sit-flat session overwrites the correct 'filtered'
+                    # marker with 'subprocess_died' and the late-entry
+                    # button stops appearing on the detail page.
                     cur.execute(
                         """
                         UPDATE user_mgmt.portfolio_sessions
@@ -3304,6 +3312,7 @@ def _release_held_lock_on_shutdown() -> None:
                                updated_at    = NOW()
                          WHERE portfolio_session_id = %s::uuid
                            AND status = 'active'
+                           AND (exit_reason IS NULL OR exit_reason = '')
                         """,
                         (sid,),
                     )
@@ -4058,6 +4067,12 @@ def _run_fresh_session_for_allocation(
             f"{today} (filter={active_filter!r})"
         )
         _mark_runtime_state(allocation_id, {"phase": "filtered", "positions": []})
+        # Stamp the portfolio_sessions row (if one exists from a prior
+        # spawn or the preview generator) with exit_reason='filtered'
+        # so the late-entry button trigger can find this row. Without
+        # this, the shutdown handler may later mis-classify it as
+        # 'subprocess_died' and the button stops appearing.
+        _mark_portfolio_session_filtered_if_exists(allocation_id, today)
         _log_allocation_return(
             allocation_id, today,
             net_return_pct=0.0,
@@ -4095,6 +4110,7 @@ def _run_fresh_session_for_allocation(
             "positions": [],
             "pre_filter_dropped": dropped,
         })
+        _mark_portfolio_session_filtered_if_exists(allocation_id, today)
         _log_allocation_return(
             allocation_id, today,
             net_return_pct=0.0,
@@ -4653,6 +4669,43 @@ def _append_portfolio_bar_for_session(
             conn.close()
     except Exception as e:
         log.warning(f"  Could not append portfolio bar (session {session_id}): {e}")
+
+
+def _mark_portfolio_session_filtered_if_exists(
+    allocation_id: str, today_date,
+) -> None:
+    """Set exit_reason='filtered' on any portfolio_sessions row for this
+    (allocation, date). Called from the trader's sit-flat early-return
+    paths so the row reads correctly even when the preview generator
+    (or a prior spawn) created the row first.
+
+    Idempotent: re-running is safe; the WHERE clause is allocation+date,
+    not exit_reason. Best-effort: a DB outage doesn't block the trader's
+    shutdown."""
+    try:
+        conn = _trader_db_connect()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE user_mgmt.portfolio_sessions
+                       SET exit_reason   = 'filtered',
+                           status        = 'closed',
+                           exit_time_utc = COALESCE(exit_time_utc, NOW()),
+                           updated_at    = NOW()
+                     WHERE allocation_id = %s::uuid
+                       AND signal_date   = %s::date
+                    """,
+                    (allocation_id, today_date),
+                )
+            conn.commit()
+        finally:
+            conn.close()
+    except Exception as e:
+        log.warning(
+            f"Could not mark portfolio_sessions row filtered "
+            f"(alloc {allocation_id[:8]}, date {today_date}): {e}"
+        )
 
 
 def _close_portfolio_session_for_allocation(
