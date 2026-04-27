@@ -2730,10 +2730,21 @@ def _splice_today_partial_into_matrix(
     df_4x[today_iso] = portfolio_decimal
     n_real = int(np.sum(~np.isnan(portfolio_decimal)))
     last_bar_dt = bar_grid[max(0, n_real - 1)] if n_real > 0 else session_start_dt
+    # Basket's leveraged intraday return at the most recent fired bar.
+    # Used by the daily-portfolio emit to populate today's raw_roi /
+    # strat_roi cells in the breakdown — without this, simulate()'s
+    # filter-blocked path leaves them at 0% even though the basket
+    # actually moved.
+    final_lev_decimal = (
+        float(portfolio_decimal[n_real - 1]) if n_real > 0 else 0.0
+    )
+    final_lev_pct = final_lev_decimal * 100.0
+    final_1x_pct  = final_lev_pct / max(pivot_leverage, 1e-9)
     print(
         f"  [live-today] spliced today's column: {n_real}/{n_bars} bars "
         f"(through {last_bar_dt.strftime('%H:%M')} UTC); "
-        f"final incr={portfolio_decimal[n_real-1]*100:+.3f}% (4x decimal)" if n_real > 0
+        f"final incr={final_lev_pct:+.3f}% ({pivot_leverage:.0f}x) "
+        f"= {final_1x_pct:+.3f}% (1x)" if n_real > 0
         else f"  [live-today] spliced today's column: 0/{n_bars} bars (no data yet)"
     )
     return {
@@ -2743,6 +2754,11 @@ def _splice_today_partial_into_matrix(
         "last_bar_time_utc": last_bar_dt.strftime("%Y-%m-%d %H:%M:%S"),
         "symbols": fetched_syms,
         "missing_symbols": [s for s in today_symbols if s not in fetched_syms],
+        # Basket return at the most recent fired bar — used to populate
+        # today's row's raw_roi / strat_roi when simulate() left them
+        # at 0 due to the filter sitting flat.
+        "partial_basket_roi_lev_pct": round(final_lev_pct, 3),
+        "partial_basket_roi_1x_pct":  round(final_1x_pct, 3),
     }
 
 
@@ -19584,6 +19600,25 @@ def main():
                     _dp_row["partial_bars_fired"] = _live_today_partial["bars_fired"]
                     _dp_row["partial_bars_total"] = _live_today_partial["bars_total"]
                     _dp_row["partial_through_utc"]  = _live_today_partial["last_bar_time_utc"]
+                    # Surface the basket's would-have-been ROI on today's
+                    # row even when the strategy didn't trade. simulate()
+                    # leaves raw_roi/strat_roi at 0 when the filter sat
+                    # flat; for today's partial we want to show what
+                    # the basket actually did so the operator can see
+                    # "we sat out, but here's what we'd have made/lost".
+                    _basket_1x = _live_today_partial.get("partial_basket_roi_1x_pct")
+                    _basket_lv = _live_today_partial.get("partial_basket_roi_lev_pct")
+                    if _basket_1x is not None:
+                        _dp_row["partial_basket_roi_1x_pct"]  = float(_basket_1x)
+                        # Override raw_roi only when simulate() left it
+                        # at 0 — preserves real values when an active
+                        # filter actually traded today.
+                        if _dp_row["raw_roi"] == 0.0:
+                            _dp_row["raw_roi"] = round(float(_basket_1x), 2)
+                    if _basket_lv is not None:
+                        _dp_row["partial_basket_roi_lev_pct"] = float(_basket_lv)
+                        if _dp_row["strat_roi"] == 0.0:
+                            _dp_row["strat_roi"] = round(float(_basket_lv), 2)
                 _dp_portfolio[_dp_dt] = _dp_row
 
             if _dp_portfolio:
