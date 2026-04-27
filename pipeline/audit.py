@@ -2796,11 +2796,21 @@ def build_dispersion_filter(
         each day's std is restricted to True-valued symbols on that day.
         When None (default), all symbols are used — original behaviour.
     """
-    idx = pd.date_range("2025-01-01", "2026-03-01", freq="D")
-
+    # End date derived from the actual data so the dispersion output
+    # isn't silently truncated when audits run past prior hardcoded end
+    # dates. Start stays anchored at 2025-01-01 to preserve coverage of
+    # the strategy training era. Bug fix 2026-04-27: the previous
+    # literal "2026-03-01" silently dropped every date past that into
+    # the reindex's fill_value=False default, so dispersion couldn't
+    # trigger sit-flat for any newer date regardless of input.
     if alt_returns.empty:
+        # Backward compat: when called with no data, return the original
+        # hardcoded range so existing length-dependent callers still work.
+        idx = pd.date_range("2025-01-01", "2026-03-01", freq="D")
         print("    Dispersion filter: no data — returning all-False (no filter)")
         return pd.Series(False, index=idx)
+
+    idx = pd.date_range("2025-01-01", alt_returns.index.max(), freq="D")
 
     use_dynamic = symbol_mask_df is not None and not symbol_mask_df.empty
 
@@ -17029,10 +17039,18 @@ def main():
     # Cross-sectional price returns — fetched unconditionally so OI-price
     # alignment metrics are available even when the dispersion filter is off.
     print("\nFetching altcoin daily returns for OI-price alignment ...")
+    # Bug fix 2026-04-27: pass an explicit `end` so the cache-staleness
+    # check in fetch_altcoin_daily_returns (cached.index[-1] >= end_dt - 2d)
+    # forces a refetch when the cache predates the audit window. Without
+    # this, the function's default end='2026-03-02' makes any cache
+    # ending near that date appear "fresh" forever, regardless of the
+    # audit's actual date range.
+    _fetch_end = (datetime.date.today() + datetime.timedelta(days=1)).isoformat()
     try:
         alt_rets = fetch_altcoin_daily_returns(
             symbols    = _fetch_symbols,
             cache_file = _ret_cache,
+            end        = _fetch_end,
         )
     except Exception as e:
         print(f"    ! fetch_altcoin_daily_returns failed: {e}")
