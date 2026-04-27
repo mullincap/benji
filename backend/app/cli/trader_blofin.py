@@ -468,6 +468,77 @@ def init_portfolio_session_sql(date: str, symbols: list, entered: list,
         log.warning(f"  Could not init portfolio session in DB: {e}")
 
 
+def _rehydrate_session_state_from_bars(
+    session_id: str,
+) -> tuple[dict[str, float], dict[str, float], dict[str, float]]:
+    """Rebuild cumulative state from `portfolio_bars` history of one session.
+
+    Each bar's `stopped` array is non-cumulative — it's the stopped state
+    *as observed during that iteration*. On every trader restart (and we
+    do restart often during sit-flat sessions where the supervisor keeps
+    respawning the logger), the in-memory `sym_stopped` resets, and any
+    bar that doesn't re-observe a previously-stopped symbol drops it
+    from `stopped`. Reading `portfolio_sessions.sym_stops` gets us the
+    deduped union of every symbol that ever stopped — which is what we
+    actually need to keep clamping after a respawn.
+
+    Returns three dicts:
+      sym_stopped_clamps:        {iid: clamp_value}  — math (audit threshold)
+      last_sym_returns_map_open: {iid: last_value}   — display fallback
+      last_sym_returns_map:      {iid: last_value}   — incr fallback
+
+    The "last" dicts let the loop fill missing entries when the per-bar
+    mark-price fetch drops a symbol — instead of letting it fall off
+    the dict entirely (which produces the sparse `symbol_returns` JSON
+    + the matrix's "—" gaps + jittery portfolio averages).
+    """
+    sym_stopped_clamps: dict[str, float] = {}
+    last_sym_returns_map_open: dict[str, float] = {}
+    last_sym_returns_map: dict[str, float] = {}
+    try:
+        conn = _trader_db_connect()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT bar_number, symbol_returns, stopped
+                      FROM user_mgmt.portfolio_bars
+                     WHERE portfolio_session_id = %s::uuid
+                     ORDER BY bar_number ASC
+                    """,
+                    (session_id,),
+                )
+                # Default psycopg2 cursor returns tuples — positional
+                # access matches the rest of this file (see row[0]
+                # convention at trader_blofin.py:3552).
+                for row in cur.fetchall():
+                    sr = row[1] or {}
+                    stopped_list = row[2] or []
+                    # Carry-forward: latest non-null value wins.
+                    for iid, v in sr.items():
+                        if v is None:
+                            continue
+                        last_sym_returns_map_open[iid] = float(v)
+                        last_sym_returns_map[iid] = float(v)
+                    # Cumulative stops: first time we see a symbol in
+                    # `stopped`, snapshot its clamp value from this
+                    # bar's `symbol_returns`. Subsequent bars don't
+                    # overwrite — the clamp is fixed at the crossing.
+                    for iid in stopped_list:
+                        if iid in sym_stopped_clamps:
+                            continue
+                        if iid in sr and sr[iid] is not None:
+                            sym_stopped_clamps[iid] = float(sr[iid])
+        finally:
+            conn.close()
+    except Exception as e:
+        log.warning(
+            f"  Could not rehydrate session state from portfolio_bars "
+            f"(session {session_id}): {e}"
+        )
+    return sym_stopped_clamps, last_sym_returns_map_open, last_sym_returns_map
+
+
 def append_portfolio_bar_sql(date: str, bar: int, ts: str,
                              incr: float, peak: float,
                              sym_returns: dict, stopped: list) -> None:
@@ -2409,6 +2480,55 @@ def _run_monitoring_loop(today, today_date, api: ExchangeAdapter, inst_ids,
             f"  math clamp at {cfg.stop_raw_pct*100:.1f}% (audit-consistent)"
         )
 
+    # ── Carry-forward state for sparse-dict robustness ────────────────────
+    # Two related issues that produce holes in portfolio_bars.symbol_returns
+    # and bogus per-bar Portfolio averages:
+    #
+    #   1. Missing live mark prices.  get_mark_prices() can return a partial
+    #      dict (rate limit, transient API hiccup, single-symbol failure).
+    #      The per-bar dict construction below previously dropped any iid
+    #      not in `current` — so a flicker became a missing column for
+    #      that bar.
+    #
+    #   2. Lost sym_stopped state.  The supervisor respawns the trader on
+    #      sit-flat sessions (logger mode keeps the price-watch alive even
+    #      when no positions are open). Each respawn reset sym_stopped to
+    #      empty, so previously-stopped symbols stopped clamping until they
+    #      next crossed threshold — which they often won't, since they're
+    #      already past it.
+    #
+    # Fix: on entry, walk the session's portfolio_bars history to build
+    # cumulative sym_stopped + last-known per-symbol returns. Then in the
+    # loop, fall back to last-known values whenever current price is
+    # unavailable for a symbol. Result: every bar's symbol_returns
+    # includes every iid in inst_ids, with stopped symbols clamped at
+    # their crossing-bar value forever.
+    last_sym_returns_map_open: dict[str, float] = {}
+    last_sym_returns_map: dict[str, float] = {}
+    if session_id is not None:
+        _rh_clamps, _rh_last_open, _rh_last_entry = (
+            _rehydrate_session_state_from_bars(session_id)
+        )
+        # Merge clamp values into sym_stopped only for symbols not already
+        # rehydrated from runtime_state (runtime_state wins — it's the
+        # canonical source for actively-traded sessions; bars-history
+        # wins for logger sessions where runtime_state stays empty).
+        _bars_added = 0
+        for _iid, _clamp in _rh_clamps.items():
+            if _iid not in sym_stopped:
+                sym_stopped[_iid] = float(_clamp)
+                if _iid not in sym_observed:
+                    sym_observed[_iid] = float(_clamp)
+                _bars_added += 1
+        last_sym_returns_map_open.update(_rh_last_open)
+        last_sym_returns_map.update(_rh_last_entry)
+        if _bars_added > 0 or last_sym_returns_map_open:
+            log.info(
+                f"{log_prefix}Rehydrated from portfolio_bars: "
+                f"+{_bars_added} stopped symbol(s), "
+                f"{len(last_sym_returns_map_open)} carry-forward value(s)"
+            )
+
     # Sync runtime_state.positions[] against live exchange positions before
     # the monitoring loop starts. Picks up manual fills and any positions
     # opened out-of-band from the programmatic entry phase, so the software
@@ -2619,12 +2739,22 @@ def _run_monitoring_loop(today, today_date, api: ExchangeAdapter, inst_ids,
         # ── Portfolio return (clamped + active symbols) ────────────────────
         # Mirrors rebuild_portfolio_matrix.py: stopped symbols contribute
         # their clamped value; active symbols use current live return.
+        # Falls back to last-known per-iid when current price is missing
+        # (transient API failure shouldn't drop a symbol from the basket
+        # and distort the mean — see "carry-forward state" block above).
         sym_returns_map = {}
         for iid in inst_ids:
             if iid in sym_stopped:
                 sym_returns_map[iid] = sym_stopped[iid]   # clamped at -6%
             elif iid in current and entry_prices.get(iid, 0) > 0:
                 sym_returns_map[iid] = current[iid] / entry_prices[iid] - 1.0
+            elif iid in last_sym_returns_map:
+                sym_returns_map[iid] = last_sym_returns_map[iid]
+            # else: still no data ever for this iid — leave unset, mean
+            # falls back to the available subset (rare; only the first
+            # bar after a fresh start with a totally unreachable symbol).
+            if iid in sym_returns_map:
+                last_sym_returns_map[iid] = sym_returns_map[iid]
         sym_returns = list(sym_returns_map.values())
 
         incr = float(np.mean(sym_returns)) if sym_returns else 0.0
@@ -2637,6 +2767,8 @@ def _run_monitoring_loop(today, today_date, api: ExchangeAdapter, inst_ids,
         # against open, so a row at -8% in the UI looked like a missed stop
         # even though the open-based ret was still above -6%. Same denominator
         # on both sides removes that confusion.
+        # Same carry-forward fallback as sym_returns_map (above) — see
+        # the "carry-forward state" block at sym_stopped init for why.
         sym_returns_map_open = {}
         for iid in inst_ids:
             if iid in sym_stopped:
@@ -2646,6 +2778,10 @@ def _run_monitoring_loop(today, today_date, api: ExchangeAdapter, inst_ids,
                 sym_returns_map_open[iid] = sym_observed.get(iid, sym_stopped[iid])
             elif iid in current and open_prices.get(iid, 0) > 0:
                 sym_returns_map_open[iid] = current[iid] / open_prices[iid] - 1.0
+            elif iid in last_sym_returns_map_open:
+                sym_returns_map_open[iid] = last_sym_returns_map_open[iid]
+            if iid in sym_returns_map_open:
+                last_sym_returns_map_open[iid] = sym_returns_map_open[iid]
 
         # session_ret uses open_prices anchor (06:00 UTC) AND clamps stopped
         # symbols at their realized stop value — mirrors the audit's path_1x
