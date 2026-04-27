@@ -149,6 +149,12 @@ def build_pipeline_env(params: dict) -> dict[str, str]:
         "PRICE_SOURCE":               str(params.get("price_source", "db")),
         "MCAP_SOURCE":                str(params.get("mcap_source", "db")),
         "DISPERSION_UNIVERSE_MODE":   str(params.get("dispersion_universe_mode", "curated")),
+        # Mid-session splice — when True, audit.py appends today's
+        # partial intraday column fetched live from Binance klines
+        # (read from live_deploys_signal.csv for today's basket). See
+        # _splice_today_partial_into_matrix in audit.py:2575. Used by
+        # the simulator's "Live Today" toggle.
+        "LIVE_TODAY":                 _boolenv(params.get("live_today", False)),
         "SAVE_CHARTS":                _boolenv(params.get("save_charts", True)),
         "TRIAL_PURCHASES":            _boolenv(params.get("trial_purchases", False)),
         "QUICK":                      _boolenv(params.get("quick", False)),

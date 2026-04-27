@@ -17324,24 +17324,47 @@ def main():
     print(f"  Column format breakdown:      {col_types}\n")
 
     # ── 2a. Mid-session splice — append today's partial column ───────────
-    # When --live-today is set, fetch today's elapsed 5m bars from
-    # Binance per the basket symbols from live_deploys_signal.csv,
-    # apply the same per-symbol stop + equal-weight + leverage as
-    # rebuild_portfolio_matrix, and append as a final column. Trailing
-    # bars (after "now") stay NaN — simulate() walks the column until
-    # it runs out of real bars, so the partial day naturally exits at
-    # whatever bar count the wall clock implies.
+    # When --live-today is set (or LIVE_TODAY=1 env var, the path
+    # used by the simulator worker so we don't need to plumb a CLI
+    # flag through overlap_analysis.run_audit), fetch today's elapsed
+    # 5m bars from Binance per the basket symbols from
+    # live_deploys_signal.csv, apply the same per-symbol stop +
+    # equal-weight + leverage as rebuild_portfolio_matrix, and append
+    # as a final column. Trailing bars (after "now") stay NaN —
+    # simulate() walks the column until it runs out of real bars, so
+    # the partial day naturally exits at whatever bar count the wall
+    # clock implies.
     _live_today_partial: dict | None = None  # carries metadata to results emitter
-    if getattr(args, "live_today", False):
-        try:
-            _live_today_partial = _splice_today_partial_into_matrix(
-                df_4x=df_4x,
-                deploys_csv_path=_DEPLOYS_PATH,
-                pivot_leverage=PIVOT_LEVERAGE,
-            )
-        except Exception as _lt_err:
-            print(f"  ⚠  --live-today: splice failed ({_lt_err}); proceeding without today's partial.")
-            _live_today_partial = None
+    _live_today_enabled = (
+        getattr(args, "live_today", False)
+        or os.environ.get("LIVE_TODAY", "").strip().lower() in ("1", "true", "yes")
+    )
+    if _live_today_enabled:
+        # Try the audit's own deploys CSV first (in case overlap_analysis
+        # was extended to include today). Fall back to the live trader's
+        # daily_signal_v2-written CSV via LIVE_DEPLOYS_CSV env var
+        # (defaults to /mnt/quant-data/live_deploys_signal.csv — the
+        # cross-container path that resolves on celery + backend).
+        _lt_paths = []
+        if _DEPLOYS_PATH:
+            _lt_paths.append(_DEPLOYS_PATH)
+        _live_csv = os.environ.get("LIVE_DEPLOYS_CSV", "/mnt/quant-data/live_deploys_signal.csv")
+        if _live_csv and _live_csv not in _lt_paths:
+            _lt_paths.append(_live_csv)
+        for _lt_path in _lt_paths:
+            try:
+                _live_today_partial = _splice_today_partial_into_matrix(
+                    df_4x=df_4x,
+                    deploys_csv_path=_lt_path,
+                    pivot_leverage=PIVOT_LEVERAGE,
+                )
+                if _live_today_partial:
+                    break  # success — stop trying paths
+            except Exception as _lt_err:
+                print(f"  ⚠  --live-today: splice via {_lt_path} failed ({_lt_err})")
+        if _live_today_partial is None:
+            print(f"  ⚠  --live-today: no usable basket source; "
+                  f"proceeding without today's partial.")
 
     # ── 2b. Load symbol counts from deploys CSV (for fee calculation) ───
     symbol_counts = None

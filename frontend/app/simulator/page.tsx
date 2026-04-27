@@ -56,6 +56,7 @@ const DEFAULT_PARAMS: Record<string, unknown> = {
   price_source: 'db',
   mcap_source: 'db',
   dispersion_universe_mode: 'curated',
+  live_today: false,
   save_charts: true,
   trial_purchases: false,
   quick: false,

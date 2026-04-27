@@ -118,6 +118,13 @@ class JobRequest(BaseModel):
     # 'all'     = no whitelist; join market.symbols.binance_id (matches
     #             live trader's compute_dispersion_filter universe scope)
     dispersion_universe_mode:   str   = "curated"
+    # Mid-session splice — when True, audit.py appends today's
+    # partial intraday column to the matrix using Binance 5m kline
+    # closes (read live for the basket from live_deploys_signal.csv).
+    # Aggregate metrics (Sharpe, CAGR, MaxDD) include today's partial
+    # day; the audit emits FINAL_LIVE_TODAY_PARTIAL with metadata so
+    # the UI can render a "* includes today's partial" footnote.
+    live_today:                 bool  = False
     save_charts:                bool  = True
     trial_purchases:            bool  = False
     quick:                      bool  = False
