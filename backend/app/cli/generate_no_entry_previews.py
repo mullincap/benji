@@ -381,19 +381,24 @@ def _build_preview(allocation_id: str, basket: list[str], filter_name: str, l_hi
                 """,
                 (allocation_id, today_str),
             )
-            for sb_bar, sb_sr, sb_stop in seed_cur.fetchall():
+            # Walk bars in order, ONLY using symbol_returns values to
+            # detect each symbol's true first-crossing bar. Seeding from
+            # the bar's `stopped[]` array is unreliable — prior runs
+            # may have written cumulative stopped[] to every bar
+            # (including pre-crossing ones), which would make us mark
+            # the stop too early on re-seed. Reading the actual return
+            # value is unambiguous: first bar where ret <= -6% is the
+            # real crossing.
+            for sb_bar, sb_sr, _sb_stop in seed_cur.fetchall():
                 sr = sb_sr or {}
-                st = sb_stop or []
                 for k, v in sr.items():
                     if v is None:
                         continue
-                    last_observed_ret[k] = float(v)
-                for k in st:
-                    if k in stopped_at:
-                        continue
-                    if k in sr and sr[k] is not None:
+                    fv = float(v)
+                    last_observed_ret[k] = fv
+                    if k not in stopped_at and fv <= STOP_THRESHOLD:
                         stopped_at[k] = int(sb_bar)
-                        clamp_value[k] = float(sr[k])
+                        clamp_value[k] = fv
             seed_cur.close()
         finally:
             seed_conn.close()
