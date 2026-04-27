@@ -355,58 +355,16 @@ def _build_preview(allocation_id: str, basket: list[str], filter_name: str, l_hi
     # Build per-bar timeline. Stop tracking per inst_id when its return
     # crosses STOP_THRESHOLD; subsequent bars hold the observed clamp.
     all_ts = sorted({t for s in series.values() for (t, _) in s})
-    # Seed cumulative state from the prior run's portfolio_bars so a
-    # transient Binance hiccup (missing kline for one symbol on one bar)
-    # doesn't drop a previously-stopped symbol's clamp out of every bar
-    # in the current pass. Without this, each */5 cron rebuild walks the
-    # kline series fresh — if a stop-detection bar's kline is missing,
-    # the symbol never lands in stopped_at and falls off the dict
-    # entirely from then on.
+    # Each run re-detects stops from live kline data — no seeding from
+    # existing portfolio_bars. Tried that earlier (cross-run state for
+    # cases where Binance is flaky on the stop-detection bar), but the
+    # seed picked up stale clamp values written by buggy prior runs and
+    # mis-attributed the stop bar. Live klines are authoritative;
+    # missing-bar fallback is handled by within-run carry-forward
+    # (last_observed_ret) below — sufficient for transient API hiccups.
     stopped_at: dict[str, int] = {}
     clamp_value: dict[str, float] = {}
     last_observed_ret: dict[str, float] = {}
-    try:
-        seed_conn = get_worker_conn()
-        try:
-            seed_cur = seed_conn.cursor()
-            seed_cur.execute(
-                """
-                SELECT pb.bar_number, pb.symbol_returns, pb.stopped
-                  FROM user_mgmt.portfolio_bars pb
-                  JOIN user_mgmt.portfolio_sessions ps
-                    ON ps.portfolio_session_id = pb.portfolio_session_id
-                 WHERE ps.allocation_id = %s::uuid
-                   AND ps.signal_date = %s::date
-                 ORDER BY pb.bar_number ASC
-                """,
-                (allocation_id, today_str),
-            )
-            # Walk bars in order, ONLY using symbol_returns values to
-            # detect each symbol's true first-crossing bar. Seeding from
-            # the bar's `stopped[]` array is unreliable — prior runs
-            # may have written cumulative stopped[] to every bar
-            # (including pre-crossing ones), which would make us mark
-            # the stop too early on re-seed. Reading the actual return
-            # value is unambiguous: first bar where ret <= -6% is the
-            # real crossing.
-            for sb_bar, sb_sr, _sb_stop in seed_cur.fetchall():
-                sr = sb_sr or {}
-                for k, v in sr.items():
-                    if v is None:
-                        continue
-                    fv = float(v)
-                    last_observed_ret[k] = fv
-                    if k not in stopped_at and fv <= STOP_THRESHOLD:
-                        stopped_at[k] = int(sb_bar)
-                        clamp_value[k] = fv
-            seed_cur.close()
-        finally:
-            seed_conn.close()
-    except Exception as _seed_e:
-        # Best-effort seed — if it fails, fall back to clean-slate
-        # behavior (the original bug pattern, but at least not a hard
-        # crash on a write that was working before).
-        print(f"  alloc {allocation_id[:8]}: state-seed skipped: {_seed_e}")
 
     bars_payload: list[dict] = []
     for ts in all_ts:
