@@ -424,10 +424,13 @@ def _build_preview(allocation_id: str, basket: list[str], filter_name: str, l_hi
             bars = series.get(inst, [])
             match = next((p for (t, p) in bars if t == ts), None) if bars else None
 
-            # Stopped: always emit clamp regardless of live kline
-            # availability. Stopped symbols don't move; their clamp is
-            # the post-stop value forever.
-            if inst in stopped_at:
+            # Stopped: emit clamp ONLY for bars at or after the stop
+            # crossing. The seeded stopped_at[inst] holds the bar
+            # number where the symbol first crossed -6%; bars before
+            # that should still show their real pre-stop returns
+            # (otherwise the matrix retroactively shows -7.21% at
+            # 06:35 even though NOT didn't actually stop until 06:45).
+            if inst in stopped_at and bar_number >= stopped_at[inst]:
                 sym_returns[inst] = clamp_value[inst]
                 stopped_now.append(inst)
                 continue
@@ -435,7 +438,14 @@ def _build_preview(allocation_id: str, basket: list[str], filter_name: str, l_hi
             # Active with live kline data — compute fresh return.
             if match is not None and entry_p > 0:
                 raw_ret = (match - entry_p) / entry_p
-                if raw_ret <= STOP_THRESHOLD:
+                # If raw_ret crosses threshold AND we don't already
+                # have an earlier stop bar recorded, this is the new
+                # stop-crossing bar. (The seeded value can be later
+                # than the actual first crossing if a prior run's
+                # kline-fetch missed the real first-cross bar.)
+                if raw_ret <= STOP_THRESHOLD and (
+                    inst not in stopped_at or bar_number <= stopped_at[inst]
+                ):
                     stopped_at[inst] = bar_number
                     clamp_value[inst] = raw_ret
                     sym_returns[inst] = raw_ret
