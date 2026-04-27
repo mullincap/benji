@@ -1533,13 +1533,18 @@ def compute_late_entry_plan(allocation_id: str) -> dict:
         return response
 
     # Pre-stopped clamps from kline history (audit-consistent).
+    # utc_today() returns a YYYY-MM-DD string; need a real date for
+    # datetime.combine. _get_prices_at_timestamp + _first_stop_crossing_observed
+    # both expect naive UTC datetimes (matches the trader's convention
+    # — see _get_prices_at_timestamp callers in run_session_for_allocation).
+    today_date = datetime.datetime.strptime(today, "%Y-%m-%d").date()
     session_open = datetime.datetime.combine(
-        today, datetime.time(config.session_start_hour, 0, 0),
-    ).replace(tzinfo=datetime.timezone.utc)
+        today_date, datetime.time(config.session_start_hour, 0, 0),
+    )
     try:
-        open_prices = _get_prices_at_timestamp(inst_ids, session_open.replace(tzinfo=None))
+        open_prices = _get_prices_at_timestamp(inst_ids, session_open)
         pre_stopped = _first_stop_crossing_observed(
-            inst_ids, open_prices, float(config.stop_raw_pct), session_open.replace(tzinfo=None),
+            inst_ids, open_prices, float(config.stop_raw_pct), session_open,
         )
     except Exception as e:
         response["errors"].append(f"pre-stopped clamp detection failed: {e}")
