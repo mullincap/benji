@@ -499,12 +499,6 @@ export default function ParamForm({ params, onChange, onSubmit }: ParamFormProps
             ]}
           />
         </Row>
-        <Row
-          label="live_today"
-          help="Mid-session splice. Append today's partial intraday column to the matrix using Binance 5m kline closes for today's basket (read live from live_deploys_signal.csv). Aggregate Sharpe / CAGR / MaxDD include today's partial; results render with a '* includes today's partial through HH:MM UTC' footnote."
-        >
-          <Toggle checked={!!p.live_today} onChange={(v) => set('live_today', v)} />
-        </Row>
         <Row label="save_charts">
           <Toggle checked={!!p.save_charts} onChange={(v) => set('save_charts', v)} />
         </Row>
@@ -527,6 +521,12 @@ export default function ParamForm({ params, onChange, onSubmit }: ParamFormProps
 
       {/* ── EXECUTION CONFIG ── */}
       <CollapsibleSection title="EXECUTION CONFIG" open={isOpen('execution')} onToggle={() => toggleSection('execution')}>
+        <Row
+          label="live_today"
+          help="Mid-session splice. Append today's partial intraday column to the matrix using Binance 5m kline closes for today's basket (read live from live_deploys_signal.csv). Aggregate Sharpe / CAGR / MaxDD include today's partial; results render with a '* includes today's partial through HH:MM UTC' footnote."
+        >
+          <Toggle checked={!!p.live_today} onChange={(v) => set('live_today', v)} />
+        </Row>
       <div
         style={{
           background: 'var(--bg0)',
