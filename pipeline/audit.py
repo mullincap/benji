@@ -2572,6 +2572,180 @@ def _load_btc_ohlcv_from_db() -> pd.DataFrame:
     return df
 
 
+def _splice_today_partial_into_matrix(
+    df_4x:          pd.DataFrame,
+    deploys_csv_path: str,
+    pivot_leverage: float,
+    bar_minutes:    int = 5,
+    session_start_hour: int = 6,
+    stop_raw_pct:   float = -6.0,
+) -> Optional[dict]:
+    """Append today's partial intraday column to df_4x, in place.
+
+    Walks today's basket (read from live_deploys_signal.csv — same
+    source the live trader uses), fetches 5m kline closes per symbol
+    from Binance for [session_start, now], applies the per-symbol
+    stop clamp at stop_raw_pct, equal-weights into a portfolio path,
+    multiplies by pivot_leverage. Trailing bars (after now) stay NaN
+    so simulate() naturally exits the day at whatever bar count the
+    wall clock implies.
+
+    Audit's matrix stores leveraged decimal returns from session
+    start (e.g. -0.032 = -3.2%); we match that shape exactly.
+
+    Returns a metadata dict on success — used by the results emitter
+    to tag today's row as is_partial in the output JSON. Returns
+    None on failure (caller proceeds without today's column).
+    """
+    import requests as _rq
+    import calendar as _cal
+
+    today_date = datetime.date.today()
+    today_iso = today_date.isoformat()
+
+    # If today is already a column (rare — would mean the matrix was
+    # built fresh with today included), skip; don't double-write.
+    if today_iso in [str(c).strip() for c in df_4x.columns]:
+        print(f"  [live-today] today ({today_iso}) already present in matrix; skipping splice.")
+        return None
+
+    # Read today's basket from the deploys CSV. Pick the row whose
+    # filter matches the strategy's active filter — but for a CLI run
+    # there isn't a single one, so fall back to taking the union of
+    # symbols across all rows for today (the audit re-applies its own
+    # filters via filter modes anyway, so the broader candidate set
+    # covers every filter's basket).
+    if not deploys_csv_path or not Path(deploys_csv_path).exists():
+        print(f"  [live-today] deploys CSV missing ({deploys_csv_path}); skipping splice.")
+        return None
+    import csv as _csv
+    today_symbols: list[str] = []
+    seen: set[str] = set()
+    try:
+        with open(deploys_csv_path, newline="") as _f:
+            for row in _csv.DictReader(_f):
+                if row.get("date", "").strip() != today_iso:
+                    continue
+                for s in row.get("symbols", "").replace(",", " ").split():
+                    s = s.strip().upper()
+                    if s and s not in seen:
+                        seen.add(s)
+                        today_symbols.append(s)
+    except Exception as _e:
+        print(f"  [live-today] CSV read failed: {_e}; skipping splice.")
+        return None
+    if not today_symbols:
+        print(f"  [live-today] no basket rows for {today_iso} in {deploys_csv_path}; skipping splice.")
+        return None
+    print(f"  [live-today] basket for {today_iso}: {len(today_symbols)} symbols → {today_symbols}")
+
+    # Build the bar grid: N_BARS = matrix-row count starting at
+    # session_start_hour:00 UTC at bar_minutes intervals.
+    n_bars = len(df_4x)
+    session_start_dt = datetime.datetime.combine(
+        today_date, datetime.time(session_start_hour, 0, 0)
+    )
+    bar_grid = pd.date_range(session_start_dt, periods=n_bars, freq=f"{bar_minutes}min")
+
+    # Per-symbol fetch + stop-clamp.
+    BINANCE_FAPI = "https://fapi.binance.com/fapi/v1/klines"
+    start_ms = _cal.timegm(session_start_dt.timetuple()) * 1000
+    now_ms = _cal.timegm(datetime.datetime.utcnow().timetuple()) * 1000
+    end_ms = min(start_ms + n_bars * bar_minutes * 60_000, now_ms)
+    raw_paths: list[np.ndarray] = []
+    fetched_syms: list[str] = []
+    for sym in today_symbols:
+        binance_sym = sym + "USDT" if not sym.endswith("USDT") else sym
+        # 1000X-prefix correction (PEPE/SHIB/FLOKI/BONK on Binance).
+        # Mirrors trader_blofin's override map — naive base+USDT misses
+        # these. See project_1000x_perp_ticker_mapping memory.
+        for base in ("PEPE", "SHIB", "FLOKI", "BONK"):
+            if sym == base:
+                binance_sym = "1000" + base + "USDT"
+                break
+        try:
+            r = _rq.get(BINANCE_FAPI, params={
+                "symbol": binance_sym,
+                "interval": f"{bar_minutes}m",
+                "startTime": start_ms,
+                "endTime": end_ms,
+                "limit": 500,
+            }, timeout=10)
+            r.raise_for_status()
+            bars = r.json()
+        except Exception as _e:
+            print(f"  [live-today] {sym}: Binance fetch failed ({_e}); excluding.")
+            continue
+        if not bars:
+            continue
+        # Bars: [open_ms, open, high, low, close, ...]. Reindex onto
+        # bar_grid by open_ms. NaN where bars haven't fired yet.
+        s = pd.Series(
+            {pd.Timestamp(b[0], unit="ms"): float(b[4]) for b in bars}
+        )
+        s = s.reindex(bar_grid)
+        if s.isna().all():
+            continue
+        # Per-symbol unleveraged cumulative pct from p0 = first bar.
+        p0 = s.iloc[0]
+        if not (p0 > 0):
+            # Bar 0 missing — back-fill from first available real bar
+            # so the early-session reference still anchors at session
+            # open. If literally no bar fired this run (very early
+            # restart) skip the symbol entirely.
+            first_valid = s.dropna()
+            if first_valid.empty:
+                continue
+            p0 = first_valid.iloc[0]
+        raw = (s.values / p0 - 1.0) * 100.0
+        # Apply -6% per-symbol stop (mirrors apply_raw_stop in
+        # rebuild_portfolio_matrix).
+        stopped = False
+        for i in range(len(raw)):
+            if np.isnan(raw[i]):
+                continue
+            if stopped:
+                raw[i] = stop_raw_pct
+            elif raw[i] <= stop_raw_pct:
+                raw[i] = stop_raw_pct
+                stopped = True
+        raw_paths.append(raw)
+        fetched_syms.append(sym)
+
+    if not raw_paths:
+        print(f"  [live-today] no symbols fetched successfully; skipping splice.")
+        return None
+    print(f"  [live-today] fetched {len(fetched_syms)}/{len(today_symbols)} symbols: {fetched_syms}")
+
+    # Equal-weight across symbols, then apply pivot leverage. Matrix
+    # values are decimals (audit divides /100 in load_matrix), so
+    # divide by 100 here too.
+    arr = np.vstack(raw_paths)  # shape (n_syms, n_bars)
+    portfolio_pct = np.nanmean(arr, axis=0)  # equal-weight
+    # Bars where every symbol is still NaN (future bars) stay NaN.
+    all_nan_mask = np.all(np.isnan(arr), axis=0)
+    portfolio_pct = np.where(all_nan_mask, np.nan, portfolio_pct)
+    portfolio_decimal = (portfolio_pct * pivot_leverage) / 100.0
+
+    df_4x[today_iso] = portfolio_decimal
+    n_real = int(np.sum(~np.isnan(portfolio_decimal)))
+    last_bar_dt = bar_grid[max(0, n_real - 1)] if n_real > 0 else session_start_dt
+    print(
+        f"  [live-today] spliced today's column: {n_real}/{n_bars} bars "
+        f"(through {last_bar_dt.strftime('%H:%M')} UTC); "
+        f"final incr={portfolio_decimal[n_real-1]*100:+.3f}% (4x decimal)" if n_real > 0
+        else f"  [live-today] spliced today's column: 0/{n_bars} bars (no data yet)"
+    )
+    return {
+        "date": today_iso,
+        "bars_fired": n_real,
+        "bars_total": n_bars,
+        "last_bar_time_utc": last_bar_dt.strftime("%Y-%m-%d %H:%M:%S"),
+        "symbols": fetched_syms,
+        "missing_symbols": [s for s in today_symbols if s not in fetched_syms],
+    }
+
+
 def _load_dynamic_dispersion_pool(
     start: str,
     end:   str,
@@ -17149,6 +17323,26 @@ def main():
         col_types[key] = col_types.get(key, 0) + 1
     print(f"  Column format breakdown:      {col_types}\n")
 
+    # ── 2a. Mid-session splice — append today's partial column ───────────
+    # When --live-today is set, fetch today's elapsed 5m bars from
+    # Binance per the basket symbols from live_deploys_signal.csv,
+    # apply the same per-symbol stop + equal-weight + leverage as
+    # rebuild_portfolio_matrix, and append as a final column. Trailing
+    # bars (after "now") stay NaN — simulate() walks the column until
+    # it runs out of real bars, so the partial day naturally exits at
+    # whatever bar count the wall clock implies.
+    _live_today_partial: dict | None = None  # carries metadata to results emitter
+    if getattr(args, "live_today", False):
+        try:
+            _live_today_partial = _splice_today_partial_into_matrix(
+                df_4x=df_4x,
+                deploys_csv_path=_DEPLOYS_PATH,
+                pivot_leverage=PIVOT_LEVERAGE,
+            )
+        except Exception as _lt_err:
+            print(f"  ⚠  --live-today: splice failed ({_lt_err}); proceeding without today's partial.")
+            _live_today_partial = None
+
     # ── 2b. Load symbol counts from deploys CSV (for fee calculation) ───
     symbol_counts = None
     try:
@@ -19204,6 +19398,14 @@ def main():
     print("=" * 70)
     print("  FINAL METRICS PER FILTER")
     print("=" * 70)
+
+    # Mid-session marker — emitted once before the per-filter block
+    # so the metrics_parser + frontend can surface a "* includes
+    # today's partial through HH:MM UTC" footnote next to aggregate
+    # numbers (Sharpe / CAGR / MaxDD all include today's partial day).
+    if _live_today_partial is not None:
+        import json as _json_lt
+        print(f"FINAL_LIVE_TODAY_PARTIAL: {_json_lt.dumps(_live_today_partial)}")
     for _run_key, _r in results_map.items():
         _sh  = _r.get("sharpe",         float("nan"))
         _ca  = _r.get("cagr",           float("nan"))
@@ -19298,18 +19500,22 @@ def main():
                 _dp_gr    = _dp_frow[9]   # gross return %
                 _dp_nr    = _dp_frow[10]  # net return %
 
-                # Determine filter/conviction status
-                if _dp_mg < 0:
-                    if _dp_mg == -2.0:
-                        _dp_filter = "ratchet_off"
-                        _dp_conviction = "n/a"
-                    else:
-                        if _dp_lev == 0.0:
-                            _dp_filter = "filtered"
-                            _dp_conviction = "n/a"
-                        else:
-                            _dp_filter = "pass"
-                            _dp_conviction = "fail"
+                # Determine filter/conviction status from the row's
+                # margin/lev sentinels. These map 1:1 with the labels printed
+                # in the per-day fees panel (search "— FILTERED —"):
+                #   margin == -2.0           → ratchet risk-off
+                #   margin == -1.0, lev == 0 → conviction gate failed
+                #   margin == 0.0, lev == 0  → pre-trade filter blocked
+                #   else                     → active trade
+                if _dp_mg < -1.5:
+                    _dp_filter = "ratchet_off"
+                    _dp_conviction = "n/a"
+                elif _dp_mg < 0.0:
+                    _dp_filter = "pass"
+                    _dp_conviction = "fail"
+                elif _dp_lev == 0.0:
+                    _dp_filter = "filtered"
+                    _dp_conviction = "n/a"
                 else:
                     _dp_filter = "pass"
                     _dp_conviction = "pass"
@@ -19326,7 +19532,7 @@ def main():
                 else:
                     _dp_exit_reason = "early_exit"
 
-                _dp_portfolio[_dp_dt] = {
+                _dp_row = {
                     "symbols": _dp_symbols_by_date.get(_dp_dt, []),
                     "filter": _dp_filter,
                     "filter_name": _dp_label,
@@ -19335,6 +19541,17 @@ def main():
                     "strat_roi": round(_dp_nr, 2),
                     "exit_reason": _dp_exit_reason,
                 }
+                # Tag today's row as partial when --live-today spliced
+                # mid-session data. Frontend uses this to render a
+                # "PARTIAL · N bars" badge next to the day so the
+                # operator doesn't compare it as a closed session.
+                if (_live_today_partial is not None
+                        and _dp_dt == _live_today_partial["date"]):
+                    _dp_row["is_partial"] = True
+                    _dp_row["partial_bars_fired"] = _live_today_partial["bars_fired"]
+                    _dp_row["partial_bars_total"] = _live_today_partial["bars_total"]
+                    _dp_row["partial_through_utc"]  = _live_today_partial["last_bar_time_utc"]
+                _dp_portfolio[_dp_dt] = _dp_row
 
             if _dp_portfolio:
                 # Tag uses underscores for spaces, matching FINAL_FILTER_VALUE convention
@@ -19682,6 +19899,16 @@ if __name__ == "__main__":
         dest="end_cross_midnight", action="store_false",
         help="Cap deployment window at 23:55 UTC same day. "
              "Passed to rebuild_portfolio_matrix.py."
+    )
+    parser.add_argument(
+        "--live-today",
+        action="store_true",
+        help="Splice today's partial intraday data into the audit "
+             "matrix using Binance 1m/5m kline fetches. Today's column "
+             "has the bars elapsed so far + trailing NaN; aggregate "
+             "metrics (Sharpe / CAGR / MaxDD) include the partial day "
+             "with a footnote noting it. Trader basket is read from "
+             "live_deploys_signal.csv (same source the live trader uses)."
     )
     args = parser.parse_args()
 
