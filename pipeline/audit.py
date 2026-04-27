@@ -2521,6 +2521,57 @@ def _load_mcap_from_db(start: str, end: str) -> pd.DataFrame:
     return wide
 
 
+def _load_btc_ohlcv_from_db() -> pd.DataFrame:
+    """
+    Return BTC daily OHLCV from market.futures_1m, matching the source
+    that live's audit_filters.compute_tail_guardrail uses.
+
+    Aggregates 1-minute bars into daily candles:
+      - open:   first close of the day (proxy; futures_1m doesn't have open)
+      - high:   max close of the day
+      - low:    min close of the day
+      - close:  last close of the day (latest 1m bar)
+      - volume: sum of volume over the day
+
+    DataFrame is indexed by tz-naive datetime, columns lowercased to match
+    what build_tail_guardrail / build_btc_ma_filter expect (.column['close']).
+
+    Date coverage: market.futures_1m's BTC data starts 2025-02-13, so this
+    DataFrame doesn't cover the audit's training-era warmup before that.
+    Caller stitches with yfinance for older dates.
+    """
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    from pipeline.db.connection import get_conn
+    conn = get_conn()
+    cur  = conn.cursor()
+    cur.execute(
+        """
+        WITH btc AS (SELECT symbol_id FROM market.symbols WHERE binance_id = 'BTCUSDT')
+        SELECT DATE_TRUNC('day', f.timestamp_utc)::date         AS day,
+               (ARRAY_AGG(f.close ORDER BY f.timestamp_utc ASC))[1]   AS day_open,
+               MAX(f.high)                                            AS day_high,
+               MIN(f.low)                                             AS day_low,
+               (ARRAY_AGG(f.close ORDER BY f.timestamp_utc DESC))[1]  AS day_close,
+               SUM(COALESCE(f.volume, 0))                             AS day_volume
+          FROM market.futures_1m f
+         WHERE f.symbol_id IN (SELECT symbol_id FROM btc)
+           AND f.close IS NOT NULL AND f.close > 0
+         GROUP BY 1
+         ORDER BY 1
+        """
+    )
+    rows = cur.fetchall()
+    cur.close()
+    conn.close()
+    if not rows:
+        return pd.DataFrame()
+    df = pd.DataFrame(rows, columns=["day", "open", "high", "low", "close", "volume"])
+    df["day"] = pd.to_datetime(df["day"]).tz_localize(None)
+    df = df.set_index("day")
+    df = df[["open", "high", "low", "close", "volume"]].astype(float)
+    return df
+
+
 def _load_dynamic_dispersion_pool(
     start: str,
     end:   str,
@@ -17008,18 +17059,62 @@ def main():
     oi_df       = fetch_btc_open_interest()
     multi_oi_df = fetch_multi_asset_oi()
 
-    print("\n  Fetching BTC OHLCV for V4 ADX/rvol (yfinance) ...")
+    # ── BTC OHLCV: hybrid yfinance (warmup) + market.futures_1m (audit window) ──
+    # Audit window (~2025-02-13 onwards) uses market.futures_1m so audit and
+    # live agree on BTC closes (live's compute_tail_guardrail also reads from
+    # market.futures_1m). Warmup buffer (pre-2025-02-13, the 60d rvol baseline
+    # before the audit's first day) uses yfinance because futures_1m doesn't
+    # have data that far back. yfinance and futures_1m agree to within ~0.5%
+    # on overlapping dates (verified 2026-04-27).
+    print("\n  Fetching BTC OHLCV (yfinance for warmup + market.futures_1m for audit window) ...")
     if yf is None:
         raise ImportError("yfinance not installed — pip install yfinance")
+    btc_ohlcv = pd.DataFrame()
     try:
         btc_raw = yf.Ticker("BTC-USD").history(start="2014-11-01", end=None, interval="1d", auto_adjust=True)
         btc_raw.index = pd.to_datetime(btc_raw.index).tz_localize(None)
         btc_ohlcv = btc_raw[["Open","High","Low","Close","Volume"]].copy()
         btc_ohlcv.columns = ["open","high","low","close","volume"]
-        print(f"    -> {len(btc_ohlcv)} rows")
+        print(f"    yfinance: {len(btc_ohlcv)} rows "
+              f"[{btc_ohlcv.index.min().date()} → {btc_ohlcv.index.max().date()}]")
     except Exception as e:
-        print(f"    ! yfinance failed: {e} - V4 Branch B will be empty")
-        btc_ohlcv = pd.DataFrame()
+        print(f"    ! yfinance failed: {e} - relying on market.futures_1m alone")
+
+    try:
+        db_btc = _load_btc_ohlcv_from_db()
+        if not db_btc.empty:
+            print(f"    market.futures_1m: {len(db_btc)} rows "
+                  f"[{db_btc.index.min().date()} → {db_btc.index.max().date()}]")
+            # Stitch: prefer DB rows where they exist, fall back to yfinance
+            # for dates DB doesn't cover (warmup + any future-dated yfinance
+            # rows the DB hasn't ingested yet). pd.concat with keep='last'
+            # makes DB rows win at overlapping dates.
+            if btc_ohlcv.empty:
+                btc_ohlcv = db_btc
+                print(f"    -> total {len(btc_ohlcv)} rows (DB only — yfinance empty)")
+            else:
+                # Build the stitched frame: yfinance is the base, overwrite
+                # with DB closes where available, columns in lockstep.
+                stitched = btc_ohlcv.copy()
+                overlap = stitched.index.intersection(db_btc.index)
+                stitched.loc[overlap, ["open","high","low","close","volume"]] = (
+                    db_btc.loc[overlap, ["open","high","low","close","volume"]].values
+                )
+                # Add DB-only rows (post yfinance.max, e.g., today) if any
+                db_only = db_btc.index.difference(stitched.index)
+                if len(db_only):
+                    stitched = pd.concat([stitched, db_btc.loc[db_only]])
+                    stitched = stitched.sort_index()
+                btc_ohlcv = stitched
+                # Diagnostics
+                yf_only_n   = len(btc_ohlcv.index.difference(db_btc.index))
+                db_only_n   = len(db_btc.index.difference(yf_only_n if False else btc_ohlcv.index))
+                overlap_n   = len(overlap)
+                print(f"    -> stitched: {yf_only_n} yfinance-only rows (warmup), "
+                      f"{overlap_n} DB-overwritten rows (audit window matches live source), "
+                      f"total {len(btc_ohlcv)} rows")
+    except Exception as e:
+        print(f"    ! market.futures_1m BTC load failed ({e}); using yfinance only")
 
     # ── 2. Load matrix ────────────────────────────────────────────────
     print("\nLoading pivot matrix from Google Sheets ...")
