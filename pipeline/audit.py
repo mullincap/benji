@@ -75,6 +75,30 @@ from contextlib import contextmanager
 import gspread
 from gspread.exceptions import APIError
 from sklearn.linear_model import LinearRegression
+
+# ──────────────────────────────────────────────────────────────────────
+# AUDIT WINDOW CONSTANTS  (added 2026-04-27 to retire 35+ hardcoded dates)
+# ──────────────────────────────────────────────────────────────────────
+# Every filter Series, fetcher default, and date-range index in this
+# module previously had a hardcoded "2026-03-01" / "2026-03-02" end.
+# That silently disabled filters, fetchers, and reindex steps for any
+# audit run extending past those dates. These constants are evaluated
+# at module import (= per audit subprocess invocation), so each run
+# uses today's date as the end.
+#
+# _AUDIT_IDX_START   — start of the canonical audit output index. Kept
+#                      as a literal so historical output indexes stay
+#                      stable across runs (existing rows don't shift).
+# _AUDIT_IDX_END     — end of the canonical audit output index. Set to
+#                      tomorrow so the inclusive `pd.date_range` covers
+#                      today's date even after timezone rounding.
+# _AUDIT_DATA_START  — earliest data fetch date (baseline-warmup buffer
+#                      for rolling windows). Kept literal — fixed offset
+#                      before the audit window is fine.
+import datetime as _audit_dt  # noqa: E402  (after stdlib import block)
+_AUDIT_IDX_START  = "2025-01-01"
+_AUDIT_IDX_END    = (_audit_dt.date.today() + _audit_dt.timedelta(days=1)).isoformat()
+_AUDIT_DATA_START = "2024-11-01"
 from scipy.stats import spearmanr
 from scipy import stats as scipy_stats
 
@@ -1253,8 +1277,8 @@ def _to_ms(date_str: str) -> int:
     return int(datetime.datetime.strptime(date_str, "%Y-%m-%d").timestamp() * 1000)
 
 
-def fetch_funding_rate(start: str = "2025-01-01",
-                       end:   str = "2026-03-01") -> pd.Series:
+def fetch_funding_rate(start: str = _AUDIT_IDX_START,
+                       end:   str = _AUDIT_IDX_END) -> pd.Series:
     print("  Fetching BTC funding rate (Binance) ...")
     BIN = "https://fapi.binance.com"
     rows = []
@@ -1296,7 +1320,7 @@ def fetch_funding_rate(start: str = "2025-01-01",
     return out
 
 
-def fetch_fear_greed(start: str = "2025-01-01",end:   str = "2026-03-01") -> pd.Series:
+def fetch_fear_greed(start: str = _AUDIT_IDX_START, end: str = _AUDIT_IDX_END) -> pd.Series:
     print("  Fetching Fear & Greed (alternative.me) ...")
     try:
         n = (datetime.datetime.strptime(end, "%Y-%m-%d") -
@@ -1321,7 +1345,7 @@ def build_v3_filter(fr: pd.Series, fg: pd.Series) -> pd.Series:
     Returns a pd.Series indexed by date with True = SIT FLAT (bad regime).
     Condition: fr_raw < V3_FR_THRESHOLD AND fg_7d_ma < V3_FG_THRESHOLD
     """
-    idx = pd.date_range("2025-01-01", "2026-03-01", freq="D")
+    idx = pd.date_range(_AUDIT_IDX_START, _AUDIT_IDX_END, freq="D")
     fr_r = fr.reindex(idx)
     fg_r = fg.reindex(idx)
     fg_7d = fg_r.rolling(7, min_periods=4).mean()
@@ -1357,7 +1381,7 @@ def build_v4_filter(fr: pd.Series, fg: pd.Series, btc_ohlcv: pd.DataFrame) -> pd
 
     Sit flat if Branch A OR Branch B fires.
     """
-    idx = pd.date_range("2025-01-01", "2026-03-01", freq="D")
+    idx = pd.date_range(_AUDIT_IDX_START, _AUDIT_IDX_END, freq="D")
 
     # Branch A
     fr_r  = fr.reindex(idx)
@@ -1445,7 +1469,7 @@ def build_v5_ml_filter(btc_ohlcv: pd.DataFrame) -> pd.Series:
         raise ImportError("scikit-learn not installed — pip install scikit-learn")
     # HMM_AVAILABLE is set at module level
 
-    idx     = pd.date_range("2025-01-01", "2026-03-01", freq="D")
+    idx     = pd.date_range(_AUDIT_IDX_START, _AUDIT_IDX_END, freq="D")
     # ── Build features (shared helper, lagged 1 day) ──────────────────
     feats_r = _price_features(btc_ohlcv, idx)
     # ── Calendar labels for Random Forest ────────────────────────────
@@ -1960,7 +1984,7 @@ def build_tail_guardrail(
     Calendar windows are applied independently in _assemble_filter;
     this filter adds ADDITIONAL protection against tail events.
     """
-    idx   = pd.date_range("2025-01-01", "2026-03-01", freq="D")
+    idx   = pd.date_range(_AUDIT_IDX_START, _AUDIT_IDX_END, freq="D")
     close = btc_ohlcv["close"].sort_index()
     lr    = np.log(close / close.shift(1))
 
@@ -2013,7 +2037,7 @@ def build_btc_ma_filter(
     `ma_days`-day simple moving average on that prior day.
     Signal is lagged 1 day to prevent lookahead bias.
     """
-    idx   = pd.date_range("2025-01-01", "2026-03-01", freq="D")
+    idx   = pd.date_range(_AUDIT_IDX_START, _AUDIT_IDX_END, freq="D")
     close = btc_ohlcv["close"].sort_index()
     sma   = close.rolling(ma_days, min_periods=max(3, ma_days // 2)).mean()
 
@@ -2264,8 +2288,8 @@ BINANCE_TO_COINGECKO: dict = {v: k for k, v in COINGECKO_TO_BINANCE.items()}
 
 def fetch_altcoin_daily_returns(
     symbols: List[str] = DISPERSION_SYMBOLS,
-    start:   str = "2024-11-01",   # extra lookback for rolling baseline warm-up
-    end:     str = "2026-03-02",
+    start:   str = _AUDIT_DATA_START,  # extra lookback for rolling baseline warm-up
+    end:     str = _AUDIT_IDX_END,
     cache_file: str = DISPERSION_CACHE_FILE,
 ) -> pd.DataFrame:
     """
@@ -2497,8 +2521,8 @@ def _load_mcap_from_db(start: str, end: str) -> pd.DataFrame:
 
 def fetch_mcap_history(
     coingecko_ids: List[str] = None,
-    start:         str = "2024-11-01",
-    end:           str = "2026-03-02",
+    start:         str = _AUDIT_DATA_START,
+    end:           str = _AUDIT_IDX_END,
     cache_file:    str = None,
     rate_limit_s:  float = 3.0,
 ) -> pd.DataFrame:
@@ -2806,11 +2830,11 @@ def build_dispersion_filter(
     if alt_returns.empty:
         # Backward compat: when called with no data, return the original
         # hardcoded range so existing length-dependent callers still work.
-        idx = pd.date_range("2025-01-01", "2026-03-01", freq="D")
+        idx = pd.date_range(_AUDIT_IDX_START, _AUDIT_IDX_END, freq="D")
         print("    Dispersion filter: no data — returning all-False (no filter)")
         return pd.Series(False, index=idx)
 
-    idx = pd.date_range("2025-01-01", alt_returns.index.max(), freq="D")
+    idx = pd.date_range(_AUDIT_IDX_START, alt_returns.index.max(), freq="D")
 
     use_dynamic = symbol_mask_df is not None and not symbol_mask_df.empty
 
@@ -2887,7 +2911,7 @@ def build_vol_filter(
     sit_out_t+1  = rvol_t < baseline_t   (vol compression regime - Case C fix)
     """
 
-    idx = pd.date_range("2025-01-01", "2026-03-01", freq="D")
+    idx = pd.date_range(_AUDIT_IDX_START, _AUDIT_IDX_END, freq="D")
 
     if btc_ohlcv.empty or "close" not in btc_ohlcv.columns:
         print("    Vol filter: no BTC data - returning all-False (no filter)")
@@ -4485,7 +4509,7 @@ def build_v5a_filter(btc_ohlcv: pd.DataFrame,fr: pd.Series, fg: pd.Series) -> pd
 
     print("    Building V5-A: HMM | vol+FR+F&G emissions | 2 states | 60/40")
 
-    idx    = pd.date_range("2025-01-01", "2026-03-01", freq="D")
+    idx    = pd.date_range(_AUDIT_IDX_START, _AUDIT_IDX_END, freq="D")
     close  = btc_ohlcv["close"].sort_index()
     lr     = np.log(close / close.shift(1))
 
@@ -4547,7 +4571,7 @@ def build_v5b_filter(btc_ohlcv: pd.DataFrame) -> pd.Series:
 
     print("    Building V5-B: HMM | price features | 3 states | 60/40")
 
-    idx     = pd.date_range("2025-01-01", "2026-03-01", freq="D")
+    idx     = pd.date_range(_AUDIT_IDX_START, _AUDIT_IDX_END, freq="D")
     feats_r = _price_features(btc_ohlcv, idx)
     cal_bad = _cal_bad_series(idx)
 
@@ -4600,7 +4624,7 @@ def build_v5b_filter_majority(btc_ohlcv: pd.DataFrame,n_seeds: int = 30,vote_thr
     print(f"    Building V5-B Majority: 3-state HMM | {n_seeds} seeds | "
           f"vote threshold >={threshold_label}")
 
-    idx     = pd.date_range("2025-01-01", "2026-03-01", freq="D")
+    idx     = pd.date_range(_AUDIT_IDX_START, _AUDIT_IDX_END, freq="D")
     feats_r = _price_features(btc_ohlcv, idx)
     cal_bad = _cal_bad_series(idx)
 
@@ -4709,7 +4733,7 @@ def build_v5c_filter(btc_ohlcv: pd.DataFrame) -> pd.Series:
     """HMM, 2 states, price features, expanding window (retrain every 30d)."""
     print("    Building V5-C: HMM | price features | 2 states | expanding window")
 
-    idx     = pd.date_range("2025-01-01", "2026-03-01", freq="D")
+    idx     = pd.date_range(_AUDIT_IDX_START, _AUDIT_IDX_END, freq="D")
     feats_r = _price_features(btc_ohlcv, idx)
     cal_bad = _cal_bad_series(idx)
 
@@ -4750,7 +4774,7 @@ def build_v5d_filter(btc_ohlcv: pd.DataFrame) -> pd.Series:
 
     print("    Building V5-D: HMM ONLY | price features | 2 states | 60/40")
 
-    idx     = pd.date_range("2025-01-01", "2026-03-01", freq="D")
+    idx     = pd.date_range(_AUDIT_IDX_START, _AUDIT_IDX_END, freq="D")
     feats_r = _price_features(btc_ohlcv, idx)
     cal_bad = _cal_bad_series(idx)
 
@@ -4790,7 +4814,7 @@ def build_v5d_filter_majority(btc_ohlcv: pd.DataFrame,n_seeds: int = 30,vote_thr
     print(f"    Building V5-D Majority: 2-state HMM | {n_seeds} seeds | "
           f"vote threshold \u2265{vote_threshold*100:.0f}%")
 
-    idx     = pd.date_range("2025-01-01", "2026-03-01", freq="D")
+    idx     = pd.date_range(_AUDIT_IDX_START, _AUDIT_IDX_END, freq="D")
     feats_r = _price_features(btc_ohlcv, idx)
     cal_bad = _cal_bad_series(idx)
 
@@ -4898,7 +4922,7 @@ def build_v5e_filter(btc_ohlcv: pd.DataFrame,fr: pd.Series, fg: pd.Series) -> pd
     """HMM, 3 states (bottom 2 = bad), vol+FR+F&G, expanding window."""
     print("    Building V5-E: HMM | vol+FR+F&G | 3 states | expanding window")
 
-    idx   = pd.date_range("2025-01-01", "2026-03-01", freq="D")
+    idx   = pd.date_range(_AUDIT_IDX_START, _AUDIT_IDX_END, freq="D")
     close = btc_ohlcv["close"].sort_index()
     lr    = np.log(close / close.shift(1))
 
@@ -5060,7 +5084,7 @@ def _print_coverage(bad_full: pd.Series, idx: pd.DatetimeIndex, tag: str):
 def build_v5b1_filter(btc_ohlcv: pd.DataFrame) -> pd.Series:
     """V5-B1: 3 states, flag bottom 1 only (more selective than V5-B's bottom 2)."""
     print("    Building V5-B1: HMM | price | 3 states flag-1 | 60/40")
-    idx      = pd.date_range("2025-01-01", "2026-03-01", freq="D")
+    idx      = pd.date_range(_AUDIT_IDX_START, _AUDIT_IDX_END, freq="D")
     feats_r  = _price_features(btc_ohlcv, idx)
     cal_bad  = _cal_bad_series(idx)
     tr_idx, pr_idx, Xs_tr, Xs_pr, _ = _walkforward_split(feats_r, idx, 0.60)
@@ -5078,7 +5102,7 @@ def build_v5b1_filter(btc_ohlcv: pd.DataFrame) -> pd.Series:
 def build_v5b2_filter(btc_ohlcv: pd.DataFrame) -> pd.Series:
     """V5-B2: 4 states, flag bottom 1 (finest regime resolution)."""
     print("    Building V5-B2: HMM | price | 4 states flag-1 | 60/40")
-    idx      = pd.date_range("2025-01-01", "2026-03-01", freq="D")
+    idx      = pd.date_range(_AUDIT_IDX_START, _AUDIT_IDX_END, freq="D")
     feats_r  = _price_features(btc_ohlcv, idx)
     cal_bad  = _cal_bad_series(idx)
     tr_idx, pr_idx, Xs_tr, Xs_pr, _ = _walkforward_split(feats_r, idx, 0.60)
@@ -5096,7 +5120,7 @@ def build_v5b2_filter(btc_ohlcv: pd.DataFrame) -> pd.Series:
 def build_v5b3_filter(btc_ohlcv: pd.DataFrame) -> pd.Series:
     """V5-B3: 3 states, confidence-gated at P(bad) >= 0.70, flag bottom 2."""
     print("    Building V5-B3: HMM | price | 3 states | gated p>=0.70 | 60/40")
-    idx      = pd.date_range("2025-01-01", "2026-03-01", freq="D")
+    idx      = pd.date_range(_AUDIT_IDX_START, _AUDIT_IDX_END, freq="D")
     feats_r  = _price_features(btc_ohlcv, idx)
     cal_bad  = _cal_bad_series(idx)
     tr_idx, pr_idx, Xs_tr, Xs_pr, _ = _walkforward_split(feats_r, idx, 0.60)
@@ -5116,7 +5140,7 @@ def build_v5b3_filter(btc_ohlcv: pd.DataFrame) -> pd.Series:
 def build_v5b4_filter(btc_ohlcv: pd.DataFrame,fr: pd.Series, fg: pd.Series) -> pd.Series:
     """V5-B4: 3 states, hybrid price+vol+FR emissions, flag bottom 2."""
     print("    Building V5-B4: HMM | hybrid price+vol+FR | 3 states flag-2 | 60/40")
-    idx      = pd.date_range("2025-01-01", "2026-03-01", freq="D")
+    idx      = pd.date_range(_AUDIT_IDX_START, _AUDIT_IDX_END, freq="D")
     feats_r  = _hybrid_features(btc_ohlcv, fr, fg, idx)
     cal_bad  = _cal_bad_series(idx)
     tr_idx, pr_idx, Xs_tr, Xs_pr, _ = _walkforward_split(feats_r, idx, 0.60)
@@ -5138,7 +5162,7 @@ def build_v5b4_filter(btc_ohlcv: pd.DataFrame,fr: pd.Series, fg: pd.Series) -> p
 def build_v5d1_filter(btc_ohlcv: pd.DataFrame,fr: pd.Series, fg: pd.Series) -> pd.Series:
     """V5-D1: HMM-only, 2 states, hybrid price+vol+FR features, 60/40."""
     print("    Building V5-D1: HMM-only | hybrid price+vol+FR | 2 states | 60/40")
-    idx      = pd.date_range("2025-01-01", "2026-03-01", freq="D")
+    idx      = pd.date_range(_AUDIT_IDX_START, _AUDIT_IDX_END, freq="D")
     feats_r  = _hybrid_features(btc_ohlcv, fr, fg, idx)
     cal_bad  = _cal_bad_series(idx)
     tr_idx, pr_idx, Xs_tr, Xs_pr, _ = _walkforward_split(feats_r, idx, 0.60)
@@ -5156,7 +5180,7 @@ def build_v5d1_filter(btc_ohlcv: pd.DataFrame,fr: pd.Series, fg: pd.Series) -> p
 def build_v5d2_filter(btc_ohlcv: pd.DataFrame) -> pd.Series:
     """V5-D2: HMM-only, 3 states, flag bottom 1 (separate crash from grind)."""
     print("    Building V5-D2: HMM-only | price | 3 states flag-1 | 60/40")
-    idx      = pd.date_range("2025-01-01", "2026-03-01", freq="D")
+    idx      = pd.date_range(_AUDIT_IDX_START, _AUDIT_IDX_END, freq="D")
     feats_r  = _price_features(btc_ohlcv, idx)
     cal_bad  = _cal_bad_series(idx)
     tr_idx, pr_idx, Xs_tr, Xs_pr, _ = _walkforward_split(feats_r, idx, 0.60)
@@ -5174,7 +5198,7 @@ def build_v5d2_filter(btc_ohlcv: pd.DataFrame) -> pd.Series:
 def build_v5d3_filter(btc_ohlcv: pd.DataFrame) -> pd.Series:
     """V5-D3: HMM-only, 2 states, confidence-gated at P(bad) >= 0.65."""
     print("    Building V5-D3: HMM-only | price | 2 states | gated p>=0.65 | 60/40")
-    idx      = pd.date_range("2025-01-01", "2026-03-01", freq="D")
+    idx      = pd.date_range(_AUDIT_IDX_START, _AUDIT_IDX_END, freq="D")
     feats_r  = _price_features(btc_ohlcv, idx)
     cal_bad  = _cal_bad_series(idx)
     tr_idx, pr_idx, Xs_tr, Xs_pr, _ = _walkforward_split(feats_r, idx, 0.60)
@@ -5194,7 +5218,7 @@ def build_v5d3_filter(btc_ohlcv: pd.DataFrame) -> pd.Series:
 def build_v5d4_filter(btc_ohlcv: pd.DataFrame) -> pd.Series:
     """V5-D4: HMM-only, 2 states, price features, expanded 70% training window."""
     print("    Building V5-D4: HMM-only | price | 2 states | 70/30 split")
-    idx      = pd.date_range("2025-01-01", "2026-03-01", freq="D")
+    idx      = pd.date_range(_AUDIT_IDX_START, _AUDIT_IDX_END, freq="D")
     feats_r  = _price_features(btc_ohlcv, idx)
     cal_bad  = _cal_bad_series(idx)
     tr_idx, pr_idx, Xs_tr, Xs_pr, _ = _walkforward_split(feats_r, idx, 0.70)
@@ -5920,7 +5944,7 @@ def plot_pbo_logit_dist(result: Dict, outdir, label: str = "") -> Optional[str]:
 
 OI_CACHE_FILE = "oi_cache.csv"
 
-def fetch_btc_open_interest(start: str = "2025-01-01",end:   str = "2026-03-01") -> pd.DataFrame:
+def fetch_btc_open_interest(start: str = _AUDIT_IDX_START, end: str = _AUDIT_IDX_END) -> pd.DataFrame:
     """
     Fetch daily BTC perpetual open interest from Binance Futures.
 
@@ -6011,8 +6035,8 @@ OI_MULTI_CACHE_FILE = "oi_multi_cache.csv"
 
 def fetch_multi_asset_oi(
     symbols:    List[str] = None,
-    start:      str = "2024-11-01",
-    end:        str = "2026-03-01",
+    start:      str = _AUDIT_DATA_START,
+    end:        str = _AUDIT_IDX_END,
     cache_file: str = OI_MULTI_CACHE_FILE,
 ) -> pd.DataFrame:
     """
@@ -15907,7 +15931,7 @@ def build_ic_filter(
     window      : rolling window in days for mean IC calculation
     threshold   : sit out when rolling mean IC < this value
     """
-    idx = pd.date_range("2025-01-01", "2026-03-01", freq="D")
+    idx = pd.date_range(_AUDIT_IDX_START, _AUDIT_IDX_END, freq="D")
 
     all_dates = [d for d in col_dates if d is not None]
     if not all_dates or alt_returns.empty:
@@ -17063,8 +17087,17 @@ def main():
     if DISPERSION_DYNAMIC_UNIVERSE and ENABLE_DISPERSION_FILTER:
         print(f"\nFetching market cap history for dynamic dispersion universe "
               f"(top-{DISPERSION_N} per day, 1-day lag) ...")
+        # Bug fix 2026-04-27 (part 2): pass `end` so the DB / parquet /
+        # CoinGecko paths in fetch_mcap_history actually load mcap rows
+        # past the function's hardcoded default end='2026-03-02'. Without
+        # this, mcap_df ends 2026-03-02 → build_dynamic_symbol_mask
+        # produces an empty mask for all later dates →
+        # build_dispersion_filter silently fails-open past that date.
+        # Companion to the part-1 fix on fetch_altcoin_daily_returns.
         try:
-            mcap_df = fetch_mcap_history()
+            mcap_df = fetch_mcap_history(
+                end=(datetime.date.today() + datetime.timedelta(days=1)).isoformat(),
+            )
             if not mcap_df.empty and not alt_rets.empty:
                 symbol_mask = build_dynamic_symbol_mask(
                     mcap_df     = mcap_df,
