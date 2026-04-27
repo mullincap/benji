@@ -2443,15 +2443,17 @@ def _load_mcap_from_db(start: str, end: str) -> pd.DataFrame:
     wide-format DataFrame as _load_mcap_from_parquet().
 
     Universe-selection mode is gated by env var DISPERSION_UNIVERSE_MODE:
-      - 'curated' (default): filter to COINGECKO_TO_BINANCE.keys() — 90
-        coin-id whitelist that the dispersion threshold (0.66) was tuned
-        on. Stable signal-tuning, but stale (new big-mcap listings need
-        manual dict edits).
-      - 'all': join market.symbols.binance_id, no coin_id whitelist.
-        Matches live trader's compute_dispersion_filter (which picks
-        top-N from the full mcap table). Universe is dynamic — auto-
-        absorbs new listings — but the dispersion threshold may need
-        re-tuning since the cross-sectional std distribution shifts.
+      - 'curated': filter to COINGECKO_TO_BINANCE.keys() — 90 coin-id
+        whitelist that the dispersion threshold (0.66) was tuned on.
+        Stable signal-tuning, but stale (new big-mcap listings need
+        manual dict edits). Available for backward-compat / A/B testing.
+      - 'all' (default 2026-04-27): join market.symbols.binance_id, no
+        coin_id whitelist. Matches live trader's compute_dispersion_filter
+        (which picks top-N from the full mcap table). Universe is
+        dynamic — auto-absorbs new listings — at the cost of dispersion
+        threshold needing re-tuning since the cross-sectional std
+        distribution shifts. Default flipped 2026-04-27 to retire the
+        live-vs-audit universe-membership divergence.
 
     Both modes take top-DISPERSION_N (40 default) by mcap downstream;
     the difference is what they take from. See open_work_list.md
@@ -2459,7 +2461,7 @@ def _load_mcap_from_db(start: str, end: str) -> pd.DataFrame:
     """
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
     from pipeline.db.connection import get_conn
-    universe_mode = os.environ.get("DISPERSION_UNIVERSE_MODE", "curated").lower()
+    universe_mode = os.environ.get("DISPERSION_UNIVERSE_MODE", "all").lower()
     conn = get_conn()
     cur = conn.cursor()
     if universe_mode == "all":
@@ -2517,6 +2519,67 @@ def _load_mcap_from_db(start: str, end: str) -> pd.DataFrame:
           f"(avg coverage {coverage:.0f}%)")
     print(f"    Date range: {wide.index[0].date()} → {wide.index[-1].date()}")
     return wide
+
+
+def _load_dynamic_dispersion_pool(
+    start: str,
+    end:   str,
+    n:     int = 40,
+) -> List[str]:
+    """
+    Return list of Binance tickers that were top-N by mcap on any day in
+    [start, end]. Replaces the frozen COINGECKO_TO_BINANCE 89-pool.
+
+    Same exclusion logic as live's compute_dispersion_filter:
+      - drop stablecoins
+      - drop non-ASCII / non-uppercase-alphanumeric bases
+      - drop precious-metal tokens (XAU/XAG/XPD/XPT)
+
+    Bases are joined to market.symbols to get the Binance ticker
+    (binance_id). Bases without a binance_id row are excluded — they
+    have no Binance perp listing, so dispersion can't compute returns
+    for them anyway.
+
+    For a year-long audit window, this typically returns ~120-150
+    tickers (the union of "ever in top-N" across the window). Compare
+    to the prior 89-pool which was frozen at a single point in time.
+    """
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    from pipeline.db.connection import get_conn
+    conn = get_conn()
+    cur  = conn.cursor()
+    cur.execute(
+        """
+        WITH ranked AS (
+            SELECT mcd.date,
+                   mcd.base,
+                   sym.binance_id,
+                   mcd.market_cap_usd,
+                   ROW_NUMBER() OVER (
+                       PARTITION BY mcd.date
+                       ORDER BY mcd.market_cap_usd DESC
+                   ) AS rk
+              FROM market.market_cap_daily mcd
+              JOIN market.symbols sym ON sym.base = mcd.base
+             WHERE mcd.date BETWEEN %s::date AND %s::date
+               AND mcd.market_cap_usd IS NOT NULL
+               AND sym.binance_id IS NOT NULL
+               AND mcd.base NOT IN ('USDT','USDC','BUSD','DAI','TUSD','FDUSD',
+                                    'USDE','USDS','PYUSD','USD1','FRAX','USDP')
+               AND mcd.base !~ '[^A-Z0-9]'
+               AND mcd.base NOT IN ('XAU','XAG','XPD','XPT')
+        )
+        SELECT DISTINCT binance_id
+          FROM ranked
+         WHERE rk <= %s
+         ORDER BY binance_id
+        """,
+        (start, end, n),
+    )
+    tickers = [r[0] for r in cur.fetchall()]
+    cur.close()
+    conn.close()
+    return tickers
 
 
 def fetch_mcap_history(
@@ -17049,13 +17112,31 @@ def main():
 
 
     # ── Determine return fetch universe ──────────────────────────────
-    # Dynamic mode: fetch ALL mapped Binance tickers so the top-N
-    #   selection has all candidates available.
+    # Dynamic mode (2026-04-27 onward): derive the candidate pool from
+    #   market.market_cap_daily — every Binance-listed base that was
+    #   top-N at any point during the audit window. Replaces the prior
+    #   frozen COINGECKO_TO_BINANCE 89-pool whose membership couldn't
+    #   absorb new mcap entrants (WBT, LEO, RAIN, PI, etc.) and forced
+    #   audit-vs-live universe divergence on borderline days.
     # Static mode:  fetch only the hardcoded DISPERSION_SYMBOLS list —
-    #   same as before, using the same cache file.
+    #   unchanged.
     if DISPERSION_DYNAMIC_UNIVERSE:
-        _fetch_symbols = list(dict.fromkeys(COINGECKO_TO_BINANCE.values()))
-        _ret_cache     = DISPERSION_DYNAMIC_RETURNS_CACHE_FILE
+        try:
+            _fetch_symbols = _load_dynamic_dispersion_pool(
+                start = _AUDIT_DATA_START,
+                end   = _AUDIT_IDX_END,
+                n     = DISPERSION_N,
+            )
+            if not _fetch_symbols:
+                raise ValueError("dynamic pool query returned empty")
+            print(f"    Dynamic dispersion pool: {len(_fetch_symbols)} Binance "
+                  f"tickers (union of top-{DISPERSION_N} by mcap across audit "
+                  f"window from market.market_cap_daily)")
+        except Exception as e:
+            print(f"    ! Dynamic pool build failed ({e}); falling back to "
+                  f"frozen COINGECKO_TO_BINANCE pool")
+            _fetch_symbols = list(dict.fromkeys(COINGECKO_TO_BINANCE.values()))
+        _ret_cache = DISPERSION_DYNAMIC_RETURNS_CACHE_FILE
     else:
         _fetch_symbols = DISPERSION_SYMBOLS
         _ret_cache     = DISPERSION_CACHE_FILE
