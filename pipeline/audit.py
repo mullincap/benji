@@ -19555,8 +19555,18 @@ def main():
                 else:
                     _dp_exit_reason = "early_exit"
 
+                _dp_syms_for_row = _dp_symbols_by_date.get(_dp_dt, [])
+                # When --live-today is set, today's basket isn't in the
+                # audit's deploys CSV (overlap_analysis didn't compute
+                # today). Fall back to the splice's basket metadata so
+                # the breakdown's "Symbols" column isn't blank for
+                # today's row.
+                if (not _dp_syms_for_row
+                        and _live_today_partial is not None
+                        and _dp_dt == _live_today_partial["date"]):
+                    _dp_syms_for_row = list(_live_today_partial.get("symbols") or [])
                 _dp_row = {
-                    "symbols": _dp_symbols_by_date.get(_dp_dt, []),
+                    "symbols": _dp_syms_for_row,
                     "filter": _dp_filter,
                     "filter_name": _dp_label,
                     "conviction": _dp_conviction,
