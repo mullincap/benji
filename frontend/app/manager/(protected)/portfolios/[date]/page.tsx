@@ -318,6 +318,8 @@ function LivePulse() {
 // stopped-clamped — same map the trader writes), NOT account-actual ROI, so
 // the bar tracks what the trader actually compares against.
 
+const EARLY_FILL_COLLAPSED_KEY = "portfolio.early_fill.collapsed";
+
 function EarlyFillProgressBar({
   sessionRet,
   earlyFillY,
@@ -344,6 +346,19 @@ function EarlyFillProgressBar({
     const id = setInterval(() => setNow(new Date()), 1000);
     return () => clearInterval(id);
   }, [isActive]);
+
+  // Collapsed state — persists across page loads so the user's choice
+  // sticks. The header (label + metrics readout) stays visible when
+  // collapsed; only the progress bar body hides. Chevron in the
+  // header flips between right (collapsed) and down (expanded).
+  const [collapsed, setCollapsed] = useState<boolean>(() => {
+    if (typeof window === "undefined") return false;
+    return window.localStorage.getItem(EARLY_FILL_COLLAPSED_KEY) === "1";
+  });
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    window.localStorage.setItem(EARLY_FILL_COLLAPSED_KEY, collapsed ? "1" : "0");
+  }, [collapsed]);
 
   const elapsed = minutesSinceSessionOpen(date, sessionStartHourUTC, now);
   const remaining = elapsed !== null ? earlyFillX - elapsed : null;
@@ -442,7 +457,7 @@ function EarlyFillProgressBar({
           display: "flex",
           alignItems: "center",
           justifyContent: "space-between",
-          marginBottom: 10,
+          marginBottom: collapsed ? 0 : 10,
           gap: 12,
           flexWrap: "wrap",
         }}
@@ -454,12 +469,39 @@ function EarlyFillProgressBar({
             letterSpacing: "0.12em",
             color: "var(--t3)",
             textTransform: "uppercase",
+            display: "flex",
+            alignItems: "center",
+            gap: 8,
           }}
         >
+          <button
+            type="button"
+            onClick={() => setCollapsed(c => !c)}
+            aria-label={collapsed ? "Expand early-fill progress bar" : "Collapse early-fill progress bar"}
+            title={collapsed ? "Expand the progress bar" : "Collapse the progress bar (header values stay visible)"}
+            style={{
+              background: "transparent",
+              border: "none",
+              color: "var(--t2)",
+              cursor: "pointer",
+              padding: 0,
+              fontSize: 10,
+              lineHeight: 1,
+              fontFamily: "inherit",
+              transform: collapsed ? "rotate(-90deg)" : "rotate(0deg)",
+              transition: "transform 0.15s ease",
+              width: 12,
+              display: "inline-flex",
+              alignItems: "center",
+              justifyContent: "center",
+            }}
+          >
+            ▾
+          </button>
           Early-Fill Progress
           <span
             style={{
-              marginLeft: 10,
+              marginLeft: 2,
               color: "var(--t2)",
               fontWeight: 400,
               letterSpacing: "0.06em",
@@ -520,76 +562,78 @@ function EarlyFillProgressBar({
           </span>
         </div>
       </div>
-      <div
-        style={{
-          position: "relative",
-          width: "100%",
-          height: 10,
-          background: "var(--bg3)",
-          borderRadius: 3,
-          overflow: "hidden",
-          border: "1px solid var(--line)",
-        }}
-      >
-        {showLayered ? (
-          <>
-            {/* Common-ground base: bar fills to min(close, live). Color
-                reflects close-trigger state (the historical anchor) — green
-                if the trigger fired at the buzzer, amber otherwise. */}
-            <div
-              style={{
-                position: "absolute",
-                top: 0, left: 0,
-                width: `${Math.min(closeWidthPct, liveWidthPct)}%`,
-                height: "100%",
-                background: closeFired ? "var(--green)" : "var(--amber)",
-                opacity: 0.7,
-                transition: "width 0.4s ease",
-              }}
-            />
-            {/* Directional delta sliver between live and close. Green when
-                live > close (gained since buzzer), red when live < close
-                (drifted back). Sits between min(close,live) and max(close,live). */}
-            {Math.abs(closeWidthPct - liveWidthPct) > 0.01 && (
+      {!collapsed && (
+        <div
+          style={{
+            position: "relative",
+            width: "100%",
+            height: 10,
+            background: "var(--bg3)",
+            borderRadius: 3,
+            overflow: "hidden",
+            border: "1px solid var(--line)",
+          }}
+        >
+          {showLayered ? (
+            <>
+              {/* Common-ground base: bar fills to min(close, live). Color
+                  reflects close-trigger state (the historical anchor) — green
+                  if the trigger fired at the buzzer, amber otherwise. */}
+              <div
+                style={{
+                  position: "absolute",
+                  top: 0, left: 0,
+                  width: `${Math.min(closeWidthPct, liveWidthPct)}%`,
+                  height: "100%",
+                  background: closeFired ? "var(--green)" : "var(--amber)",
+                  opacity: 0.7,
+                  transition: "width 0.4s ease",
+                }}
+              />
+              {/* Directional delta sliver between live and close. Green when
+                  live > close (gained since buzzer), red when live < close
+                  (drifted back). Sits between min(close,live) and max(close,live). */}
+              {Math.abs(closeWidthPct - liveWidthPct) > 0.01 && (
+                <div
+                  style={{
+                    position: "absolute",
+                    top: 0,
+                    left: `${Math.min(closeWidthPct, liveWidthPct)}%`,
+                    width: `${Math.abs(closeWidthPct - liveWidthPct)}%`,
+                    height: "100%",
+                    background: liveCur >= closeCur ? "var(--green)" : "var(--red)",
+                    opacity: 0.7,
+                    transition: "width 0.4s ease, left 0.4s ease",
+                  }}
+                />
+              )}
+              {/* Vertical tick anchoring the close-ROI mark. Always sits at
+                  closeWidthPct so the user sees the buzzer reference even
+                  when the live bar overshoots or undershoots. */}
               <div
                 style={{
                   position: "absolute",
                   top: 0,
-                  left: `${Math.min(closeWidthPct, liveWidthPct)}%`,
-                  width: `${Math.abs(closeWidthPct - liveWidthPct)}%`,
+                  left: `calc(${closeWidthPct}% - 1px)`,
+                  width: 2,
                   height: "100%",
-                  background: liveCur >= closeCur ? "var(--green)" : "var(--red)",
-                  opacity: 0.7,
-                  transition: "width 0.4s ease, left 0.4s ease",
+                  background: "var(--t0)",
+                  opacity: 0.85,
                 }}
               />
-            )}
-            {/* Vertical tick anchoring the close-ROI mark. Always sits at
-                closeWidthPct so the user sees the buzzer reference even
-                when the live bar overshoots or undershoots. */}
+            </>
+          ) : (
             <div
               style={{
-                position: "absolute",
-                top: 0,
-                left: `calc(${closeWidthPct}% - 1px)`,
-                width: 2,
+                width: `${liveWidthPct}%`,
                 height: "100%",
-                background: "var(--t0)",
-                opacity: 0.85,
+                background: fillColor,
+                transition: "width 0.4s ease",
               }}
             />
-          </>
-        ) : (
-          <div
-            style={{
-              width: `${liveWidthPct}%`,
-              height: "100%",
-              background: fillColor,
-              transition: "width 0.4s ease",
-            }}
-          />
-        )}
-      </div>
+          )}
+        </div>
+      )}
     </div>
   );
 }
@@ -804,6 +848,7 @@ export default function PortfolioDetailPage() {
     now: true,
     fillWindow: true,
     symbols: false,
+    symbolTrendlines: false,
   });
 
   const toggleSymbolHidden = useCallback((label: string) => {
@@ -1210,6 +1255,80 @@ export default function PortfolioDetailPage() {
     _isSymbol: false,
   };
 
+  // Per-symbol trendline datasets — same OLS regression as the portfolio
+  // trendline above, but computed per symbol from its own real points.
+  // Skipped for stopped symbols (their post-stop value is clamped, so
+  // the regression would be biased toward the floor and project a flat
+  // line). Skipped for symbols with <2 real points (no slope possible).
+  // Only built when the SYM-PACE toggle is on so the chart isn't
+  // littered with regression lines by default.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const symbolTrendlineDatasets: any[] = [];
+  if (overlays.symbolTrendlines) {
+    for (let symIdx = 0; symIdx < symbolsOrdered.length; symIdx++) {
+      const sym = symbolsOrdered[symIdx];
+      const displayLabel = sym.replace("-USDT", "");
+      if (hiddenSymbols.has(displayLabel)) continue;
+      const stoppedBar = stoppedAtBar.get(sym);
+      // Collect real points up through the stop bar (or the latest
+      // filled bar if never stopped). Exclude post-stop bars where the
+      // value is just the held clamp.
+      const symRealPoints: { x: number; y: number }[] = [];
+      for (let i = 0; i <= lastFilledIdx; i++) {
+        const b = barAtSlot[i];
+        if (!b) continue;
+        if (stoppedBar !== undefined && b.bar > stoppedBar) break;
+        const v = b.sym_returns[sym];
+        if (v === undefined) continue;
+        symRealPoints.push({ x: i, y: v * 100 });
+      }
+      if (symRealPoints.length < 2) continue;
+      const lastReal = symRealPoints[symRealPoints.length - 1];
+      const REGRESSION_MIN_POINTS = 12;
+      let symSlope = 0;
+      if (symRealPoints.length >= REGRESSION_MIN_POINTS) {
+        const n = symRealPoints.length;
+        const sumX = symRealPoints.reduce((s, p) => s + p.x, 0);
+        const sumY = symRealPoints.reduce((s, p) => s + p.y, 0);
+        const sumXY = symRealPoints.reduce((s, p) => s + p.x * p.y, 0);
+        const sumX2 = symRealPoints.reduce((s, p) => s + p.x * p.x, 0);
+        const denom = n * sumX2 - sumX * sumX;
+        symSlope = denom === 0 ? 0 : (n * sumXY - sumX * sumY) / denom;
+      }
+      const symTrendData: (number | null)[] = new Array(totalSlots).fill(null);
+      const symStartX = trendlineExtended ? 0 : lastReal.x;
+      for (let i = symStartX; i < totalSlots; i++) {
+        symTrendData[i] = lastReal.y + symSlope * (i - lastReal.x);
+      }
+      // Match the symbol's primary line color for visual association
+      // but at lower opacity + a longer dash so the eye reads it as
+      // "the projection of the X line", not a second symbol.
+      const baseColor = colorFor(sym, symIdx);
+      const dashedColor = baseColor.replace(/rgba?\(([^)]+)\)/, (_m, inner) => {
+        // If rgb() / rgba(), tweak alpha to 0.6. If hex/named, leave it
+        // and rely on borderDash + width to disambiguate.
+        const parts = (inner as string).split(",").map(s => s.trim());
+        if (parts.length === 3) return `rgba(${parts.join(",")}, 0.6)`;
+        if (parts.length === 4) return `rgba(${parts[0]},${parts[1]},${parts[2]},0.6)`;
+        return inner as string;
+      });
+      symbolTrendlineDatasets.push({
+        label: `${displayLabel} pace`,
+        data: symTrendData,
+        borderColor: dashedColor,
+        backgroundColor: "transparent",
+        borderWidth: 1.2,
+        borderDash: [3, 5],
+        pointRadius: 0,
+        pointHoverRadius: 0,
+        fill: false,
+        tension: 0.15,
+        spanGaps: false,
+        _isSymbol: false,
+      });
+    }
+  }
+
   // ── Risk-threshold reference lines ──────────────────────────────────────
   // Faint horizontal/dynamic markers showing where the trader's exit
   // triggers fire. Operator can read distance-to-trigger off the chart
@@ -1361,8 +1480,8 @@ export default function PortfolioDetailPage() {
   // rather than a competing line). The drawdown wedge layers between
   // portfolio and trendline so it reads behind both lines.
   const chartDatasets = overlays.symbols
-    ? [portfolioDataset, drawdownDataset, trendlineDataset, portSlDataset, portTslDataset, currentDataset, sessionLowDataset, ...symbolDatasets]
-    : [portfolioDataset, drawdownDataset, trendlineDataset, portSlDataset, portTslDataset, currentDataset, sessionLowDataset];
+    ? [portfolioDataset, drawdownDataset, trendlineDataset, portSlDataset, portTslDataset, currentDataset, sessionLowDataset, ...symbolDatasets, ...symbolTrendlineDatasets]
+    : [portfolioDataset, drawdownDataset, trendlineDataset, portSlDataset, portTslDataset, currentDataset, sessionLowDataset, ...symbolTrendlineDatasets];
 
   // Right-edge value labels for the threshold + current reference lines.
   // Inline Chart.js plugin avoids a chartjs-plugin-annotation dependency;
@@ -1687,105 +1806,121 @@ export default function PortfolioDetailPage() {
           >
             ← Back to Portfolios
           </Link>
+          {/* Date + metadata on the left, late-entry button on the
+              far right of the same row. justify-between so the
+              button sits flush right regardless of viewport width;
+              alignItems center vertically aligns the 18px date
+              with the 32px button. */}
           <div
             style={{
               display: "flex",
-              alignItems: "baseline",
+              alignItems: "center",
+              justifyContent: "space-between",
               gap: 14,
               marginTop: 6,
             }}
           >
-            <span
+            <div
               style={{
-                fontSize: 18,
-                fontWeight: 700,
-                color: "var(--t0)",
+                display: "flex",
+                alignItems: "baseline",
+                gap: 14,
+                flex: 1,
+                minWidth: 0,
               }}
             >
-              {meta.date}
-            </span>
-            <span style={{ fontSize: 11, color: "var(--t2)" }}>
-              {startTime} → {live ? "" : endTime}
-              {live && <LivePulse />}
-              {" · "}
-              {bars.length} bars
-              {(() => {
-                // Suppress stale/transient exit_reason text when the
-                // session is still being written. subprocess_died is a
-                // crash marker; if a respawn is updating bars, the
-                // session hasn't actually ended.
-                const transient = new Set(["subprocess_died", "stale_close_failed", "errored"]);
-                if (live) return null;
-                if (meta.exit_reason && transient.has(meta.exit_reason)) return null;
-                return meta.exit_reason ? ` · ${meta.exit_reason.replace(/_/g, " ")} exit` : null;
-              })()}
-              {" · "}
-              {enteredCount} symbols active
-              {symStopsCount > 0 && ` (${symStopsCount} stopped)`}
-            </span>
+              <span
+                style={{
+                  fontSize: 18,
+                  fontWeight: 700,
+                  color: "var(--t0)",
+                }}
+              >
+                {meta.date}
+              </span>
+              <span style={{ fontSize: 11, color: "var(--t2)" }}>
+                {startTime} → {live ? "" : endTime}
+                {live && <LivePulse />}
+                {" · "}
+                {bars.length} bars
+                {(() => {
+                  // Suppress stale/transient exit_reason text when the
+                  // session is still being written. subprocess_died is a
+                  // crash marker; if a respawn is updating bars, the
+                  // session hasn't actually ended.
+                  const transient = new Set(["subprocess_died", "stale_close_failed", "errored"]);
+                  if (live) return null;
+                  if (meta.exit_reason && transient.has(meta.exit_reason)) return null;
+                  return meta.exit_reason ? ` · ${meta.exit_reason.replace(/_/g, " ")} exit` : null;
+                })()}
+                {" · "}
+                {enteredCount} symbols active
+                {symStopsCount > 0 && ` (${symStopsCount} stopped)`}
+              </span>
+            </div>
+            {/* Late-entry button: inline-right when the session is in
+                a sit-flat / preview state; null otherwise. Errors and
+                helper text render below the row so they don't push
+                the chart down on every active session. */}
+            {(() => {
+              const buttonStates = new Set([
+                "preview_late_entry", "preview_no_entry", "filtered",
+              ]);
+              if (!meta.exit_reason || !buttonStates.has(meta.exit_reason)) {
+                return null;
+              }
+              return (
+                <button
+                  onClick={openLateEntryModal}
+                  disabled={lateEntryFiring || lateEntrySpawning || lateEntryPlanLoading}
+                  title={lateEntrySpawning
+                    ? "Polling every 3s. Page updates when the trader writes its first bar (~60-120s)."
+                    : "Compute a state-aware reconcile plan. You'll see exactly what will happen before committing."}
+                  style={{
+                    background: lateEntrySpawning ? "var(--amber)" : "var(--green)",
+                    color: "var(--bg0)",
+                    fontWeight: 700,
+                    fontSize: 10,
+                    letterSpacing: "0.08em",
+                    textTransform: "uppercase",
+                    padding: "8px 14px",
+                    border: "none",
+                    borderRadius: 3,
+                    cursor: (lateEntryFiring || lateEntrySpawning || lateEntryPlanLoading) ? "wait" : "pointer",
+                    opacity: (lateEntryFiring || lateEntryPlanLoading) ? 0.5 : 1,
+                    fontFamily: "inherit",
+                    flexShrink: 0,
+                    whiteSpace: "nowrap",
+                  }}
+                >
+                  {lateEntryPlanLoading
+                    ? "Computing plan…"
+                    : lateEntryFiring
+                      ? "Sending…"
+                      : lateEntrySpawning
+                        ? "Trader spawning…"
+                        : "▸ Manual Override"}
+                </button>
+              );
+            })()}
           </div>
           {lastUpdated && live && (
             <div style={{ fontSize: 9, color: "var(--t3)", marginTop: 4 }}>
               LAST UPDATED · {lastUpdated.toISOString().slice(11, 19)} UTC
             </div>
           )}
-          {(() => {
-            // Late-entry button trigger: any sit-flat / preview state.
-            // Older 'preview_late_entry' / 'preview_no_entry' are kept
-            // so existing flows still work; 'filtered' is the post-fix
-            // marker the trader writes on graceful sit-flat shutdown
-            // (see _mark_portfolio_session_filtered_if_exists in
-            // trader_blofin.py).
-            const buttonStates = new Set([
-              "preview_late_entry", "preview_no_entry", "filtered",
-            ]);
-            if (!meta.exit_reason || !buttonStates.has(meta.exit_reason)) {
-              return null;
-            }
-            return (
-              <div style={{ marginTop: 10, display: "flex", flexDirection: "column", gap: 6 }}>
-                <button
-                  onClick={openLateEntryModal}
-                  disabled={lateEntryFiring || lateEntrySpawning || lateEntryPlanLoading}
-                  style={{
-                    background: lateEntrySpawning ? "var(--amber)" : "var(--green)",
-                    color: "var(--bg0)",
-                    fontWeight: 700,
-                    fontSize: 11,
-                    letterSpacing: "0.08em",
-                    textTransform: "uppercase",
-                    padding: "10px 18px",
-                    border: "none",
-                    cursor: (lateEntryFiring || lateEntrySpawning || lateEntryPlanLoading) ? "wait" : "pointer",
-                    opacity: (lateEntryFiring || lateEntryPlanLoading) ? 0.5 : 1,
-                    fontFamily: "inherit",
-                    alignSelf: "flex-start",
-                  }}
-                >
-                  {lateEntryPlanLoading
-                    ? "Computing plan…"
-                    : lateEntryFiring
-                      ? "Sending request…"
-                      : lateEntrySpawning
-                        ? "Trader spawning… (waiting for first bar)"
-                        : "▸ Manual Override · Enter Now"}
-                </button>
-                <div style={{ fontSize: 9, color: "var(--t3)", maxWidth: 420 }}>
-                  {lateEntrySpawning
-                    ? "Polling every 3s. Page updates automatically when the trader writes its first bar (~60-120s)."
-                    : "Click to compute a state-aware reconcile plan. You'll see exactly what will happen — close foreign positions, open fresh, top up under-target legs, or just hold manual positions — before committing."}
+          {(lateEntryPlanFetchError || lateEntryError) && (
+            <div style={{ marginTop: 6, display: "flex", flexDirection: "column", gap: 3 }}>
+              {lateEntryPlanFetchError && (
+                <div style={{ fontSize: 10, color: "var(--red)" }}>
+                  Plan fetch failed: {lateEntryPlanFetchError}
                 </div>
-                {lateEntryPlanFetchError && (
-                  <div style={{ fontSize: 10, color: "var(--red)" }}>
-                    Plan fetch failed: {lateEntryPlanFetchError}
-                  </div>
-                )}
-                {lateEntryError && (
-                  <div style={{ fontSize: 10, color: "var(--red)" }}>{lateEntryError}</div>
-                )}
-              </div>
-            );
-          })()}
+              )}
+              {lateEntryError && (
+                <div style={{ fontSize: 10, color: "var(--red)" }}>{lateEntryError}</div>
+              )}
+            </div>
+          )}
         </div>
 
         {/* Late-entry confirmation modal — overlay shown when
@@ -2067,6 +2202,15 @@ export default function PortfolioDetailPage() {
                     ? "Hide per-symbol lines (portfolio-only view)"
                     : "Overlay per-symbol lines and the legend below"}
                   onClick={() => setOverlays((o) => ({ ...o, symbols: !o.symbols }))}
+                />
+                <OverlayChip
+                  label="SYM PACE"
+                  active={overlays.symbolTrendlines}
+                  color="var(--amber)"
+                  title={overlays.symbolTrendlines
+                    ? "Hide per-symbol trendlines (regression projections)"
+                    : "Overlay per-symbol OLS trendline projections to session close. Skipped for stopped symbols (clamped values would bias the regression)."}
+                  onClick={() => setOverlays((o) => ({ ...o, symbolTrendlines: !o.symbolTrendlines }))}
                 />
               </div>
             </div>
