@@ -2198,38 +2198,23 @@ export default function PortfolioDetailPage() {
                   title={overlays.fillWindow ? "Hide fill-window marker" : "Show fill-window marker"}
                   onClick={() => setOverlays((o) => ({ ...o, fillWindow: !o.fillWindow }))}
                 />
-                {/* Symbols visibility — 3-segment toggle replaces the
-                    earlier SYMBOLS chip + SYM PACE chip pair. Same
-                    component as the Projection/Full toggle so the
-                    chart toolbar reads as a coherent set. The third
-                    segment (W/ TRENDS) implies symbols=on so the
-                    trendlines render against their parent lines. */}
-                <SegmentedToggle
-                  ariaLabel="Per-symbol overlays"
-                  value={
-                    !overlays.symbols
-                      ? "off"
-                      : overlays.symbolTrendlines
-                        ? "trends"
-                        : "on"
-                  }
-                  onChange={(next) => {
-                    if (next === "off") {
-                      setOverlays(o => ({ ...o, symbols: false, symbolTrendlines: false }));
-                    } else if (next === "on") {
-                      setOverlays(o => ({ ...o, symbols: true,  symbolTrendlines: false }));
-                    } else {
-                      setOverlays(o => ({ ...o, symbols: true,  symbolTrendlines: true }));
-                    }
-                  }}
-                  options={[
-                    { key: "off",    label: "Off",
-                      title: "Portfolio-only view; per-symbol lines hidden." },
-                    { key: "on",     label: "Symbols",
-                      title: "Overlay per-symbol lines and the legend below." },
-                    { key: "trends", label: "w/ Trends",
-                      title: "Symbols plus OLS-regression trendlines per symbol (full chart span). Skipped for stopped symbols (clamped values would bias the regression)." },
-                  ]}
+                <OverlayChip
+                  label="SYMBOLS"
+                  active={overlays.symbols}
+                  color="var(--t1)"
+                  title={overlays.symbols
+                    ? "Hide per-symbol lines (portfolio-only view)"
+                    : "Overlay per-symbol lines and the legend below"}
+                  onClick={() => setOverlays((o) => ({ ...o, symbols: !o.symbols }))}
+                />
+                <OverlayChip
+                  label="W/ TRENDS"
+                  active={overlays.symbolTrendlines}
+                  color="var(--amber)"
+                  title={overlays.symbolTrendlines
+                    ? "Hide per-symbol trendlines"
+                    : "Overlay per-symbol OLS trendlines spanning the full chart. Skipped for stopped symbols (clamped values would bias the regression)."}
+                  onClick={() => setOverlays((o) => ({ ...o, symbolTrendlines: !o.symbolTrendlines }))}
                 />
               </div>
             </div>
