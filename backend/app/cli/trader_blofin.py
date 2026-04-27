@@ -1162,6 +1162,7 @@ def _reconcile_to_target_basket(
     pre_stopped_clamps: dict[str, float],
     capital_usd: float,
     eff_lev: float,
+    trader_owned_iids: set[str] | None = None,
     *,
     dry_run: bool = True,
     log_prefix: str = "",
@@ -1169,41 +1170,56 @@ def _reconcile_to_target_basket(
     """Compute (and optionally execute) a state-aware reconcile plan to
     bring the exchange account into the target basket configuration.
 
-    Unlike enter_positions() which assumes a clean account at session
-    open, this fits the operator-initiated late-entry case where:
-      - The session may have been sit-flat all day (no positions)
-      - There may be pre-existing positions on these symbols (manual
-        fills, or leftovers from another session that wasn't closed)
-      - There may be foreign positions on OTHER symbols that need to
-        be cleared so capital is available
+    Safe-default semantics: only acts on positions the trader recorded
+    as its own in `runtime_state.positions[]` for this (allocation,
+    date). Manual positions opened by the operator outside the trader
+    are LEFT ALONE — even if they overlap the target basket, even if
+    they're foreign to it. The reconcile never reduces ("trim" was
+    removed) so a manual position larger than the strategy's target
+    keeps its upside.
+
+    Pass `trader_owned_iids` = set of inst_ids the trader has on
+    record. For a sit-flat session this is empty (trader never
+    entered), so all existing positions are treated as manual. For a
+    session that entered normally, runtime_state.positions[].inst_id
+    populates the set.
 
     Per-symbol classification:
-        skip_pre_stopped   target symbol already past stop threshold
-                           → don't enter; sym_stopped seeds the clamp
-        open_fresh         no existing position; place a new entry order
-        hold               existing notional within match tolerance
-                           → leave untouched (keeps fee history + audit
-                             of when the position was actually opened)
-        top_up             existing under-target → submit add-only order
-                           for the delta
-        trim               existing over-target → submit reduce-only
-                           order for the excess
-        replace            existing on wrong side (short on a long-only
-                           strategy) → close fully + open fresh
-        close_foreign      position open on a symbol NOT in the target
-                           basket → close fully
+        skip_pre_stopped     target symbol already past stop threshold
+                             → don't enter; sym_stopped seeds the clamp
+        open_fresh           no existing position; place new entry order
+        hold                 existing notional within target tolerance
+                             → leave untouched
+        manual_in_basket     existing position on a basket symbol that
+                             the trader didn't open → leave alone (user
+                             may have intentionally entered/sized this)
+        top_up               trader-owned existing UNDER target →
+                             submit add-only order for the delta
+        close_foreign        trader-owned position on symbol NOT in
+                             target basket → close fully
+        manual_foreign       non-trader-owned position on symbol NOT in
+                             target basket → log only, never close
+        replace              trader-owned existing on wrong side
+                             → close + open fresh (rare; long-only)
+
+    NEVER reduces a position. If trader-owned existing > target, treat
+    as 'hold'; if manual existing > target, also 'manual_in_basket' /
+    no action. The strategy assumes basket symbols ride to a stop or
+    to session close; reducing means losing upside the operator
+    decided was worth holding.
 
     Execution order (when dry_run=False) frees margin before consuming:
-        1. close_foreign / replace-close (frees margin)
-        2. trim          (frees margin)
-        3. top_up        (consumes margin)
-        4. open_fresh / replace-open  (consumes margin)
+        1. close_foreign       (frees margin)
+        2. replace-close       (frees margin)
+        3. top_up              (consumes margin)
+        4. open_fresh          (consumes margin)
+        5. replace-open        (consumes margin)
 
     Returns a plan dict with structure:
         {
           "summary": {action_kind: count, ...},
           "actions": [{inst_id, action, current{...}, target{...},
-                       delta{...}, reason}, ...],
+                       delta{...}, reason, owned_by}, ...],
           "capital_to_deploy_usd": float,
           "capital_to_release_usd": float,
           "executed": bool,            # True only if dry_run=False
@@ -1217,6 +1233,7 @@ def _reconcile_to_target_basket(
     other live symbols hold their original 1/N share. Mirrors what
     audit would have computed at 06:35 launch.
     """
+    owned_set = set(trader_owned_iids or [])
     target_set = set(inst_ids)
     n_basket = max(1, len(inst_ids))
     target_capital_per_sym = capital_usd / n_basket
@@ -1244,7 +1261,8 @@ def _reconcile_to_target_basket(
     actions: list[dict] = []
     summary: dict[str, int] = {
         "skip_pre_stopped": 0, "open_fresh": 0, "hold": 0,
-        "top_up": 0, "trim": 0, "replace": 0, "close_foreign": 0,
+        "top_up": 0, "manual_in_basket": 0, "replace": 0,
+        "close_foreign": 0, "manual_foreign": 0,
     }
     capital_to_deploy = 0.0
     capital_to_release = 0.0
@@ -1283,6 +1301,7 @@ def _reconcile_to_target_basket(
                 "current": _leg(cur_contracts, mark, ctval),
                 "target":  _leg(0.0, mark, ctval),
                 "delta":   {"contracts": 0.0, "notional_usd": 0.0},
+                "owned_by": "trader" if iid in owned_set else "manual",
                 "reason": (
                     f"already past stop threshold "
                     f"(observed {pre_stopped_clamps[iid]*100:+.2f}%)"
@@ -1296,25 +1315,6 @@ def _reconcile_to_target_basket(
         target_contracts = (target_notional / (mark * ctval)) if (mark > 0 and ctval > 0) else 0.0
         target_leg = _leg(target_contracts, mark, ctval)
 
-        # Side mismatch: existing short on a long basket → replace.
-        # Strategy is long-only so cur_contracts < 0 is the flag.
-        if cur_pos and cur_contracts < 0:
-            actions.append({
-                "inst_id": iid, "action": "replace",
-                "current": _leg(cur_contracts, mark, ctval),
-                "target":  target_leg,
-                "delta":   {
-                    "contracts": float(target_contracts - cur_contracts),
-                    "notional_usd": round(target_leg["notional_usd"]
-                                          + abs(cur_contracts) * mark * ctval, 2),
-                },
-                "reason": "existing position is short; target is long",
-            })
-            summary["replace"] += 1
-            capital_to_release += abs(cur_contracts) * mark * ctval / max(eff_lev, 1e-9)
-            capital_to_deploy += target_leg["margin_usd"]
-            continue
-
         # No existing position → open_fresh
         if not cur_pos or cur_contracts == 0:
             actions.append({
@@ -1323,83 +1323,131 @@ def _reconcile_to_target_basket(
                 "target":  target_leg,
                 "delta":   {"contracts": float(target_contracts),
                             "notional_usd": target_leg["notional_usd"]},
+                "owned_by": "new",
                 "reason":  "no existing position",
             })
             summary["open_fresh"] += 1
             capital_to_deploy += target_leg["margin_usd"]
             continue
 
-        # Existing long position — compare notional to target
+        # Manual position on a basket symbol — leave alone regardless of
+        # size, side, or leverage. The operator opened it intentionally;
+        # the reconcile never overrides their choice. Could be a
+        # higher-conviction sizing they want to ride, or a different
+        # entry timing, or a side mismatch they're aware of.
         cur_leg = _leg(cur_contracts, mark, ctval)
+        if iid not in owned_set:
+            cur_notional = cur_leg["notional_usd"]
+            actions.append({
+                "inst_id": iid, "action": "manual_in_basket",
+                "current": cur_leg, "target": target_leg,
+                "delta":   {"contracts": 0.0, "notional_usd": 0.0},
+                "owned_by": "manual",
+                "reason": (
+                    f"existing position not in runtime_state.positions[]; "
+                    f"treating as operator-managed (current ${cur_notional:.2f}, "
+                    f"target would be ${target_leg['notional_usd']:.2f}). "
+                    "Reconcile never touches manual positions."
+                ),
+            })
+            summary["manual_in_basket"] += 1
+            continue
+
+        # Trader-owned existing position — eligible for reconcile.
+        # Side mismatch (rare on long-only): replace.
+        if cur_contracts < 0:
+            actions.append({
+                "inst_id": iid, "action": "replace",
+                "current": cur_leg, "target": target_leg,
+                "delta":   {
+                    "contracts": float(target_contracts - cur_contracts),
+                    "notional_usd": round(target_leg["notional_usd"]
+                                          + abs(cur_contracts) * mark * ctval, 2),
+                },
+                "owned_by": "trader",
+                "reason": "trader-owned position is short; target is long",
+            })
+            summary["replace"] += 1
+            capital_to_release += abs(cur_contracts) * mark * ctval / max(eff_lev, 1e-9)
+            capital_to_deploy += target_leg["margin_usd"]
+            continue
+
         cur_notional = cur_leg["notional_usd"]
         diff = target_leg["notional_usd"] - cur_notional
         tolerance = max(RECONCILE_MATCH_PCT * target_leg["notional_usd"],
                         RECONCILE_MATCH_USD)
 
-        if abs(diff) <= tolerance:
+        # Trader-owned at-or-above target → hold (never reduce).
+        # Within tolerance also holds.
+        if diff <= tolerance:
             actions.append({
                 "inst_id": iid, "action": "hold",
                 "current": cur_leg, "target": target_leg,
                 "delta":   {"contracts": 0.0, "notional_usd": 0.0},
+                "owned_by": "trader",
                 "reason": (
-                    f"existing notional ${cur_notional:.2f} within "
-                    f"${tolerance:.2f} tolerance of target "
-                    f"${target_leg['notional_usd']:.2f}"
+                    f"trader-owned existing ${cur_notional:.2f} at or above "
+                    f"target ${target_leg['notional_usd']:.2f} (within "
+                    f"${tolerance:.2f} tolerance) — never reduce; ride upside"
                 ),
             })
             summary["hold"] += 1
             continue
 
-        if diff > 0:
-            # Under-target → top up by the delta
-            delta_contracts = diff / (mark * ctval) if (mark > 0 and ctval > 0) else 0.0
-            actions.append({
-                "inst_id": iid, "action": "top_up",
-                "current": cur_leg, "target": target_leg,
-                "delta":   {"contracts": float(delta_contracts),
-                            "notional_usd": round(diff, 2)},
-                "reason": (
-                    f"existing ${cur_notional:.2f} below target "
-                    f"${target_leg['notional_usd']:.2f} "
-                    f"(delta +${diff:.2f})"
-                ),
-            })
-            summary["top_up"] += 1
-            capital_to_deploy += diff / max(eff_lev, 1e-9)
-        else:
-            # Over-target → trim the excess (reduce-only)
-            delta_contracts = abs(diff) / (mark * ctval) if (mark > 0 and ctval > 0) else 0.0
-            actions.append({
-                "inst_id": iid, "action": "trim",
-                "current": cur_leg, "target": target_leg,
-                "delta":   {"contracts": -float(delta_contracts),
-                            "notional_usd": round(diff, 2)},
-                "reason": (
-                    f"existing ${cur_notional:.2f} above target "
-                    f"${target_leg['notional_usd']:.2f} "
-                    f"(delta {diff:+.2f})"
-                ),
-            })
-            summary["trim"] += 1
-            capital_to_release += abs(diff) / max(eff_lev, 1e-9)
+        # Trader-owned under target → top up by the delta.
+        delta_contracts = diff / (mark * ctval) if (mark > 0 and ctval > 0) else 0.0
+        actions.append({
+            "inst_id": iid, "action": "top_up",
+            "current": cur_leg, "target": target_leg,
+            "delta":   {"contracts": float(delta_contracts),
+                        "notional_usd": round(diff, 2)},
+            "owned_by": "trader",
+            "reason": (
+                f"trader-owned existing ${cur_notional:.2f} below target "
+                f"${target_leg['notional_usd']:.2f} (delta +${diff:.2f})"
+            ),
+        })
+        summary["top_up"] += 1
+        capital_to_deploy += diff / max(eff_lev, 1e-9)
 
-    # 2b. Foreign-side: existing positions NOT in target basket
+    # 2b. Foreign-side: existing positions NOT in target basket.
+    # Trader-owned (recorded in runtime_state.positions[]) → close;
+    # manual (anything else) → log only, never close. The latter
+    # includes positions on other allocations sharing the same
+    # exchange account, manual operator hedges, and untracked
+    # leftovers — none of which the reconcile is authorized to act on.
     for iid in foreign_iids:
         cur_pos = pos_by_iid[iid]
         cur_contracts = float(cur_pos.contracts)
         ctval = _ctval(iid)
         mark = float(marks.get(iid, 0.0))
         cur_leg = _leg(cur_contracts, mark, ctval)
-        actions.append({
-            "inst_id": iid, "action": "close_foreign",
-            "current": cur_leg,
-            "target":  _leg(0.0, mark, ctval),
-            "delta":   {"contracts": -cur_contracts,
-                        "notional_usd": -cur_leg["notional_usd"]},
-            "reason": "position not in target basket",
-        })
-        summary["close_foreign"] += 1
-        capital_to_release += cur_leg["margin_usd"]
+        if iid in owned_set:
+            actions.append({
+                "inst_id": iid, "action": "close_foreign",
+                "current": cur_leg,
+                "target":  _leg(0.0, mark, ctval),
+                "delta":   {"contracts": -cur_contracts,
+                            "notional_usd": -cur_leg["notional_usd"]},
+                "owned_by": "trader",
+                "reason": "trader-owned position not in target basket",
+            })
+            summary["close_foreign"] += 1
+            capital_to_release += cur_leg["margin_usd"]
+        else:
+            actions.append({
+                "inst_id": iid, "action": "manual_foreign",
+                "current": cur_leg,
+                "target":  _leg(0.0, mark, ctval),
+                "delta":   {"contracts": 0.0, "notional_usd": 0.0},
+                "owned_by": "manual",
+                "reason": (
+                    "position not in target basket and not in "
+                    "runtime_state.positions[]; treating as operator-"
+                    "managed and leaving untouched"
+                ),
+            })
+            summary["manual_foreign"] += 1
 
     plan = {
         "summary": summary,
@@ -1416,8 +1464,10 @@ def _reconcile_to_target_basket(
             f"{log_prefix}reconcile DRY-RUN: "
             f"open_fresh={summary['open_fresh']} "
             f"hold={summary['hold']} top_up={summary['top_up']} "
-            f"trim={summary['trim']} replace={summary['replace']} "
+            f"replace={summary['replace']} "
             f"close_foreign={summary['close_foreign']} "
+            f"manual_in_basket={summary['manual_in_basket']} "
+            f"manual_foreign={summary['manual_foreign']} "
             f"skip={summary['skip_pre_stopped']} | "
             f"deploy=${plan['capital_to_deploy_usd']:.2f} "
             f"release=${plan['capital_to_release_usd']:.2f}"
@@ -1555,12 +1605,28 @@ def compute_late_entry_plan(allocation_id: str) -> dict:
     eff_lev = float(config.l_high)
     response["eff_lev"] = eff_lev
 
+    # Trader-owned position set: read runtime_state.positions[] for
+    # this allocation. For sit-flat sessions this is empty (trader
+    # never entered), so all exchange positions get treated as
+    # manual and left untouched. For a session that entered normally
+    # but then crashed mid-loop, this carries the trader's record of
+    # what it opened so the reconcile can safely top-up below-target
+    # legs without touching operator-placed manual positions.
+    runtime_state = alloc.get("runtime_state") or {}
+    trader_owned_iids: set[str] = set()
+    for p in (runtime_state.get("positions") or []):
+        iid = p.get("inst_id") if isinstance(p, dict) else None
+        if iid:
+            trader_owned_iids.add(iid)
+    response["trader_owned_iids"] = sorted(trader_owned_iids)
+
     plan = _reconcile_to_target_basket(
         api=api,
         inst_ids=inst_ids,
         pre_stopped_clamps=response["pre_stopped_clamps"],
         capital_usd=response["capital_usd"],
         eff_lev=eff_lev,
+        trader_owned_iids=trader_owned_iids,
         dry_run=True,
         log_prefix=f"[alloc {allocation_id[:8]}] ",
     )
