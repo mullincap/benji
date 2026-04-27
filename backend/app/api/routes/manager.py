@@ -2165,6 +2165,100 @@ class LateEntryBody(BaseModel):
 _TRADER_LOG_DIR = Path("/mnt/quant-data/logs/trader")
 
 
+@router.get("/portfolios/{date}/late-entry-plan")
+def late_entry_plan(
+    date: str,
+    allocation_id: str,
+    cur=Depends(get_cursor),
+) -> dict[str, Any]:
+    """Dry-run plan for the late-entry confirmation modal.
+
+    Spawns trader_blofin --plan-only, captures stdout JSON, returns it
+    to the frontend. Read-only: no lock acquired, no orders placed,
+    no state writes. Latency ~5s (kline fetch + position read +
+    instrument-info lookups).
+
+    The plan classifies every existing exchange position + every
+    target-basket symbol into one of: skip_pre_stopped, open_fresh,
+    hold, top_up, manual_in_basket, manual_foreign, replace,
+    close_foreign. Manual positions (not in this allocation's
+    runtime_state.positions[]) are always left alone — even when in
+    the target basket — per the safe-default attribution policy.
+    """
+    if len(date) != 10 or date[4] != "-" or date[7] != "-":
+        raise HTTPException(status_code=400, detail="invalid date format")
+    try:
+        target_date = datetime.datetime.strptime(date, "%Y-%m-%d").date()
+    except ValueError:
+        raise HTTPException(status_code=400, detail=f"Invalid date format: {date}")
+    today = datetime.datetime.now(datetime.timezone.utc).date()
+    if target_date != today:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Late-entry plan is for today only ({today}); got {target_date}",
+        )
+
+    # Validate allocation exists + active (cheap pre-check before the
+    # ~5s subprocess; lets the modal fail fast on malformed input).
+    cur.execute(
+        """
+        SELECT a.allocation_id, a.status
+          FROM user_mgmt.allocations a
+         WHERE a.allocation_id = %s::uuid
+        """,
+        (allocation_id,),
+    )
+    row = cur.fetchone()
+    if row is None:
+        raise HTTPException(status_code=404, detail=f"Allocation {allocation_id} not found")
+    if row["status"] != "active":
+        raise HTTPException(
+            status_code=400,
+            detail=f"Allocation status={row['status']!r}; must be 'active' to compute plan",
+        )
+
+    cmd = [
+        sys.executable, "-m", "app.cli.trader_blofin",
+        "--allocation-id", allocation_id,
+        "--plan-only",
+    ]
+    try:
+        proc = subprocess.run(
+            cmd,
+            capture_output=True, text=True, timeout=30,
+            cwd="/app/backend",
+        )
+    except subprocess.TimeoutExpired:
+        raise HTTPException(
+            status_code=504,
+            detail="Plan computation timed out (>30s)",
+        )
+
+    # The plan-only CLI prints JSON on the LAST line of stdout
+    # (preceded by trader-config log lines from the script's INFO
+    # logger). Parse the last non-empty line as JSON.
+    out_lines = [ln for ln in (proc.stdout or "").splitlines() if ln.strip()]
+    if not out_lines:
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "Plan computation produced no output. "
+                f"stderr={proc.stderr[:200]!r} returncode={proc.returncode}"
+            ),
+        )
+    try:
+        plan_response = json.loads(out_lines[-1])
+    except json.JSONDecodeError as e:
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                f"Could not parse plan JSON: {e}. "
+                f"last_line={out_lines[-1][:200]!r}"
+            ),
+        )
+    return plan_response
+
+
 @router.post("/portfolios/{date}/late-entry")
 def late_entry_portfolio(
     date: str,
