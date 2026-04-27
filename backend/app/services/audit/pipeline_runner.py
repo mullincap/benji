@@ -437,6 +437,155 @@ def run_audit_subprocess(
 # Full audit: prestage + subprocess + scrape → metrics dict
 # ---------------------------------------------------------------------------
 
+def _ensure_today_in_db(
+    *,
+    pipeline_env: dict,
+    pipeline_dir: Path,
+    progress_cb: Optional[Callable[[bytes], None]] = None,
+) -> dict:
+    """Mid-session ingest pre-flight for live_today=True.
+
+    Walks the data dependency chain and triggers any missing pieces so
+    today's data is available for overlap_analysis + audit:
+
+       metl ingest  (today's 1m bars → market.futures_1m)
+            ↓
+       indexer      (today's 06:00 anchor → market.leaderboards × 3 metrics)
+            ↓
+       overlap_analysis (today's basket → deploys_overlap CSV)
+
+    Skips any step whose output already exists in the DB — re-running
+    after the nightly cron has caught up is a no-op. Long-running:
+    metl can take 5-10 min, each indexer metric 5-15 min. Total
+    pre-flight may exceed 30 min on a fully-cold DB; expected to be
+    much faster (or no-op) once the morning crons have run.
+
+    Returns a dict with status of each step for the caller to log /
+    surface in the job UI:
+        {"metl": "ran"|"skipped"|"failed", "indexer": ..., "errors": [...]}
+    """
+    import datetime as _dt
+    sys.path.insert(0, str(Path(__file__).resolve().parents[4]))
+    from pipeline.db.connection import get_conn as _get_conn
+
+    today = _dt.datetime.now(_dt.timezone.utc).date()
+    today_str = today.isoformat()
+    status: dict = {"metl": None, "indexer": None, "errors": []}
+
+    def _emit(msg: str) -> None:
+        line = f"[live-today preflight] {msg}\n"
+        print(line, end="", flush=True)
+        if progress_cb:
+            try:
+                progress_cb(line.encode())
+            except Exception:
+                pass
+
+    _emit(f"checking data availability for {today_str}…")
+
+    # ── 1. metl ingest ────────────────────────────────────────────
+    # Check if today's 1m bars are in market.futures_1m. If not,
+    # invoke metl.py to pull from Amberdata. Idempotent on re-run
+    # (existing rows skipped via ON CONFLICT in metl's writer).
+    try:
+        conn = _get_conn()
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT COUNT(*) FROM market.futures_1m "
+            "WHERE timestamp_utc::date = %s::date",
+            (today_str,),
+        )
+        rows_today = int(cur.fetchone()[0])
+        cur.close()
+        conn.close()
+    except Exception as e:
+        _emit(f"DB check for futures_1m failed: {e}; assuming missing")
+        rows_today = 0
+
+    if rows_today == 0:
+        _emit(f"futures_1m has 0 rows for {today_str}; running metl…")
+        metl_script = pipeline_dir / "compiler" / "metl.py"
+        metl_cmd = [
+            _PIPELINE_PYTHON, str(metl_script),
+            "--start", today_str,
+            "--end", today_str,
+            "--triggered-by", "cli",
+            "--run-tag", "live_today_preflight",
+        ]
+        try:
+            subprocess.run(
+                metl_cmd, cwd=str(pipeline_dir), env=pipeline_env,
+                capture_output=True, timeout=1200,  # 20 min
+            )
+            status["metl"] = "ran"
+            _emit("metl complete")
+        except subprocess.TimeoutExpired:
+            status["metl"] = "timeout"
+            status["errors"].append("metl exceeded 20-min timeout")
+            _emit("⚠ metl timed out; proceeding (overlap may still pick up partial data)")
+        except Exception as e:
+            status["metl"] = "failed"
+            status["errors"].append(f"metl: {e}")
+            _emit(f"⚠ metl failed: {e}")
+    else:
+        status["metl"] = "skipped"
+        _emit(f"futures_1m already has {rows_today} rows for {today_str}; skipping metl")
+
+    # ── 2. indexer ────────────────────────────────────────────────
+    # Check if today's leaderboards rows exist. If not, run the
+    # indexer for each of the three metrics. The indexer's
+    # date_already_in_db() guard makes re-runs idempotent.
+    try:
+        conn = _get_conn()
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT COUNT(*) FROM market.leaderboards "
+            "WHERE timestamp_utc::date = %s::date",
+            (today_str,),
+        )
+        lb_rows = int(cur.fetchone()[0])
+        cur.close()
+        conn.close()
+    except Exception as e:
+        _emit(f"DB check for leaderboards failed: {e}; assuming missing")
+        lb_rows = 0
+
+    if lb_rows == 0:
+        _emit(f"leaderboards has 0 rows for {today_str}; running indexer × 3 metrics…")
+        indexer_script = pipeline_dir / "indexer" / "build_intraday_leaderboard.py"
+        indexer_results: list[str] = []
+        for metric in ("price", "open_interest", "volume"):
+            ix_cmd = [
+                _PIPELINE_PYTHON, str(indexer_script),
+                "--metric", metric,
+                "--source", "db",
+                "--start", today_str,
+                "--end", today_str,
+                "--triggered-by", "cli",
+                "--run-tag", "live_today_preflight",
+            ]
+            _emit(f"  indexer metric={metric}…")
+            try:
+                subprocess.run(
+                    ix_cmd, cwd=str(pipeline_dir), env=pipeline_env,
+                    capture_output=True, timeout=1800,  # 30 min per metric
+                )
+                indexer_results.append(f"{metric}=ok")
+            except subprocess.TimeoutExpired:
+                indexer_results.append(f"{metric}=timeout")
+                status["errors"].append(f"indexer metric={metric} timed out")
+            except Exception as e:
+                indexer_results.append(f"{metric}=failed")
+                status["errors"].append(f"indexer metric={metric}: {e}")
+        status["indexer"] = ", ".join(indexer_results)
+        _emit(f"indexer results: {status['indexer']}")
+    else:
+        status["indexer"] = "skipped"
+        _emit(f"leaderboards already has {lb_rows} rows for {today_str}; skipping indexer")
+
+    return status
+
+
 def run_audit(
     params: dict,
     *,
@@ -465,6 +614,17 @@ def run_audit(
     pipeline_dir = Path(settings.PIPELINE_DIR)
     overlap_script = pipeline_dir / "overlap_analysis.py"
     cmd = [_PIPELINE_PYTHON, str(overlap_script)] + build_cli_args(params)
+
+    # Mid-session pre-flight: if live_today is set, ensure today's
+    # data is in the DB before overlap_analysis runs against it.
+    # Triggers metl + indexer subprocesses as needed; idempotent on
+    # re-run (skips steps whose output is already in DB).
+    if params.get("live_today"):
+        _ensure_today_in_db(
+            pipeline_env=pipeline_env,
+            pipeline_dir=pipeline_dir,
+            progress_cb=progress_cb,
+        )
 
     prestage_parquet(
         params,
