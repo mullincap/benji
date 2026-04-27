@@ -1141,6 +1141,429 @@ def equal_weight_return(current: dict, ref: dict,
 
 
 # ==========================================================================
+# RECONCILE-TO-TARGET (LATE ENTRY)
+# ==========================================================================
+
+# Match-tolerance: a position is "in line with target" if its notional is
+# within ±5% OR ±$10, whichever is larger. Below that, the trim/top-up
+# branches fire. The slack absorbs tick-rounding on contract counts +
+# mark-price drift since the original fill — without it, the reconcile
+# would top-up by tiny dust amounts every click.
+RECONCILE_MATCH_PCT = 0.05
+RECONCILE_MATCH_USD = 10.0
+# Same deploy ratio the trader logs as expected_roi factor (10% margin
+# buffer = 90% of capital actually deployed in leveraged positions).
+RECONCILE_DEPLOY_RATIO = 0.90
+
+
+def _reconcile_to_target_basket(
+    api: "ExchangeAdapter",
+    inst_ids: list[str],
+    pre_stopped_clamps: dict[str, float],
+    capital_usd: float,
+    eff_lev: float,
+    *,
+    dry_run: bool = True,
+    log_prefix: str = "",
+) -> dict:
+    """Compute (and optionally execute) a state-aware reconcile plan to
+    bring the exchange account into the target basket configuration.
+
+    Unlike enter_positions() which assumes a clean account at session
+    open, this fits the operator-initiated late-entry case where:
+      - The session may have been sit-flat all day (no positions)
+      - There may be pre-existing positions on these symbols (manual
+        fills, or leftovers from another session that wasn't closed)
+      - There may be foreign positions on OTHER symbols that need to
+        be cleared so capital is available
+
+    Per-symbol classification:
+        skip_pre_stopped   target symbol already past stop threshold
+                           → don't enter; sym_stopped seeds the clamp
+        open_fresh         no existing position; place a new entry order
+        hold               existing notional within match tolerance
+                           → leave untouched (keeps fee history + audit
+                             of when the position was actually opened)
+        top_up             existing under-target → submit add-only order
+                           for the delta
+        trim               existing over-target → submit reduce-only
+                           order for the excess
+        replace            existing on wrong side (short on a long-only
+                           strategy) → close fully + open fresh
+        close_foreign      position open on a symbol NOT in the target
+                           basket → close fully
+
+    Execution order (when dry_run=False) frees margin before consuming:
+        1. close_foreign / replace-close (frees margin)
+        2. trim          (frees margin)
+        3. top_up        (consumes margin)
+        4. open_fresh / replace-open  (consumes margin)
+
+    Returns a plan dict with structure:
+        {
+          "summary": {action_kind: count, ...},
+          "actions": [{inst_id, action, current{...}, target{...},
+                       delta{...}, reason}, ...],
+          "capital_to_deploy_usd": float,
+          "capital_to_release_usd": float,
+          "executed": bool,            # True only if dry_run=False
+          "execution_errors": [...],   # populated only if executed
+        }
+
+    Capital is sized in the audit-aligned "skip-and-shrink" mode:
+        target_capital_per_symbol = capital_usd / N_basket
+    where N_basket is len(inst_ids) including pre-stopped symbols.
+    Pre-stopped symbols get 0 deployed (their slot stays in cash);
+    other live symbols hold their original 1/N share. Mirrors what
+    audit would have computed at 06:35 launch.
+    """
+    target_set = set(inst_ids)
+    n_basket = max(1, len(inst_ids))
+    target_capital_per_sym = capital_usd / n_basket
+
+    # 1. Snapshot live exchange state — positions across the WHOLE
+    #    account (not just inst_ids; we need to see foreign positions
+    #    too). Mark prices for all relevant symbols (target basket +
+    #    foreign positions) so we can compute notional.
+    try:
+        all_positions = api.get_positions(None)
+    except Exception as e:
+        log.warning(f"{log_prefix}reconcile: get_positions failed: {e}")
+        all_positions = []
+    pos_by_iid: dict[str, "PositionInfo"] = {p.inst_id: p for p in all_positions}
+
+    foreign_iids = [iid for iid in pos_by_iid if iid not in target_set]
+    price_iids = list(target_set | set(foreign_iids))
+    try:
+        marks = get_mark_prices(api, price_iids) if price_iids else {}
+    except Exception as e:
+        log.warning(f"{log_prefix}reconcile: get_mark_prices failed: {e}")
+        marks = {}
+
+    # 2. Build per-symbol actions.
+    actions: list[dict] = []
+    summary: dict[str, int] = {
+        "skip_pre_stopped": 0, "open_fresh": 0, "hold": 0,
+        "top_up": 0, "trim": 0, "replace": 0, "close_foreign": 0,
+    }
+    capital_to_deploy = 0.0
+    capital_to_release = 0.0
+
+    # Helper: ctval for notional math. Cached fetch.
+    def _ctval(iid: str) -> float:
+        try:
+            info = get_instrument_info(api, iid)
+            return float(info.contract_value) or 1.0
+        except Exception:
+            return 1.0
+
+    # Helper: shape a current/target leg for the plan.
+    def _leg(contracts: float, price: float, ctval: float) -> dict:
+        notional = float(contracts) * float(price) * float(ctval) if (contracts and price) else 0.0
+        return {
+            "contracts": float(contracts or 0.0),
+            "price": float(price or 0.0),
+            "ctval": float(ctval),
+            "notional_usd": round(notional, 2),
+            "margin_usd": round(notional / max(eff_lev, 1e-9), 2),
+        }
+
+    # 2a. Target-side: walk inst_ids in order
+    for iid in inst_ids:
+        ctval = _ctval(iid)
+        mark = float(marks.get(iid, 0.0))
+        cur_pos = pos_by_iid.get(iid)
+        cur_contracts = float(cur_pos.contracts) if cur_pos else 0.0
+
+        # skip_pre_stopped — already past threshold, sym_stopped seeds
+        # the clamp; no entry order needed regardless of current state.
+        if iid in pre_stopped_clamps:
+            actions.append({
+                "inst_id": iid, "action": "skip_pre_stopped",
+                "current": _leg(cur_contracts, mark, ctval),
+                "target":  _leg(0.0, mark, ctval),
+                "delta":   {"contracts": 0.0, "notional_usd": 0.0},
+                "reason": (
+                    f"already past stop threshold "
+                    f"(observed {pre_stopped_clamps[iid]*100:+.2f}%)"
+                ),
+            })
+            summary["skip_pre_stopped"] += 1
+            continue
+
+        # Target sizing for live symbols
+        target_notional = target_capital_per_sym * eff_lev * RECONCILE_DEPLOY_RATIO
+        target_contracts = (target_notional / (mark * ctval)) if (mark > 0 and ctval > 0) else 0.0
+        target_leg = _leg(target_contracts, mark, ctval)
+
+        # Side mismatch: existing short on a long basket → replace.
+        # Strategy is long-only so cur_contracts < 0 is the flag.
+        if cur_pos and cur_contracts < 0:
+            actions.append({
+                "inst_id": iid, "action": "replace",
+                "current": _leg(cur_contracts, mark, ctval),
+                "target":  target_leg,
+                "delta":   {
+                    "contracts": float(target_contracts - cur_contracts),
+                    "notional_usd": round(target_leg["notional_usd"]
+                                          + abs(cur_contracts) * mark * ctval, 2),
+                },
+                "reason": "existing position is short; target is long",
+            })
+            summary["replace"] += 1
+            capital_to_release += abs(cur_contracts) * mark * ctval / max(eff_lev, 1e-9)
+            capital_to_deploy += target_leg["margin_usd"]
+            continue
+
+        # No existing position → open_fresh
+        if not cur_pos or cur_contracts == 0:
+            actions.append({
+                "inst_id": iid, "action": "open_fresh",
+                "current": _leg(0.0, mark, ctval),
+                "target":  target_leg,
+                "delta":   {"contracts": float(target_contracts),
+                            "notional_usd": target_leg["notional_usd"]},
+                "reason":  "no existing position",
+            })
+            summary["open_fresh"] += 1
+            capital_to_deploy += target_leg["margin_usd"]
+            continue
+
+        # Existing long position — compare notional to target
+        cur_leg = _leg(cur_contracts, mark, ctval)
+        cur_notional = cur_leg["notional_usd"]
+        diff = target_leg["notional_usd"] - cur_notional
+        tolerance = max(RECONCILE_MATCH_PCT * target_leg["notional_usd"],
+                        RECONCILE_MATCH_USD)
+
+        if abs(diff) <= tolerance:
+            actions.append({
+                "inst_id": iid, "action": "hold",
+                "current": cur_leg, "target": target_leg,
+                "delta":   {"contracts": 0.0, "notional_usd": 0.0},
+                "reason": (
+                    f"existing notional ${cur_notional:.2f} within "
+                    f"${tolerance:.2f} tolerance of target "
+                    f"${target_leg['notional_usd']:.2f}"
+                ),
+            })
+            summary["hold"] += 1
+            continue
+
+        if diff > 0:
+            # Under-target → top up by the delta
+            delta_contracts = diff / (mark * ctval) if (mark > 0 and ctval > 0) else 0.0
+            actions.append({
+                "inst_id": iid, "action": "top_up",
+                "current": cur_leg, "target": target_leg,
+                "delta":   {"contracts": float(delta_contracts),
+                            "notional_usd": round(diff, 2)},
+                "reason": (
+                    f"existing ${cur_notional:.2f} below target "
+                    f"${target_leg['notional_usd']:.2f} "
+                    f"(delta +${diff:.2f})"
+                ),
+            })
+            summary["top_up"] += 1
+            capital_to_deploy += diff / max(eff_lev, 1e-9)
+        else:
+            # Over-target → trim the excess (reduce-only)
+            delta_contracts = abs(diff) / (mark * ctval) if (mark > 0 and ctval > 0) else 0.0
+            actions.append({
+                "inst_id": iid, "action": "trim",
+                "current": cur_leg, "target": target_leg,
+                "delta":   {"contracts": -float(delta_contracts),
+                            "notional_usd": round(diff, 2)},
+                "reason": (
+                    f"existing ${cur_notional:.2f} above target "
+                    f"${target_leg['notional_usd']:.2f} "
+                    f"(delta {diff:+.2f})"
+                ),
+            })
+            summary["trim"] += 1
+            capital_to_release += abs(diff) / max(eff_lev, 1e-9)
+
+    # 2b. Foreign-side: existing positions NOT in target basket
+    for iid in foreign_iids:
+        cur_pos = pos_by_iid[iid]
+        cur_contracts = float(cur_pos.contracts)
+        ctval = _ctval(iid)
+        mark = float(marks.get(iid, 0.0))
+        cur_leg = _leg(cur_contracts, mark, ctval)
+        actions.append({
+            "inst_id": iid, "action": "close_foreign",
+            "current": cur_leg,
+            "target":  _leg(0.0, mark, ctval),
+            "delta":   {"contracts": -cur_contracts,
+                        "notional_usd": -cur_leg["notional_usd"]},
+            "reason": "position not in target basket",
+        })
+        summary["close_foreign"] += 1
+        capital_to_release += cur_leg["margin_usd"]
+
+    plan = {
+        "summary": summary,
+        "actions": actions,
+        "capital_to_deploy_usd": round(capital_to_deploy, 2),
+        "capital_to_release_usd": round(capital_to_release, 2),
+        "net_capital_change_usd": round(capital_to_deploy - capital_to_release, 2),
+        "executed": False,
+        "execution_errors": [],
+    }
+
+    if dry_run:
+        log.info(
+            f"{log_prefix}reconcile DRY-RUN: "
+            f"open_fresh={summary['open_fresh']} "
+            f"hold={summary['hold']} top_up={summary['top_up']} "
+            f"trim={summary['trim']} replace={summary['replace']} "
+            f"close_foreign={summary['close_foreign']} "
+            f"skip={summary['skip_pre_stopped']} | "
+            f"deploy=${plan['capital_to_deploy_usd']:.2f} "
+            f"release=${plan['capital_to_release_usd']:.2f}"
+        )
+        return plan
+
+    # Execution path is intentionally not wired in this slice. Slice 2
+    # adds the audit table + writers; Slice 3 adds the actual order
+    # placement using enter_positions / close_position primitives.
+    # Until then dry_run=False is treated as a safe-default no-op
+    # with an explicit error, NOT as a silent execution.
+    plan["execution_errors"].append(
+        "execution path not yet implemented — dry_run-only in this slice"
+    )
+    log.warning(
+        f"{log_prefix}reconcile: dry_run=False but execution not yet "
+        "implemented; returning plan without action"
+    )
+    return plan
+
+
+def compute_late_entry_plan(allocation_id: str) -> dict:
+    """Build a dry-run reconcile plan for a given allocation, without
+    acquiring locks or writing any state. Used by the late-entry
+    confirmation modal to show the operator exactly what the click will
+    do before they commit.
+
+    Returns the plan dict from _reconcile_to_target_basket plus context
+    fields (basket, capital, eff_lev, errors). Errors are reported in
+    the response body, not raised — the modal renders them so the
+    operator can see why the plan is empty/skipped.
+
+    Mirrors the same sequence as run_session_for_allocation through
+    Phase 2.5 (pre_stopped_clamps detection), then calls reconcile in
+    dry-run mode.
+    """
+    response: dict = {
+        "allocation_id": allocation_id,
+        "errors": [],
+        "plan": None,
+        "basket": [],
+        "pre_stopped_clamps": {},
+        "capital_usd": 0.0,
+        "eff_lev": 0.0,
+        "active_filter": None,
+    }
+    try:
+        alloc = _fetch_allocation(allocation_id)
+    except Exception as e:
+        response["errors"].append(f"fetch_allocation failed: {e}")
+        return response
+    if alloc.get("status") != "active":
+        response["errors"].append(
+            f"allocation status={alloc.get('status')!r} (must be 'active')"
+        )
+        return response
+
+    try:
+        sv = _fetch_strategy_version(alloc["strategy_version_id"])
+        config = TraderConfig.from_strategy_version(
+            sv["config"], capital_usd=float(alloc["capital_usd"]),
+        )
+    except Exception as e:
+        response["errors"].append(f"strategy_version load failed: {e}")
+        return response
+
+    response["capital_usd"] = float(alloc["capital_usd"])
+    response["active_filter"] = config.active_filter
+
+    # Read candidate basket from the deploys CSV. bypass_sit_flat=True
+    # — late-entry's whole point is to override the sit-flat decision.
+    today = utc_today()
+    try:
+        symbols = get_today_symbols(
+            today, active_filter=config.active_filter, bypass_sit_flat=True,
+        )
+    except Exception as e:
+        response["errors"].append(f"basket lookup failed: {e}")
+        return response
+    if not symbols:
+        response["errors"].append(
+            f"no candidate basket for {today} filter={config.active_filter!r}"
+        )
+        return response
+
+    inst_ids = [s + config.symbol_suffix for s in symbols]
+
+    # Decrypt creds + spin up the adapter so reconcile can read live
+    # positions + mark prices. No orders placed; this is read-only.
+    try:
+        creds = load_credentials(alloc["connection_id"])
+        api = adapter_for(creds)
+    except Exception as e:
+        response["errors"].append(f"adapter setup failed: {e}")
+        return response
+
+    # Pre-filter against exchange's supported set (some symbols in the
+    # daily signal may not be tradable on this allocation's exchange).
+    try:
+        supported = {iid for iid in inst_ids if api.supports_symbol(iid)}
+        dropped = [iid for iid in inst_ids if iid not in supported]
+        inst_ids = [iid for iid in inst_ids if iid in supported]
+        if dropped:
+            response["errors"].append(
+                f"dropped {len(dropped)} unsupported symbol(s): {dropped}"
+            )
+    except Exception as e:
+        response["errors"].append(f"supports_symbol check failed: {e}")
+    response["basket"] = list(inst_ids)
+
+    if not inst_ids:
+        response["errors"].append("no supported symbols left after pre-filter")
+        return response
+
+    # Pre-stopped clamps from kline history (audit-consistent).
+    session_open = datetime.datetime.combine(
+        today, datetime.time(config.session_start_hour, 0, 0),
+    ).replace(tzinfo=datetime.timezone.utc)
+    try:
+        open_prices = _get_prices_at_timestamp(inst_ids, session_open.replace(tzinfo=None))
+        pre_stopped = _first_stop_crossing_observed(
+            inst_ids, open_prices, float(config.stop_raw_pct), session_open.replace(tzinfo=None),
+        )
+    except Exception as e:
+        response["errors"].append(f"pre-stopped clamp detection failed: {e}")
+        pre_stopped = {}
+    response["pre_stopped_clamps"] = {k: float(v) for k, v in pre_stopped.items()}
+
+    # Effective leverage (mirrors run_session_for_allocation phase 3).
+    eff_lev = float(config.l_high)
+    response["eff_lev"] = eff_lev
+
+    plan = _reconcile_to_target_basket(
+        api=api,
+        inst_ids=inst_ids,
+        pre_stopped_clamps=response["pre_stopped_clamps"],
+        capital_usd=response["capital_usd"],
+        eff_lev=eff_lev,
+        dry_run=True,
+        log_prefix=f"[alloc {allocation_id[:8]}] ",
+    )
+    response["plan"] = plan
+    return response
+
+
+# ==========================================================================
 # ORDER EXECUTION
 # ==========================================================================
 
@@ -5092,7 +5515,26 @@ if __name__ == "__main__":
              "default filter sat the day out. Only takes effect with "
              "--late-entry; otherwise the strategy_version's filter wins.",
     )
+    parser.add_argument(
+        "--plan-only", action="store_true",
+        help="Compute and print the late-entry reconcile plan as JSON, "
+             "then exit. Read-only: no lock, no orders, no state writes. "
+             "Used by the late-entry confirmation modal to preview "
+             "exactly what a click would do. Requires --allocation-id.",
+    )
     args = parser.parse_args()
+
+    if args.plan_only:
+        if not args.allocation_id:
+            print(json.dumps({"error": "--plan-only requires --allocation-id"}))
+            sys.exit(2)
+        try:
+            plan_response = compute_late_entry_plan(args.allocation_id)
+            print(json.dumps(plan_response, default=str))
+            sys.exit(0)
+        except Exception as e:
+            print(json.dumps({"error": f"plan computation failed: {e}"}))
+            sys.exit(1)
 
     if args.status:
         print(json.dumps(load_state(), indent=2, default=str))
