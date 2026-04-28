@@ -530,6 +530,27 @@ def rank_table_at_timestamp_db(metric: str, ts: datetime.datetime) -> list:
 # oi_ranks, timing_dict). price_ranks / oi_ranks are [(rank, base, pct), ...].
 # ---------------------------------------------------------------------------
 
+def _df_stats(df: pd.DataFrame, label: str) -> str:
+    """One-line summary of a fetched DataFrame: rows, symbols, ts_min span."""
+    if df.empty:
+        return f"{label}: 0 rows"
+    n_rows = len(df)
+    n_syms = df["symbol"].nunique()
+    g = df.groupby("symbol")["ts_min"]
+    bars_min = int(g.count().min())
+    bars_max = int(g.count().max())
+    bars_med = int(g.count().median())
+    span_min = int(df["ts_min"].min())
+    span_max = int(df["ts_min"].max())
+    span_low = datetime.datetime.fromtimestamp(span_min * 60,
+                                                 tz=datetime.timezone.utc)
+    span_high = datetime.datetime.fromtimestamp(span_max * 60,
+                                                  tz=datetime.timezone.utc)
+    return (f"{label}: {n_rows:,} rows  "
+            f"{n_syms} syms × ~{bars_med} bars (min {bars_min}, max {bars_max})  "
+            f"span {span_low:%H:%M}–{span_high:%H:%M} UTC")
+
+
 def run_amber_source(peek_dt: datetime.date, no_cache: bool):
     now = datetime.datetime.now(datetime.timezone.utc)
     utc_today = now.date()
@@ -542,15 +563,23 @@ def run_amber_source(peek_dt: datetime.date, no_cache: bool):
     else:
         snap_dt = min(now, canonical_snap)
 
+    is_today = peek_dt == utc_today
+    cache_label = (
+        "enabled (same-UTC-day)" if is_today and not no_cache
+        else ("BYPASSED" if no_cache else "skipped (past date)")
+    )
+
     fetch_t0 = time.time()
     print(f"[peek] target date: {peek_dt.isoformat()}  source: amber  "
           f"snap target: {snap_dt:%Y-%m-%d %H:%M:%S} UTC")
-    print(f"[peek] fetching universe + per-symbol deltas (cache: "
-          f"{'BYPASSED' if no_cache else 'enabled'})")
+    print(f"[peek] cache: {cache_label}")
     price_df = fetch_amber_with_cache(peek_dt, "price", snap_dt, force=no_cache)
     oi_df = fetch_amber_with_cache(peek_dt, "open_interest", snap_dt,
                                     force=no_cache)
     fetch_seconds = time.time() - fetch_t0
+
+    print(f"  {_df_stats(price_df, 'price')}")
+    print(f"  {_df_stats(oi_df, 'open_interest')}")
 
     rank_t0 = time.time()
     price_ranks = compute_ranks_from_cache(price_df, peek_dt, snap_dt)
@@ -564,7 +593,9 @@ def run_amber_source(peek_dt: datetime.date, no_cache: bool):
     fallback_dt = snap_dt if snap_dt < canonical_snap else None
     return (basket, snap_dt, fallback_dt, price_ranks, oi_ranks,
             {"fetch_seconds": round(fetch_seconds, 1),
-             "rank_seconds": round(rank_seconds, 1)})
+             "rank_seconds": round(rank_seconds, 1),
+             "price_rows": int(len(price_df)),
+             "oi_rows": int(len(oi_df))})
 
 
 def run_db_source(peek_dt: datetime.date, force_build: bool):
