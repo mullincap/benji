@@ -284,6 +284,57 @@ def coverage(
     }
 
 
+# ─── /coverage/refresh ────────────────────────────────────────────────────────
+
+@router.post("/coverage/refresh")
+def refresh_coverage(
+    days: int = Query(7, ge=1, le=90,
+                      description="Refresh the last N days of cagg data."),
+) -> dict[str, Any]:
+    """Manually refresh the continuous aggregates the coverage map reads from.
+
+    The nightly cron at 01:15-01:18 UTC normally keeps these aggregates current.
+    But any data correction (e.g. a manual metl topup for a partial day) lands
+    AFTER that refresh and won't appear in the coverage map until tomorrow's
+    cron — unless this endpoint is called.
+
+    Refreshes both `market.futures_1m_daily_symbol_count` and
+    `market.symbol_day_counts` over the last `days` days. Uses an autocommit
+    connection because `CALL refresh_continuous_aggregate(...)` cannot run
+    inside a transaction block on some TimescaleDB versions.
+    """
+    import time as _time
+    from ...db import get_conn  # local import to avoid pulling at module load
+
+    cagg_names = [
+        "market.futures_1m_daily_symbol_count",
+        "market.symbol_day_counts",
+    ]
+    conn = get_conn()
+    try:
+        conn.autocommit = True
+        cur = conn.cursor()
+        t0 = _time.time()
+        refreshed: list[str] = []
+        try:
+            for name in cagg_names:
+                cur.execute(
+                    f"CALL refresh_continuous_aggregate(%s, "
+                    f"NOW() - INTERVAL '{int(days)} days', NOW())",
+                    (name,),
+                )
+                refreshed.append(name)
+        finally:
+            cur.close()
+        return {
+            "refreshed": refreshed,
+            "days": days,
+            "elapsed_seconds": round(_time.time() - t0, 2),
+        }
+    finally:
+        conn.close()
+
+
 # ─── /gaps ────────────────────────────────────────────────────────────────────
 
 @router.get("/gaps")
