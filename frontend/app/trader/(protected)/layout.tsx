@@ -15,6 +15,7 @@
 import { useEffect, useState } from "react";
 import { usePathname, useRouter } from "next/navigation";
 import Topbar from "../../components/Topbar";
+import { useSidebarCollapsed } from "../../components/useSidebarCollapsed";
 import { TraderProvider, useTrader, STRATEGY_CATALOG, StrategyCatalogEntry } from "../context";
 import { Chart as ChartJS, ArcElement } from "chart.js";
 import { Doughnut } from "react-chartjs-2";
@@ -139,7 +140,7 @@ function Sidebar() {
   const pathname = usePathname();
   const router = useRouter();
   const { instances, exchanges } = useTrader();
-  const [collapsed, setCollapsed] = useState(false);
+  const [collapsed, setCollapsed] = useSidebarCollapsed();
   const [tradersOpen, setTradersOpen] = useState(true);
 
   return (

@@ -24,6 +24,7 @@
 import { useEffect, useState } from "react";
 import { usePathname, useRouter } from "next/navigation";
 import Topbar from "../../components/Topbar";
+import { useSidebarCollapsed } from "../../components/useSidebarCollapsed";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE || "";
 
@@ -70,7 +71,7 @@ function NavItem({ label, href, active }: { label: string; href: string; active:
 
 function CompilerSidebar() {
   const pathname = usePathname();
-  const [collapsed, setCollapsed] = useState(false);
+  const [collapsed, setCollapsed] = useSidebarCollapsed();
   return (
     <div
       style={{

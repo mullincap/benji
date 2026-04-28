@@ -18,6 +18,7 @@
 import { useEffect, useState, useCallback } from "react";
 import { usePathname, useRouter } from "next/navigation";
 import Topbar from "../../components/Topbar";
+import { useSidebarCollapsed } from "../../components/useSidebarCollapsed";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE || "";
 
@@ -118,7 +119,7 @@ function ManagerSidebar({
 }) {
   const pathname = usePathname();
   const router = useRouter();
-  const [collapsed, setCollapsed] = useState(false);
+  const [collapsed, setCollapsed] = useSidebarCollapsed();
 
   // Active conversation ID from URL
   const chatMatch = pathname.match(/\/manager\/chat\/(.+)/);
