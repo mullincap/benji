@@ -533,6 +533,39 @@ function LookbackSegmentControl({
 export default function IndexerCoveragePage() {
   const [state, setState] = useState<LoadState>({ kind: "loading" });
   const [preset, setPreset] = useState<LookbackPreset>(DEFAULT_PRESET);
+  const [refreshNonce, setRefreshNonce] = useState(0);
+  const [refreshStatus, setRefreshStatus] = useState<
+    | { kind: "idle" }
+    | { kind: "running" }
+    | { kind: "ok"; elapsed: number }
+    | { kind: "error"; message: string }
+  >({ kind: "idle" });
+
+  // POST /api/indexer/coverage/refresh — recomputes the leaderboards_daily_count
+  // continuous aggregate. After success, bumps refreshNonce so the data load
+  // below re-runs and the heatmap reflects the now-fresh aggregate values.
+  async function handleRefreshCaggs() {
+    if (refreshStatus.kind === "running") return;
+    setRefreshStatus({ kind: "running" });
+    try {
+      const res = await fetch(
+        `${API_BASE}/api/indexer/coverage/refresh?days=7`,
+        { method: "POST", credentials: "include" },
+      );
+      if (!res.ok) {
+        const text = await res.text().catch(() => `HTTP ${res.status}`);
+        setRefreshStatus({ kind: "error", message: text.slice(0, 200) });
+        return;
+      }
+      const body = (await res.json()) as { elapsed_seconds: number };
+      setRefreshStatus({ kind: "ok", elapsed: body.elapsed_seconds });
+      setRefreshNonce((n) => n + 1);
+      setTimeout(() => setRefreshStatus({ kind: "idle" }), 4000);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      setRefreshStatus({ kind: "error", message });
+    }
+  }
 
   useEffect(() => {
     let cancelled = false;
@@ -565,7 +598,7 @@ export default function IndexerCoveragePage() {
     return () => {
       cancelled = true;
     };
-  }, [preset]);
+  }, [preset, refreshNonce]);
 
   return (
     <div style={{ background: "var(--bg0)", padding: 28, minHeight: "100%" }}>
@@ -585,11 +618,77 @@ export default function IndexerCoveragePage() {
           }}>
             Coverage Map
           </h1>
-          <LookbackSegmentControl
-            value={preset}
-            onChange={setPreset}
-            disabled={state.kind === "loading"}
-          />
+          <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+            {refreshStatus.kind === "ok" && (
+              <span style={{
+                fontSize: 9,
+                fontWeight: 700,
+                letterSpacing: "0.12em",
+                textTransform: "uppercase",
+                color: "var(--green)",
+                fontFamily: "var(--font-space-mono), Space Mono, monospace",
+              }}>
+                refreshed in {refreshStatus.elapsed}s
+              </span>
+            )}
+            {refreshStatus.kind === "error" && (
+              <span title={refreshStatus.message} style={{
+                fontSize: 9,
+                fontWeight: 700,
+                letterSpacing: "0.12em",
+                textTransform: "uppercase",
+                color: "var(--red)",
+                fontFamily: "var(--font-space-mono), Space Mono, monospace",
+              }}>
+                refresh failed
+              </span>
+            )}
+            <button
+              type="button"
+              onClick={handleRefreshCaggs}
+              disabled={refreshStatus.kind === "running" || state.kind === "loading"}
+              title="Recompute the continuous aggregate this page reads from. Use after a manual leaderboard rebuild."
+              style={{
+                background: refreshStatus.kind === "running"
+                  ? "var(--bg4)"
+                  : "var(--bg2)",
+                color: refreshStatus.kind === "running"
+                  ? "var(--t2)"
+                  : "var(--t1)",
+                border: "1px solid var(--line)",
+                borderRadius: 4,
+                padding: "6px 14px",
+                fontSize: 9,
+                fontWeight: 700,
+                letterSpacing: "0.12em",
+                textTransform: "uppercase",
+                fontFamily: "var(--font-space-mono), Space Mono, monospace",
+                cursor: refreshStatus.kind === "running" ? "wait"
+                  : state.kind === "loading" ? "not-allowed"
+                  : "pointer",
+                transition: "background 0.15s ease, color 0.15s ease",
+              }}
+              onMouseEnter={(e) => {
+                if (refreshStatus.kind !== "running" && state.kind !== "loading") {
+                  e.currentTarget.style.background = "var(--bg4)";
+                  e.currentTarget.style.color = "var(--t0)";
+                }
+              }}
+              onMouseLeave={(e) => {
+                if (refreshStatus.kind !== "running") {
+                  e.currentTarget.style.background = "var(--bg2)";
+                  e.currentTarget.style.color = "var(--t1)";
+                }
+              }}
+            >
+              {refreshStatus.kind === "running" ? "refreshing…" : "refresh cagg"}
+            </button>
+            <LookbackSegmentControl
+              value={preset}
+              onChange={setPreset}
+              disabled={state.kind === "loading"}
+            />
+          </div>
         </div>
         <div style={{
           fontSize: 10, color: "var(--t2)",

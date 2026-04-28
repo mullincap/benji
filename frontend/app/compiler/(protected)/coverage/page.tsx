@@ -623,7 +623,7 @@ export default function CompilerCoveragePage() {
                 }
               }}
             >
-              {refreshStatus.kind === "running" ? "refreshing…" : "refresh"}
+              {refreshStatus.kind === "running" ? "refreshing…" : "refresh cagg"}
             </button>
             <LookbackSegmentControl
               value={preset}

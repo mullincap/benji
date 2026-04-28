@@ -160,6 +160,50 @@ _JOB_SELECT = """
 """
 
 
+# ─── /coverage/refresh ────────────────────────────────────────────────────────
+
+@router.post("/coverage/refresh")
+def refresh_coverage(
+    days: int = Query(7, ge=1, le=90,
+                      description="Refresh the last N days of cagg data."),
+) -> dict[str, Any]:
+    """Manually refresh the continuous aggregate the indexer coverage map
+    reads from (`market.leaderboards_daily_count`).
+
+    The nightly cron at 01:15 UTC normally keeps this aggregate current.
+    But a manual leaderboard rebuild (e.g. `--force` after an anchor
+    fallback fix or a metl topup) lands AFTER the cron and won't appear
+    in the indexer coverage UI until tomorrow's cron — unless this
+    endpoint is called.
+
+    Uses an autocommit connection because `CALL refresh_continuous_aggregate(...)`
+    cannot run inside a transaction block on some TimescaleDB versions.
+    """
+    import time as _time
+    from ...db import get_conn  # local import to avoid pulling at module load
+
+    conn = get_conn()
+    try:
+        conn.autocommit = True
+        cur = conn.cursor()
+        t0 = _time.time()
+        try:
+            cur.execute(
+                f"CALL refresh_continuous_aggregate(%s, "
+                f"NOW() - INTERVAL '{int(days)} days', NOW())",
+                ("market.leaderboards_daily_count",),
+            )
+        finally:
+            cur.close()
+        return {
+            "refreshed": ["market.leaderboards_daily_count"],
+            "days": days,
+            "elapsed_seconds": round(_time.time() - t0, 2),
+        }
+    finally:
+        conn.close()
+
+
 @router.get("/jobs")
 def list_jobs(
     limit: int = Query(50, ge=1, le=200),
