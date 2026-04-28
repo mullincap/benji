@@ -403,9 +403,17 @@ def date_already_in_db(date_str: str) -> int:
         return -1
 
 
-def write_leaders_to_db(leaders_long: pd.DataFrame, date_str: str) -> int:
+def write_leaders_to_db(leaders_long: pd.DataFrame, date_str: str,
+                         force_wipe: bool = False) -> int:
     """Insert the long-format leaders dataframe into market.leaderboards.
     Called BEFORE the pivot so we still have pct_change_midnight available.
+
+    `force_wipe`: when True, DELETE existing rows for this (metric, variant,
+    anchor_hour, date) tuple before INSERT — necessary when reprocessing a
+    partial day, because ON CONFLICT DO NOTHING would preserve any existing
+    stale rank-N rows. Set by the caller in two situations:
+        - args.force is set (explicit user request)
+        - the day was detected as partial (rows existed but < complete threshold)
 
     Expected columns on `leaders_long`:
         - minute (timestamp)
@@ -452,16 +460,17 @@ def write_leaders_to_db(leaders_long: pd.DataFrame, date_str: str) -> int:
     try:
         conn = get_conn()
         cur = conn.cursor()
-        # When --force is set, the user wants the rankings recomputed from
-        # the current state of futures_1m. The default INSERT path uses
+        # When force_wipe is set, the rankings are being recomputed from
+        # the current state of futures_1m and need to actually displace
+        # whatever's in the DB. The default INSERT path uses
         # ON CONFLICT DO NOTHING (idempotent re-runs), but that means a
         # ranking *change* (e.g. a symbol newly visible after an anchor-
-        # fallback fix) can't displace the existing rank-N row. Wipe the
-        # day's rows for this (metric, variant, anchor_hour) tuple first
-        # so the new rankings actually land. Scoped to the date + metric +
-        # anchor combo only, so concurrent runs for other metrics/anchors
-        # are unaffected.
-        if args.force:
+        # fallback fix, or a partial day being topped up) can't displace
+        # the existing rank-N row. Wipe the day's rows for this
+        # (metric, variant, anchor_hour) tuple first so the new rankings
+        # actually land. Scoped to the date + metric + anchor combo only,
+        # so concurrent runs for other metrics/anchors are unaffected.
+        if force_wipe:
             cur.execute("""
                 DELETE FROM market.leaderboards
                 WHERE metric = %s AND variant = %s AND anchor_hour = %s
@@ -471,7 +480,7 @@ def write_leaders_to_db(leaders_long: pd.DataFrame, date_str: str) -> int:
             _wiped = cur.rowcount
             if _wiped > 0:
                 tqdm.write(
-                    f"  --force: wiped {_wiped:,} existing leaderboard rows "
+                    f"  wiped {_wiped:,} existing leaderboard rows "
                     f"for {date_str} {RANK_METRIC} anchor={ANCHOR_HOUR:02d} "
                     f"before reinsert"
                 )
@@ -811,12 +820,38 @@ for _day_key in tqdm(_date_groups, desc="Processing days"):
     # set. The DB is the canonical source of truth — file existence is not
     # checked. A DB error in the checkpoint query falls through and processes
     # the date anyway (better to do duplicate work than skip a real gap).
+    # Track whether existing rows for this day are partial. Drives both
+    # the skip decision (skip only when ≥95% complete) and the force_wipe
+    # passed to write_leaders_to_db (partial → wipe stale rows so the new
+    # ranks actually land, since ON CONFLICT DO NOTHING would preserve
+    # any stale rank-N rows from a thin earlier run).
+    _day_partial_detected = False
     if not args.force and WRITE_TO_DB:
         existing_rows = date_already_in_db(date_str)
-        if existing_rows > 0:
-            tqdm.write(f"⏭  {date_str} → skipping ({existing_rows:,} rows already in DB, use --force to reprocess)")
+        # 1440 minutes × TOP_N ranks per minute = expected complete count
+        # for this (metric, variant, anchor_hour, date). Use 95% threshold
+        # so we don't bother re-fetching days that are within rounding of
+        # complete (some metrics legitimately top out below 100%, e.g.
+        # OI when many symbols had OI=0 at the anchor minute).
+        _expected_full = 1440 * TOP_N
+        _complete_threshold = int(_expected_full * 0.95)
+        if existing_rows >= _complete_threshold:
+            _pct = (existing_rows * 100) // _expected_full
+            tqdm.write(
+                f"⏭  {date_str} → skipping ({existing_rows:,}/{_expected_full:,} "
+                f"rows = {_pct}%, complete; use --force to reprocess)"
+            )
             job_increment(JOB_ID, 0)  # progress without rows
             continue
+        if existing_rows > 0:
+            _pct = (existing_rows * 100) // _expected_full
+            tqdm.write(
+                f"⚙  {date_str} → reprocessing partial "
+                f"({existing_rows:,}/{_expected_full:,} rows = {_pct}%); "
+                f"will wipe stale rows before reinsert"
+            )
+            _day_partial_detected = True
+        # else: zero existing rows → process fresh (no wipe needed)
 
     try:
 
@@ -1134,7 +1169,10 @@ for _day_key in tqdm(_date_groups, desc="Processing days"):
         # write below still happens regardless.
         _rows_inserted_today = 0
         if WRITE_TO_DB:
-            _rows_inserted_today = write_leaders_to_db(leaders, date_str)
+            _rows_inserted_today = write_leaders_to_db(
+                leaders, date_str,
+                force_wipe=(args.force or _day_partial_detected),
+            )
 
         # ----------------------------------------------------
         # Pivot leaderboard
