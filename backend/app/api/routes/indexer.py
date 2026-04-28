@@ -204,6 +204,207 @@ def refresh_coverage(
         conn.close()
 
 
+# ─── /coverage/fill-missing ──────────────────────────────────────────────────
+# Mirrors the compiler page's fill-missing pattern (see compiler.py).
+# Detects partial days in market.leaderboards (any metric < 95% of
+# 1440 × 333 = 479,520 rows), spawns a worker that runs
+# build_intraday_leaderboard.py --force per (date, metric) tuple, then
+# refreshes leaderboards_daily_count.
+
+_FILL_MISSING_DIR_INDEXER = "/mnt/quant-data/jobs/fill_missing_indexer"
+
+
+def _fill_missing_indexer_status_path(job_id: str) -> str:
+    return f"{_FILL_MISSING_DIR_INDEXER}/{job_id}.json"
+
+
+def _detect_partial_dates_indexer(lookback_days: int = 30) -> list[str]:
+    """Return ISO dates in the last `lookback_days` where any of
+    (price, open_interest, volume) has < 95% of expected rows
+    (479,520 = 1440 × 333). Excludes today (UTC) — see compiler's
+    _detect_partial_dates for why."""
+    import datetime as _dt
+    from ...db import get_conn
+
+    today = _dt.datetime.now(_dt.timezone.utc).date()
+    start = today - _dt.timedelta(days=lookback_days)
+    expected_full = 1440 * 333  # 479,520
+    threshold = int(expected_full * 0.95)
+    conn = get_conn()
+    try:
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT day::text
+            FROM (
+                SELECT
+                    timestamp_utc::date AS day,
+                    metric,
+                    COUNT(*) AS rows_in_lb
+                FROM market.leaderboards
+                WHERE timestamp_utc >= %s::timestamptz
+                  AND timestamp_utc <  %s::timestamptz
+                  AND anchor_hour = 0 AND variant = 'close'
+                GROUP BY timestamp_utc::date, metric
+            ) per_day_metric
+            WHERE rows_in_lb < %s
+              AND day < (timezone('UTC', NOW()))::date  -- never today
+            GROUP BY day
+            ORDER BY day DESC
+        """, (start, today, threshold))
+        return [r[0] for r in cur.fetchall()]
+    finally:
+        try:
+            cur.close()
+        except Exception:
+            pass
+        conn.close()
+
+
+@router.post("/coverage/fill-missing")
+def fill_missing_indexer(
+    days_back: int = Query(30, ge=1, le=90,
+                            description="Lookback window in days for "
+                                        "auto-detect."),
+    dates: str | None = Query(None,
+                               description="Optional comma-separated "
+                                           "YYYY-MM-DD list to fill instead "
+                                           "of auto-detecting."),
+) -> dict[str, Any]:
+    """Detect partial days in market.leaderboards, spawn a background
+    worker that runs `build_intraday_leaderboard.py --force` for each
+    (date, metric) tuple, then refreshes leaderboards_daily_count.
+
+    Zero-gap fast path: if no partial dates found, refreshes the cagg
+    inline (~0.5-1s) and returns state=done immediately.
+    """
+    import os as _os
+    import subprocess as _sp
+    import sys as _sys
+    import uuid as _uuid
+    import time as _time
+    import json as _json
+    from ...db import get_conn
+
+    if dates:
+        target_dates = [d.strip() for d in dates.split(",") if d.strip()]
+    else:
+        target_dates = _detect_partial_dates_indexer(lookback_days=days_back)
+
+    job_id = str(_uuid.uuid4())
+    _os.makedirs(_FILL_MISSING_DIR_INDEXER, exist_ok=True)
+    status_path = _fill_missing_indexer_status_path(job_id)
+
+    # Zero-gap fast path
+    if not target_dates:
+        t0 = _time.time()
+        conn = get_conn()
+        try:
+            conn.autocommit = True
+            cur = conn.cursor()
+            cur.execute(
+                "CALL refresh_continuous_aggregate(%s, "
+                "NOW() - INTERVAL '7 days', NOW())",
+                ("market.leaderboards_daily_count",),
+            )
+            cur.close()
+        finally:
+            conn.close()
+        elapsed = round(_time.time() - t0, 1)
+        synthetic = {
+            "job_id": job_id,
+            "page": "indexer",
+            "state": "done",
+            "started_at": t0,
+            "finished_at": _time.time(),
+            "dates_total": 0,
+            "dates_completed": 0,
+            "dates_failed": 0,
+            "dates": [],
+            "current_date": None,
+            "current_state": None,
+            "elapsed_seconds": int(elapsed),
+            "errors": [],
+            "summary": f"No partial days found; cagg refreshed in {elapsed}s",
+        }
+        with open(status_path, "w") as f:
+            _json.dump(synthetic, f, indent=2)
+        return {
+            "job_id": job_id,
+            "state": "done",
+            "dates_total": 0,
+            "summary": synthetic["summary"],
+        }
+
+    # Spawn detached worker subprocess
+    cmd = [
+        _sys.executable, "-m", "app.cli.fill_missing_indexer",
+        "--job-id", job_id,
+        "--status-file", status_path,
+        "--dates", ",".join(target_dates),
+    ]
+    log_path = status_path.replace(".json", ".spawn.log")
+    with open(log_path, "w") as logf:
+        logf.write(f"spawning: {' '.join(cmd)}\n")
+        _sp.Popen(
+            cmd,
+            stdout=logf, stderr=_sp.STDOUT,
+            stdin=_sp.DEVNULL,
+            cwd="/app",
+            start_new_session=True,
+        )
+
+    return {
+        "job_id": job_id,
+        "state": "queued",
+        "dates_total": len(target_dates),
+        "dates": target_dates,
+    }
+
+
+@router.get("/coverage/fill-missing/status")
+def fill_missing_indexer_status(job_id: str) -> dict[str, Any]:
+    """Read the JSON status file written by the indexer fill-missing worker."""
+    import json as _json
+    import os as _os
+
+    path = _fill_missing_indexer_status_path(job_id)
+    if not _os.path.exists(path):
+        raise HTTPException(status_code=404, detail="status not yet written")
+    try:
+        with open(path) as f:
+            return _json.load(f)
+    except _json.JSONDecodeError:
+        raise HTTPException(status_code=503, detail="status mid-write, retry")
+
+
+@router.get("/coverage/fill-missing/active")
+def fill_missing_indexer_active() -> dict[str, Any]:
+    """Most recent in-progress indexer fill-missing job; for page-load
+    rehydration. Returns {job_id: null} if none."""
+    import json as _json
+    import glob as _glob
+    import os as _os
+
+    if not _os.path.isdir(_FILL_MISSING_DIR_INDEXER):
+        return {"job_id": None}
+    candidates: list[tuple[float, dict]] = []
+    for path in _glob.glob(f"{_FILL_MISSING_DIR_INDEXER}/*.json"):
+        try:
+            with open(path) as f:
+                doc = _json.load(f)
+        except Exception:
+            continue
+        if doc.get("page") != "indexer":
+            continue
+        if doc.get("state") not in ("running", "queued"):
+            continue
+        candidates.append((doc.get("started_at", 0), doc))
+    if not candidates:
+        return {"job_id": None}
+    candidates.sort(key=lambda x: x[0], reverse=True)
+    return candidates[0][1]
+
+
 @router.get("/jobs")
 def list_jobs(
     limit: int = Query(50, ge=1, le=200),

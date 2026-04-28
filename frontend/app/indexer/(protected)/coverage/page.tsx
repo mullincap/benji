@@ -530,41 +530,131 @@ function LookbackSegmentControl({
 
 // ─── Page ────────────────────────────────────────────────────────────────────
 
+type FillStatus = {
+  job_id: string;
+  state: "queued" | "running" | "done" | "completed_with_errors" | "failed";
+  dates_total: number;
+  dates_completed: number;
+  dates_failed: number;
+  current_date: string | null;
+  current_state: string | null;
+  elapsed_seconds: number;
+  summary: string | null;
+  errors?: string[];
+};
+
 export default function IndexerCoveragePage() {
   const [state, setState] = useState<LoadState>({ kind: "loading" });
   const [preset, setPreset] = useState<LookbackPreset>(DEFAULT_PRESET);
   const [refreshNonce, setRefreshNonce] = useState(0);
-  const [refreshStatus, setRefreshStatus] = useState<
-    | { kind: "idle" }
-    | { kind: "running" }
-    | { kind: "ok"; elapsed: number }
-    | { kind: "error"; message: string }
-  >({ kind: "idle" });
+  const [fillStatus, setFillStatus] = useState<FillStatus | null>(null);
+  const [fillError, setFillError] = useState<string | null>(null);
 
-  // POST /api/indexer/coverage/refresh — recomputes the leaderboards_daily_count
-  // continuous aggregate. After success, bumps refreshNonce so the data load
-  // below re-runs and the heatmap reflects the now-fresh aggregate values.
-  async function handleRefreshCaggs() {
-    if (refreshStatus.kind === "running") return;
-    setRefreshStatus({ kind: "running" });
+  const fillIsTerminal = (s: FillStatus | null) =>
+    s !== null && (s.state === "done" || s.state === "failed" ||
+                   s.state === "completed_with_errors");
+  const fillIsRunning = (s: FillStatus | null) =>
+    s !== null && (s.state === "queued" || s.state === "running");
+
+  // Poll status while a job is in-flight; stop on terminal.
+  useEffect(() => {
+    if (!fillStatus || fillIsTerminal(fillStatus)) return;
+    const job_id = fillStatus.job_id;
+    const interval = window.setInterval(async () => {
+      try {
+        const res = await fetch(
+          `${API_BASE}/api/indexer/coverage/fill-missing/status?job_id=${job_id}`,
+          { credentials: "include" },
+        );
+        if (res.status === 404 || res.status === 503) return;
+        if (!res.ok) return;
+        const next = (await res.json()) as FillStatus;
+        setFillStatus(next);
+        if (fillIsTerminal(next)) {
+          setRefreshNonce((n) => n + 1);
+        }
+      } catch { /* network blip — keep polling */ }
+    }, 3000);
+    return () => window.clearInterval(interval);
+  }, [fillStatus]);
+
+  // On page load, rehydrate any active job
+  useEffect(() => {
+    let cancelled = false;
+    fetch(`${API_BASE}/api/indexer/coverage/fill-missing/active`,
+          { credentials: "include" })
+      .then((r) => r.ok ? r.json() : null)
+      .then((doc) => {
+        if (cancelled || !doc || !doc.job_id) return;
+        setFillStatus(doc as FillStatus);
+      })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, []);
+
+  async function handleFillMissing() {
+    if (fillIsRunning(fillStatus)) return;
+    setFillError(null);
+
+    let initial: { job_id: string; state: string; dates_total: number;
+                   dates?: string[]; summary?: string };
     try {
       const res = await fetch(
-        `${API_BASE}/api/indexer/coverage/refresh?days=7`,
+        `${API_BASE}/api/indexer/coverage/fill-missing?days_back=30`,
         { method: "POST", credentials: "include" },
       );
       if (!res.ok) {
         const text = await res.text().catch(() => `HTTP ${res.status}`);
-        setRefreshStatus({ kind: "error", message: text.slice(0, 200) });
+        setFillError(text.slice(0, 200));
         return;
       }
-      const body = (await res.json()) as { elapsed_seconds: number };
-      setRefreshStatus({ kind: "ok", elapsed: body.elapsed_seconds });
-      setRefreshNonce((n) => n + 1);
-      setTimeout(() => setRefreshStatus({ kind: "idle" }), 4000);
+      initial = await res.json();
     } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      setRefreshStatus({ kind: "error", message });
+      setFillError(err instanceof Error ? err.message : String(err));
+      return;
     }
+
+    if (initial.state === "done") {
+      setFillStatus({
+        job_id: initial.job_id,
+        state: "done",
+        dates_total: 0,
+        dates_completed: 0,
+        dates_failed: 0,
+        current_date: null,
+        current_state: null,
+        elapsed_seconds: 0,
+        summary: initial.summary || "No partial days found",
+      });
+      setRefreshNonce((n) => n + 1);
+      setTimeout(() => setFillStatus(null), 6000);
+      return;
+    }
+
+    const dates = initial.dates || [];
+    // Indexer rebuild ~30-50s per metric per day, 3 metrics per day.
+    // So ~2-3 min per day, much faster than compiler's metl-driven topup.
+    const estMin = Math.ceil((dates.length * 2.5));
+    const ok = window.confirm(
+      `Found ${dates.length} partial day(s) in market.leaderboards:\n` +
+      `  ${dates.join(", ")}\n\n` +
+      `Estimated time: ~${estMin} min (3 metrics × ~45s per day).\n\n` +
+      `The job is already running in the background.\n` +
+      `OK = keep tracking it; Cancel = ignore (job continues regardless).`
+    );
+    if (!ok) return;
+
+    setFillStatus({
+      job_id: initial.job_id,
+      state: "queued",
+      dates_total: dates.length,
+      dates_completed: 0,
+      dates_failed: 0,
+      current_date: null,
+      current_state: "queued",
+      elapsed_seconds: 0,
+      summary: null,
+    });
   }
 
   useEffect(() => {
@@ -619,20 +709,27 @@ export default function IndexerCoveragePage() {
             Coverage Map
           </h1>
           <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
-            {refreshStatus.kind === "ok" && (
+            {fillStatus && fillIsTerminal(fillStatus) && fillStatus.summary && (
               <span style={{
                 fontSize: 9,
                 fontWeight: 700,
                 letterSpacing: "0.12em",
                 textTransform: "uppercase",
-                color: "var(--green)",
+                color: fillStatus.state === "done" ? "var(--green)"
+                       : fillStatus.state === "failed" ? "var(--red)"
+                       : "var(--amber)",
                 fontFamily: "var(--font-space-mono), Space Mono, monospace",
-              }}>
-                refreshed in {refreshStatus.elapsed}s
+                maxWidth: 280,
+                overflow: "hidden",
+                textOverflow: "ellipsis",
+                whiteSpace: "nowrap",
+              }} title={fillStatus.summary}>
+                {fillStatus.state === "done" ? "✓" :
+                 fillStatus.state === "failed" ? "✗" : "⚠"} {fillStatus.summary}
               </span>
             )}
-            {refreshStatus.kind === "error" && (
-              <span title={refreshStatus.message} style={{
+            {fillError && (
+              <span title={fillError} style={{
                 fontSize: 9,
                 fontWeight: 700,
                 letterSpacing: "0.12em",
@@ -640,21 +737,17 @@ export default function IndexerCoveragePage() {
                 color: "var(--red)",
                 fontFamily: "var(--font-space-mono), Space Mono, monospace",
               }}>
-                refresh failed
+                ✗ {fillError.slice(0, 60)}
               </span>
             )}
             <button
               type="button"
-              onClick={handleRefreshCaggs}
-              disabled={refreshStatus.kind === "running" || state.kind === "loading"}
-              title="Recompute the continuous aggregate this page reads from. Use after a manual leaderboard rebuild."
+              onClick={handleFillMissing}
+              disabled={fillIsRunning(fillStatus) || state.kind === "loading"}
+              title="Detect partial days in market.leaderboards, force-rebuild each metric (price/OI/volume) per day, then refresh the continuous aggregate. Today (UTC) is always excluded from auto-detect."
               style={{
-                background: refreshStatus.kind === "running"
-                  ? "var(--bg4)"
-                  : "var(--bg2)",
-                color: refreshStatus.kind === "running"
-                  ? "var(--t2)"
-                  : "var(--t1)",
+                background: fillIsRunning(fillStatus) ? "var(--bg4)" : "var(--bg2)",
+                color: fillIsRunning(fillStatus) ? "var(--amber)" : "var(--t1)",
                 border: "1px solid var(--line)",
                 borderRadius: 4,
                 padding: "6px 14px",
@@ -663,25 +756,46 @@ export default function IndexerCoveragePage() {
                 letterSpacing: "0.12em",
                 textTransform: "uppercase",
                 fontFamily: "var(--font-space-mono), Space Mono, monospace",
-                cursor: refreshStatus.kind === "running" ? "wait"
+                cursor: fillIsRunning(fillStatus) ? "wait"
                   : state.kind === "loading" ? "not-allowed"
                   : "pointer",
                 transition: "background 0.15s ease, color 0.15s ease",
+                minWidth: 120,
+                whiteSpace: "nowrap",
               }}
               onMouseEnter={(e) => {
-                if (refreshStatus.kind !== "running" && state.kind !== "loading") {
+                if (!fillIsRunning(fillStatus) && state.kind !== "loading") {
                   e.currentTarget.style.background = "var(--bg4)";
                   e.currentTarget.style.color = "var(--t0)";
                 }
               }}
               onMouseLeave={(e) => {
-                if (refreshStatus.kind !== "running") {
+                if (!fillIsRunning(fillStatus)) {
                   e.currentTarget.style.background = "var(--bg2)";
                   e.currentTarget.style.color = "var(--t1)";
                 }
               }}
             >
-              {refreshStatus.kind === "running" ? "refreshing…" : "refresh cagg"}
+              {(() => {
+                if (!fillStatus || !fillIsRunning(fillStatus)) return "fill missing";
+                const total = fillStatus.dates_total;
+                const done = fillStatus.dates_completed + fillStatus.dates_failed;
+                const cur = fillStatus.current_date;
+                const elapsed = fillStatus.elapsed_seconds;
+                const mm = Math.floor(elapsed / 60);
+                const ss = String(elapsed % 60).padStart(2, "0");
+                if (cur && fillStatus.current_state) {
+                  // current_state is e.g. "rebuilding price"
+                  return `${done + 1}/${total} ${cur} ${fillStatus.current_state.replace("rebuilding ", "")} ${mm}:${ss}`;
+                }
+                if (cur) {
+                  return `filling ${done + 1}/${total}: ${cur} ${mm}:${ss}`;
+                }
+                if (fillStatus.current_state === "refreshing_cagg") {
+                  return `refreshing cagg ${mm}:${ss}`;
+                }
+                return `queued ${mm}:${ss}`;
+              })()}
             </button>
             <LookbackSegmentControl
               value={preset}
