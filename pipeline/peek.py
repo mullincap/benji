@@ -96,6 +96,62 @@ def spawn_indexer(metric: str, peek_date: datetime.date) -> subprocess.Popen:
     return subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
 
 
+def latest_bar_in_window(peek_date: datetime.date) -> "datetime.datetime | None":
+    """Most recent timestamp present for BOTH price and OI inside
+    [00:00, deployment_start) UTC of peek_date. Used as the snapshot anchor
+    when the deployment_start bar doesn't exist yet (intra-day peek)."""
+    anchor_hour = (DEPLOYMENT_START_HOUR - oa.INDEX_LOOKBACK) % 24
+    start_dt = datetime.datetime.combine(peek_date, datetime.time(0, 0))
+    end_dt = datetime.datetime.combine(peek_date, datetime.time(DEPLOYMENT_START_HOUR, 0))
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT MAX(timestamp_utc) FROM (
+            SELECT DISTINCT timestamp_utc FROM market.leaderboards
+            WHERE metric = 'price' AND anchor_hour = %s AND variant = 'close'
+              AND timestamp_utc >= %s AND timestamp_utc < %s
+            INTERSECT
+            SELECT DISTINCT timestamp_utc FROM market.leaderboards
+            WHERE metric = 'open_interest' AND anchor_hour = %s AND variant = 'close'
+              AND timestamp_utc >= %s AND timestamp_utc < %s
+        ) t
+    """, (anchor_hour, start_dt, end_dt, anchor_hour, start_dt, end_dt))
+    ts = cur.fetchone()[0]
+    cur.close()
+    conn.close()
+    return ts
+
+
+def freq_at_exact_timestamp(metric: str, ts: "datetime.datetime",
+                             peek_date: datetime.date) -> dict:
+    """dict[date, Counter] for `metric` at exact timestamp `ts`. Same shape as
+    oa._load_frequency_from_db so compute_overlap consumes it identically."""
+    from collections import Counter
+    anchor_hour = (DEPLOYMENT_START_HOUR - oa.INDEX_LOOKBACK) % 24
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT s.binance_id
+        FROM market.leaderboards l
+        JOIN market.symbols s ON s.symbol_id = l.symbol_id
+        WHERE l.metric = %s
+          AND l.anchor_hour = %s
+          AND l.variant = 'close'
+          AND l.rank <= %s
+          AND l.timestamp_utc = %s
+    """, (metric, anchor_hour, FREQ_WIDTH, ts))
+    rows = cur.fetchall()
+    cur.close()
+    conn.close()
+    counter: Counter = Counter()
+    for (raw_sym,) in rows:
+        base = oa.normalize_symbol(raw_sym) if raw_sym else None
+        if base is None:
+            continue
+        counter[base] += 1
+    return {peek_date: counter}
+
+
 def main():
     ap = argparse.ArgumentParser(
         description=__doc__,
@@ -168,6 +224,20 @@ def main():
     price_freq = {peek_dt: price_all.get(peek_dt, {})}
     oi_freq = {peek_dt: oi_all.get(peek_dt, {})}
 
+    # Fallback: if the deployment_start bar isn't in market.leaderboards yet
+    # (peek run before the window completes), snapshot from the latest bar
+    # available in [00:00, deployment_start) instead. Useful for smoke tests
+    # and intra-window dry runs.
+    fallback_ts = None
+    if not price_freq[peek_dt] and not oi_freq[peek_dt]:
+        fallback_ts = latest_bar_in_window(peek_dt)
+        if fallback_ts:
+            print(f"  [peek] {DEPLOYMENT_START_HOUR:02d}:00 UTC bar not in "
+                  f"market.leaderboards yet — falling back to latest available: "
+                  f"{fallback_ts:%Y-%m-%d %H:%M:%S} UTC")
+            price_freq = freq_at_exact_timestamp("price", fallback_ts, peek_dt)
+            oi_freq = freq_at_exact_timestamp("open_interest", fallback_ts, peek_dt)
+
     overlap_df = oa.compute_overlap(
         price_freq, oi_freq,
         freq_cutoff=FREQ_CUTOFF,
@@ -181,7 +251,12 @@ def main():
 
     # 4. Output
     print()
-    print(f"[peek-date {peek_dt.isoformat()}] {len(syms)} symbols")
+    snap_label = (
+        f"snapshot @ {fallback_ts:%H:%M:%S} UTC (partial)"
+        if fallback_ts
+        else f"snapshot @ {DEPLOYMENT_START_HOUR:02d}:00:00 UTC"
+    )
+    print(f"[peek-date {peek_dt.isoformat()}] {len(syms)} symbols  ({snap_label})")
     print(f"  → {' '.join(syms) if syms else '(empty basket)'}")
     print(f"  build={build_seconds:.1f}s  freq={freq_seconds:.1f}s  "
           f"total={build_seconds + freq_seconds:.1f}s")
@@ -194,6 +269,12 @@ def main():
                 "date": peek_dt.isoformat(),
                 "symbols": syms,
                 "basket_size": len(syms),
+                "snapshot_timestamp_utc": (
+                    fallback_ts.isoformat()
+                    if fallback_ts
+                    else f"{peek_dt.isoformat()}T{DEPLOYMENT_START_HOUR:02d}:00:00"
+                ),
+                "is_partial": fallback_ts is not None,
                 "build_seconds": round(build_seconds, 1),
                 "freq_seconds": round(freq_seconds, 1),
                 "run_config": {
