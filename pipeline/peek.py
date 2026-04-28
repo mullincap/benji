@@ -152,6 +152,39 @@ def freq_at_exact_timestamp(metric: str, ts: "datetime.datetime",
     return {peek_date: counter}
 
 
+def rank_table_at_timestamp(metric: str, ts: "datetime.datetime") -> list:
+    """Return ordered top-FREQ_WIDTH ranks for metric at exact timestamp ts.
+
+    Each entry: (rank, base, pct_change_decimal). Sorted by rank ascending.
+    Used by --diagnostics to surface which symbols ranked where, before the
+    intersection — so divergence vs daily_signal_v2's basket can be traced
+    to a specific axis (OI granularity, snapshot timing, etc)."""
+    anchor_hour = (DEPLOYMENT_START_HOUR - oa.INDEX_LOOKBACK) % 24
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT l.rank, s.binance_id, l.pct_change
+        FROM market.leaderboards l
+        JOIN market.symbols s ON s.symbol_id = l.symbol_id
+        WHERE l.metric = %s
+          AND l.anchor_hour = %s
+          AND l.variant = 'close'
+          AND l.rank <= %s
+          AND l.timestamp_utc = %s
+        ORDER BY l.rank
+    """, (metric, anchor_hour, FREQ_WIDTH, ts))
+    rows = cur.fetchall()
+    cur.close()
+    conn.close()
+    out = []
+    for rank, raw_sym, pct in rows:
+        base = oa.normalize_symbol(raw_sym) if raw_sym else None
+        if base is None:
+            continue
+        out.append((int(rank), base, float(pct) if pct is not None else 0.0))
+    return out
+
+
 def main():
     ap = argparse.ArgumentParser(
         description=__doc__,
@@ -165,6 +198,13 @@ def main():
     ap.add_argument("--force-build", action="store_true",
                     help="Rebuild leaderboards even if [00:00, 06:00) coverage "
                          "is already complete")
+    ap.add_argument("--diagnostics", action="store_true",
+                    help="Print top-FREQ_WIDTH rank tables (price + OI) at the "
+                         "snapshot timestamp, before the intersection. Useful for "
+                         "diagnosing divergence vs daily_signal_v2's basket — "
+                         "mark whether each top-ranked symbol survived the "
+                         "intersection. Also adds a 'diagnostics' block to JSON "
+                         "output if --out is set.")
     args = ap.parse_args()
 
     try:
@@ -261,37 +301,80 @@ def main():
     print(f"  build={build_seconds:.1f}s  freq={freq_seconds:.1f}s  "
           f"total={build_seconds + freq_seconds:.1f}s")
 
+    # Diagnostics: rank table dump
+    diag_block = None
+    if args.diagnostics:
+        diag_ts = fallback_ts or datetime.datetime.combine(
+            peek_dt,
+            datetime.time(DEPLOYMENT_START_HOUR, 0, 0),
+            tzinfo=datetime.timezone.utc,
+        )
+        price_top = rank_table_at_timestamp("price", diag_ts)
+        oi_top = rank_table_at_timestamp("open_interest", diag_ts)
+        basket_set = set(syms)
+
+        def _print_table(label, rows):
+            print(f"\n[diagnostics] {label} top-{FREQ_WIDTH} @ "
+                  f"{diag_ts:%Y-%m-%d %H:%M:%S} UTC  "
+                  f"(★ = in basket)")
+            if not rows:
+                print(f"  (no rows in market.leaderboards at this timestamp)")
+                return
+            for rank, base, pct in rows:
+                marker = "★" if base in basket_set else " "
+                print(f"  {rank:>3}.  {base:<12}  {pct * 100:+8.3f}%  {marker}")
+
+        _print_table("price", price_top)
+        _print_table("open_interest", oi_top)
+
+        diag_block = {
+            "snapshot_timestamp_utc": diag_ts.isoformat(),
+            "price_top": [
+                {"rank": r, "base": b, "pct_change": pct,
+                 "in_basket": b in basket_set}
+                for r, b, pct in price_top
+            ],
+            "oi_top": [
+                {"rank": r, "base": b, "pct_change": pct,
+                 "in_basket": b in basket_set}
+                for r, b, pct in oi_top
+            ],
+        }
+
     if args.out:
         out_path = Path(args.out)
         out_path.parent.mkdir(parents=True, exist_ok=True)
+        json_payload = {
+            "date": peek_dt.isoformat(),
+            "symbols": syms,
+            "basket_size": len(syms),
+            "snapshot_timestamp_utc": (
+                fallback_ts.isoformat()
+                if fallback_ts
+                else f"{peek_dt.isoformat()}T{DEPLOYMENT_START_HOUR:02d}:00:00"
+            ),
+            "is_partial": fallback_ts is not None,
+            "build_seconds": round(build_seconds, 1),
+            "freq_seconds": round(freq_seconds, 1),
+            "run_config": {
+                "freq_width": FREQ_WIDTH,
+                "freq_cutoff": FREQ_CUTOFF,
+                "mode": MODE,
+                "deployment_start_hour": DEPLOYMENT_START_HOUR,
+                "index_lookback": oa.INDEX_LOOKBACK,
+                "sort_lookback": oa._resolve_sort_lookback(),
+                "sample_interval": SAMPLE_INTERVAL,
+                "min_mcap": MIN_MCAP,
+                "overlap_dimensions": OVERLAP_DIMENSIONS,
+                "sort_by": SORT_BY,
+                "price_ranking_metric": "pct_change",
+                "oi_ranking_metric": "pct_change",
+            },
+        }
+        if diag_block is not None:
+            json_payload["diagnostics"] = diag_block
         with open(out_path, "w") as f:
-            json.dump({
-                "date": peek_dt.isoformat(),
-                "symbols": syms,
-                "basket_size": len(syms),
-                "snapshot_timestamp_utc": (
-                    fallback_ts.isoformat()
-                    if fallback_ts
-                    else f"{peek_dt.isoformat()}T{DEPLOYMENT_START_HOUR:02d}:00:00"
-                ),
-                "is_partial": fallback_ts is not None,
-                "build_seconds": round(build_seconds, 1),
-                "freq_seconds": round(freq_seconds, 1),
-                "run_config": {
-                    "freq_width": FREQ_WIDTH,
-                    "freq_cutoff": FREQ_CUTOFF,
-                    "mode": MODE,
-                    "deployment_start_hour": DEPLOYMENT_START_HOUR,
-                    "index_lookback": oa.INDEX_LOOKBACK,
-                    "sort_lookback": oa._resolve_sort_lookback(),
-                    "sample_interval": SAMPLE_INTERVAL,
-                    "min_mcap": MIN_MCAP,
-                    "overlap_dimensions": OVERLAP_DIMENSIONS,
-                    "sort_by": SORT_BY,
-                    "price_ranking_metric": "pct_change",
-                    "oi_ranking_metric": "pct_change",
-                },
-            }, f, indent=2)
+            json.dump(json_payload, f, indent=2)
         print(f"  wrote {out_path}")
 
 
