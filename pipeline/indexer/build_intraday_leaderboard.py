@@ -452,6 +452,29 @@ def write_leaders_to_db(leaders_long: pd.DataFrame, date_str: str) -> int:
     try:
         conn = get_conn()
         cur = conn.cursor()
+        # When --force is set, the user wants the rankings recomputed from
+        # the current state of futures_1m. The default INSERT path uses
+        # ON CONFLICT DO NOTHING (idempotent re-runs), but that means a
+        # ranking *change* (e.g. a symbol newly visible after an anchor-
+        # fallback fix) can't displace the existing rank-N row. Wipe the
+        # day's rows for this (metric, variant, anchor_hour) tuple first
+        # so the new rankings actually land. Scoped to the date + metric +
+        # anchor combo only, so concurrent runs for other metrics/anchors
+        # are unaffected.
+        if args.force:
+            cur.execute("""
+                DELETE FROM market.leaderboards
+                WHERE metric = %s AND variant = %s AND anchor_hour = %s
+                  AND timestamp_utc >= %s::date
+                  AND timestamp_utc <  (%s::date + INTERVAL '1 day')
+            """, (RANK_METRIC, VARIANT, ANCHOR_HOUR, date_str, date_str))
+            _wiped = cur.rowcount
+            if _wiped > 0:
+                tqdm.write(
+                    f"  --force: wiped {_wiped:,} existing leaderboard rows "
+                    f"for {date_str} {RANK_METRIC} anchor={ANCHOR_HOUR:02d} "
+                    f"before reinsert"
+                )
         result = execute_values(cur, """
             INSERT INTO market.leaderboards
                 (timestamp_utc, metric, variant, anchor_hour, rank, symbol_id, pct_change)
