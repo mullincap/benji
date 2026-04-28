@@ -328,6 +328,22 @@ function SignalRow({
     : "—";
   const filterName = signal.filter_name ?? "—";
 
+  // Date text color encodes the row's deploy state:
+  //   green  = went live (filter passed, trade happened)
+  //   red    = sat flat (filter triggered, no trade)
+  //   amber  = pending conv gate (today's row, now < 06:35 UTC — outcome not yet
+  //            visible because conviction window 06:00-06:35 hasn't closed)
+  const dateColor = (() => {
+    if (!signal.signal_date) return "var(--t1)";
+    const nowUtc = new Date();
+    const todayUtc = nowUtc.toISOString().slice(0, 10);
+    if (signal.signal_date === todayUtc) {
+      const cutoff = new Date(`${todayUtc}T06:35:00Z`);
+      if (nowUtc < cutoff) return "var(--amber)";
+    }
+    return signal.sit_flat ? "var(--red)" : "var(--green)";
+  })();
+
   return (
     <>
       <tr
@@ -349,7 +365,7 @@ function SignalRow({
           }}>
             {expanded ? "▾" : "▸"}
           </span>{" "}
-          {date}
+          <span style={{ color: dateColor }}>{date}</span>
         </Td>
         <Td><SourceBadge source={signal.signal_source} /></Td>
         <Td><SitFlatBadge sitFlat={signal.sit_flat} /></Td>
