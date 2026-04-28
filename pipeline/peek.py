@@ -499,6 +499,94 @@ def freq_at_exact_timestamp_db(metric: str, ts: datetime.datetime,
     return {peek_date: counter}
 
 
+def compute_strategy_filters(peek_dt: datetime.date) -> dict | None:
+    """Run Tail Guardrail + Dispersion filters for peek_dt using the SAME
+    canonical helpers the live trader uses (pipeline.audit_filters), which
+    are documented to produce identical decisions to audit.py's
+    build_tail_guardrail / build_dispersion_filter on identical inputs.
+
+    Returns None on import failure (defensive — peek's basket output is
+    still useful even if filter helpers can't be loaded).
+
+    Returns a dict with both individual gate states and the canonical
+    per-strategy combinations the live trader applies:
+        {
+            "tail_guardrail": {"sit_flat": bool, "reason": str|None},
+            "dispersion":     {"sit_flat": bool, "reason": str|None},
+            "combined": {
+                "tail_only":          {"sit_flat": bool, "reason": str|None},
+                "tail_plus_dispersion": {"sit_flat": bool, "reason": str|None},
+            },
+        }
+    """
+    try:
+        from pipeline.audit_filters import (
+            compute_tail_guardrail as _ctg,
+            compute_dispersion_filter as _cdf,
+        )
+    except Exception as e:
+        return {"error": f"audit_filters import failed: {e}"}
+
+    try:
+        tg_flat, tg_reason = _ctg(peek_dt)
+    except Exception as e:
+        tg_flat, tg_reason = None, f"tail_guardrail_error: {e}"
+    try:
+        disp_flat, disp_reason = _cdf(peek_dt)
+    except Exception as e:
+        disp_flat, disp_reason = None, f"dispersion_error: {e}"
+
+    # Per-strategy combinations:
+    #   "Tail Guardrail" strategies: only TG fires
+    #   "Tail + Dispersion" strategies: either TG or Dispersion fires
+    tail_only_flat = bool(tg_flat) if tg_flat is not None else None
+    tail_only_reason = tg_reason if tg_flat else None
+
+    if tg_flat is None or disp_flat is None:
+        td_flat, td_reason = None, "filter_error"
+    elif tg_flat:
+        td_flat, td_reason = True, tg_reason
+    elif disp_flat:
+        td_flat, td_reason = True, disp_reason
+    else:
+        td_flat, td_reason = False, None
+
+    return {
+        "tail_guardrail": {"sit_flat": tg_flat, "reason": tg_reason},
+        "dispersion": {"sit_flat": disp_flat, "reason": disp_reason},
+        "combined": {
+            "tail_only": {"sit_flat": tail_only_flat, "reason": tail_only_reason},
+            "tail_plus_dispersion": {"sit_flat": td_flat, "reason": td_reason},
+        },
+    }
+
+
+def print_strategy_filters(filters: dict) -> None:
+    """Pretty-print the filter block to stdout."""
+    if not filters:
+        return
+    if "error" in filters:
+        print(f"\n[filters]  ⚠ {filters['error']}")
+        return
+
+    def _fmt(name: str, gate: dict) -> str:
+        f = gate["sit_flat"]
+        if f is None:
+            return f"  {name:<28} ERROR — {gate.get('reason', '')}"
+        if f:
+            r = gate.get("reason") or ""
+            return f"  {name:<28} SIT FLAT  — {r}"
+        return f"  {name:<28} PASS"
+
+    print()
+    print(f"[filters]  audit_filters.py canonical helpers")
+    print(_fmt("tail guardrail:", filters["tail_guardrail"]))
+    print(_fmt("dispersion:", filters["dispersion"]))
+    print(f"  ─────────────────────────")
+    print(_fmt("combined: Tail Guardrail", filters["combined"]["tail_only"]))
+    print(_fmt("combined: Tail + Disp", filters["combined"]["tail_plus_dispersion"]))
+
+
 def fetch_blofin_status(bases: list[str]) -> dict[str, bool]:
     """Return {base: on_blofin} for each base. Lookups market.symbols.blofin_id;
     a NULL or empty value means the symbol is not in BloFin's USDT-perp list
@@ -938,7 +1026,8 @@ def write_json_output(out_path: Path, peek_dt: datetime.date, basket: list[str],
                        diagnostics_block: dict | None,
                        conviction_roi: dict | None = None,
                        trade_roi: dict | None = None,
-                       blofin_status: dict[str, bool] | None = None) -> None:
+                       blofin_status: dict[str, bool] | None = None,
+                       filters: dict | None = None) -> None:
     payload = {
         "date": peek_dt.isoformat(),
         "symbols": basket,
@@ -975,6 +1064,8 @@ def write_json_output(out_path: Path, peek_dt: datetime.date, basket: list[str],
         payload["conviction_roi"] = conviction_roi
     if trade_roi is not None:
         payload["trade_roi"] = trade_roi
+    if filters is not None:
+        payload["filters"] = filters
     out_path.parent.mkdir(parents=True, exist_ok=True)
     with open(out_path, "w") as f:
         json.dump(payload, f, indent=2)
@@ -1152,6 +1243,17 @@ def main() -> None:
             ],
         }
 
+    # ── Strategy filters: Tail Guardrail + Dispersion ──
+    # Uses pipeline.audit_filters (the canonical helpers shared by
+    # daily_signal_v2 and the audit verifier — documented to produce
+    # identical decisions to audit.py's build_tail_guardrail and
+    # build_dispersion_filter on identical inputs). Surfaces both
+    # individual gate states and the per-strategy combinations the
+    # live trader applies ("Tail Guardrail" alone, "Tail + Dispersion").
+    filters_block = compute_strategy_filters(peek_dt) if basket else None
+    if filters_block:
+        print_strategy_filters(filters_block)
+
     # ── Window ROI: conviction gate (06:00–06:35) + trade window (06:35–23:55) ──
     # Both blocks are gated on "now >= 06:35 UTC of peek_date" — the conviction
     # window is only meaningful after it CLOSES, not while it's in-progress.
@@ -1185,7 +1287,8 @@ def main() -> None:
                             timing, args.source, diagnostics_block,
                             conviction_roi=conviction_roi,
                             trade_roi=trade_roi,
-                            blofin_status=blofin_status)
+                            blofin_status=blofin_status,
+                            filters=filters_block)
         print(f"  wrote {out_path}")
 
 
