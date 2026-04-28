@@ -671,6 +671,71 @@ def run_db_source(peek_dt: datetime.date, force_build: bool):
 
 
 # ---------------------------------------------------------------------------
+# Diff helpers (--diff-against-db)
+# ---------------------------------------------------------------------------
+
+def _ranks_to_dict(ranks: list) -> dict:
+    """Convert [(rank, base, pct), ...] → {base: (rank, pct)}."""
+    return {base: (rank, pct) for rank, base, pct in ranks}
+
+
+def print_basket_diff(amber_basket: list[str], db_basket: list[str]) -> None:
+    a, d = set(amber_basket), set(db_basket)
+    only_amber = sorted(a - d)
+    only_db = sorted(d - a)
+    both = sorted(a & d)
+    print()
+    print(f"[diff vs db] basket comparison")
+    print(f"  amber only ({len(only_amber)}): "
+          f"{' '.join(only_amber) if only_amber else '(none)'}")
+    print(f"  db only    ({len(only_db)}): "
+          f"{' '.join(only_db) if only_db else '(none)'}")
+    print(f"  both       ({len(both)}): "
+          f"{' '.join(both) if both else '(none)'}")
+    overlap_pct = (len(both) / max(len(a | d), 1)) * 100.0
+    print(f"  Jaccard overlap: {len(both)}/{len(a | d)} = {overlap_pct:.1f}%")
+
+
+def print_rank_diff(label: str,
+                     amber_ranks: list,
+                     db_ranks: list,
+                     amber_basket: list[str],
+                     db_basket: list[str]) -> None:
+    a_dict = _ranks_to_dict(amber_ranks)
+    d_dict = _ranks_to_dict(db_ranks)
+    a_basket_set = set(amber_basket)
+    d_basket_set = set(db_basket)
+    all_bases = sorted(set(a_dict) | set(d_dict),
+                       key=lambda b: min(a_dict.get(b, (999, 0))[0],
+                                          d_dict.get(b, (999, 0))[0]))
+    print(f"\n[diff vs db] {label} top-{FREQ_WIDTH} rank diff "
+          f"(★a/★d = in amber/db basket; ‼ = rank moved >2)")
+    print(f"  {'base':<12}  {'amber':>14}  {'db':>14}  {'Δrank':>6}  flags")
+    print(f"  {'-'*12}  {'-'*14}  {'-'*14}  {'-'*6}  -----")
+    for base in all_bases:
+        a = a_dict.get(base)
+        d = d_dict.get(base)
+        a_str = (f"#{a[0]:<2} {a[1] * 100:+7.3f}%" if a else f"{'—':>14}")
+        d_str = (f"#{d[0]:<2} {d[1] * 100:+7.3f}%" if d else f"{'—':>14}")
+        if a and d:
+            drank = a[0] - d[0]
+            drank_str = f"{drank:+d}"
+        else:
+            drank_str = "  —"
+        flags = ""
+        flags += "★a" if base in a_basket_set else "  "
+        flags += " "
+        flags += "★d" if base in d_basket_set else "  "
+        if a and d and abs(a[0] - d[0]) > 2:
+            flags += " ‼"
+        if not a:
+            flags += " (db-only)"
+        elif not d:
+            flags += " (amber-only)"
+        print(f"  {base:<12}  {a_str:>14}  {d_str:>14}  {drank_str:>6}  {flags}")
+
+
+# ---------------------------------------------------------------------------
 # Output
 # ---------------------------------------------------------------------------
 
@@ -762,6 +827,12 @@ def main() -> None:
                          "coverage is complete.")
     ap.add_argument("--clear-cache", type=str, default=None, metavar="YYYY-MM-DD",
                     help="Delete all peek_cache files for the given date and exit.")
+    ap.add_argument("--diff-against-db", action="store_true",
+                    help="Run BOTH amber and db sources for the date and print "
+                         "the basket + rank-table diff. Past dates only (DB "
+                         "has no rows for today). Useful for validating that "
+                         "the amber-direct path matches market.leaderboards "
+                         "for historical dates.")
     args = ap.parse_args()
 
     if args.clear_cache:
@@ -786,6 +857,61 @@ def main() -> None:
     utc_today = datetime.datetime.now(datetime.timezone.utc).date()
     if peek_dt > utc_today + datetime.timedelta(days=1):
         ap.error(f"date {peek_dt} is in the future (UTC); no data possible")
+
+    if args.diff_against_db:
+        if peek_dt >= utc_today:
+            ap.error(f"--diff-against-db requires a past UTC date "
+                     f"(got {peek_dt}, current UTC date {utc_today}); "
+                     "DB has no leaderboard rows for today.")
+        print(f"[diff] running amber source...")
+        a_basket, a_snap, a_fb, a_price, a_oi, a_timing = \
+            run_amber_source(peek_dt, no_cache=args.no_cache)
+        print(f"\n[diff] running db source...")
+        d_basket, d_snap, d_fb, d_price, d_oi, d_timing = \
+            run_db_source(peek_dt, force_build=args.force_build)
+        print_basket_diff(a_basket, d_basket)
+        print_rank_diff("price", a_price, d_price, a_basket, d_basket)
+        print_rank_diff("open_interest", a_oi, d_oi, a_basket, d_basket)
+        if args.out:
+            out_path = Path(args.out)
+            out_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(out_path, "w") as f:
+                json.dump({
+                    "date": peek_dt.isoformat(),
+                    "amber": {
+                        "basket": a_basket,
+                        "snapshot_timestamp_utc": a_snap.isoformat(),
+                        "price_top": [
+                            {"rank": r, "base": b, "pct_change": pct}
+                            for r, b, pct in a_price
+                        ],
+                        "oi_top": [
+                            {"rank": r, "base": b, "pct_change": pct}
+                            for r, b, pct in a_oi
+                        ],
+                        "timing": a_timing,
+                    },
+                    "db": {
+                        "basket": d_basket,
+                        "snapshot_timestamp_utc": d_snap.isoformat(),
+                        "price_top": [
+                            {"rank": r, "base": b, "pct_change": pct}
+                            for r, b, pct in d_price
+                        ],
+                        "oi_top": [
+                            {"rank": r, "base": b, "pct_change": pct}
+                            for r, b, pct in d_oi
+                        ],
+                        "timing": d_timing,
+                    },
+                    "diff": {
+                        "amber_only": sorted(set(a_basket) - set(d_basket)),
+                        "db_only": sorted(set(d_basket) - set(a_basket)),
+                        "both": sorted(set(a_basket) & set(d_basket)),
+                    },
+                }, f, indent=2)
+            print(f"\n  wrote {out_path}")
+        return
 
     if args.source == "amber":
         basket, snap_dt, fallback_dt, price_ranks, oi_ranks, timing = \
