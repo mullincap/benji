@@ -499,6 +499,34 @@ def freq_at_exact_timestamp_db(metric: str, ts: datetime.datetime,
     return {peek_date: counter}
 
 
+def fetch_blofin_status(bases: list[str]) -> dict[str, bool]:
+    """Return {base: on_blofin} for each base. Lookups market.symbols.blofin_id;
+    a NULL or empty value means the symbol is not in BloFin's USDT-perp list
+    (per the latest refresh_symbol_registry cron run, currently 00:45 UTC daily).
+
+    Used by peek to ANNOTATE basket symbols that wouldn't be tradable on
+    BloFin — without dropping them. This makes the audit-vs-live divergence
+    legible: the user sees 'audit selected X but BloFin doesn't list X'
+    rather than 'X silently missing from one of the baskets'."""
+    if not bases:
+        return {}
+    conn = get_conn()
+    try:
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT base, (blofin_id IS NOT NULL AND blofin_id <> '')
+            FROM market.symbols
+            WHERE base = ANY(%s)
+        """, (bases,))
+        out = {b: False for b in bases}  # default: unknown → treat as off
+        for base, on_blofin in cur.fetchall():
+            out[base] = bool(on_blofin)
+        cur.close()
+        return out
+    finally:
+        conn.close()
+
+
 def fetch_close_bars_db(bases: list[str],
                          start_dt: datetime.datetime,
                          end_dt: datetime.datetime) -> dict[str, list[tuple]]:
@@ -909,11 +937,15 @@ def write_json_output(out_path: Path, peek_dt: datetime.date, basket: list[str],
                        timing: dict, source: str,
                        diagnostics_block: dict | None,
                        conviction_roi: dict | None = None,
-                       trade_roi: dict | None = None) -> None:
+                       trade_roi: dict | None = None,
+                       blofin_status: dict[str, bool] | None = None) -> None:
     payload = {
         "date": peek_dt.isoformat(),
         "symbols": basket,
         "basket_size": len(basket),
+        "blofin_status": blofin_status or {},
+        "symbols_not_on_blofin": [b for b in basket
+                                    if not (blofin_status or {}).get(b, False)],
         "snapshot_timestamp_utc": snap_dt.isoformat(),
         "is_partial": fallback_dt is not None or (
             snap_dt < datetime.datetime.combine(
@@ -1082,9 +1114,22 @@ def main() -> None:
         if is_partial
         else f"snapshot @ {DEPLOYMENT_START_HOUR:02d}:00:00 UTC"
     )
+    # Annotate basket symbols with BloFin tradability. Symbols without a
+    # blofin_id in market.symbols (per the daily refresh_symbol_registry cron)
+    # are flagged ⚠ in stdout — they're in the audit's basket but the live
+    # trader can't trade them, so this is one of the dominant axes of
+    # audit-vs-live divergence.
+    blofin_status = fetch_blofin_status(basket) if basket else {}
+    not_on_blofin = [b for b in basket if not blofin_status.get(b, False)]
+
+    def _annotate(b: str) -> str:
+        return b if blofin_status.get(b, False) else f"{b}⚠"
+
     print()
     print(f"[peek-date {peek_dt.isoformat()}] {len(basket)} symbols  ({snap_label})")
-    print(f"  → {' '.join(basket) if basket else '(empty basket)'}")
+    print(f"  → {' '.join(_annotate(b) for b in basket) if basket else '(empty basket)'}")
+    if not_on_blofin:
+        print(f"  ⚠ {len(not_on_blofin)} not on BloFin: {' '.join(not_on_blofin)}")
     timing_str = "  ".join(f"{k}={v}s" for k, v in timing.items())
     print(f"  {timing_str}")
 
@@ -1139,7 +1184,8 @@ def main() -> None:
         write_json_output(out_path, peek_dt, basket, snap_dt, fallback_dt,
                             timing, args.source, diagnostics_block,
                             conviction_roi=conviction_roi,
-                            trade_roi=trade_roi)
+                            trade_roi=trade_roi,
+                            blofin_status=blofin_status)
         print(f"  wrote {out_path}")
 
 
