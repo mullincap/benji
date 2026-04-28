@@ -335,11 +335,23 @@ def prestage_parquet(
     _cur.close()
     _conn.close()
 
-    parquet_stale = False
+    # Two failure modes worth distinguishing:
+    #   - parquet_missing: file genuinely absent (e.g. fresh deploy / wiped
+    #     state / corrupt). Triggers a full rebuild — without the file,
+    #     downstream code paths that try to read it will crash hard.
+    #   - parquet_stale: file exists but doesn't span [db_first, db_last]
+    #     (e.g. an emergency 1-day topup left a thin parquet). For
+    #     price_source="db" audits, overlap_analysis reads from
+    #     market.leaderboards directly and doesn't open the parquet, so
+    #     a stale parquet is acceptable. Log a warning instead of doing
+    #     a 3-hour rebuild that would race against any concurrent manual
+    #     rebuild and block the audit user for hours.
+    parquet_missing = False
+    stale_metrics: list[str] = []
     for metric in ("price", "open_interest", "volume"):
         pq_path = Path(base_dir) / "leaderboards" / metric / f"intraday_pct_leaderboard_{metric}_top333_anchor0000_ALL.parquet"
         if not pq_path.exists():
-            parquet_stale = True
+            parquet_missing = True
             break
         try:
             pf = _pq.ParquetFile(str(pq_path))
@@ -348,18 +360,20 @@ def prestage_parquet(
             pq_first = first_rg.to_pandas()["timestamp_utc"].min().date()
             pq_last = last_rg.to_pandas()["timestamp_utc"].max().date()
             if pq_last < db_last or pq_first > db_first:
-                parquet_stale = True
-                break
-        except Exception:
-            parquet_stale = True
+                stale_metrics.append(
+                    f"{metric}: pq=[{pq_first}, {pq_last}] vs db=[{db_first}, {db_last}]"
+                )
+        except Exception as _e:
+            # Corrupt parquet — treat as missing so a rebuild repairs it.
+            print(f"  ⚠ {metric} parquet read failed ({_e}); treating as missing")
+            parquet_missing = True
             break
 
-    if parquet_stale:
+    if parquet_missing:
         if on_rebuild_start:
             on_rebuild_start()
         # Delete ALL parquets + filtered caches so the rebuild starts
-        # from scratch across the full DB date range, not just the
-        # delta since the last parquet end date.
+        # from scratch across the full DB date range.
         for stale in _glob.glob(f"{base_dir}/leaderboard_*_filtered_*"):
             os.remove(stale)
         db_first_str = db_first.strftime("%Y-%m-%d")
@@ -375,8 +389,13 @@ def prestage_parquet(
             subprocess.run(lb_cmd, cwd=str(pipeline_dir), env=pipeline_env,
                            capture_output=True, timeout=14400)  # 4h — full rebuild is ~3h
     else:
-        # Parquets are current — still need to clear filtered caches
-        # in case the filter params changed since last run.
+        if stale_metrics:
+            print(
+                f"  ⚠ leaderboard parquets are stale (db source path doesn't "
+                f"read them, so audit will proceed): " + "; ".join(stale_metrics)
+            )
+        # Clear filtered caches in case the filter params changed since
+        # last run — applies whether or not the master parquets are stale.
         for stale in _glob.glob(f"{base_dir}/leaderboard_*_filtered_*"):
             os.remove(stale)
 
