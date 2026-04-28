@@ -460,45 +460,151 @@ function StatusBadge({ status }: { status: "missing" | "partial" }) {
 
 // ─── Page ────────────────────────────────────────────────────────────────────
 
+type FillStatus = {
+  job_id: string;
+  state: "queued" | "running" | "done" | "completed_with_errors" | "failed";
+  dates_total: number;
+  dates_completed: number;
+  dates_failed: number;
+  current_date: string | null;
+  current_state: string | null;
+  elapsed_seconds: number;
+  summary: string | null;
+  errors?: string[];
+};
+
 export default function CompilerCoveragePage() {
   const router = useRouter();
   const [state, setState] = useState<LoadState>({ kind: "loading" });
   const [preset, setPreset] = useState<LookbackPreset>(DEFAULT_PRESET);
   const [refreshNonce, setRefreshNonce] = useState(0);
-  const [refreshStatus, setRefreshStatus] = useState<
-    | { kind: "idle" }
-    | { kind: "running" }
-    | { kind: "ok"; elapsed: number }
-    | { kind: "error"; message: string }
-  >({ kind: "idle" });
+  // fillStatus: null = idle. Otherwise the latest poll result.
+  const [fillStatus, setFillStatus] = useState<FillStatus | null>(null);
+  const [fillError, setFillError] = useState<string | null>(null);
 
   const goToDay = (date: string) => router.push(`/compiler/days/${date}`);
 
-  // POST /api/compiler/coverage/refresh — recomputes the continuous aggregates
-  // the coverage map reads from. After success, bumps refreshNonce so the data
-  // load below re-runs and the heatmap reflects the new aggregate values.
-  async function handleRefreshCaggs() {
-    if (refreshStatus.kind === "running") return;
-    setRefreshStatus({ kind: "running" });
+  const fillIsTerminal = (s: FillStatus | null) =>
+    s !== null && (s.state === "done" || s.state === "failed" ||
+                   s.state === "completed_with_errors");
+  const fillIsRunning = (s: FillStatus | null) =>
+    s !== null && (s.state === "queued" || s.state === "running");
+
+  // Poll the worker's status JSON every 3s while the job is in-flight.
+  // Stops when state becomes terminal. Restarts if a new job is kicked off.
+  useEffect(() => {
+    if (!fillStatus || fillIsTerminal(fillStatus)) return;
+    const job_id = fillStatus.job_id;
+    const interval = window.setInterval(async () => {
+      try {
+        const res = await fetch(
+          `${API_BASE}/api/compiler/coverage/fill-missing/status?job_id=${job_id}`,
+          { credentials: "include" },
+        );
+        if (res.status === 404 || res.status === 503) return; // brief race
+        if (!res.ok) return;
+        const next = (await res.json()) as FillStatus;
+        setFillStatus(next);
+        if (fillIsTerminal(next)) {
+          // Refresh the page data once the job completes
+          setRefreshNonce((n) => n + 1);
+        }
+      } catch {
+        // network blips: ignore, keep polling
+      }
+    }, 3000);
+    return () => window.clearInterval(interval);
+  }, [fillStatus]);
+
+  // On page load, check for an active fill job and rehydrate state.
+  useEffect(() => {
+    let cancelled = false;
+    fetch(`${API_BASE}/api/compiler/coverage/fill-missing/active`,
+          { credentials: "include" })
+      .then((r) => r.ok ? r.json() : null)
+      .then((doc) => {
+        if (cancelled || !doc || !doc.job_id) return;
+        setFillStatus(doc as FillStatus);
+      })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, []);
+
+  async function handleFillMissing() {
+    if (fillIsRunning(fillStatus)) return;
+    setFillError(null);
+
+    // 1. Hit the endpoint with no `dates` arg — backend auto-detects gaps.
+    //    We need to know the gap count to decide whether to confirm.
+    //    The endpoint will (a) return done immediately with dates_total=0
+    //    if no gaps (cheap cagg refresh path), or (b) return queued with
+    //    a list of dates if gaps were found.
+    let initial: { job_id: string; state: string; dates_total: number;
+                   dates?: string[]; summary?: string };
     try {
       const res = await fetch(
-        `${API_BASE}/api/compiler/coverage/refresh?days=7`,
+        `${API_BASE}/api/compiler/coverage/fill-missing?days_back=30`,
         { method: "POST", credentials: "include" },
       );
       if (!res.ok) {
         const text = await res.text().catch(() => `HTTP ${res.status}`);
-        setRefreshStatus({ kind: "error", message: text.slice(0, 200) });
+        setFillError(text.slice(0, 200));
         return;
       }
-      const body = (await res.json()) as { elapsed_seconds: number };
-      setRefreshStatus({ kind: "ok", elapsed: body.elapsed_seconds });
-      setRefreshNonce((n) => n + 1);
-      // Auto-clear the success state after a few seconds
-      setTimeout(() => setRefreshStatus({ kind: "idle" }), 4000);
+      initial = await res.json();
     } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      setRefreshStatus({ kind: "error", message });
+      setFillError(err instanceof Error ? err.message : String(err));
+      return;
     }
+
+    // 2. Zero-gap fast path: state=done, just show the summary.
+    if (initial.state === "done") {
+      setFillStatus({
+        job_id: initial.job_id,
+        state: "done",
+        dates_total: 0,
+        dates_completed: 0,
+        dates_failed: 0,
+        current_date: null,
+        current_state: null,
+        elapsed_seconds: 0,
+        summary: initial.summary || "No partial days found",
+      });
+      setRefreshNonce((n) => n + 1);
+      setTimeout(() => setFillStatus(null), 6000);
+      return;
+    }
+
+    // 3. Gaps found — confirm with the user before letting the worker proceed.
+    //    NOTE: the worker is already running (POST already kicked it off).
+    //    For MVP we let it run; future enhancement could split into preview +
+    //    commit endpoints. For now: prompt is informational, not blocking.
+    const dates = initial.dates || [];
+    const estMin = Math.ceil((dates.length * 7) / 1) || 1; // ~7 min/day for metl
+    const ok = window.confirm(
+      `Found ${dates.length} partial day(s):\n` +
+      `  ${dates.join(", ")}\n\n` +
+      `Estimated time: ~${estMin} min (metl re-fetches per day).\n\n` +
+      `The job is already running in the background.\n` +
+      `OK = keep tracking it; Cancel = ignore (job continues regardless).`
+    );
+    if (!ok) {
+      // Don't show progress UI but the worker is still running. User can
+      // refresh the page to pick it up via the /active endpoint.
+      return;
+    }
+
+    setFillStatus({
+      job_id: initial.job_id,
+      state: "queued",
+      dates_total: dates.length,
+      dates_completed: 0,
+      dates_failed: 0,
+      current_date: null,
+      current_state: "queued",
+      elapsed_seconds: 0,
+      summary: null,
+    });
   }
 
   useEffect(() => {
@@ -561,20 +667,27 @@ export default function CompilerCoveragePage() {
             </h1>
           </div>
           <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
-            {refreshStatus.kind === "ok" && (
+            {fillStatus && fillIsTerminal(fillStatus) && fillStatus.summary && (
               <span style={{
                 fontSize: 9,
                 fontWeight: 700,
                 letterSpacing: "0.12em",
                 textTransform: "uppercase",
-                color: "var(--green)",
+                color: fillStatus.state === "done" ? "var(--green)"
+                       : fillStatus.state === "failed" ? "var(--red)"
+                       : "var(--amber)",
                 fontFamily: "var(--font-space-mono), Space Mono, monospace",
-              }}>
-                refreshed in {refreshStatus.elapsed}s
+                maxWidth: 280,
+                overflow: "hidden",
+                textOverflow: "ellipsis",
+                whiteSpace: "nowrap",
+              }} title={fillStatus.summary}>
+                {fillStatus.state === "done" ? "✓" :
+                 fillStatus.state === "failed" ? "✗" : "⚠"} {fillStatus.summary}
               </span>
             )}
-            {refreshStatus.kind === "error" && (
-              <span title={refreshStatus.message} style={{
+            {fillError && (
+              <span title={fillError} style={{
                 fontSize: 9,
                 fontWeight: 700,
                 letterSpacing: "0.12em",
@@ -582,21 +695,17 @@ export default function CompilerCoveragePage() {
                 color: "var(--red)",
                 fontFamily: "var(--font-space-mono), Space Mono, monospace",
               }}>
-                refresh failed
+                ✗ {fillError.slice(0, 60)}
               </span>
             )}
             <button
               type="button"
-              onClick={handleRefreshCaggs}
-              disabled={refreshStatus.kind === "running" || state.kind === "loading"}
-              title="Recompute the continuous aggregates this page reads from. Use after a manual data backfill."
+              onClick={handleFillMissing}
+              disabled={fillIsRunning(fillStatus) || state.kind === "loading"}
+              title="Detect days with incomplete data in market.futures_1m, delete + re-run metl for each, then refresh the continuous aggregates. Today (UTC) is always excluded from auto-detect."
               style={{
-                background: refreshStatus.kind === "running"
-                  ? "var(--bg4)"
-                  : "var(--bg2)",
-                color: refreshStatus.kind === "running"
-                  ? "var(--t2)"
-                  : "var(--t1)",
+                background: fillIsRunning(fillStatus) ? "var(--bg4)" : "var(--bg2)",
+                color: fillIsRunning(fillStatus) ? "var(--amber)" : "var(--t1)",
                 border: "1px solid var(--line)",
                 borderRadius: 4,
                 padding: "6px 14px",
@@ -605,25 +714,42 @@ export default function CompilerCoveragePage() {
                 letterSpacing: "0.12em",
                 textTransform: "uppercase",
                 fontFamily: "var(--font-space-mono), Space Mono, monospace",
-                cursor: refreshStatus.kind === "running" ? "wait"
+                cursor: fillIsRunning(fillStatus) ? "wait"
                   : state.kind === "loading" ? "not-allowed"
                   : "pointer",
                 transition: "background 0.15s ease, color 0.15s ease",
+                minWidth: 120,
+                whiteSpace: "nowrap",
               }}
               onMouseEnter={(e) => {
-                if (refreshStatus.kind !== "running" && state.kind !== "loading") {
+                if (!fillIsRunning(fillStatus) && state.kind !== "loading") {
                   e.currentTarget.style.background = "var(--bg4)";
                   e.currentTarget.style.color = "var(--t0)";
                 }
               }}
               onMouseLeave={(e) => {
-                if (refreshStatus.kind !== "running") {
+                if (!fillIsRunning(fillStatus)) {
                   e.currentTarget.style.background = "var(--bg2)";
                   e.currentTarget.style.color = "var(--t1)";
                 }
               }}
             >
-              {refreshStatus.kind === "running" ? "refreshing…" : "refresh cagg"}
+              {(() => {
+                if (!fillStatus || !fillIsRunning(fillStatus)) return "fill missing";
+                const total = fillStatus.dates_total;
+                const done = fillStatus.dates_completed + fillStatus.dates_failed;
+                const cur = fillStatus.current_date;
+                const elapsed = fillStatus.elapsed_seconds;
+                const mm = Math.floor(elapsed / 60);
+                const ss = String(elapsed % 60).padStart(2, "0");
+                if (cur) {
+                  return `filling ${done + 1}/${total}: ${cur} ${mm}:${ss}`;
+                }
+                if (fillStatus.current_state === "refreshing_caggs") {
+                  return `refreshing caggs ${mm}:${ss}`;
+                }
+                return `queued ${mm}:${ss}`;
+              })()}
             </button>
             <LookbackSegmentControl
               value={preset}

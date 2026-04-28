@@ -141,6 +141,310 @@ at promotion time. Frontend fix is the safe ship-now path.
 
 ## 🟡 Active — when ready
 
+### [v2] Include today's partial day in fill-missing auto-detect
+
+Surfaced 2026-04-28. The `fill missing` button on `/compiler/coverage` and
+`/indexer/coverage` currently auto-detects gaps in the last 30 days but
+**excludes today (UTC) from auto-detect** — today's data is in-progress
+and would always look "partial" regardless of any data fix.
+
+For v2: add an explicit "include today" path so users can top up today's
+in-progress data on demand. Two options:
+- **Smart threshold**: re-define "complete for today" as `≥ floor(elapsed_minutes_since_00:00_UTC × 0.9)` per symbol, then today is auto-detectable when its actual coverage falls below that threshold.
+- **Separate "fill today" button** that always runs a fresh metl for today + cagg refresh, regardless of completeness.
+
+Workaround in current version: pass `?dates=YYYY-MM-DD` explicitly to the
+POST endpoint to fill any specific date including today.
+
+> **Top 3 priorities for 2026-04-27** (set late 2026-04-26):
+> 1. **BloFin futures instrument daily snapshot** — survivorship bias foundation
+> 2. **Audit-derived basket as canonical signal source** — daily_signal as fallback
+> 3. **Allocation distribution shim** — multi-strategy on shared exchange account
+>
+> *Nothing else in this section is more important than these three.*
+
+### [#1] BloFin futures instrument daily snapshot — survivorship bias foundation
+
+Surfaced 2026-04-26 late. Today the audit and the live trader each
+discover the universe of "currently tradable" symbols at runtime
+(audit reads `market.futures_1m`; live reads Binance `exchangeInfo`
++ BloFin `/instruments` endpoints at session start). Neither persists
+a daily snapshot of "these were the actually-tradable instruments on
+day X", which means:
+
+1. **Survivorship bias is invisible.** The audit can include symbols
+   that were tradable on day X but have since been delisted from
+   BloFin (or Binance). The live trader can never trade them today,
+   but they show up in historical baskets via `market.futures_1m`.
+   We have no way to detect this gap because we don't snapshot the
+   per-day instrument list.
+
+2. **Backtest results may be inflated.** Symbols that delist
+   typically do so after sustained price decline; including their
+   pre-delisting returns while excluding their unrecoverable end
+   inflates Sharpe + CAGR. Magnitude unknown today.
+
+3. **Audit-vs-live universe mismatch can't be quantified
+   historically.** Today's "audit ~565 / live ~535" gap is a single
+   snapshot — the historical drift is unknown.
+
+**What to build:**
+
+1. **New cron at 00:05 UTC** (right after metl 00:15 — actually
+   slightly before, or a separate slot like 23:55 prior-day): pulls
+   BloFin's `/api/v1/market/instruments?instType=SWAP` and persists
+   every entry as a row keyed by `(date, symbol)`. Snapshot
+   includes: `instrument_id`, `contract_value (ctval)`, `tick_size`,
+   `status`, `listing_date` if available.
+
+2. **Same for Binance** (`/fapi/v1/exchangeInfo` filtered to
+   `contractType=PERPETUAL`). Together the two snapshots let us
+   answer "what was tradable on each exchange on day X?"
+   historically.
+
+3. **New table** `market.exchange_instruments_daily(date, exchange,
+   binance_id|blofin_id, status, ctval, listing_date, ...)` with PK
+   `(date, exchange, symbol)`.
+
+4. **Backfill from BloFin/Binance API** if they return historical
+   listing metadata. If not, the snapshot starts from day-1 of the
+   cron and we accept the historical gap (mark it explicitly in the
+   table).
+
+5. **Audit hook**: when the audit's basket-selection step picks a
+   symbol for day X, cross-reference against
+   `market.exchange_instruments_daily WHERE date=X` and emit a
+   counter for "selected but not tradable on BloFin that day."
+   Initially logging-only; later optionally exclude from baskets.
+
+6. **Survivorship-bias estimator**: nightly job that recomputes the
+   canonical audit *with* the day-X tradability filter applied and
+   reports the Sharpe/CAGR/maxDD delta vs unfiltered. This becomes
+   the "survivorship bias coefficient" for the strategy.
+
+**Why this is #1 priority.** Every audit-vs-live alignment question
+is more reliable once we can answer "was this symbol tradable on
+that exchange that day?" historically. Today we're guessing — the
+live=8 vs audit=10 basket gap on 2026-04-26 may already be partially
+explained by symbols audit included that BloFin had delisted, but we
+have no way to check.
+
+**Scope:** ~4-6h. New cron + table + writer (~150 LOC), backfill
+shim (~50 LOC if APIs allow), audit cross-ref hook (~30 LOC), CLI to
+query the snapshot (~30 LOC). Survivorship-bias estimator is a
+follow-up that builds on this foundation.
+
+---
+
+### [#2] Audit-derived basket as canonical signal source (daily_signal as fallback)
+
+Surfaced 2026-04-26. Today's flow runs the canonical audit *after* the
+06:00 UTC trading session has already happened, so the trader can never
+read the audit's exact basket for today — it has to recompute its own
+basket via `daily_signal_v2.py` at 05:58 UTC. The two paths can pick
+different symbols even after PR #6/#7/#8 closed the structural gaps
+(live=8 vs audit=10 for 2026-04-26 is the most recent example) because
+each runs its own dispersion universe selection, mcap cutoff, and
+ranking under slightly different data assumptions.
+
+The fix is to invert the dependency: **audit becomes the primary basket
+source, daily_signal becomes the fallback**.
+
+**What this requires:**
+
+1. **Update audit so it runs and persists today's basket *before* the
+   06:00 UTC trading session, not after.** Today the canonical audit
+   runs end-of-day after the session closes. We need a "morning-only"
+   variant (or the same script invoked earlier) that completes by
+   ~05:30 UTC using yesterday's closed data + this morning's
+   leaderboards row (already produced by the 01:00 UTC indexer cron).
+   The audit already computes per-day baskets for every day in its
+   window — extending it through "today" before 06:00 is a question of
+   cron placement + ensuring the `market.leaderboards` row at
+   `timestamp=today 06:00 UTC` is available pre-session (it currently
+   is, generated at 01:00).
+
+2. **Persist per-portfolio baskets to a queryable table.** The
+   `audit.daily_baskets` table exists from migration 018; needs a
+   schema check (date, strategy_version_id, filter_label, symbol,
+   rank, weight, source_audit_id, computed_at) and an audit.py write
+   hook that fires once per audit run.
+
+3. **Trader read-path: audit table first, fallback to daily_signal.**
+   At 05:58 UTC `daily_signal_v2.py` reads
+   `audit.daily_baskets WHERE date=today AND strategy_version_id=...`.
+   If a row exists with non-empty symbols → use it. If missing/empty/
+   stale → fall back to its own in-process computation (current path).
+
+4. **Always dual-write daily_signal's output to a comparison table.**
+   Even when audit-derived basket is used, daily_signal still computes
+   its own basket and writes it to `trader.fallback_basket` (or
+   similar). Builds an automatic side-by-side log so we can spot when
+   the two diverge and investigate without running ad-hoc queries.
+
+**Why this is high priority.** Without it, every divergence between
+audit and live (filter decisions, basket symbols, sizing) becomes a
+separate investigation against shifting data. With it, the audit's
+basket is what trades, end of story; daily_signal is just the
+safety net.
+
+**Scope:** ~6-8h. Audit cron repositioning + write hook (~150 LOC),
+trader read-path with fallback (~50 LOC in `daily_signal_v2.py`),
+fallback dual-write table + writer (~50 LOC), schema verification on
+`audit.daily_baskets` (~30 min). Does NOT require changing audit.py's
+basket-selection logic — only when/where it runs and what it persists.
+
+**Priority: #2 in top-3 (2026-04-26).** Gates real basket alignment
+between audit and live; everything else becomes simpler with this
+in place.
+
+---
+
+### [#3] Allocation distribution shim — multi-strategy on shared exchange account
+
+Surfaced 2026-04-26. Two strategies (e.g. ALTS MAIN + ALTS MAX)
+sharing the same BloFin connection / API key cannot run
+simultaneously today: the exchange holds a single net position per
+symbol, but each trader process independently tracks "its" position
+size and reads the full account balance for capital sizing. Two
+consequences if a user splits capital:
+
+1. **Capital double-counting.** Each trader reads exchange equity
+   and sizes against the full balance. Two traders against $5k each
+   try to deploy ~$5k notional → 2× intended exposure.
+2. **Position-close interference.** When trader A closes "its" SOL
+   leg, it sends a close order sized to its recorded position. If
+   trader B also has a SOL position open, A's close partially
+   flattens B's position. B's own close later fails / over-reduces.
+
+This blocked the user from splitting $5k across MAIN+MAX on
+2026-04-26 — had to pick one strategy and commit fully.
+
+**Option A — sub-account isolation (preferred long-term)**
+Each strategy gets its own BloFin sub-account + API key. Connections
+table already supports multiple rows per user. Requires the user to
+create a sub-account on BloFin manually + transfer capital + key the
+allocation to the new connection. Zero code changes if connections
+schema is already per-strategy.
+
+**Option B — software attribution layer**
+Ledger table `trader.strategy_positions(connection_id, strategy_id,
+symbol, contracts, entry_price, ...)` tracks per-strategy ownership.
+Capital sizing reads `account_equity − sum(other_strategies'
+notional)` not raw balance. Close orders sized from
+`strategy_positions[me]` not runtime_state's local view.
+Reconciliation cron reconciles `SUM(strategy_positions[symbol]) ≈
+exchange_position[symbol]` per bar.
+
+**Scope:** Option A is ~0 LOC + operational (user creates
+sub-account). Option B is ~400-600 LOC across `ExchangeAdapter`
+(strategy_id-aware size/close helpers), `trader_blofin.py`
+(read/write strategy_positions on entry+exit), new migration +
+reconcile cron. Option B is the right call if we want UI-driven
+splits without operator action.
+
+**Priority: #3 in top-3 (2026-04-26).** Gates a real product
+capability: running multiple strategies on a single exchange account
+without operator-level workarounds.
+
+---
+
+### Stale `fa_oos_sharpe` / `Sortino` / `Calmar` across audit runs
+
+Surfaced 2026-04-26 late. Three-way comparison of dispersion settings
+(A=curated+dyn `384c45fd`, B=all+dyn `d7edf759`, C=all+static
+`ba83fb24`) shows:
+- `fa_oos_sharpe` = 3.858 across all three runs (3 decimals)
+- `Sortino` = 8.234 across all three
+- `Calmar` = 46.061 across all three
+
+Other metrics (Sharpe, CAGR, max_drawdown, CV) all moved as expected.
+Three independent risk-adjusted metrics matching to 3 decimals across
+three runs with materially different daily-return series is not
+coincidence — these metrics are either:
+1. Computed on a fixed/cached upstream that doesn't refresh per run
+2. Reading from a stale parquet/db row that gets copied through
+3. Computed on a window that's identical across runs (less likely
+   given the size of the changes)
+
+**Why this matters.** `fa_oos_sharpe` is the only out-of-sample
+metric in the audit's headline summary — if it's actually being
+copied from somewhere stale, we've been mis-reporting it for a while
+in audit history cards + canonical-compare cards + nightly metrics
+emails. Sortino and Calmar being identical alongside reinforces
+hypothesis (1)/(2).
+
+**What to investigate:**
+1. Grep audit.py for `fa_oos_sharpe`, `sortino`, `calmar`
+   computation. If they're computed per run, check what input they
+   read (df_4x, daily_with_zeros, etc.) and whether that input is
+   cached.
+2. Check `audit.equity_curves` and `refresh_strategy_metrics` paths
+   — are these metrics persisted from a single canonical run and
+   then copied to subsequent rows by tag?
+3. Run a 4th audit with materially different params (e.g. swap
+   strategy version, change leverage) and check whether the three
+   "stuck" metrics finally move. If they don't, the cache is in
+   audit.py itself; if they do, the cache is somewhere upstream.
+
+**Scope:** ~1-2h. Mostly grep + trace; the fix depends on what's
+found but is likely small once located.
+
+---
+
+### Lock dispersion universe to "all + dynamic on" + surface mode in audit history
+
+Surfaced 2026-04-26. The simulator already exposes a
+`dispersion_universe_mode` toggle (curated 90 / all full-mcap) and
+a `DISPERSION_DYNAMIC_UNIVERSE` flag. Decision made 2026-04-26 to
+**default to `mode='all'` + dynamic-on regardless of Sharpe outcome**
+— see `feedback_dispersion_universe_default.md`. Methodological
+correctness wins over Sharpe optimization; reverting to curated for
+better Sharpe would be curve-fitting on universe choice and would
+silently drift from live's universe over time.
+
+**Open work:**
+
+1. **Flip the simulator UI default toggle from "curated (90 coins)"
+   to "all (full mcap table)".** Path of least resistance should be
+   the locked default. Currently runs silently default to curated,
+   which led to today's footgun (audits labelled "dynamic" were
+   actually curated for several re-runs).
+
+2. **Surface `dispersion_universe_mode` on each audit history card.**
+   The current card shows sharpe + date + name — needs a "universe:
+   all" / "universe: curated" line so the operator can tell at a
+   glance which pool was used. Eliminates the "wait, was this curated
+   or dynamic?" failure mode that ate ~30 min today.
+
+3. **Echo `dispersion_universe_mode` in `FINAL_METRICS` from
+   audit.py.** So the saved results reliably carry the mode through
+   to the audit job's persisted metrics, not just the run-config side.
+
+4. **Verify the "curated" mode mechanics** — quick read of audit.py
+   to confirm `mode='curated'` actually resolves to
+   `COINGECKO_TO_BINANCE` (89 entries, but UI says 90 — minor
+   discrepancy worth understanding).
+
+5. **Re-attribute today's Sharpe drop.** Pre-everything baseline was
+   ~3.815, post-Change-1 re-runs showed 3.614 with curated mode.
+   Both runs were on curated, so the 0.2 delta is NOT the dynamic-pool
+   effect — it's some downstream interaction from the date-fix or
+   BTC-source change. Once the new "all + dynamic on" and
+   "all + dynamic off" audits land (kicked off 2026-04-26 late), do a
+   clean 3-cell side-by-side and document real attribution.
+
+6. **If "all + dynamic on" Sharpe is materially below curated** (>0.3
+   drop), open a follow-up item to **re-tune the dispersion threshold
+   (currently 0.66) for the wider universe's noise profile** — NOT to
+   revert to curated.
+
+**Scope:** ~2-3h. UI default flip (~15 min), audit history card
+addition (~30 min), audit.py FINAL_METRICS echo (~30 min),
+verification + re-attribution writeup (~60 min).
+
+---
+
 ### Account-history backfill + net-imports PnL (Session F+)
 
 Surfaced 2026-04-22. Two related gaps:
@@ -446,6 +750,42 @@ found`). Falls through to master default — works but means rename of one
 strategy doesn't propagate config. One-shot SQL.
 
 **Scope:** ~10 LOC migration. Low risk.
+
+### Filter-math exposure on Audit Breakdown tab — surfaced 2026-04-27
+
+Backstory: spent ~4h on 2026-04-27 diagnosing why audit's
+`A - Tail + Dispersion` returned `no_entry=False` for 2026-04-26 while
+live ALTS MAIN sat flat with `dispersion_low: ratio=0.343 < 0.66`. Root
+cause turned out to be 35+ hardcoded `"2026-03-01"`/`"2026-03-02"` date
+literals in `audit.py` (`build_*_filter` reindex + fetcher defaults +
+caller missing `end`) that silently truncated filter Series past those
+dates. Fixed in `1997b32` via module-level `_AUDIT_IDX_END` constant.
+
+The bug was invisible because the Breakdown tab only shows
+PASS/FLAT booleans per filter — no per-day ratio numbers. If we'd seen
+`disp_ratio = (no value)` instead of `disp_ratio = 0.557` or
+`disp_ratio = 1.13` per day, the truncation would have been obvious
+within minutes.
+
+**Proposal:** add per-day filter-math columns to the Breakdown table.
+
+For each row (day):
+- **Tail Guardrail**: `prev_day_ret`, `vol_ratio`, `tg_fires`, short
+  reason (`crash gate` / `vol gate` / `both` / `clear`)
+- **Dispersion**: `yesterday_disp`, `baseline_median`, `disp_ratio`,
+  `disp_fires`
+- Color-code ratio cells (red below threshold, green above)
+
+**Scope:** ~2h backend (modify `build_tail_guardrail` and
+`build_dispersion_filter` to also return per-day diagnostic DataFrames,
+inject into `metrics.filter_diagnostics_per_day`, expose via job.json),
+~2h frontend (read from job.json, render new columns or expandable
+diagnostic row in Breakdown table). Total ~4h.
+
+**Why this matters:** future filter bugs of this class become visible
+on inspection rather than requiring a 4h reproduction-and-diagnosis
+session. Same observability principle as the audit verifier
+(intraday_audit) — make divergence loud, not silent.
 
 ---
 

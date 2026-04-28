@@ -335,6 +335,237 @@ def refresh_coverage(
         conn.close()
 
 
+# ─── /coverage/fill-missing ──────────────────────────────────────────────────
+# Two endpoints + a helper:
+#   POST /coverage/fill-missing  → spawn worker, return job_id
+#   GET  /coverage/fill-missing/status?job_id=X → poll status JSON
+#   GET  /coverage/fill-missing/active → most recent in-progress job (so the
+#                                          frontend can rehydrate state on
+#                                          page load)
+
+_FILL_MISSING_DIR = "/mnt/quant-data/jobs/fill_missing"
+
+
+def _fill_missing_status_path(job_id: str) -> str:
+    return f"{_FILL_MISSING_DIR}/{job_id}.json"
+
+
+def _detect_partial_dates_compiler(lookback_days: int = 30) -> list[str]:
+    """Return ISO dates in the last `lookback_days` where futures_1m has
+    < 95% complete coverage on close/vol/OI.
+
+    DEFENSIVE: today (UTC) is always in-progress and would always appear
+    partial regardless of any data fix — we exclude it from auto-detect.
+    The query uses `timestamp_utc < today_start` (exclusive) AND a final
+    `day < CURRENT_DATE` filter so today can't slip through even if the
+    DB's notion of "today" disagrees with the application's UTC clock.
+    """
+    import datetime as _dt
+    from ...db import get_conn
+
+    today = _dt.datetime.now(_dt.timezone.utc).date()
+    start = today - _dt.timedelta(days=lookback_days)
+    conn = get_conn()
+    try:
+        cur = conn.cursor()
+        cur.execute("""
+            WITH per_symbol_day AS (
+                SELECT
+                    timestamp_utc::date AS day,
+                    symbol_id,
+                    COUNT(close) AS close_n,
+                    COUNT(volume) AS vol_n,
+                    COUNT(open_interest) AS oi_n
+                FROM market.futures_1m
+                WHERE timestamp_utc >= %s::timestamptz
+                  AND timestamp_utc <  %s::timestamptz
+                GROUP BY timestamp_utc::date, symbol_id
+            ),
+            per_day AS (
+                SELECT
+                    day,
+                    COUNT(*) AS syms,
+                    COUNT(*) FILTER (WHERE close_n >= 1296
+                                       AND vol_n  >= 1296
+                                       AND oi_n   >= 1296) AS syms_complete
+                FROM per_symbol_day
+                GROUP BY day
+            ),
+            active_count AS (
+                SELECT COUNT(*) AS expected
+                FROM market.symbols WHERE active
+            )
+            SELECT day::text
+            FROM per_day, active_count
+            WHERE syms_complete::numeric / NULLIF(expected, 0) < 0.95
+              AND day < (timezone('UTC', NOW()))::date  -- never include today
+            ORDER BY day DESC
+        """, (start, today))
+        return [r[0] for r in cur.fetchall()]
+    finally:
+        try:
+            cur.close()
+        except Exception:
+            pass
+        conn.close()
+
+
+@router.post("/coverage/fill-missing")
+def fill_missing_coverage(
+    days_back: int = Query(30, ge=1, le=90,
+                            description="Lookback window in days when "
+                                        "auto-detecting gap days. "
+                                        "Caller-supplied `dates` override this."),
+    dates: str | None = Query(None,
+                               description="Optional comma-separated "
+                                           "YYYY-MM-DD list. If provided, "
+                                           "skips auto-detect."),
+) -> dict[str, Any]:
+    """Detect partial days in market.futures_1m, kick off a background
+    subprocess that DELETEs each day's rows + re-runs metl + refreshes the
+    caggs. Returns a job_id immediately; client polls /status?job_id=X.
+
+    If no partial dates are found, refreshes caggs synchronously (cheap)
+    and returns state=done immediately.
+    """
+    import os as _os
+    import subprocess as _sp
+    import sys as _sys
+    import uuid as _uuid
+    import time as _time
+    import json as _json
+    from ...db import get_conn
+
+    # 1. Determine which dates to fill.
+    if dates:
+        target_dates = [d.strip() for d in dates.split(",") if d.strip()]
+    else:
+        target_dates = _detect_partial_dates_compiler(lookback_days=days_back)
+
+    job_id = str(_uuid.uuid4())
+    _os.makedirs(_FILL_MISSING_DIR, exist_ok=True)
+    status_path = _fill_missing_status_path(job_id)
+
+    # 2. Zero-gap fast path: just refresh caggs synchronously.
+    if not target_dates:
+        t0 = _time.time()
+        conn = get_conn()
+        try:
+            conn.autocommit = True
+            cur = conn.cursor()
+            for name in ("market.futures_1m_daily_symbol_count",
+                         "market.symbol_day_counts"):
+                cur.execute(
+                    "CALL refresh_continuous_aggregate(%s, "
+                    "NOW() - INTERVAL '7 days', NOW())",
+                    (name,),
+                )
+            cur.close()
+        finally:
+            conn.close()
+        elapsed = round(_time.time() - t0, 1)
+        # Write a synthetic done-status so the frontend can show a
+        # consistent "✅ no gaps; cagg refreshed in Ns" message via the
+        # same status-polling path.
+        synthetic = {
+            "job_id": job_id,
+            "page": "compiler",
+            "state": "done",
+            "started_at": t0,
+            "finished_at": _time.time(),
+            "dates_total": 0,
+            "dates_completed": 0,
+            "dates_failed": 0,
+            "dates": [],
+            "current_date": None,
+            "current_state": None,
+            "elapsed_seconds": int(elapsed),
+            "errors": [],
+            "summary": f"No partial days found; cagg refreshed in {elapsed}s",
+        }
+        with open(status_path, "w") as f:
+            _json.dump(synthetic, f, indent=2)
+        return {
+            "job_id": job_id,
+            "state": "done",
+            "dates_total": 0,
+            "summary": synthetic["summary"],
+        }
+
+    # 3. Spawn detached subprocess. Don't wait.
+    cmd = [
+        _sys.executable, "-m", "app.cli.fill_missing_compiler",
+        "--job-id", job_id,
+        "--status-file", status_path,
+        "--dates", ",".join(target_dates),
+    ]
+    log_path = status_path.replace(".json", ".spawn.log")
+    with open(log_path, "w") as logf:
+        logf.write(f"spawning: {' '.join(cmd)}\n")
+        _sp.Popen(
+            cmd,
+            stdout=logf, stderr=_sp.STDOUT,
+            stdin=_sp.DEVNULL,
+            cwd="/app",
+            start_new_session=True,
+        )
+
+    return {
+        "job_id": job_id,
+        "state": "queued",
+        "dates_total": len(target_dates),
+        "dates": target_dates,
+    }
+
+
+@router.get("/coverage/fill-missing/status")
+def fill_missing_status(job_id: str) -> dict[str, Any]:
+    """Read the JSON status file written by the worker. Returns 404 if no
+    such job exists yet (the worker writes within ~1s of spawn, so a tight
+    poll-immediately-after-POST loop may briefly 404)."""
+    import json as _json
+    import os as _os
+
+    path = _fill_missing_status_path(job_id)
+    if not _os.path.exists(path):
+        raise HTTPException(status_code=404, detail="status not yet written")
+    try:
+        with open(path) as f:
+            return _json.load(f)
+    except _json.JSONDecodeError:
+        # Mid-write race — caller should retry on next poll
+        raise HTTPException(status_code=503, detail="status mid-write, retry")
+
+
+@router.get("/coverage/fill-missing/active")
+def fill_missing_active() -> dict[str, Any]:
+    """Return the most recent in-progress fill_missing job for the compiler
+    page (if any). Used by the frontend to rehydrate the running button on
+    page load. Returns {job_id: null} if none."""
+    import json as _json
+    import glob as _glob
+    import os as _os
+
+    if not _os.path.isdir(_FILL_MISSING_DIR):
+        return {"job_id": None}
+    candidates: list[tuple[float, dict]] = []
+    for path in _glob.glob(f"{_FILL_MISSING_DIR}/*.json"):
+        try:
+            with open(path) as f:
+                doc = _json.load(f)
+        except Exception:
+            continue
+        if doc.get("page") != "compiler":
+            continue
+        if doc.get("state") not in ("running", "queued"):
+            continue
+        candidates.append((doc.get("started_at", 0), doc))
+    if not candidates:
+        return {"job_id": None}
+    candidates.sort(key=lambda x: x[0], reverse=True)
+    return candidates[0][1]
+
+
 # ─── /gaps ────────────────────────────────────────────────────────────────────
 
 @router.get("/gaps")
