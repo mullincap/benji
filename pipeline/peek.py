@@ -499,6 +499,152 @@ def freq_at_exact_timestamp_db(metric: str, ts: datetime.datetime,
     return {peek_date: counter}
 
 
+def fetch_close_bars_db(bases: list[str],
+                         start_dt: datetime.datetime,
+                         end_dt: datetime.datetime) -> dict[str, list[tuple]]:
+    """Bulk-fetch (timestamp_utc, close) bars from market.futures_1m for a
+    list of base symbols within [start_dt, end_dt]. Returns a dict keyed by
+    base, value is a list of (ts, close) tuples sorted ascending. Bases
+    with no rows in the window get an empty list. Filters out NULL or
+    non-positive close prices."""
+    if not bases:
+        return {}
+    conn = get_conn()
+    try:
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT s.base, f.timestamp_utc, f.close
+            FROM market.futures_1m f
+            JOIN market.symbols s ON s.symbol_id = f.symbol_id
+            WHERE s.base = ANY(%s)
+              AND f.timestamp_utc >= %s::timestamptz
+              AND f.timestamp_utc <= %s::timestamptz
+              AND f.close IS NOT NULL
+              AND f.close > 0
+            ORDER BY s.base, f.timestamp_utc
+        """, (bases, start_dt, end_dt))
+        out: dict[str, list[tuple]] = {b: [] for b in bases}
+        for base, ts, close in cur.fetchall():
+            out[base].append((ts, float(close)))
+        cur.close()
+        return out
+    finally:
+        conn.close()
+
+
+def compute_window_roi(basket: list[str],
+                        peek_date: datetime.date,
+                        start_time: datetime.time,
+                        end_time: datetime.time,
+                        stop_loss_pct: float = -0.06,
+                        leverage: float = 1.0) -> dict | None:
+    """Compute equal-weight, sticky-stop simulated return for the basket
+    over [start_time, end_time] UTC of peek_date.
+
+    Returns None if start_time hasn't elapsed yet for peek_date, or if
+    futures_1m has no rows for the date (e.g., today before the next
+    nightly metl cron).
+
+    Used for two windows:
+      - conviction gate: 06:00 → 06:35 UTC (pre-deploy momentum check)
+      - trade window: 06:35 → 23:55 UTC (post-deploy realized return)
+    """
+    if not basket:
+        return None
+
+    now = datetime.datetime.now(datetime.timezone.utc)
+    win_start = datetime.datetime.combine(
+        peek_date, start_time, tzinfo=datetime.timezone.utc,
+    )
+    win_end = datetime.datetime.combine(
+        peek_date, end_time, tzinfo=datetime.timezone.utc,
+    )
+    if now < win_start:
+        return None
+    actual_end = min(now, win_end)
+    in_progress = now < win_end
+
+    bars_per_symbol = fetch_close_bars_db(basket, win_start, actual_end)
+    if not any(bars_per_symbol.values()):
+        return None
+
+    symbol_results = []
+    for base in basket:
+        bars = bars_per_symbol.get(base, [])
+        if not bars:
+            symbol_results.append({
+                "base": base, "entry_price": None, "exit_price": None,
+                "pct_return": None, "stopped_at": None, "n_bars": 0,
+            })
+            continue
+        entry = bars[0][1]
+        final_pct = 0.0
+        stopped_at: datetime.datetime | None = None
+        last_price = entry
+        for ts, price in bars:
+            pct = ((price / entry) - 1.0) * leverage
+            if pct <= stop_loss_pct:
+                final_pct = stop_loss_pct
+                stopped_at = ts
+                last_price = price
+                break
+            final_pct = pct
+            last_price = price
+        symbol_results.append({
+            "base": base,
+            "entry_price": float(entry),
+            "exit_price": float(last_price),
+            "pct_return": float(final_pct),
+            "stopped_at": stopped_at.isoformat() if stopped_at else None,
+            "n_bars": len(bars),
+        })
+
+    realized = [r for r in symbol_results if r["pct_return"] is not None]
+    if not realized:
+        return None
+    portfolio_pct = sum(r["pct_return"] for r in realized) / len(realized)
+
+    return {
+        "symbols": symbol_results,
+        "portfolio_pct_return": portfolio_pct,
+        "n_symbols_with_data": len(realized),
+        "n_symbols_total": len(basket),
+        "window_start": win_start.isoformat(),
+        "window_end": actual_end.isoformat(),
+        "in_progress": in_progress,
+        "stop_loss_pct": stop_loss_pct,
+        "leverage": leverage,
+        "weighting": "equal",
+    }
+
+
+def print_window_roi(label: str, roi: dict) -> None:
+    """Pretty-print one window's ROI block to stdout."""
+    if not roi:
+        return
+    state = "in progress" if roi["in_progress"] else "complete"
+    start_short = roi["window_start"][11:16]
+    end_short = roi["window_end"][11:16]
+    print()
+    print(f"[{label} {start_short}–{end_short} UTC]  "
+          f"{roi['leverage']:g}× equal-weight, "
+          f"{roi['stop_loss_pct']*100:g}% sticky stop  ({state})")
+    for s in roi["symbols"]:
+        if s["pct_return"] is None:
+            print(f"  {s['base']:<12} (no data)")
+            continue
+        marker = ""
+        if s["stopped_at"]:
+            t = s["stopped_at"][11:16]
+            marker = f"  ← stopped {t} UTC"
+        print(f"  {s['base']:<12}  {s['pct_return']*100:+8.3f}%{marker}")
+    if roi["n_symbols_with_data"] < roi["n_symbols_total"]:
+        print(f"  ({roi['n_symbols_with_data']}/{roi['n_symbols_total']} "
+              f"symbols had bars in window)")
+    print(f"  ─────────────────────────")
+    print(f"  portfolio:    {roi['portfolio_pct_return']*100:+8.3f}%")
+
+
 def rank_table_at_timestamp_db(metric: str, ts: datetime.datetime) -> list:
     """Top-FREQ_WIDTH ranks at exact ts from market.leaderboards. Returns
     [(rank, base, pct_change_decimal), ...]."""
@@ -761,7 +907,9 @@ def write_json_output(out_path: Path, peek_dt: datetime.date, basket: list[str],
                        snap_dt: datetime.datetime,
                        fallback_dt: datetime.datetime | None,
                        timing: dict, source: str,
-                       diagnostics_block: dict | None) -> None:
+                       diagnostics_block: dict | None,
+                       conviction_roi: dict | None = None,
+                       trade_roi: dict | None = None) -> None:
     payload = {
         "date": peek_dt.isoformat(),
         "symbols": basket,
@@ -791,6 +939,10 @@ def write_json_output(out_path: Path, peek_dt: datetime.date, basket: list[str],
     }
     if diagnostics_block is not None:
         payload["diagnostics"] = diagnostics_block
+    if conviction_roi is not None:
+        payload["conviction_roi"] = conviction_roi
+    if trade_roi is not None:
+        payload["trade_roi"] = trade_roi
     out_path.parent.mkdir(parents=True, exist_ok=True)
     with open(out_path, "w") as f:
         json.dump(payload, f, indent=2)
@@ -955,10 +1107,39 @@ def main() -> None:
             ],
         }
 
+    # ── Window ROI: conviction gate (06:00–06:35) + trade window (06:35–23:55) ──
+    # Both blocks are gated on "now >= 06:35 UTC of peek_date" — the conviction
+    # window is only meaningful after it CLOSES, not while it's in-progress.
+    conviction_roi = None
+    trade_roi = None
+    now_utc = datetime.datetime.now(datetime.timezone.utc)
+    deploy_moment = datetime.datetime.combine(
+        peek_dt, datetime.time(6, 35),
+        tzinfo=datetime.timezone.utc,
+    )
+    if basket and now_utc >= deploy_moment:
+        conviction_roi = compute_window_roi(
+            basket, peek_dt,
+            datetime.time(6, 0), datetime.time(6, 35),
+        )
+        trade_roi = compute_window_roi(
+            basket, peek_dt,
+            datetime.time(6, 35), datetime.time(23, 55),
+        )
+        if conviction_roi:
+            print_window_roi("conviction gate", conviction_roi)
+        if trade_roi:
+            print_window_roi("roi", trade_roi)
+        if not conviction_roi and not trade_roi:
+            print()
+            print("[roi] futures_1m has no rows for this date — skipping")
+
     if args.out:
         out_path = Path(args.out)
         write_json_output(out_path, peek_dt, basket, snap_dt, fallback_dt,
-                            timing, args.source, diagnostics_block)
+                            timing, args.source, diagnostics_block,
+                            conviction_roi=conviction_roi,
+                            trade_roi=trade_roi)
         print(f"  wrote {out_path}")
 
 
