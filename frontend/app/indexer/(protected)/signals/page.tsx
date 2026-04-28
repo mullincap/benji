@@ -123,26 +123,17 @@ function FilterChip({
 }
 
 function SourceBadge({ source }: { source: SignalSource }) {
-  const color =
-    source === "live" ? "var(--green)" :
-    source === "backtest" ? "var(--amber)" :
-    "var(--t1)";
-  const bg =
-    source === "live" ? "var(--green-dim)" :
-    source === "backtest" ? "var(--amber-dim)" :
-    "var(--bg3)";
+  // Plain text — no badge framing. The previous green "LIVE" pill could be
+  // misread at a glance as a passing-filter indicator (which is what the
+  // date color now encodes).
   return (
     <span style={{
-      display: "inline-block",
       fontSize: 9,
       fontWeight: 700,
       letterSpacing: "0.08em",
       textTransform: "uppercase",
-      color,
-      background: bg,
-      border: `1px solid ${color}`,
-      borderRadius: 3,
-      padding: "2px 6px",
+      color: "var(--t1)",
+      fontFamily: "var(--font-space-mono), Space Mono, monospace",
     }}>
       {source}
     </span>
