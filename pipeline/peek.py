@@ -310,19 +310,26 @@ def fetch_amber_with_cache(peek_date: datetime.date, metric: str,
                             force: bool = False) -> pd.DataFrame:
     """Returns merged cache+delta DataFrame for (peek_date, metric).
 
-    Per-symbol delta: reads max(ts_min) per symbol from cache → fetches only
-    (max+1min, snap_dt] from Amberdata in parallel → merges into cache → saves.
-    Returns the combined DataFrame.
+    Same-day: reads cache, fetches only the per-symbol delta (s_max+1, snap_dt]
+    from Amberdata, merges, saves. Past dates: cache is bypassed and not
+    written — Amberdata may revise historical data and we want a fresh
+    snapshot each time. (Override with `force=False` from caller is not
+    supported for past dates; force only controls whether to *bypass* a
+    same-day cache.)
     """
-    cache = pd.DataFrame(columns=["symbol", "ts_min", "value"]) if force \
-        else load_cache(peek_date, metric)
+    utc_today = datetime.datetime.now(datetime.timezone.utc).date()
+    is_today = peek_date == utc_today
+    use_cache = is_today and not force
+
+    cache = load_cache(peek_date, metric) if use_cache \
+        else pd.DataFrame(columns=["symbol", "ts_min", "value"])
 
     if not cache.empty:
         sym_max = cache.groupby("symbol")["ts_min"].max().to_dict()
     else:
         sym_max = {}
 
-    universe = get_universe(peek_date, force=force)
+    universe = get_universe(peek_date, force=(not use_cache))
 
     day_start = datetime.datetime.combine(
         peek_date, datetime.time(0, 0, 0),
@@ -331,15 +338,21 @@ def fetch_amber_with_cache(peek_date: datetime.date, metric: str,
     day_start_ts_min = int(day_start.timestamp() // 60)
     snap_ts_min = int(snap_dt.timestamp() // 60)
 
+    # Amberdata's endDate is EXCLUSIVE — fetching to snap_dt would miss the
+    # snap_ts_min bar itself. Push end forward 1 minute so the response
+    # includes [start, snap_ts_min]. compute_ranks_from_cache filters back
+    # to <= snap_ts_min, so any spillover bars at snap_ts_min+1 are ignored.
+    fetch_end_dt = snap_dt + datetime.timedelta(minutes=1)
+
     def fetch_one(sym: str):
         s_max = sym_max.get(sym, day_start_ts_min - 1)
-        eff_start_min = max(day_start_ts_min, s_max + 1)
-        if eff_start_min > snap_ts_min:
+        if s_max >= snap_ts_min:
             return sym, []
+        eff_start_min = max(day_start_ts_min, s_max + 1)
         eff_start_dt = datetime.datetime.fromtimestamp(
             eff_start_min * 60, tz=datetime.timezone.utc,
         )
-        result = fetch_amber_metric(metric, sym, eff_start_dt, snap_dt)
+        result = fetch_amber_metric(metric, sym, eff_start_dt, fetch_end_dt)
         rows = [(sym, ts, val) for ts, val in result.items()]
         return sym, rows
 
@@ -353,7 +366,8 @@ def fetch_amber_with_cache(peek_date: datetime.date, metric: str,
         new_df = pd.DataFrame(new_rows, columns=["symbol", "ts_min", "value"])
         combined = pd.concat([cache, new_df], ignore_index=True)
         combined = combined.drop_duplicates(subset=["symbol", "ts_min"], keep="last")
-        save_cache(peek_date, metric, combined)
+        if use_cache:
+            save_cache(peek_date, metric, combined)
         return combined
     return cache
 
@@ -518,11 +532,12 @@ def rank_table_at_timestamp_db(metric: str, ts: datetime.datetime) -> list:
 
 def run_amber_source(peek_dt: datetime.date, no_cache: bool):
     now = datetime.datetime.now(datetime.timezone.utc)
+    utc_today = now.date()
     canonical_snap = datetime.datetime.combine(
         peek_dt, datetime.time(DEPLOYMENT_START_HOUR, 0, 0),
         tzinfo=datetime.timezone.utc,
     )
-    if peek_dt < datetime.date.today():
+    if peek_dt < utc_today:
         snap_dt = canonical_snap
     else:
         snap_dt = min(now, canonical_snap)
@@ -737,8 +752,9 @@ def main() -> None:
         peek_dt = datetime.date.fromisoformat(args.date)
     except ValueError:
         ap.error(f"date must be YYYY-MM-DD, got {args.date!r}")
-    if peek_dt > datetime.date.today() + datetime.timedelta(days=1):
-        ap.error(f"date {peek_dt} is in the future; no data possible")
+    utc_today = datetime.datetime.now(datetime.timezone.utc).date()
+    if peek_dt > utc_today + datetime.timedelta(days=1):
+        ap.error(f"date {peek_dt} is in the future (UTC); no data possible")
 
     if args.source == "amber":
         basket, snap_dt, fallback_dt, price_ranks, oi_ranks, timing = \
