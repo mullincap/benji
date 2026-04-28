@@ -208,17 +208,17 @@ function ManagerSidebar({
       />
 
       <NavItem
-        label="Execution"
-        href="/manager/execution"
-        active={pathname === "/manager/execution"}
-      />
-
-      <NavItem
         label="Portfolios"
         href="/manager/portfolios"
         // Highlight on both the list view and any drilled-in detail page
         // (`/manager/portfolios/<date>`) so the operator stays oriented.
         active={pathname.startsWith("/manager/portfolios")}
+      />
+
+      <NavItem
+        label="Execution"
+        href="/manager/execution"
+        active={pathname === "/manager/execution"}
       />
 
       {/* Divider — separates top nav from the conversations panel below. */}
