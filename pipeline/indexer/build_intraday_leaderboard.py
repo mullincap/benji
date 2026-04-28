@@ -980,6 +980,47 @@ for _day_key in tqdm(_date_groups, desc="Processing days"):
                       .groupby("symbol")[RANK_METRIC]
                       .last()
                 )
+
+                # ── Anchor fallback for zero/NULL anchor values ──
+                # Some Amberdata bars at the anchor minute report 0 due
+                # to ingest glitches (documented case: SUI open_interest
+                # = 0 at exactly 2026-04-27 00:00:00 UTC, bracketed by
+                # ~88.5M at 23:59 and 00:01). A zero anchor blocks
+                # pct_change (divide-by-zero → replaced with NA → row
+                # dropped → symbol silently absent from the leaderboard).
+                # Scan forward up to ANCHOR_FALLBACK_MIN minutes for the
+                # first valid (non-zero, non-NULL) bar and substitute
+                # its value as the anchor.
+                ANCHOR_FALLBACK_MIN = 10
+                bad = anchor_df[anchor_df.isna() | (anchor_df == 0)]
+                if not bad.empty:
+                    forward_end = anchor_ts + pd.Timedelta(
+                        minutes=ANCHOR_FALLBACK_MIN
+                    )
+                    forward_valid = (
+                        df[
+                            (df["symbol"].isin(bad.index)) &
+                            (df["minute"] > anchor_ts) &
+                            (df["minute"] <= forward_end) &
+                            df[RANK_METRIC].notna() &
+                            (df[RANK_METRIC] != 0)
+                        ]
+                          .sort_values("minute")
+                          .groupby("symbol")[RANK_METRIC]
+                          .first()
+                    )
+                    if not forward_valid.empty:
+                        anchor_df.update(forward_valid)
+                        _sample = sorted(forward_valid.index.tolist())[:10]
+                        tqdm.write(
+                            f"  ⚠ anchor fallback ({RANK_METRIC}): "
+                            f"{len(forward_valid)} symbol(s) had 0/NULL "
+                            f"at {ANCHOR_HHMM} UTC; using next valid bar "
+                            f"within {ANCHOR_FALLBACK_MIN}min — "
+                            f"{', '.join(_sample)}"
+                            f"{', …' if len(forward_valid) > 10 else ''}"
+                        )
+
                 anchor_vals = df["symbol"].map(anchor_df)
             else:
                 # Cross-midnight anchor: value lives in previous day's partition
