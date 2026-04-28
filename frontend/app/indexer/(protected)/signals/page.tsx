@@ -319,11 +319,15 @@ function SignalRow({
     : "—";
   const filterName = signal.filter_name ?? "—";
 
-  // Date text color encodes the row's deploy state:
-  //   green  = went live (filter passed, trade happened)
-  //   red    = sat flat (filter triggered, no trade)
-  //   amber  = pending conv gate (today's row, now < 06:35 UTC — outcome not yet
-  //            visible because conviction window 06:00-06:35 hasn't closed)
+  // Date text color encodes the deploy outcome end-to-end:
+  //   green = filter passed AND conviction gate passed → trade went live
+  //   red   = filter triggered (sit_flat) OR conviction gate killed the deploy
+  //           (conviction_roi_x < killY) → no live trade
+  //   amber = pending conv gate (today's row, now < 06:35 UTC)
+  // Note: a deploy that passes the filter but fails the conviction gate is
+  // ALSO red, since no live trade resulted. (Previously the green/red split
+  // tracked sit_flat alone, which painted conviction-killed days green —
+  // misleading because the trade never actually went live.)
   const dateColor = (() => {
     if (!signal.signal_date) return "var(--t1)";
     const nowUtc = new Date();
@@ -332,7 +336,11 @@ function SignalRow({
       const cutoff = new Date(`${todayUtc}T06:35:00Z`);
       if (nowUtc < cutoff) return "var(--amber)";
     }
-    return signal.sit_flat ? "var(--red)" : "var(--green)";
+    if (signal.sit_flat) return "var(--red)";
+    if (signal.conviction_roi_x !== null && signal.conviction_roi_x < killY) {
+      return "var(--red)";
+    }
+    return "var(--green)";
   })();
 
   return (
