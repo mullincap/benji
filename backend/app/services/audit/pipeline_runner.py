@@ -706,9 +706,14 @@ def run_audit_with_blofin_variants(
         )
 
     if mode == "blofin_only":
+        # Same basket selection as a regular vanilla audit
+        # (leaderboards fast path, no apply_blofin_filter), then
+        # rebuild_portfolio_matrix's listTime filter drops symbols
+        # not on BloFin at the basket date. "Same picks vanilla
+        # would have made, minus what BloFin can't trade."
         blofin_params = {
             **params,
-            "apply_blofin_filter":      True,
+            "apply_blofin_filter":      False,
             "blofin_universe_enabled":  True,
         }
         return run_audit(
@@ -720,18 +725,21 @@ def run_audit_with_blofin_variants(
         )
 
     if mode == "both":
-        # Both passes use the canonical pct_change SQL ranking path so
-        # the only difference between vanilla and BloFin is the universe
-        # — apples-to-apples comparison. Without this, the vanilla pass
-        # would use market.leaderboards (fast path) while the BloFin
-        # pass would use the canonical SQL (forced by apply_blofin_filter),
-        # confounding the comparison with a ranking-method difference.
-        # See spec § 3.1 / overlap_analysis.py:_non_canonical_ranking.
+        # Post-mode semantics: both passes use the SAME basket selection
+        # (leaderboards fast path, no apply_blofin_filter at SQL ranking
+        # time). Only the rebuild_portfolio_matrix step differs — the
+        # BloFin pass drops per-day basket symbols whose BloFin listTime
+        # post-dates the basket date. This answers the question "if I
+        # tried to trade today's intended basket on BloFin, what could
+        # I actually trade and how would it perform?"
+        #
+        # Vanilla rows in the merged 10-row table will MATCH a regular
+        # single-pass ALTS MAIN audit's metrics exactly. BloFin rows
+        # are vanilla baskets minus the non-tradeable symbols.
         vanilla_params = {
             **params,
             "apply_blofin_filter":      False,
             "blofin_universe_enabled":  False,
-            "force_canonical":          True,
         }
         vanilla_metrics = run_audit(
             vanilla_params,
@@ -745,10 +753,11 @@ def run_audit_with_blofin_variants(
         if cancellation_cb is not None and cancellation_cb():
             raise JobCancelled("Cancelled between vanilla and BloFin variants")
 
-        # Second: BloFin pass
+        # Second: BloFin pass — same basket selection, rebuild adds
+        # the time-correct listTime filter via blofin_universe_enabled.
         blofin_params = {
             **params,
-            "apply_blofin_filter":      True,
+            "apply_blofin_filter":      False,
             "blofin_universe_enabled":  True,
         }
         blofin_metrics = run_audit(
