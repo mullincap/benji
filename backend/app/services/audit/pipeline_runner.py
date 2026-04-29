@@ -214,6 +214,12 @@ def build_pipeline_env(params: dict) -> dict[str, str]:
         "IC_THRESHOLD":                 str(params.get("ic_threshold", 0.02)),
         "BTC_MA_DAYS":                  str(params.get("btc_ma_days", 20)),
         "BLOFIN_MIN_SYMBOLS":           str(params.get("blofin_min_symbols", 1)),
+        # Pre-mode universe restriction at the rebuild step (listTime-aware,
+        # time-correct). Set by the worker for BloFin-variant audit runs.
+        # Composes with overlap_analysis.py's apply_blofin_filter (live
+        # universe at SQL ranking time): apply_blofin filters at ranking,
+        # this env triggers an additional listTime check at eligibility.
+        "BLOFIN_UNIVERSE_ENABLED":      _boolenv(params.get("blofin_universe_enabled", False)),
         "LEADERBOARD_TOP_N":            str(params.get("leaderboard_top_n", 333)),
         "TRAIN_TEST_SPLIT":             str(params.get("train_test_split", 0.60)),
         "N_TRIALS":                     str(params.get("n_trials", 3)),
@@ -648,6 +654,165 @@ def _ensure_today_in_db(
         _emit(f"leaderboards already has {lb_rows} rows for {today_str}; skipping indexer")
 
     return status
+
+
+def run_audit_with_blofin_variants(
+    params: dict,
+    *,
+    output_dir: Path,
+    progress_cb: Optional[Callable[[bytes], None]] = None,
+    cancellation_cb: Optional[Callable[[], bool]] = None,
+    on_rebuild_start: Optional[Callable[[], None]] = None,
+) -> dict:
+    """Wrapper around `run_audit` that orchestrates BloFin variant runs.
+
+    Branches on `params["blofin_variants"]`:
+
+      "off" (default)
+        Single vanilla audit run. Returns the same metrics dict shape as
+        `run_audit` directly.
+
+      "blofin_only"
+        Single audit run with `apply_blofin_filter=True` (overlap_analysis
+        ranks within BloFin universe) AND `blofin_universe_enabled=True`
+        (rebuild adds time-correct listTime check). Filter labels are
+        emitted unchanged ("A - Tail Guardrail", etc.) — there is no
+        vanilla baseline to disambiguate against.
+
+      "both"
+        Two sequential audit runs. Vanilla first, then BloFin. Output
+        artifacts go to separate audit_output_*.txt files in `output_dir`.
+        Metrics are merged: vanilla rows tagged `blofin_variant=False`,
+        BloFin rows tagged `blofin_variant=True` AND label suffixed with
+        " (BloFin)" so the frontend can render 10-row pairs.
+
+    `output_dir` is the per-job directory (settings.JOBS_DIR / job_id);
+    we own the audit_output*.txt files inside it.
+    """
+    mode = (params.get("blofin_variants") or "off").lower()
+
+    if mode in ("", "off"):
+        return run_audit(
+            params,
+            output_path=output_dir / "audit_output.txt",
+            progress_cb=progress_cb,
+            cancellation_cb=cancellation_cb,
+            on_rebuild_start=on_rebuild_start,
+        )
+
+    if mode == "blofin_only":
+        blofin_params = {
+            **params,
+            "apply_blofin_filter":      True,
+            "blofin_universe_enabled":  True,
+        }
+        return run_audit(
+            blofin_params,
+            output_path=output_dir / "audit_output.txt",
+            progress_cb=progress_cb,
+            cancellation_cb=cancellation_cb,
+            on_rebuild_start=on_rebuild_start,
+        )
+
+    if mode == "both":
+        # First: vanilla pass (no BloFin universe restriction)
+        vanilla_params = {
+            **params,
+            "apply_blofin_filter":      False,
+            "blofin_universe_enabled":  False,
+        }
+        vanilla_metrics = run_audit(
+            vanilla_params,
+            output_path=output_dir / "audit_output_vanilla.txt",
+            progress_cb=progress_cb,
+            cancellation_cb=cancellation_cb,
+            on_rebuild_start=on_rebuild_start,
+        )
+
+        # Bail early on cancellation between runs — don't waste a second run
+        if cancellation_cb is not None and cancellation_cb():
+            raise JobCancelled("Cancelled between vanilla and BloFin variants")
+
+        # Second: BloFin pass
+        blofin_params = {
+            **params,
+            "apply_blofin_filter":      True,
+            "blofin_universe_enabled":  True,
+        }
+        blofin_metrics = run_audit(
+            blofin_params,
+            output_path=output_dir / "audit_output_blofin.txt",
+            progress_cb=progress_cb,
+            cancellation_cb=cancellation_cb,
+            on_rebuild_start=on_rebuild_start,
+        )
+
+        # Concatenate the two stdout files into a single audit_output.txt
+        # so the frontend's "Raw Output" tab shows both passes in one view,
+        # with a clear separator between them.
+        combined = output_dir / "audit_output.txt"
+        try:
+            with combined.open("w") as out_f:
+                out_f.write("══════════════════════════════════════════════════════════════════\n")
+                out_f.write("  VANILLA PASS (no BloFin universe restriction)\n")
+                out_f.write("══════════════════════════════════════════════════════════════════\n")
+                v_path = output_dir / "audit_output_vanilla.txt"
+                if v_path.exists():
+                    out_f.write(v_path.read_text())
+                out_f.write("\n\n══════════════════════════════════════════════════════════════════\n")
+                out_f.write("  BLOFIN PASS (universe restricted to BloFin SWAP listings, time-correct)\n")
+                out_f.write("══════════════════════════════════════════════════════════════════\n")
+                b_path = output_dir / "audit_output_blofin.txt"
+                if b_path.exists():
+                    out_f.write(b_path.read_text())
+        except OSError:
+            # Best-effort — Raw Output tab will still find the per-pass files
+            pass
+
+        return merge_audit_metrics(vanilla_metrics, blofin_metrics)
+
+    raise ValueError(
+        f"Unknown blofin_variants mode: {mode!r}. "
+        f"Expected one of: off, blofin_only, both."
+    )
+
+
+def merge_audit_metrics(vanilla: dict, blofin: dict) -> dict:
+    """Merge two audit metrics dicts (vanilla + BloFin) into one.
+
+    Vanilla rows are taken as the base (top-level fields like best_filter,
+    sharpe, scorecard come from there). BloFin rows are appended to the
+    `filters` and `filter_comparison` arrays with:
+      * label suffixed " (BloFin)"
+      * `blofin_variant: True`
+
+    Vanilla rows get `blofin_variant: False` for symmetry.
+
+    `fees_tables_by_filter` is also merged with BloFin keys suffixed.
+    """
+    import copy
+    merged = copy.deepcopy(vanilla)
+
+    for arr_key in ("filters", "filter_comparison"):
+        for row in merged.get(arr_key, []) or []:
+            if isinstance(row, dict):
+                row["blofin_variant"] = False
+        for row in (blofin.get(arr_key) or []):
+            if not isinstance(row, dict):
+                continue
+            new_row = dict(row)
+            label = str(new_row.get("filter") or "")
+            new_row["filter"] = f"{label} (BloFin)" if label else "(BloFin)"
+            new_row["blofin_variant"] = True
+            merged.setdefault(arr_key, []).append(new_row)
+
+    blofin_fees = blofin.get("fees_tables_by_filter") or {}
+    if blofin_fees:
+        merged.setdefault("fees_tables_by_filter", {})
+        for label, fees_table in blofin_fees.items():
+            merged["fees_tables_by_filter"][f"{label} (BloFin)"] = fees_table
+
+    return merged
 
 
 def run_audit(

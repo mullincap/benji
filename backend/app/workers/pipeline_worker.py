@@ -19,7 +19,10 @@ from celery import Celery
 
 from app.core.config import settings
 from app.db import get_worker_conn
-from app.services.audit.pipeline_runner import JobCancelled, run_audit
+from app.services.audit.pipeline_runner import (
+    JobCancelled,
+    run_audit_with_blofin_variants,
+)
 from app.services.job_store import get_job, update_job
 
 _worker_log = logging.getLogger("pipeline_worker")
@@ -168,7 +171,6 @@ def run_pipeline(self, job_id: str, params: dict) -> dict:
     """
     job_dir       = Path(settings.JOBS_DIR) / job_id
     job_dir.mkdir(parents=True, exist_ok=True)
-    audit_output_path = job_dir / "audit_output.txt"
 
     update_job(job_id, status="running", stage="overlap", progress=5)
 
@@ -182,9 +184,13 @@ def run_pipeline(self, job_id: str, params: dict) -> dict:
                 update_job(job_id, progress=progress[0])
 
     try:
-        metrics = run_audit(
+        # Delegates BloFin variant orchestration:
+        #   blofin_variants="off"          → single run as before
+        #   blofin_variants="blofin_only"  → single run with BloFin universe applied
+        #   blofin_variants="both"         → two runs (vanilla + BloFin), merged
+        metrics = run_audit_with_blofin_variants(
             params,
-            output_path=audit_output_path,
+            output_dir=job_dir,
             progress_cb=_bump_progress,
             cancellation_cb=lambda: _is_cancelled(job_id),
             on_rebuild_start=lambda: update_job(
@@ -233,9 +239,13 @@ def run_pipeline(self, job_id: str, params: dict) -> dict:
             "skipping basket ingestion", src_gate_report, job_id,
         )
 
+    # audit_output.txt is written by the wrapper:
+    #   off / blofin_only → directly at this path
+    #   both              → concatenated from audit_output_vanilla.txt
+    #                       and audit_output_blofin.txt at end of wrapper
     results = {
         "metrics":            metrics,
-        "audit_output_path":  str(audit_output_path),
+        "audit_output_path":  str(job_dir / "audit_output.txt"),
         "starting_capital":   params.get("starting_capital", 100000.0),
         "fees_tables_by_filter": metrics.get("fees_tables_by_filter"),
         "fees_table":         metrics.get("fees_table"),
