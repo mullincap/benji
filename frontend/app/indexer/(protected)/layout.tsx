@@ -124,8 +124,8 @@ function IndexerSidebar() {
       {!collapsed && (
         <div style={{ flex: 1, overflowY: "auto", paddingTop: 8, display: "flex", flexDirection: "column" }}>
           <div>
-            <NavItem label="Coverage"   href="/indexer/coverage"   active={pathname === "/indexer/coverage"} />
             <NavItem label="Signals"    href="/indexer/signals"    active={pathname === "/indexer/signals"} />
+            <NavItem label="Coverage"   href="/indexer/coverage"   active={pathname === "/indexer/coverage"} />
             <NavItem label="Strategies" href="/indexer/strategies" active={pathname === "/indexer/strategies"} />
           </div>
           <div style={{ marginTop: "auto", borderTop: "1px solid var(--line)", paddingTop: 4 }}>

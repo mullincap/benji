@@ -1189,13 +1189,17 @@ export default function PortfolioDetailPage() {
       const v = b.sym_returns[sym];
       return v !== undefined ? v * 100 : null;
     });
+    // Chart.js needs >=2 non-null points to draw a line segment; with one
+    // point the line is invisible. Show a dot in single-bar mode so the
+    // chart doesn't appear empty between entry and the second bar.
+    const nonNullCount = data.reduce((n: number, v) => n + (v !== null ? 1 : 0), 0);
     return {
       label: displayLabel,
       data,
       borderColor: colorFor(sym, idx),
       backgroundColor: colorFor(sym, idx),
       borderWidth: 1.5,
-      pointRadius: 0,
+      pointRadius: nonNullCount === 1 ? 3 : 0,
       pointHoverRadius: 4,
       tension: 0.15,
       hidden: hiddenSymbols.has(displayLabel),
@@ -1220,9 +1224,13 @@ export default function PortfolioDetailPage() {
   // Portfolio series always renders as a filled area anchored to the zero
   // axis (not the chart min) — matches the trader-page Performance chart's
   // gradient treatment so the pair reads as part of the same design system.
+  const portfolioData = barAtSlot.map((b) => (b ? b.incr * 100 : null));
+  const portfolioNonNullCount = portfolioData.reduce(
+    (n: number, v) => n + (v !== null ? 1 : 0), 0,
+  );
   const portfolioDataset = {
     label: "Portfolio",
-    data: barAtSlot.map((b) => (b ? b.incr * 100 : null)),
+    data: portfolioData,
     borderColor: PORTFOLIO_COLOR,
     backgroundColor: (ctx: { chart: ChartJS }) => {
       const c = ctx.chart.ctx;
@@ -1235,7 +1243,9 @@ export default function PortfolioDetailPage() {
     },
     fill: "origin" as const,
     borderWidth: 3,
-    pointRadius: 0,
+    // Chart.js needs >=2 non-null points to draw a line; show a visible dot
+    // in single-bar mode so the chart isn't empty between entry and bar 2.
+    pointRadius: portfolioNonNullCount === 1 ? 4 : 0,
     pointHoverRadius: 5,
     tension: 0.15,
     // Same gap-bridging rationale as the symbol datasets — missing bars
