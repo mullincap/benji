@@ -65,12 +65,22 @@ type LoadState =
   | { kind: "error"; message: string }
   | { kind: "ready"; signals: DailySignal[]; killY: number };
 
-type FilterKey = "all" | SignalSource;
+// "today" is a client-side date filter (signal_date == current UTC day),
+// not a source filter. "research" maps to the server-side source param.
+// "live" + "backtest" filters retired in favour of the simpler All / Today / Research
+// triad: Today is the operator's primary "what's happening right now" view,
+// Research is for sandboxed strategy experiments.
+type FilterKey = "all" | "today" | "research";
+
+// Current UTC date as YYYY-MM-DD. Computed at call time so the Today
+// filter automatically picks up the next UTC day-roll without a refresh.
+function utcToday(): string {
+  return new Date().toISOString().slice(0, 10);
+}
 
 const FILTER_CHIPS: { key: FilterKey; label: string }[] = [
   { key: "all",      label: "All" },
-  { key: "live",     label: "Live" },
-  { key: "backtest", label: "Backtest" },
+  { key: "today",    label: "Today" },
   { key: "research", label: "Research" },
 ];
 
@@ -140,37 +150,102 @@ function SourceBadge({ source }: { source: SignalSource }) {
   );
 }
 
-function SitFlatBadge({ sitFlat }: { sitFlat: boolean }) {
+// Status badge — four states reflecting the actual outcome of the signal:
+//
+//   Sit Flat — filter (TG / Disp / combined) fired. Strategy did not deploy.
+//   Pending  — filter passed BUT conviction gate hasn't been evaluated yet.
+//              Today's row before 06:35 UTC, or a fresh research/backtest
+//              row whose conviction wasn't computed.
+//   Fail     — filter passed AND conviction gate evaluated AND failed
+//              (conviction_roi_x < kill_y → strategy killed at 06:35).
+//   Active   — filter passed AND conviction gate passed → strategy deployed
+//              for the trade window. Older rows whose conviction wasn't
+//              tracked also default here for backward compat.
+function StatusBadge({
+  sitFlat,
+  convictionRoiX,
+  killY,
+  signalDate,
+}: {
+  sitFlat: boolean;
+  convictionRoiX: number | null;
+  killY: number;
+  signalDate: string | null;
+}) {
+  const baseStyle: React.CSSProperties = {
+    display: "inline-block",
+    fontSize: 9,
+    fontWeight: 700,
+    letterSpacing: "0.08em",
+    textTransform: "uppercase",
+    borderRadius: 3,
+    padding: "2px 6px",
+    border: "1px solid",
+  };
+
   if (sitFlat) {
     return (
       <span style={{
-        display: "inline-block",
-        fontSize: 9,
-        fontWeight: 700,
-        letterSpacing: "0.08em",
-        textTransform: "uppercase",
+        ...baseStyle,
         color: "var(--red)",
         background: "var(--red-dim)",
-        border: "1px solid var(--red)",
-        borderRadius: 3,
-        padding: "2px 6px",
+        borderColor: "var(--red)",
       }}>
         Sit Flat
       </span>
     );
   }
+
+  // Conviction gate not evaluated. Treat as "Pending" only when this is
+  // today's row (so the conviction window genuinely hasn't fired yet);
+  // for past rows whose conviction simply wasn't tracked, fall through
+  // to the legacy "Active" rendering to preserve historical UX.
+  if (convictionRoiX === null) {
+    const isToday = signalDate === utcToday();
+    if (isToday) {
+      return (
+        <span style={{
+          ...baseStyle,
+          color: "var(--amber)",
+          background: "var(--amber-dim)",
+          borderColor: "var(--amber)",
+        }}>
+          Pending
+        </span>
+      );
+    }
+    // Old/missing conviction → keep Active label (backward-compat)
+    return (
+      <span style={{
+        ...baseStyle,
+        color: "var(--green)",
+        background: "var(--green-dim)",
+        borderColor: "var(--green)",
+      }}>
+        Active
+      </span>
+    );
+  }
+
+  // Conviction evaluated; compare to kill_y threshold.
+  if (convictionRoiX < killY) {
+    return (
+      <span style={{
+        ...baseStyle,
+        color: "var(--red)",
+        background: "var(--red-dim)",
+        borderColor: "var(--red)",
+      }}>
+        Fail
+      </span>
+    );
+  }
   return (
     <span style={{
-      display: "inline-block",
-      fontSize: 9,
-      fontWeight: 700,
-      letterSpacing: "0.08em",
-      textTransform: "uppercase",
+      ...baseStyle,
       color: "var(--green)",
       background: "var(--green-dim)",
-      border: "1px solid var(--green)",
-      borderRadius: 3,
-      padding: "2px 6px",
+      borderColor: "var(--green)",
     }}>
       Active
     </span>
@@ -367,7 +442,14 @@ function SignalRow({
           <span style={{ color: dateColor }}>{date}</span>
         </Td>
         <Td><SourceBadge source={signal.signal_source} /></Td>
-        <Td><SitFlatBadge sitFlat={signal.sit_flat} /></Td>
+        <Td>
+          <StatusBadge
+            sitFlat={signal.sit_flat}
+            convictionRoiX={signal.conviction_roi_x}
+            killY={killY}
+            signalDate={signal.signal_date}
+          />
+        </Td>
         <Td>{filterName}</Td>
         <Td><ConvictionBadge roiX={signal.conviction_roi_x} killY={killY} sitFlat={signal.sit_flat} /></Td>
         <Td align="right">
@@ -556,7 +638,10 @@ export default function IndexerSignalsPage() {
     setStratRoi({});
     try {
       const params = new URLSearchParams({ days: String(LOOKBACK_DAYS) });
-      if (sourceFilter !== "all") params.set("source", sourceFilter);
+      // "today" is a client-side date filter (applied below in render path),
+      // so it fetches everything from the server. Only "research" maps to
+      // the source param; "all" omits it.
+      if (sourceFilter === "research") params.set("source", "research");
       const res = await fetch(
         `${API_BASE}/api/indexer/signals?${params.toString()}`,
         { credentials: "include" },
@@ -661,7 +746,16 @@ export default function IndexerSignalsPage() {
 
         {state.kind === "ready" && (
           <SignalsTable
-            signals={state.signals}
+            signals={
+              filter === "today"
+                // Client-side date filter — server returned all sources, narrow to today UTC.
+                // utcToday() is computed at render time, so the page picks up
+                // the new UTC day without a manual refresh.
+                ? state.signals.filter(
+                    (s) => s.signal_date === utcToday(),
+                  )
+                : state.signals
+            }
             expandedId={expandedId}
             onToggle={handleToggle}
             killY={state.killY}
