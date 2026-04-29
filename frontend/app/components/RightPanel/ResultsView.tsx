@@ -2824,6 +2824,333 @@ type FeesRowWithCumulative = FeesRow & {
   cum_pnl: number;
 };
 
+// ── Filter Confluence Analysis ────────────────────────────────────────────
+//
+// Tests the hypothesis: do days where multiple filters all agree to SIT-FLAT
+// produce different (worse) market returns than days where filters disagree?
+//
+// Per-day verdicts are derived from the per-filter equity_curve arrays
+// already in results.metrics.filters[]:
+//   - F.daily_return == 0  AND  NoFilter.daily_return != 0  →  F said SIT-FLAT
+//   - F.daily_return != 0                                   →  F said GO
+//   - F == 0  AND  NoFilter == 0                            →  ambiguous (no
+//     winners that day; can't tell skip from breakeven). Excluded from n.
+//
+// Requires the audit to have run "A - No Filter" as a baseline (standard).
+
+function curveToReturns(curve: Point[] | undefined): Array<number | null> {
+  if (!curve || curve.length === 0) return [];
+  const ys: Array<number | null> = curve.map((p) => {
+    const v = typeof p === 'number' ? p : (p as { y: number }).y;
+    return Number.isFinite(v) ? (v as number) : null;
+  });
+  const out: Array<number | null> = [null];
+  for (let i = 1; i < ys.length; i += 1) {
+    const a = ys[i - 1];
+    const b = ys[i];
+    if (a == null || b == null || a === 0) {
+      out.push(null);
+    } else {
+      out.push(b / a - 1);
+    }
+  }
+  return out;
+}
+
+function meanOf(xs: number[]): number {
+  if (xs.length === 0) return NaN;
+  let s = 0;
+  for (const x of xs) s += x;
+  return s / xs.length;
+}
+
+function medianOf(xs: number[]): number {
+  if (xs.length === 0) return NaN;
+  const s = [...xs].sort((a, b) => a - b);
+  const m = Math.floor(s.length / 2);
+  return s.length % 2 === 0 ? (s[m - 1] + s[m]) / 2 : s[m];
+}
+
+function FilterConfluencePanel({ filters }: { filters: FilterRow[] }) {
+  const analysis = useMemo(() => {
+    const noFilter = filters.find(
+      (f) => normalizeFilterLabel(String(f.filter ?? '')) === normalizeFilterLabel('A - No Filter'),
+    );
+    if (!noFilter || !noFilter.equity_curve || (noFilter.equity_curve as Point[]).length === 0) {
+      return { available: false as const, reason: 'No "A - No Filter" baseline in this audit — confluence requires the unfiltered baseline to derive per-day verdicts.' };
+    }
+    const candidates = filters.filter((f) => {
+      if (f === noFilter) return false;
+      if (f.not_run) return false;
+      const ec = f.equity_curve as Point[] | undefined;
+      return !!ec && ec.length > 0;
+    });
+    if (candidates.length < 2) {
+      return { available: false as const, reason: `Confluence needs ≥2 filters (besides No Filter); this audit has ${candidates.length}.` };
+    }
+
+    const nfReturns = curveToReturns(noFilter.equity_curve as Point[]);
+    const filterReturns = candidates.map((f) => ({
+      label: String(f.filter ?? ''),
+      returns: curveToReturns(f.equity_curve as Point[]),
+    }));
+    const N = nfReturns.length;
+    const EPS = 1e-9;
+
+    type Day = {
+      idx: number;
+      nfReturn: number;
+      verdicts: Map<string, 'sit_flat' | 'go'>;
+      sitCount: number;
+    };
+    const days: Day[] = [];
+    let ambiguous = 0;
+    for (let i = 0; i < N; i += 1) {
+      const nf = nfReturns[i];
+      if (nf == null || Math.abs(nf) < EPS) {
+        ambiguous += 1;
+        continue;
+      }
+      const verdicts = new Map<string, 'sit_flat' | 'go'>();
+      let sitCount = 0;
+      for (const fr of filterReturns) {
+        const r = fr.returns[i];
+        if (r == null) continue;
+        if (Math.abs(r) < EPS) {
+          verdicts.set(fr.label, 'sit_flat');
+          sitCount += 1;
+        } else {
+          verdicts.set(fr.label, 'go');
+        }
+      }
+      days.push({ idx: i, nfReturn: nf, verdicts, sitCount });
+    }
+
+    const nDeterm = days.length;
+    const overallAvg = meanOf(days.map((d) => d.nfReturn));
+    const overallWin = nDeterm > 0 ? days.filter((d) => d.nfReturn > 0).length / nDeterm : 0;
+
+    const kRows: Array<{ k: number; days: number; avgRet: number; medRet: number; winRate: number }> = [];
+    for (let k = 0; k <= candidates.length; k += 1) {
+      const subset = days.filter((d) => d.sitCount === k);
+      const rets = subset.map((d) => d.nfReturn);
+      kRows.push({
+        k,
+        days: subset.length,
+        avgRet: meanOf(rets),
+        medRet: medianOf(rets),
+        winRate: rets.length > 0 ? rets.filter((r) => r > 0).length / rets.length : 0,
+      });
+    }
+
+    const perFilter = filterReturns.map((fr) => {
+      const sitDays = days.filter((d) => d.verdicts.get(fr.label) === 'sit_flat');
+      const goDays = days.filter((d) => d.verdicts.get(fr.label) === 'go');
+      return {
+        label: fr.label,
+        sitDays: sitDays.length,
+        sitAvgRet: meanOf(sitDays.map((d) => d.nfReturn)),
+        sitWin: sitDays.length > 0 ? sitDays.filter((d) => d.nfReturn > 0).length / sitDays.length : 0,
+        goDays: goDays.length,
+        goAvgRet: meanOf(goDays.map((d) => d.nfReturn)),
+        goWin: goDays.length > 0 ? goDays.filter((d) => d.nfReturn > 0).length / goDays.length : 0,
+      };
+    });
+
+    return {
+      available: true as const,
+      nDeterm,
+      nTotal: N,
+      ambiguous,
+      nFilters: candidates.length,
+      overallAvg,
+      overallWin,
+      kRows,
+      perFilter,
+    };
+  }, [filters]);
+
+  if (!analysis.available) {
+    return (
+      <div style={{ fontSize: 10, color: 'var(--t2)', padding: '12px 4px', lineHeight: 1.5 }}>
+        {analysis.reason}
+      </div>
+    );
+  }
+
+  const cellStyle: React.CSSProperties = {
+    padding: '6px 8px',
+    fontFamily: 'var(--font-space-mono), Space Mono, monospace',
+    fontSize: 10,
+    textAlign: 'right' as const,
+    borderBottom: '1px solid var(--line)',
+    color: 'var(--t1)',
+  };
+  const headStyle: React.CSSProperties = {
+    ...cellStyle,
+    color: 'var(--t3)',
+    fontSize: 9,
+    fontWeight: 700,
+    textTransform: 'uppercase',
+    letterSpacing: '0.08em',
+    borderBottom: '1px solid var(--line2)',
+  };
+
+  // Color a return value: green if positive, red if negative, muted at zero.
+  const retColor = (v: number) => {
+    if (!Number.isFinite(v)) return 'var(--t3)';
+    if (v > 0.0001) return 'var(--green)';
+    if (v < -0.0001) return 'var(--red)';
+    return 'var(--t2)';
+  };
+  const fmtRet = (v: number) => (Number.isFinite(v) ? `${v >= 0 ? '+' : ''}${(v * 100).toFixed(2)}%` : '—');
+  const fmtPct = (v: number) => (Number.isFinite(v) ? `${(v * 100).toFixed(0)}%` : '—');
+
+  // Confluence delta = avg return at k=N minus avg return at k=0
+  const k0 = analysis.kRows.find((r) => r.k === 0);
+  const kAll = analysis.kRows.find((r) => r.k === analysis.nFilters);
+  const confluenceDelta = (k0 && kAll && Number.isFinite(k0.avgRet) && Number.isFinite(kAll.avgRet))
+    ? kAll.avgRet - k0.avgRet
+    : null;
+
+  return (
+    <div style={{ fontFamily: 'var(--font-space-mono), Space Mono, monospace' }}>
+      <div
+        style={{
+          padding: '8px 4px 12px 4px',
+          fontSize: 10,
+          color: 'var(--t2)',
+          lineHeight: 1.55,
+        }}
+      >
+        Per-day filter verdicts derived from the unfiltered baseline. Sample
+        excludes ambiguous days where No Filter return was 0 (no winners /
+        no basket).{' '}
+        <span style={{ color: 'var(--t1)' }}>
+          n={analysis.nDeterm}
+        </span>
+        {' of '}{analysis.nTotal} days
+        {' ('}<span style={{ color: 'var(--t3)' }}>{analysis.ambiguous} excluded</span>{').'}
+        {confluenceDelta !== null && (
+          <>
+            {' '}Confluence delta (k=all − k=0) ={' '}
+            <span style={{ color: retColor(confluenceDelta), fontWeight: 700 }}>
+              {fmtRet(confluenceDelta)}
+            </span>
+            .
+          </>
+        )}
+      </div>
+
+      <div
+        style={{
+          fontSize: 9,
+          color: 'var(--t3)',
+          textTransform: 'uppercase',
+          letterSpacing: '0.12em',
+          fontWeight: 700,
+          marginBottom: 6,
+        }}
+      >
+        K-of-{analysis.nFilters} Agreement (Filters Voting Sit-Flat)
+      </div>
+      <table style={{ width: '100%', borderCollapse: 'collapse', marginBottom: 18 }}>
+        <thead>
+          <tr>
+            <th style={{ ...headStyle, textAlign: 'left' }}>k</th>
+            <th style={headStyle}>Days</th>
+            <th style={headStyle}>Avg NF Ret</th>
+            <th style={headStyle}>Median Ret</th>
+            <th style={headStyle}>Win %</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td style={{ ...cellStyle, textAlign: 'left', color: 'var(--t2)' }}>baseline</td>
+            <td style={cellStyle}>{analysis.nDeterm}</td>
+            <td style={{ ...cellStyle, color: retColor(analysis.overallAvg), fontWeight: 700 }}>{fmtRet(analysis.overallAvg)}</td>
+            <td style={cellStyle}>—</td>
+            <td style={cellStyle}>{fmtPct(analysis.overallWin)}</td>
+          </tr>
+          {analysis.kRows.map((row) => {
+            const allFlat = row.k === analysis.nFilters;
+            const allGo = row.k === 0;
+            const highlight = allFlat || allGo;
+            return (
+              <tr key={`k-${row.k}`}>
+                <td
+                  style={{
+                    ...cellStyle,
+                    textAlign: 'left',
+                    color: highlight ? 'var(--t0)' : 'var(--t1)',
+                    fontWeight: highlight ? 700 : 400,
+                  }}
+                >
+                  {row.k}{allGo ? ' (all GO)' : ''}{allFlat ? ' (all SIT)' : ''}
+                </td>
+                <td style={cellStyle}>{row.days}</td>
+                <td style={{ ...cellStyle, color: retColor(row.avgRet), fontWeight: 700 }}>{fmtRet(row.avgRet)}</td>
+                <td style={{ ...cellStyle, color: retColor(row.medRet) }}>{fmtRet(row.medRet)}</td>
+                <td style={cellStyle}>{fmtPct(row.winRate)}</td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+
+      <div
+        style={{
+          fontSize: 9,
+          color: 'var(--t3)',
+          textTransform: 'uppercase',
+          letterSpacing: '0.12em',
+          fontWeight: 700,
+          marginBottom: 6,
+        }}
+      >
+        Per-Filter Solo Decisions (NF Return on Sit vs Go Days)
+      </div>
+      <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+        <thead>
+          <tr>
+            <th style={{ ...headStyle, textAlign: 'left' }}>Filter</th>
+            <th style={headStyle}>Sit Days</th>
+            <th style={headStyle}>Sit Avg Ret</th>
+            <th style={headStyle}>Sit Win %</th>
+            <th style={headStyle}>Go Days</th>
+            <th style={headStyle}>Go Avg Ret</th>
+            <th style={headStyle}>Go Win %</th>
+            <th style={headStyle}>Edge</th>
+          </tr>
+        </thead>
+        <tbody>
+          {analysis.perFilter.map((row) => {
+            // Edge = how much worse market was on sit days vs go days.
+            // Positive edge = filter correctly avoided losing days.
+            const edge = (Number.isFinite(row.goAvgRet) && Number.isFinite(row.sitAvgRet))
+              ? row.goAvgRet - row.sitAvgRet
+              : NaN;
+            return (
+              <tr key={row.label}>
+                <td style={{ ...cellStyle, textAlign: 'left', color: 'var(--t1)' }}>
+                  {row.label.replace(/^A\s*-\s*/i, '')}
+                </td>
+                <td style={cellStyle}>{row.sitDays}</td>
+                <td style={{ ...cellStyle, color: retColor(row.sitAvgRet) }}>{fmtRet(row.sitAvgRet)}</td>
+                <td style={cellStyle}>{fmtPct(row.sitWin)}</td>
+                <td style={cellStyle}>{row.goDays}</td>
+                <td style={{ ...cellStyle, color: retColor(row.goAvgRet) }}>{fmtRet(row.goAvgRet)}</td>
+                <td style={cellStyle}>{fmtPct(row.goWin)}</td>
+                <td style={{ ...cellStyle, color: retColor(edge), fontWeight: 700 }}>{fmtRet(edge)}</td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
 function normalizeIntradaySeriesToDayReturn(
   bars: Array<number | null>,
   leverage: number,
@@ -14060,6 +14387,18 @@ export default function ResultsView({ results, jobId, startingCapital, params }:
                   onSelectFilter={(filter) => setManualSelectedFilter(filter)}
                 />
               </details>
+            </div>
+          </details>
+
+          <details
+            open
+            style={{ background: 'var(--bg2)', border: '1px solid var(--line)', borderRadius: 3, padding: '8px 10px' }}
+          >
+            <summary style={{ cursor: 'pointer', fontSize: 9, color: 'var(--t3)', textTransform: 'uppercase', letterSpacing: '0.12em', fontWeight: 700 }}>
+              Filter Confluence
+            </summary>
+            <div style={{ marginTop: 8 }}>
+              <FilterConfluencePanel filters={mergedFilters} />
             </div>
           </details>
 
