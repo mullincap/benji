@@ -2277,6 +2277,7 @@ function CurveCard({
   backgroundColor = 'var(--bg0)',
   showBorder = true,
   logScale = false,
+  overlays,
 }: {
   title: string;
   data: Point[] | null | undefined;
@@ -2298,6 +2299,7 @@ function CurveCard({
   backgroundColor?: string;
   showBorder?: boolean;
   logScale?: boolean;
+  overlays?: Array<{ label: string; color: string; data: Point[] | null | undefined }>;
 }) {
   const rows = useMemo(() => {
     const src = data ?? [];
@@ -2318,6 +2320,17 @@ function CurveCard({
       .filter((r): r is { idx: number; ts: number; date: Date; y: number } => r !== null);
   }, [data]);
   const isDrawdownPanel = fillAbove || /drawdown/i.test(title);
+  const overlayList = overlays ?? [];
+  const overlayParsed = useMemo(() => {
+    return overlayList.map((ov) => {
+      const src = ov.data ?? [];
+      const ys: Array<number | null> = src.map((p) => {
+        const v = typeof p === 'number' ? p : (p as { y: number }).y;
+        return Number.isFinite(v) ? v : null;
+      });
+      return { label: ov.label, color: ov.color, ys };
+    });
+  }, [overlayList]);
   const withSeries = useMemo(() => {
     if (rows.length === 0) return [] as Array<{
       idx: number;
@@ -2328,17 +2341,25 @@ function CurveCard({
       ath?: number;
       ma?: number | null;
       trend?: number | null;
+      [overlayKey: string]: unknown;
     }>;
     const out = rows.map((r, i) => {
       const prev = i > 0 ? rows[i - 1].y : null;
       const dailyRetPct = prev && prev !== 0 ? ((r.y / prev) - 1) * 100 : null;
       const ath = showAthLine ? Math.max(...rows.slice(0, i + 1).map((x) => x.y)) : undefined;
+      const overlayFields: Record<string, number | null> = {};
+      for (let ovIdx = 0; ovIdx < overlayParsed.length; ovIdx += 1) {
+        const ovYs = overlayParsed[ovIdx].ys;
+        const ovOffset = Math.max(0, ovYs.length - rows.length);
+        overlayFields[`ov_${ovIdx}`] = ovYs[i + ovOffset] ?? null;
+      }
       return {
         ...r,
         dailyRetPct,
         ath,
         ma: null as number | null,
         trend: null as number | null,
+        ...overlayFields,
       };
     });
     if (showMovingAverage) {
@@ -2375,7 +2396,7 @@ function CurveCard({
       }
     }
     return out;
-  }, [rows, showAthLine, showMovingAverage, movingAverageWindow, logScale]);
+  }, [rows, showAthLine, showMovingAverage, movingAverageWindow, logScale, overlayParsed]);
   const monthRefs = useMemo(() => {
     if (!showMonthlyGridlines || withSeries.length < 2) return [] as number[];
     const out: number[] = [];
@@ -2479,7 +2500,7 @@ function CurveCard({
                 cursor={{ stroke: 'var(--line2)', strokeDasharray: '2 2', strokeOpacity: 0.4 }}
                 content={({ active, payload }) => {
                   if (!active || !payload || payload.length === 0) return null;
-                  const row = payload[0]?.payload as { date?: Date; y?: number; dailyRetPct?: number | null } | undefined;
+                  const row = payload[0]?.payload as ({ date?: Date; y?: number; dailyRetPct?: number | null } & Record<string, unknown>) | undefined;
                   if (!row || typeof row.y !== 'number') return null;
                   return (
                     <div
@@ -2495,8 +2516,21 @@ function CurveCard({
                       }}
                     >
                       <div>{row.date ? fmtDateLong(new Date(row.date)) : ''}</div>
-                      <div>{title}: {valueFmt(row.y)}</div>
-                      <div>Daily Return %: {row.dailyRetPct !== null && row.dailyRetPct !== undefined ? fmtPercent2(row.dailyRetPct) : 'N/A'}</div>
+                      <div>
+                        <span style={{ display: 'inline-block', width: 8, height: 2, background: color, marginRight: 6, verticalAlign: 'middle' }} />
+                        {title}: <span style={{ color, fontWeight: 700 }}>{valueFmt(row.y)}</span>
+                      </div>
+                      {overlayParsed.map((ov, ovIdx) => {
+                        const v = row[`ov_${ovIdx}`];
+                        if (typeof v !== 'number' || !Number.isFinite(v)) return null;
+                        return (
+                          <div key={`tt-ov-${ovIdx}`}>
+                            <span style={{ display: 'inline-block', width: 8, height: 2, background: ov.color, marginRight: 6, verticalAlign: 'middle' }} />
+                            {ov.label.replace(/^A\s*-\s*/i, '')}: <span style={{ color: ov.color, fontWeight: 700 }}>{valueFmt(v)}</span>
+                          </div>
+                        );
+                      })}
+                      <div style={{ color: 'var(--t2)', marginTop: 2 }}>Daily Return %: {row.dailyRetPct !== null && row.dailyRetPct !== undefined ? fmtPercent2(row.dailyRetPct as number) : 'N/A'}</div>
                     </div>
                   );
                 }}
@@ -2563,6 +2597,19 @@ function CurveCard({
                   isAnimationActive={false}
                 />
               )}
+              {!isDrawdownPanel && overlayParsed.map((ov, ovIdx) => (
+                <Line
+                  key={`ov-${ov.label}-${ovIdx}`}
+                  type="monotone"
+                  dataKey={`ov_${ovIdx}`}
+                  stroke={ov.color}
+                  strokeWidth={1}
+                  strokeOpacity={0.78}
+                  dot={false}
+                  connectNulls
+                  isAnimationActive={false}
+                />
+              ))}
               {minPointInfo && (
                 <ReferenceDot
                   x={minPointInfo.ts}
@@ -12266,6 +12313,7 @@ export default function ResultsView({ results, jobId, startingCapital, params }:
   })();
 
   const [equityLogScale, setEquityLogScale] = useState(false);
+  const [equityOverlayKeys, setEquityOverlayKeys] = useState<Set<string>>(new Set());
   const [manualSelectedFilter, setManualSelectedFilter] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<ReportTab>('summary');
   const [hideFlatDays, setHideFlatDays] = useState(false);
@@ -12701,6 +12749,36 @@ export default function ResultsView({ results, jobId, startingCapital, params }:
       ? p * runStartingCapital
       : { ...p, y: p.y * runStartingCapital }
   ));
+
+  const overlayCandidates = useMemo(() => {
+    const selectedNorm = normalizeFilterLabel(String(selectedFilter ?? ''));
+    return mergedFilters
+      .map((row, idx) => {
+        const label = String(row.filter ?? '');
+        if (!label) return null;
+        const norm = normalizeFilterLabel(label);
+        if (norm === selectedNorm) return null;
+        if (row.not_run) return null;
+        const curve = row.equity_curve as Point[] | undefined;
+        if (!curve || curve.length === 0) return null;
+        return { label, color: FILTER_PALETTE[idx % FILTER_PALETTE.length], curve };
+      })
+      .filter((x): x is { label: string; color: string; curve: Point[] } => x !== null);
+  }, [mergedFilters, selectedFilter]);
+
+  const activeOverlays = useMemo(() => {
+    return overlayCandidates
+      .filter((c) => equityOverlayKeys.has(c.label))
+      .map((c) => ({
+        label: c.label,
+        color: c.color,
+        data: c.curve.map((p) => (
+          typeof p === 'number'
+            ? p * runStartingCapital
+            : { ...p, y: p.y * runStartingCapital }
+        )) as Point[],
+      }));
+  }, [overlayCandidates, equityOverlayKeys, runStartingCapital]);
   const equitySeriesDated = useMemo(() => {
     const src = equityCurveDollars ?? [];
     const feeDates = selectedFeesTableRows
@@ -13648,6 +13726,96 @@ export default function ResultsView({ results, jobId, startingCapital, params }:
                 </button>
               </summary>
               <div style={{ marginTop: 8, display: 'flex', flexDirection: 'column', gap: 0 }}>
+                {overlayCandidates.length > 0 && (
+                  <div
+                    style={{
+                      display: 'flex',
+                      flexWrap: 'wrap',
+                      alignItems: 'center',
+                      gap: 6,
+                      marginBottom: 6,
+                      padding: '4px 0',
+                    }}
+                  >
+                    <span
+                      style={{
+                        fontSize: 9,
+                        color: 'var(--t3)',
+                        textTransform: 'uppercase',
+                        letterSpacing: '0.12em',
+                        fontWeight: 700,
+                        marginRight: 4,
+                      }}
+                    >
+                      Overlay
+                    </span>
+                    {equityOverlayKeys.size > 0 && (
+                      <button
+                        onClick={(e) => {
+                          e.preventDefault();
+                          setEquityOverlayKeys(new Set());
+                        }}
+                        style={{
+                          background: 'none',
+                          border: '1px solid var(--line2)',
+                          borderRadius: 2,
+                          padding: '1px 6px',
+                          fontSize: 8,
+                          fontFamily: 'var(--font-space-mono), Space Mono, monospace',
+                          letterSpacing: '0.08em',
+                          textTransform: 'uppercase',
+                          color: 'var(--t2)',
+                          cursor: 'pointer',
+                        }}
+                      >
+                        Clear
+                      </button>
+                    )}
+                    {overlayCandidates.map((c) => {
+                      const isOn = equityOverlayKeys.has(c.label);
+                      const shortLabel = c.label.replace(/^A\s*-\s*/i, '');
+                      return (
+                        <button
+                          key={c.label}
+                          onClick={(e) => {
+                            e.preventDefault();
+                            setEquityOverlayKeys((prev) => {
+                              const next = new Set(prev);
+                              if (next.has(c.label)) next.delete(c.label);
+                              else next.add(c.label);
+                              return next;
+                            });
+                          }}
+                          style={{
+                            display: 'inline-flex',
+                            alignItems: 'center',
+                            gap: 5,
+                            background: isOn ? 'rgba(255,255,255,0.04)' : 'transparent',
+                            border: `1px solid ${isOn ? c.color : 'var(--line2)'}`,
+                            borderRadius: 2,
+                            padding: '2px 8px',
+                            fontSize: 9,
+                            fontFamily: 'var(--font-space-mono), Space Mono, monospace',
+                            letterSpacing: '0.05em',
+                            color: isOn ? c.color : 'var(--t2)',
+                            cursor: 'pointer',
+                          }}
+                        >
+                          <span
+                            style={{
+                              display: 'inline-block',
+                              width: 10,
+                              height: 2,
+                              background: c.color,
+                              opacity: isOn ? 1 : 0.45,
+                            }}
+                          />
+                          {shortLabel}
+                        </button>
+                      );
+                    })}
+                  </div>
+                )}
                 <CurveCard
                   title="Equity Curve ($)"
                   data={equityCurveDollars}
@@ -13665,6 +13833,7 @@ export default function ResultsView({ results, jobId, startingCapital, params }:
                   valueFormatter={fmtCurrency}
                   showTitle={false}
                   logScale={equityLogScale}
+                  overlays={activeOverlays}
                 />
                 <CurveCard
                   title="Drawdown Curve"
