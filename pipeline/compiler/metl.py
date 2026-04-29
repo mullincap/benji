@@ -1385,6 +1385,27 @@ def main(start_date, end_date, job_id=None, triggered_by='cli', run_tag=None):
                             file_path = os.path.join(CSV_BACKUP_DIR, f"oi_{day.strftime('%Y%m%d')}.csv")
                             append_day_csv(day,expected_header,all_rows_day,write_header=not os.path.exists(file_path))
                             all_rows_day.clear()   # frees RAM
+                            # ── Mid-run DB load ───────────────────────────
+                            # Load the (growing) CSV into market.futures_1m
+                            # at every flush boundary so a SIGTERM mid-run
+                            # doesn't throw away all of the day's progress.
+                            # ON CONFLICT DO NOTHING means already-loaded
+                            # rows are skipped, only the new chunk lands.
+                            # Cost: ~Nx more DB scans where N = number of
+                            # flushes per day (~6 at 100k chunks); accepted
+                            # for the cancellation safety net.
+                            try:
+                                _r = load_csv_to_futures_1m(file_path)
+                                print(f"   💽 mid-run DB load → "
+                                      f"sent={_r['rows_inserted']:,} "
+                                      f"skipped={_r['rows_skipped']:,} "
+                                      f"in {_r['elapsed_sec']}s")
+                            except Exception as _db_err:
+                                # Don't kill the run on a transient DB
+                                # blip — the final end-of-day load will
+                                # mop up whatever wasn't written.
+                                print(f"   ⚠️ mid-run DB load failed "
+                                      f"(will retry at end-of-day): {_db_err}")
                     else: print(f"   ❌ {symb} failed → {result['error']}")
 
                     total_elap = datetime.now() - script_start

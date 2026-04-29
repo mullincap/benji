@@ -741,17 +741,50 @@ def fill_missing_cancel(job_id: str) -> dict[str, Any]:
             raise HTTPException(status_code=500,
                                 detail=f"could not signal pid {pid}: {e}")
 
+    # Refresh the daily-symbol-count cagg so any rows metl already
+    # mid-run-loaded into market.futures_1m are reflected on the
+    # coverage page. Synchronous here is fine — it's <1s for a 7-day
+    # window. Skipped on connection error so a flaky DB doesn't break
+    # the cancel response. (Mirrors the end-of-job refresh that the
+    # worker would have run if it'd completed normally.)
+    cagg_refreshed = False
+    try:
+        from ...db import get_conn
+        conn = get_conn()
+        try:
+            conn.autocommit = True
+            cur = conn.cursor()
+            for name in ("market.futures_1m_daily_symbol_count",
+                         "market.symbol_day_counts"):
+                try:
+                    cur.execute(
+                        "CALL refresh_continuous_aggregate(%s, "
+                        "NOW() - INTERVAL '7 days', NOW())",
+                        (name,),
+                    )
+                except Exception:
+                    pass
+            cur.close()
+            cagg_refreshed = True
+        finally:
+            conn.close()
+    except Exception:
+        pass
+
     # Stamp as cancelled so the modal sees a terminal state on next poll.
     status["state"] = "cancelled"
     status["finished_at"] = _time.time()
     status["summary"] = (status.get("summary") or
-                         f"Cancelled by operator (pid_killed={pid_killed})")
+                         f"Cancelled by operator (pid_killed={pid_killed}, "
+                         f"cagg_refreshed={cagg_refreshed})")
     tmp = path + ".tmp"
     with open(tmp, "w") as f:
         _json.dump(status, f, indent=2)
     _os.replace(tmp, path)
 
-    return {"job_id": job_id, "state": "cancelled", "pid_killed": pid_killed}
+    return {"job_id": job_id, "state": "cancelled",
+            "pid_killed": pid_killed,
+            "cagg_refreshed": cagg_refreshed}
 
 
 # ─── /gaps ────────────────────────────────────────────────────────────────────
