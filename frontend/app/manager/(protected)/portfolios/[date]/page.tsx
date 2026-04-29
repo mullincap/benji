@@ -939,9 +939,16 @@ export default function PortfolioDetailPage() {
       "portfolio.matrix.collapsed", matrixCollapsed ? "1" : "0",
     );
   }, [matrixCollapsed]);
-  // Chart body height — bumps up when the matrix is collapsed so the
-  // chart can use the freed vertical space.
-  const chartBodyHeight = matrixCollapsed && !chartCollapsed ? 620 : 320;
+  // Chart body height — viewport-relative so the page never overflows.
+  // 480px covers everything above the chart+matrix bodies (page header,
+  // KPI strip, early-fill bar, chart container header, matrix container
+  // header). Whatever's left is split between the two bodies:
+  //   matrix expanded → split 50/50
+  //   matrix collapsed → chart takes the full remainder
+  // Mirrors the matrix's own maxHeight calc (PortfolioMatrix.tsx).
+  const chartBodyHeight = matrixCollapsed
+    ? "calc(100vh - 480px)"
+    : "calc((100vh - 480px) / 2)";
 
   const toggleSymbolHidden = useCallback((label: string) => {
     setHiddenSymbols((prev) => {

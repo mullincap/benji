@@ -219,20 +219,25 @@ export default function MatrixContainer({
         onToggleCollapsed={onToggleCollapsed}
       />
       {!collapsed && (
-        // When the companion chart is collapsed, grant the body a much
-        // taller scroll region (70vh ~ most of the viewport) so the
-        // matrix uses the freed space. Otherwise keep the historical
-        // 460px cap so the matrix doesn't push the page beyond the
-        // viewport. Pass directly into the body so the existing
-        // overflow-auto behaviour stays intact — wrapping it in another
-        // div lost the maxHeight contract on shorter rows.
+        // Viewport-relative cap on the matrix scroll region so the page
+        // never overflows the viewport.
+        // PORTFOLIO_TOP_CHROME (~480px) covers everything above the
+        // chart+matrix bodies — page header, KPI strip, early-fill bar,
+        // chart container header, matrix container header. Whatever's
+        // left after that is split between the two bodies:
+        //   companion expanded → split 50/50
+        //   companion collapsed → matrix takes the full remainder
+        // Subtracting MATRIX_INTERNAL_CHROME (~50px) inside the cap
+        // keeps the matrix's tfoot/thead visible past the scroll region.
         theme === "simple" ? (
           <SimpleMatrix
             bars={bars}
             symbolsOrdered={symbolsOrdered}
             stoppedAtBar={stoppedAtBar}
             onSymbolClick={onSymbolClick}
-            maxHeightPx={companionCollapsed ? null : 420}
+            maxHeight={companionCollapsed
+              ? "calc(100vh - 480px)"
+              : "calc((100vh - 480px) / 2)"}
           />
         ) : (
           <AdvancedMatrix
@@ -241,7 +246,9 @@ export default function MatrixContainer({
             symbolsOrdered={symbolsOrdered}
             stoppedAtBar={stoppedAtBar}
             onSymbolClick={onSymbolClick}
-            maxHeightPx={companionCollapsed ? null : 460}
+            maxHeight={companionCollapsed
+              ? "calc(100vh - 480px)"
+              : "calc((100vh - 480px) / 2)"}
           />
         )
       )}
@@ -478,15 +485,15 @@ function SimpleMatrix({
   symbolsOrdered,
   stoppedAtBar,
   onSymbolClick,
-  maxHeightPx = 420,
+  maxHeight = 420,
 }: {
   bars: PortfolioBar[];
   symbolsOrdered: string[];
   stoppedAtBar: Map<string, number>;
   onSymbolClick?: (sym: string) => void;
-  // null = no cap (let the parent grow into the freed space when the
-  // companion chart is collapsed); a number caps the scroll region.
-  maxHeightPx?: number | null;
+  // Cap on the matrix scroll region. number → px; string → CSS value
+  // (lets the parent pass `calc((100vh - …) / 2)`); null → no cap.
+  maxHeight?: number | string | null;
 }) {
   const matrixThStyle: React.CSSProperties = {
     fontSize: 9,
@@ -512,7 +519,7 @@ function SimpleMatrix({
     <div
       style={{
         overflow: "auto",
-        maxHeight: maxHeightPx ?? undefined,
+        maxHeight: maxHeight ?? undefined,
         border: "1px solid var(--line)",
         borderRadius: 4,
       }}
@@ -679,15 +686,15 @@ function AdvancedMatrix({
   symbolsOrdered,
   stoppedAtBar,
   onSymbolClick,
-  maxHeightPx = 460,
+  maxHeight = 460,
 }: {
   bars: PortfolioBar[];
   allBars: PortfolioBar[];
   symbolsOrdered: string[];
   stoppedAtBar: Map<string, number>;
   onSymbolClick?: (sym: string) => void;
-  // null = no cap (matrix uses freed space from collapsed companion).
-  maxHeightPx?: number | null;
+  // number → px; string → CSS value; null → no cap.
+  maxHeight?: number | string | null;
 }) {
   // Latest-first. Sparkline data still walks the chronological array
   // separately so the time-series chart goes left-to-right oldest→newest
@@ -766,7 +773,7 @@ function AdvancedMatrix({
     <div
       style={{
         overflow: "auto",
-        maxHeight: maxHeightPx ?? undefined,
+        maxHeight: maxHeight ?? undefined,
         border: "1px solid var(--line)",
         borderRadius: 4,
         background: "#080809",
