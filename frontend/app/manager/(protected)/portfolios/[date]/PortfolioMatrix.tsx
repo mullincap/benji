@@ -52,6 +52,16 @@ interface Props {
   // open the per-symbol anchor-prices modal (06:00 / 06:35 closes
   // + computed stop levels). Omit to keep headers static text.
   onSymbolClick?: (sym: string) => void;
+  // Collapse state owned by the parent so it can co-ordinate with the
+  // companion chart container (when one is collapsed, the other can
+  // expand into the freed space). Both are optional — when omitted the
+  // matrix renders as a plain non-collapsible block.
+  collapsed?: boolean;
+  onToggleCollapsed?: () => void;
+  // Whether the companion (chart) container is currently collapsed.
+  // When true AND this matrix is expanded, we bump the body's
+  // max-height so the matrix uses the freed space.
+  companionCollapsed?: boolean;
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
@@ -145,11 +155,17 @@ export default function MatrixContainer({
   stoppedAtBar,
   symStopsCount,
   onSymbolClick,
+  collapsed = false,
+  onToggleCollapsed,
+  companionCollapsed = false,
 }: Props) {
+  // Default theme is Advanced — gives operators the heatmap + sparkline +
+  // stats footer view immediately; Simple stays available via the toggle
+  // for the legacy tabular treatment. Persists per browser via localStorage.
   const [theme, setTheme] = useState<Theme>(() => {
-    if (typeof window === "undefined") return "simple";
+    if (typeof window === "undefined") return "advanced";
     const v = window.localStorage.getItem(STORAGE_KEYS.theme);
-    return v === "advanced" ? "advanced" : "simple";
+    return v === "simple" ? "simple" : "advanced";
   });
   const [scope, setScope] = useState<Scope>(() => {
     if (typeof window === "undefined") return "ALL";
@@ -197,23 +213,38 @@ export default function MatrixContainer({
         gapCount={totalGaps}
         theme={theme}
         onThemeChange={setTheme}
+        scope={scope}
+        onScopeChange={setScope}
+        collapsed={collapsed}
+        onToggleCollapsed={onToggleCollapsed}
       />
-      {theme === "advanced" && <ScopePills scope={scope} onChange={setScope} />}
-      {theme === "simple" ? (
-        <SimpleMatrix
-          bars={bars}
-          symbolsOrdered={symbolsOrdered}
-          stoppedAtBar={stoppedAtBar}
-          onSymbolClick={onSymbolClick}
-        />
-      ) : (
-        <AdvancedMatrix
-          bars={scopedBars}
-          allBars={bars}
-          symbolsOrdered={symbolsOrdered}
-          stoppedAtBar={stoppedAtBar}
-          onSymbolClick={onSymbolClick}
-        />
+      {!collapsed && (
+        <div
+          style={{
+            // When the companion chart is collapsed and we're expanded,
+            // grant a generous max-height so the matrix scroll region
+            // can use the freed vertical space.
+            maxHeight: companionCollapsed ? "70vh" : undefined,
+            overflowY: companionCollapsed ? "auto" : undefined,
+          }}
+        >
+          {theme === "simple" ? (
+            <SimpleMatrix
+              bars={bars}
+              symbolsOrdered={symbolsOrdered}
+              stoppedAtBar={stoppedAtBar}
+              onSymbolClick={onSymbolClick}
+            />
+          ) : (
+            <AdvancedMatrix
+              bars={scopedBars}
+              allBars={bars}
+              symbolsOrdered={symbolsOrdered}
+              stoppedAtBar={stoppedAtBar}
+              onSymbolClick={onSymbolClick}
+            />
+          )}
+        </div>
       )}
     </div>
   );
@@ -228,6 +259,10 @@ function MatrixHeader({
   gapCount,
   theme,
   onThemeChange,
+  scope,
+  onScopeChange,
+  collapsed,
+  onToggleCollapsed,
 }: {
   visibleCount: number;
   totalCount: number;
@@ -235,6 +270,10 @@ function MatrixHeader({
   gapCount: number;
   theme: Theme;
   onThemeChange: (next: Theme) => void;
+  scope: Scope;
+  onScopeChange: (next: Scope) => void;
+  collapsed: boolean;
+  onToggleCollapsed?: () => void;
 }) {
   return (
     <div
@@ -242,18 +281,45 @@ function MatrixHeader({
         display: "flex",
         alignItems: "center",
         justifyContent: "space-between",
-        marginBottom: 10,
+        marginBottom: collapsed ? 0 : 10,
+        gap: 12,
       }}
     >
-      <div
+      <button
+        type="button"
+        onClick={onToggleCollapsed}
+        disabled={!onToggleCollapsed}
+        aria-expanded={!collapsed}
+        title={collapsed ? "Expand ROI Matrix" : "Collapse ROI Matrix"}
         style={{
+          display: "inline-flex",
+          alignItems: "center",
+          gap: 6,
           fontSize: 9,
           fontWeight: 700,
           letterSpacing: "0.12em",
           color: "var(--t3)",
           textTransform: "uppercase",
+          background: "transparent",
+          border: "none",
+          padding: 0,
+          cursor: onToggleCollapsed ? "pointer" : "default",
+          fontFamily: FONT_MONO,
         }}
       >
+        {onToggleCollapsed && (
+          <span
+            aria-hidden="true"
+            style={{
+              display: "inline-block",
+              width: 8,
+              transition: "transform 0.15s ease",
+              transform: collapsed ? "rotate(-90deg)" : "rotate(0deg)",
+            }}
+          >
+            ▾
+          </span>
+        )}
         ROI Matrix
         <span
           style={{
@@ -289,8 +355,13 @@ function MatrixHeader({
             · {stoppedCount} stopped
           </span>
         )}
-      </div>
-      <ThemeToggle value={theme} onChange={onThemeChange} />
+      </button>
+      {!collapsed && (
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          {theme === "advanced" && <ScopePills scope={scope} onChange={onScopeChange} />}
+          <ThemeToggle value={theme} onChange={onThemeChange} />
+        </div>
+      )}
     </div>
   );
 }
@@ -369,7 +440,6 @@ function ScopePills({
       style={{
         display: "flex",
         gap: 4,
-        padding: "4px 0 10px 0",
       }}
     >
       {opts.map((s) => {

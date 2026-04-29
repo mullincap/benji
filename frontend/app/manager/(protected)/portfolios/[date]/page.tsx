@@ -878,12 +878,15 @@ export default function PortfolioDetailPage() {
     if (typeof window === "undefined") return false;
     return window.localStorage.getItem("portfolio.sessionLogs.expanded") === "true";
   });
-  // When true, the pace trendline extends across the historical region
-  // too (bar 0 → end of session) instead of only the projection segment.
-  // Default off so the trendline reads as a forecast; on, it doubles as
-  // a "best-fit pace" overlay across the full path so the user can spot
-  // bars sitting above/below the line at a glance.
-  const [trendlineExtended, setTrendlineExtended] = useState(false);
+  // Pace trendline rendering mode:
+  //   projection — forward-only forecast from latest bar to session close
+  //   full       — extends backwards across historical path too
+  //   off        — hide entirely (use when an early-deployed regression
+  //                distorts the y-scale by projecting unrealistic values)
+  // Default "projection" so the trendline reads as a forecast.
+  type TrendlineMode = "projection" | "full" | "off";
+  const [trendlineMode, setTrendlineMode] = useState<TrendlineMode>("projection");
+  const trendlineExtended = trendlineMode === "full";
   // Tracks the (date, allocationId) we've already seeded the hidden-set
   // for, so polling refreshes don't keep clobbering the user's legend
   // clicks. Reset when the user navigates to a different portfolio.
@@ -900,6 +903,45 @@ export default function PortfolioDetailPage() {
     symbols: false,
     symbolTrendlines: false,
   });
+
+  // Latest-value ref so canvas plugins (registered once at mount via
+  // react-chartjs-2's `plugins` prop) always read the current overlay
+  // state. Without this the WIN toggle's effect on the fill-window
+  // vertical line is invisible: the plugin closure captures the FIRST
+  // render's `overlays` object and Chart.js never picks up a new
+  // closure on subsequent renders. The other overlay toggles only
+  // look responsive because their dataset references flip `hidden`,
+  // which forces chart.update() — WIN has no such dataset.
+  const overlaysRef = useRef(overlays);
+  overlaysRef.current = overlays;
+
+  // Collapse state for the cumulative-ROI chart and ROI matrix sections.
+  // Each can be collapsed independently; when one is collapsed and the
+  // other is expanded, the expanded one bumps up its body height to use
+  // the freed vertical space. Persisted per-browser via localStorage.
+  const [chartCollapsed, setChartCollapsed] = useState<boolean>(() => {
+    if (typeof window === "undefined") return false;
+    return window.localStorage.getItem("portfolio.chart.collapsed") === "1";
+  });
+  const [matrixCollapsed, setMatrixCollapsed] = useState<boolean>(() => {
+    if (typeof window === "undefined") return false;
+    return window.localStorage.getItem("portfolio.matrix.collapsed") === "1";
+  });
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    window.localStorage.setItem(
+      "portfolio.chart.collapsed", chartCollapsed ? "1" : "0",
+    );
+  }, [chartCollapsed]);
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    window.localStorage.setItem(
+      "portfolio.matrix.collapsed", matrixCollapsed ? "1" : "0",
+    );
+  }, [matrixCollapsed]);
+  // Chart body height — bumps up when the matrix is collapsed so the
+  // chart can use the freed vertical space.
+  const chartBodyHeight = matrixCollapsed && !chartCollapsed ? 620 : 320;
 
   const toggleSymbolHidden = useCallback((label: string) => {
     setHiddenSymbols((prev) => {
@@ -1311,6 +1353,7 @@ export default function PortfolioDetailPage() {
     // of the live path's own gradient.
     fill: (trendlineExtended ? false : "origin") as "origin" | false,
     tension: 0.15,
+    hidden: trendlineMode === "off",
     spanGaps: false,
     _isSymbol: false,
   };
@@ -1624,7 +1667,10 @@ export default function PortfolioDetailPage() {
       if (!yScale || !xScale) return;
       ctx.save();
       // ── Vertical marker: fill-window close ──────────────────────────
-      if (overlays.fillWindow && fillWindowSlot !== null && fillWindowSlot >= 0 && fillWindowSlot < totalSlots) {
+      // Read via overlaysRef so toggles registered after first render
+      // (e.g. WIN clicks) actually take effect — see overlaysRef
+      // declaration for the why.
+      if (overlaysRef.current.fillWindow && fillWindowSlot !== null && fillWindowSlot >= 0 && fillWindowSlot < totalSlots) {
         const xPx = xScale.getPixelForValue(fillWindowSlot);
         if (xPx >= chartArea.left && xPx <= chartArea.right) {
           ctx.strokeStyle = "rgba(0, 200, 150, 0.45)";
@@ -2184,18 +2230,41 @@ export default function PortfolioDetailPage() {
               flexWrap: "wrap",
             }}
           >
-            <div
+            <button
+              type="button"
+              onClick={() => setChartCollapsed((v) => !v)}
+              aria-expanded={!chartCollapsed}
+              title={chartCollapsed ? "Expand chart" : "Collapse chart"}
               style={{
+                display: "inline-flex",
+                alignItems: "center",
+                gap: 6,
                 fontSize: 9,
                 fontWeight: 700,
                 letterSpacing: "0.12em",
                 color: "var(--t3)",
                 textTransform: "uppercase",
+                background: "transparent",
+                border: "none",
+                cursor: "pointer",
+                padding: 0,
+                fontFamily: "var(--font-space-mono), Space Mono, monospace",
               }}
             >
+              <span
+                aria-hidden="true"
+                style={{
+                  display: "inline-block",
+                  width: 8,
+                  transition: "transform 0.15s ease",
+                  transform: chartCollapsed ? "rotate(-90deg)" : "rotate(0deg)",
+                }}
+              >
+                ▾
+              </span>
               Cumulative ROI
-            </div>
-            <div style={{ display: "flex", alignItems: "center", gap: 14, flexWrap: "wrap" }}>
+            </button>
+            <div style={{ display: chartCollapsed ? "none" : "flex", alignItems: "center", gap: 14, flexWrap: "wrap" }}>
               {/* Custom legend — surfaces only when the SYMBOLS overlay is
                   on. Each symbol chip is clickable to toggle visibility;
                   Portfolio is always rendered as a non-interactive header. */}
@@ -2231,13 +2300,15 @@ export default function PortfolioDetailPage() {
                   too. Same OLS slope + last-bar anchor either way. */}
               <SegmentedToggle
                 ariaLabel="Trendline extent"
-                value={trendlineExtended ? "full" : "projection"}
-                onChange={(next) => setTrendlineExtended(next === "full")}
+                value={trendlineMode}
+                onChange={(next) => setTrendlineMode(next as TrendlineMode)}
                 options={[
                   { key: "projection", label: "Projection",
                     title: "Pace line covers only the post-NOW projection segment." },
                   { key: "full", label: "Full",
                     title: "Pace line extends backwards across the historical path." },
+                  { key: "off", label: "Off",
+                    title: "Hide the pace trendline. Use when an early-deployed regression distorts the y-scale." },
                 ]}
               />
               {/* Overlay toggles — color-coded chip group lets the operator
@@ -2293,7 +2364,11 @@ export default function PortfolioDetailPage() {
               </div>
             </div>
           </div>
-          <div style={{ height: 320 }}>
+          <div style={{
+            height: chartCollapsed ? 0 : chartBodyHeight,
+            overflow: "hidden",
+            transition: "height 0.18s ease",
+          }}>
             <Line
               data={{ labels, datasets: chartDatasets }}
               options={chartOptions}
@@ -2313,6 +2388,9 @@ export default function PortfolioDetailPage() {
           stoppedAtBar={stoppedAtBar}
           symStopsCount={symStopsCount}
           onSymbolClick={openSymbolAnchorsModal}
+          collapsed={matrixCollapsed}
+          onToggleCollapsed={() => setMatrixCollapsed((v) => !v)}
+          companionCollapsed={chartCollapsed}
         />
 
         {/* Session-logs deep-link removed — replaced by the right-edge
