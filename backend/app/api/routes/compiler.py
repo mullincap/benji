@@ -576,10 +576,30 @@ def fill_missing_status(job_id: str) -> dict[str, Any]:
 def fill_missing_active() -> dict[str, Any]:
     """Return the most recent in-progress fill_missing job for the compiler
     page (if any). Used by the frontend to rehydrate the running button on
-    page load. Returns {job_id: null} if none."""
+    page load. Returns {job_id: null} if none.
+
+    Self-heals stale-running JSONs: if a worker's PID is no longer alive
+    (SIGKILL/crash/container-rebuild left the JSON frozen at state=running)
+    we stamp it cancelled inline so the frontend's chip doesn't re-attach
+    to a ghost job. Avoids the 2026-04-29 incident where three killed
+    workers' JSONs kept resurfacing in the UI as "FILLING 16/28..." days
+    later.
+    """
     import json as _json
     import glob as _glob
     import os as _os
+    import time as _time
+
+    def _pid_alive(pid: object) -> bool:
+        if not isinstance(pid, int) or pid <= 0:
+            return False
+        try:
+            _os.kill(pid, 0)  # signal 0 = existence check, no actual signal
+            return True
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            return True  # exists but owned by another user — treat as alive
 
     if not _os.path.isdir(_FILL_MISSING_DIR):
         return {"job_id": None}
@@ -593,6 +613,34 @@ def fill_missing_active() -> dict[str, Any]:
         if doc.get("page") != "compiler":
             continue
         if doc.get("state") not in ("running", "queued"):
+            continue
+        # Stale-running detection: worker PID is gone → stamp cancelled.
+        # Older JSONs from before the pid field was written won't have a
+        # pid; in that case fall back to a 24h staleness threshold.
+        pid = doc.get("pid")
+        is_stale = False
+        if pid is not None:
+            if not _pid_alive(pid):
+                is_stale = True
+        else:
+            started_at = doc.get("started_at") or 0
+            if started_at and (_time.time() - started_at) > 86400:
+                is_stale = True
+        if is_stale:
+            doc["state"] = "cancelled"
+            doc["finished_at"] = _time.time()
+            doc["summary"] = (
+                doc.get("summary")
+                or f"Auto-cancelled: worker pid {pid} not alive at "
+                   f"{_time.strftime('%Y-%m-%dT%H:%M:%SZ', _time.gmtime())}"
+            )
+            tmp = path + ".tmp"
+            try:
+                with open(tmp, "w") as f:
+                    _json.dump(doc, f, indent=2)
+                _os.replace(tmp, path)
+            except Exception:
+                pass
             continue
         candidates.append((doc.get("started_at", 0), doc))
     if not candidates:

@@ -400,10 +400,27 @@ def fill_missing_indexer_status(job_id: str) -> dict[str, Any]:
 @router.get("/coverage/fill-missing/active")
 def fill_missing_indexer_active() -> dict[str, Any]:
     """Most recent in-progress indexer fill-missing job; for page-load
-    rehydration. Returns {job_id: null} if none."""
+    rehydration. Returns {job_id: null} if none.
+
+    Self-heals JSONs frozen at state=running by checking whether the
+    worker PID is still alive — see compiler.fill_missing_active() for
+    the reasoning (2026-04-29 incident).
+    """
     import json as _json
     import glob as _glob
     import os as _os
+    import time as _time
+
+    def _pid_alive(pid: object) -> bool:
+        if not isinstance(pid, int) or pid <= 0:
+            return False
+        try:
+            _os.kill(pid, 0)
+            return True
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            return True
 
     if not _os.path.isdir(_FILL_MISSING_DIR_INDEXER):
         return {"job_id": None}
@@ -417,6 +434,31 @@ def fill_missing_indexer_active() -> dict[str, Any]:
         if doc.get("page") != "indexer":
             continue
         if doc.get("state") not in ("running", "queued"):
+            continue
+        pid = doc.get("pid")
+        is_stale = False
+        if pid is not None:
+            if not _pid_alive(pid):
+                is_stale = True
+        else:
+            started_at = doc.get("started_at") or 0
+            if started_at and (_time.time() - started_at) > 86400:
+                is_stale = True
+        if is_stale:
+            doc["state"] = "cancelled"
+            doc["finished_at"] = _time.time()
+            doc["summary"] = (
+                doc.get("summary")
+                or f"Auto-cancelled: worker pid {pid} not alive at "
+                   f"{_time.strftime('%Y-%m-%dT%H:%M:%SZ', _time.gmtime())}"
+            )
+            tmp = path + ".tmp"
+            try:
+                with open(tmp, "w") as f:
+                    _json.dump(doc, f, indent=2)
+                _os.replace(tmp, path)
+            except Exception:
+                pass
             continue
         candidates.append((doc.get("started_at", 0), doc))
     if not candidates:
