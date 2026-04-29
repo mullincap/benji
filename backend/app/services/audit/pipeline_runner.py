@@ -11,15 +11,66 @@ lives in Track 3 (run_audit(params) -> AuditResult).
 Extraction is behavior-preserving. Any drift from pipeline_worker.py's prior
 inline implementation is a bug.
 """
+import contextlib
+import fcntl
 import glob as _glob
+import logging
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import Callable, Optional
 
 from app.core.config import settings
 from app.services.audit.metrics_parser import parse_metrics
+
+_audit_log = logging.getLogger("audit_pipeline_runner")
+
+
+@contextlib.contextmanager
+def _audit_subprocess_lock():
+    """Serialize audit subprocess invocations across concurrent celery workers.
+
+    The audit pipeline (overlap_analysis → audit.py → rebuild_portfolio_matrix)
+    writes to several globally-shared files in PIPELINE_DIR / data dirs:
+      - deploys_overlap_*.csv
+      - portfolio_matrix_gated.csv
+      - eligibility_gate_report.csv
+
+    With celery --concurrency=2, two simultaneous audit jobs race: the
+    second job's matrix CSV write can clobber the first's, then the first
+    reads back the wrong matrix. This produced silent metric corruption
+    in twin-run BloFin tests where Job B's blofin_only output matched
+    vanilla — Job B's audit subprocess read Job A's vanilla matrix.
+
+    Using fcntl.flock on a marker file inside PIPELINE_DIR. Both workers
+    share the same volume so the lock is effective across processes. The
+    lock is held for the duration of one full run_audit invocation
+    (overlap_analysis + audit + rebuild). Released automatically on
+    error or context-exit.
+    """
+    pipeline_dir = Path(settings.PIPELINE_DIR)
+    pipeline_dir.mkdir(parents=True, exist_ok=True)
+    lock_path = pipeline_dir / ".audit_subprocess.lock"
+    started = time.time()
+    fh = open(lock_path, "w")
+    try:
+        # Try non-blocking first to log queue position
+        try:
+            fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            _audit_log.info("audit_subprocess_lock: acquired immediately")
+        except BlockingIOError:
+            _audit_log.info("audit_subprocess_lock: another audit running, queuing")
+            fcntl.flock(fh.fileno(), fcntl.LOCK_EX)  # blocks
+            wait_sec = time.time() - started
+            _audit_log.info("audit_subprocess_lock: acquired after %.1fs wait", wait_sec)
+        try:
+            yield
+        finally:
+            fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+    finally:
+        fh.close()
 
 _PIPELINE_PYTHON = settings.PIPELINE_PYTHON
 
@@ -865,32 +916,37 @@ def run_audit(
     overlap_script = pipeline_dir / "overlap_analysis.py"
     cmd = [_PIPELINE_PYTHON, str(overlap_script)] + build_cli_args(params)
 
-    # Mid-session pre-flight: if live_today is set, ensure today's
-    # data is in the DB before overlap_analysis runs against it.
-    # Triggers metl + indexer subprocesses as needed; idempotent on
-    # re-run (skips steps whose output is already in DB).
-    if params.get("live_today"):
-        _ensure_today_in_db(
+    # Serialize audit subprocess invocations across concurrent celery
+    # workers. The audit pipeline writes to globally-shared files
+    # (portfolio_matrix_gated.csv, deploys_*.csv) so two concurrent
+    # audits would clobber each other's state. See _audit_subprocess_lock.
+    with _audit_subprocess_lock():
+        # Mid-session pre-flight: if live_today is set, ensure today's
+        # data is in the DB before overlap_analysis runs against it.
+        # Triggers metl + indexer subprocesses as needed; idempotent on
+        # re-run (skips steps whose output is already in DB).
+        if params.get("live_today"):
+            _ensure_today_in_db(
+                pipeline_env=pipeline_env,
+                pipeline_dir=pipeline_dir,
+                overlap_dimensions=params.get("overlap_dimensions") or "price_oi",
+                progress_cb=progress_cb,
+            )
+
+        prestage_parquet(
+            params,
             pipeline_env=pipeline_env,
             pipeline_dir=pipeline_dir,
-            overlap_dimensions=params.get("overlap_dimensions") or "price_oi",
-            progress_cb=progress_cb,
+            on_rebuild_start=on_rebuild_start,
         )
 
-    prestage_parquet(
-        params,
-        pipeline_env=pipeline_env,
-        pipeline_dir=pipeline_dir,
-        on_rebuild_start=on_rebuild_start,
-    )
+        run_audit_subprocess(
+            cmd=cmd,
+            output_path=output_path,
+            cwd=pipeline_dir,
+            env=pipeline_env,
+            on_line=progress_cb,
+            cancelled=cancellation_cb,
+        )
 
-    run_audit_subprocess(
-        cmd=cmd,
-        output_path=output_path,
-        cwd=pipeline_dir,
-        env=pipeline_env,
-        on_line=progress_cb,
-        cancelled=cancellation_cb,
-    )
-
-    return parse_metrics(output_path)
+        return parse_metrics(output_path)
