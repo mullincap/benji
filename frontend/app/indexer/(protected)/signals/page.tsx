@@ -262,6 +262,40 @@ function StatusBadge({
   );
 }
 
+// Research-row status: pure filter pass/fail readout. Research rows show
+// every filter mode's decision on the SAME canonical basket per date, so
+// the operator wants the filter outcome up front (sit_flat == filter
+// fired). Conviction is the same number across all modes per date and is
+// already shown in the Conviction column, so we don't double-encode it
+// here.
+function ResearchFilterBadge({ sitFlat }: { sitFlat: boolean }) {
+  const passed = !sitFlat;
+  const label = passed ? "Filter Pass" : "Filter Fail";
+  const symbol = passed ? "✓" : "✗";
+  const color = passed ? "var(--green)" : "var(--red)";
+  const bg = passed ? "var(--green-dim)" : "var(--red-dim)";
+  return (
+    <span style={{
+      display: "inline-flex",
+      alignItems: "center",
+      gap: 4,
+      fontSize: 9,
+      fontWeight: 700,
+      letterSpacing: "0.08em",
+      textTransform: "uppercase",
+      borderRadius: 3,
+      padding: "2px 6px",
+      border: `1px solid ${color}`,
+      color,
+      background: bg,
+      fontFamily: "var(--font-space-mono), Space Mono, monospace",
+    }}>
+      <span style={{ fontSize: 11, fontWeight: 700 }}>{symbol}</span>
+      <span>{label}</span>
+    </span>
+  );
+}
+
 function Th({ children, align = "left" }: { children: React.ReactNode; align?: "left" | "right" }) {
   return (
     <th style={{
@@ -453,12 +487,16 @@ function SignalRow({
         </Td>
         <Td><SourceBadge source={signal.signal_source} /></Td>
         <Td>
-          <StatusBadge
-            sitFlat={signal.sit_flat}
-            convictionRoiX={signal.conviction_roi_x}
-            killY={killY}
-            signalDate={signal.signal_date}
-          />
+          {signal.signal_source === "research" ? (
+            <ResearchFilterBadge sitFlat={signal.sit_flat} />
+          ) : (
+            <StatusBadge
+              sitFlat={signal.sit_flat}
+              convictionRoiX={signal.conviction_roi_x}
+              killY={killY}
+              signalDate={signal.signal_date}
+            />
+          )}
         </Td>
         <Td>{filterName}</Td>
         <Td><ConvictionBadge roiX={signal.conviction_roi_x} killY={killY} sitFlat={signal.sit_flat} /></Td>

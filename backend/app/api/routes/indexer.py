@@ -504,8 +504,19 @@ _RESEARCH_FILTER_MODES = (
     "A - No Filter",
     "A - Tail Guardrail",
     "A - Dispersion",
+    "A - Volatility",
     "A - Tail + Dispersion",
+    "A - Tail + Disp + Vol",
 )
+
+# Vol filter knobs — match audit.py defaults so the research view
+# computes the same gate the canonical audit does. Triple combo logic
+# is `tail_filter | (disp_filter & vol_filter)` (audit.py:17704), i.e.
+# tail always enforced; normal days sit out only when BOTH dispersion
+# weak AND vol compressed.
+_VOL_LOOKBACK = 10
+_VOL_PERCENTILE = 0.25
+_VOL_BASELINE_WIN = 90
 
 
 def _research_signals(cur, days: int) -> list[dict[str, Any]]:
@@ -614,17 +625,42 @@ def _research_signals(cur, days: int) -> list[dict[str, Any]]:
 
     decisions: dict[_dt.date, dict] = {d: {} for d in baskets_by_date}
 
+    # ── BTC daily closes (shared by TG + Vol series) ─────────────────────
+    # Pull a wider window than fetch_btc_daily_closes does (which is sized
+    # to TG's 60-day window + buffer): Vol filter needs baseline_win=90 +
+    # lookback=10 + buffer, so target ~140 days minimum. Single direct
+    # query — avoids the redundant connection fetch_btc_daily_closes
+    # opens internally.
+    btc_lookback_days = max(TAIL_VOL_LONG_WINDOW, _VOL_BASELINE_WIN + _VOL_LOOKBACK) + 30
+    cur.execute(
+        """
+        WITH btc AS (
+            SELECT symbol_id FROM market.symbols WHERE binance_id = 'BTCUSDT'
+        )
+        SELECT DATE_TRUNC('day', f.timestamp_utc)::date AS day,
+               (ARRAY_AGG(f.close ORDER BY f.timestamp_utc DESC))[1] AS day_close
+          FROM market.futures_1m f
+         WHERE f.symbol_id IN (SELECT symbol_id FROM btc)
+           AND f.timestamp_utc >= %s::timestamptz - (%s || ' days')::interval
+           AND f.timestamp_utc <  %s::timestamptz + INTERVAL '1 day'
+           AND f.close IS NOT NULL AND f.close > 0
+         GROUP BY 1
+         ORDER BY 1
+        """,
+        (latest, btc_lookback_days, latest),
+    )
+    btc_rows = cur.fetchall()
+    close_series = (
+        _pd.Series(
+            [float(r["day_close"]) for r in btc_rows],
+            index=_pd.to_datetime([r["day"] for r in btc_rows]),
+        )
+        if btc_rows else _pd.Series(dtype=float)
+    )
+
     # ── Tail Guardrail series ─────────────────────────────────────────────
     try:
-        # Use a ref date past the lookback so fetch_btc_daily_closes
-        # returns the full window of closes ending at today.
-        closes = fetch_btc_daily_closes(latest + _dt.timedelta(days=1))
-        if len(closes) >= TAIL_VOL_LONG_WINDOW + 1:
-            # Map closes to dates: fetch_btc_daily_closes returns oldest→newest
-            # ending at ref_date - 1. Build a dated series.
-            close_dates = [(latest - _dt.timedelta(days=len(closes) - 1 - i))
-                           for i in range(len(closes))]
-            close_series = _pd.Series(closes, index=_pd.to_datetime(close_dates))
+        if len(close_series) >= TAIL_VOL_LONG_WINDOW + 1:
             log_rets = _np.log(close_series / close_series.shift(1))
             # rvol windows; ratio cancels annualization so use raw stdev
             rvol_short = log_rets.rolling(TAIL_VOL_SHORT_WINDOW, min_periods=3).std()
@@ -732,6 +768,53 @@ def _research_signals(cur, days: int) -> list[dict[str, Any]]:
         for d in baskets_by_date:
             decisions[d]["dp"] = {"sit_flat": None, "reason": f"disp_error: {e}"}
 
+    # ── Volatility (compression) series ──────────────────────────────────
+    # Mirrors pipeline/audit.py:build_vol_filter — sit out when
+    # rvol(lookback=10d) < rolling_quantile(p25, baseline_win=90d).
+    # Lagged by 1 day so yesterday's signal gates today's trade.
+    try:
+        if len(close_series) >= _VOL_BASELINE_WIN + _VOL_LOOKBACK + 1:
+            btc_ret_pct = close_series.pct_change()
+            rvol = btc_ret_pct.rolling(
+                _VOL_LOOKBACK,
+                min_periods=max(3, _VOL_LOOKBACK // 2),
+            ).std()
+            vol_baseline = rvol.rolling(
+                _VOL_BASELINE_WIN,
+                min_periods=max(10, _VOL_BASELINE_WIN // 3),
+            ).quantile(_VOL_PERCENTILE)
+            vol_compressed = (rvol < vol_baseline).shift(1)
+            for d in baskets_by_date:
+                ts = _pd.Timestamp(d)
+                if ts in vol_compressed.index and _pd.notna(vol_compressed.loc[ts]):
+                    fired = bool(vol_compressed.loc[ts])
+                    yest_ts = ts - _pd.Timedelta(days=1)
+                    rv = (float(rvol.loc[yest_ts])
+                          if yest_ts in rvol.index and _pd.notna(rvol.loc[yest_ts])
+                          else None)
+                    bl = (float(vol_baseline.loc[yest_ts])
+                          if yest_ts in vol_baseline.index
+                          and _pd.notna(vol_baseline.loc[yest_ts])
+                          else None)
+                    if fired and rv is not None and bl is not None:
+                        reason = (f"vol_compressed: rvol={rv:.5f} "
+                                  f"< baseline_p{int(_VOL_PERCENTILE*100)}={bl:.5f}")
+                    elif fired:
+                        reason = "vol_compressed"
+                    else:
+                        reason = None
+                    decisions[d]["vl"] = {"sit_flat": fired, "reason": reason}
+                else:
+                    decisions[d]["vl"] = {"sit_flat": None,
+                                          "reason": "vol_insufficient_history"}
+        else:
+            for d in baskets_by_date:
+                decisions[d]["vl"] = {"sit_flat": None,
+                                      "reason": "vol_insufficient_history"}
+    except Exception as e:
+        for d in baskets_by_date:
+            decisions[d]["vl"] = {"sit_flat": None, "reason": f"vol_error: {e}"}
+
     # Step 3: per-date conviction roi_x from futures_1m (06:00 → 06:35
     # equal-weight average across the day's basket). Symbols come from
     # market.symbols.base; the basket is base-symbol strings. Single
@@ -795,9 +878,10 @@ def _research_signals(cur, days: int) -> list[dict[str, Any]]:
             {"rank": i + 1, "base": b, "weight": None}
             for i, b in enumerate(basket)
         ]
-        d_decisions = decisions.get(d, {"tg": {}, "dp": {}})
-        tg = d_decisions["tg"]
-        dp = d_decisions["dp"]
+        d_decisions = decisions.get(d, {"tg": {}, "dp": {}, "vl": {}})
+        tg = d_decisions.get("tg", {})
+        dp = d_decisions.get("dp", {})
+        vl = d_decisions.get("vl", {})
         conv = conviction_by_date.get(d)
 
         for mode in _RESEARCH_FILTER_MODES:
@@ -811,6 +895,9 @@ def _research_signals(cur, days: int) -> list[dict[str, Any]]:
             elif mode == "A - Dispersion":
                 sit_flat = bool(dp.get("sit_flat"))
                 reason = dp.get("reason") or ("pass" if not sit_flat else "")
+            elif mode == "A - Volatility":
+                sit_flat = bool(vl.get("sit_flat"))
+                reason = vl.get("reason") or ("pass" if not sit_flat else "")
             elif mode == "A - Tail + Dispersion":
                 tg_flat = bool(tg.get("sit_flat"))
                 dp_flat = bool(dp.get("sit_flat"))
@@ -821,6 +908,21 @@ def _research_signals(cur, days: int) -> list[dict[str, Any]]:
                     reason = f"tail+disp_tail_only: {tg.get('reason')}"
                 elif dp_flat:
                     reason = f"tail+disp_disp_only: {dp.get('reason')}"
+                else:
+                    reason = "pass"
+            elif mode == "A - Tail + Disp + Vol":
+                # audit.py:17704 — triple combo: tail always enforced;
+                # normal days sit out only when BOTH dispersion weak AND
+                # vol compressed (prevents over-filtering).
+                tg_flat = bool(tg.get("sit_flat"))
+                dp_flat = bool(dp.get("sit_flat"))
+                vl_flat = bool(vl.get("sit_flat"))
+                sit_flat = tg_flat or (dp_flat and vl_flat)
+                if tg_flat:
+                    reason = f"triple_tail: {tg.get('reason')}"
+                elif dp_flat and vl_flat:
+                    reason = (f"triple_disp_and_vol: {dp.get('reason')} | "
+                              f"{vl.get('reason')}")
                 else:
                     reason = "pass"
 
