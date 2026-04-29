@@ -78,6 +78,11 @@ def build_cli_args(params: dict) -> list[str]:
         "drop_unverified":       "--drop-unverified",
         "quick":                 "--quick",
         "apply_blofin_filter":   "--apply-blofin-filter",
+        # Trigger the canonical pct_change SQL ranking path WITHOUT
+        # restricting the universe to BloFin. Set by the BloFin twin-run
+        # wrapper so the vanilla baseline uses the same ranking method
+        # as the BloFin-restricted pass.
+        "force_canonical":       "--force-canonical",
     }
 
     audit_source = params.get("price_source", "db")
@@ -715,11 +720,18 @@ def run_audit_with_blofin_variants(
         )
 
     if mode == "both":
-        # First: vanilla pass (no BloFin universe restriction)
+        # Both passes use the canonical pct_change SQL ranking path so
+        # the only difference between vanilla and BloFin is the universe
+        # — apples-to-apples comparison. Without this, the vanilla pass
+        # would use market.leaderboards (fast path) while the BloFin
+        # pass would use the canonical SQL (forced by apply_blofin_filter),
+        # confounding the comparison with a ranking-method difference.
+        # See spec § 3.1 / overlap_analysis.py:_non_canonical_ranking.
         vanilla_params = {
             **params,
             "apply_blofin_filter":      False,
             "blofin_universe_enabled":  False,
+            "force_canonical":          True,
         }
         vanilla_metrics = run_audit(
             vanilla_params,

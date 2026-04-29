@@ -1817,6 +1817,7 @@ def run(min_mcap: float, freq_width: int, marketcap_dir: Path,
         price_ranking_metric: str = "pct_change",
         oi_ranking_metric: str = "pct_change",
         apply_blofin_filter: bool = False,
+        force_canonical: bool = False,
         overlap_dimensions: str = "price_oi",
 ):
     mcap_label      = f"{int(min_mcap / 1_000_000)}M"
@@ -1895,10 +1896,16 @@ def run(min_mcap: float, freq_width: int, marketcap_dir: Path,
     # that deviate from (pct_change price, pct_change OI, no BloFin filter)
     # get a suffix describing the deviation so artifacts don't collide with
     # canonical default runs of the same mode.
+    # `force_canonical` lets a caller request the canonical (pct_change,
+    # universe-aware) SQL ranking path WITHOUT also restricting the
+    # universe to BloFin. Used by the Simulator's BloFin "both variants"
+    # twin-run so the vanilla baseline uses the same ranking method as
+    # the BloFin-restricted pass — apples-to-apples comparison.
     _non_canonical_ranking = (
         price_ranking_metric != "pct_change"
         or oi_ranking_metric != "pct_change"
         or apply_blofin_filter
+        or force_canonical
     )
     if _non_canonical_ranking:
         _rm_parts = []
@@ -1908,6 +1915,11 @@ def run(min_mcap: float, freq_width: int, marketcap_dir: Path,
             _rm_parts.append(f"o{oi_ranking_metric[:4]}")
         if apply_blofin_filter:
             _rm_parts.append("bf")
+        elif force_canonical:
+            # Distinct suffix so the canonical-no-BloFin output doesn't
+            # collide with a vanilla leaderboards-fast-path output of the
+            # same mode. Suffix dropped when bf is set (bf implies canonical).
+            _rm_parts.append("fc")
         _rm_suffix = "_" + "".join(_rm_parts)
     else:
         _rm_suffix = ""
@@ -2472,6 +2484,14 @@ if __name__ == "__main__":
                              "currently listed on BloFin's USDT-swap instrument list BEFORE "
                              "ranking. Matches live trading universe constraints. Fetched once "
                              "per audit-run via BloFin REST API.")
+    parser.add_argument("--force-canonical", dest="force_canonical",
+                        action="store_true", default=False,
+                        help="OPT-IN (default: off). Force the canonical (pct_change, "
+                             "universe-aware) SQL ranking path WITHOUT also restricting the "
+                             "universe to BloFin. Used by the Simulator's BloFin twin-run so "
+                             "the vanilla baseline uses the same ranking method as the "
+                             "BloFin-restricted pass — apples-to-apples comparison. "
+                             "Implied when --apply-blofin-filter is set.")
     parser.add_argument("--overlap-dimensions", dest="overlap_dimensions", type=str,
                         default="price_oi", choices=list(OVERLAP_DIMENSIONS_CHOICES),
                         help="Which axes must agree for a symbol to enter the basket. "
@@ -2596,6 +2616,7 @@ if __name__ == "__main__":
         price_ranking_metric = args.price_ranking_metric,
         oi_ranking_metric    = args.oi_ranking_metric,
         apply_blofin_filter  = args.apply_blofin_filter,
+        force_canonical      = args.force_canonical,
         overlap_dimensions   = args.overlap_dimensions,
     )
 
