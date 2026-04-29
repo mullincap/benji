@@ -492,6 +492,15 @@ export default function CompilerCoveragePage() {
   const [fillModal, setFillModal] = useState<FillModalInit | null>(null);
   const pendingFillJobIdRef = useRef<string | null>(null);
   const pendingFillDatesTotalRef = useRef<number>(0);
+  // Live tail of the worker's metl log, streamed in via the new
+  // /coverage/fill-missing/log endpoint at the same 3s cadence as
+  // the status JSON. Stored as one text blob; the frontend renders
+  // it inside the modal's progress phase as a scrolling console.
+  const [fillLogText, setFillLogText] = useState<string>("");
+  const fillLogOffsetRef = useRef<number>(0);
+  // Disabled-button flag for the in-flight POST window so a double-
+  // click can't race two submissions through before the first lands.
+  const [postingFill, setPostingFill] = useState(false);
 
   function handleStartWatching() {
     const job_id = pendingFillJobIdRef.current;
@@ -511,6 +520,14 @@ export default function CompilerCoveragePage() {
   }
 
   function handleDismissModal() {
+    // Dismiss = "run in background" — close the modal but kick off
+    // chip tracking so the operator still has a visible signal that
+    // a worker is alive. Without this, the page looked idle right
+    // after dismiss and a second Fill Missing click would race the
+    // running worker (was a real footgun pre-2026-04-29).
+    if (pendingFillJobIdRef.current && fillStatus === null) {
+      handleStartWatching();
+    }
     setFillModal(null);
     pendingFillJobIdRef.current = null;
   }
@@ -550,6 +567,52 @@ export default function CompilerCoveragePage() {
     return () => window.clearInterval(interval);
   }, [fillStatus]);
 
+  // Poll the worker's log file at the same cadence. Tails new bytes
+  // since `fillLogOffsetRef` and appends to the in-memory text blob,
+  // capping the blob to the last ~64KB so a long-running job doesn't
+  // bloat memory. Resets when the watched job_id changes.
+  useEffect(() => {
+    if (!fillStatus) {
+      setFillLogText("");
+      fillLogOffsetRef.current = 0;
+      return;
+    }
+    const job_id = fillStatus.job_id;
+    // Reset on job_id change
+    setFillLogText("");
+    fillLogOffsetRef.current = 0;
+
+    let cancelled = false;
+    const tick = async () => {
+      if (cancelled) return;
+      try {
+        const res = await fetch(
+          `${API_BASE}/api/compiler/coverage/fill-missing/log?job_id=${job_id}&since=${fillLogOffsetRef.current}`,
+          { credentials: "include" },
+        );
+        if (!res.ok) return;
+        const body = await res.json() as
+          { end: number; bytes: number; truncated: boolean; text: string };
+        if (cancelled) return;
+        fillLogOffsetRef.current = body.end;
+        if (body.bytes > 0) {
+          setFillLogText((prev) => {
+            // If server told us it skipped a chunk, replace; otherwise append.
+            const next = body.truncated ? body.text : prev + body.text;
+            // Keep the tail bounded (~80KB) so the modal doesn't
+            // grow without limit on a long job.
+            const MAX = 80_000;
+            return next.length > MAX ? next.slice(next.length - MAX) : next;
+          });
+        }
+      } catch { /* swallow blips */ }
+    };
+    // Fire once immediately so the panel has content fast, then poll.
+    void tick();
+    const id = window.setInterval(tick, 3000);
+    return () => { cancelled = true; window.clearInterval(id); };
+  }, [fillStatus?.job_id]);
+
   // On page load, check for an active fill job and rehydrate state.
   useEffect(() => {
     let cancelled = false;
@@ -566,13 +629,15 @@ export default function CompilerCoveragePage() {
 
   async function handleFillMissing() {
     if (fillIsRunning(fillStatus)) return;
+    if (postingFill) return; // double-click guard
     setFillError(null);
+    setPostingFill(true);
 
     // 1. Hit the endpoint with no `dates` arg — backend auto-detects gaps.
-    //    We need to know the gap count to decide whether to confirm.
     //    The endpoint will (a) return done immediately with dates_total=0
-    //    if no gaps (cheap cagg refresh path), or (b) return queued with
-    //    a list of dates if gaps were found.
+    //    if no gaps, (b) return queued with a list of dates, or (c) 409
+    //    if another job is already running — in that case we rehydrate
+    //    from /status and reopen the modal in progress phase.
     let initial: { job_id: string; state: string; dates_total: number;
                    dates?: string[]; summary?: string };
     try {
@@ -580,6 +645,33 @@ export default function CompilerCoveragePage() {
         `${API_BASE}/api/compiler/coverage/fill-missing?days_back=30`,
         { method: "POST", credentials: "include" },
       );
+      if (res.status === 409) {
+        // Another job already running. Server returns the existing
+        // job_id in the detail; pull the current status so the modal
+        // re-attaches to it instead of showing a confusing error.
+        try {
+          const body = await res.json();
+          const existingJobId = body?.detail?.job_id;
+          if (existingJobId) {
+            const sres = await fetch(
+              `${API_BASE}/api/compiler/coverage/fill-missing/status?job_id=${existingJobId}`,
+              { credentials: "include" },
+            );
+            if (sres.ok) {
+              const live = (await sres.json()) as FillStatus;
+              setFillStatus(live);
+              // Open modal in progress phase by reusing the dates
+              // already in the status payload. estMin is irrelevant
+              // post-confirm; pass 0.
+              setFillModal({
+                dates: (live.dates ?? []).map((d) => d.date),
+                estMin: 0,
+              });
+            }
+          }
+        } catch { /* fall through to generic */ }
+        return;
+      }
       if (!res.ok) {
         const text = await res.text().catch(() => `HTTP ${res.status}`);
         setFillError(text.slice(0, 200));
@@ -589,6 +681,8 @@ export default function CompilerCoveragePage() {
     } catch (err) {
       setFillError(err instanceof Error ? err.message : String(err));
       return;
+    } finally {
+      setPostingFill(false);
     }
 
     // 2. Zero-gap fast path: state=done, just show the summary.
@@ -723,11 +817,13 @@ export default function CompilerCoveragePage() {
                   handleFillMissing();
                 }
               }}
-              disabled={state.kind === "loading"}
+              disabled={state.kind === "loading" || postingFill}
               title={
-                fillIsRunning(fillStatus)
-                  ? "Click to re-open the progress modal"
-                  : "Detect days with incomplete data in market.futures_1m, delete + re-run metl for each, then refresh the continuous aggregates. Today (UTC) is always excluded from auto-detect."
+                postingFill
+                  ? "Detecting partial days…"
+                  : fillIsRunning(fillStatus)
+                    ? "Click to re-open the progress modal"
+                    : "Detect days with incomplete data in market.futures_1m, delete + re-run metl for each, then refresh the continuous aggregates. Today (UTC) is always excluded from auto-detect."
               }
               style={{
                 background: fillIsRunning(fillStatus) ? "var(--bg4)" : "var(--bg2)",
@@ -740,7 +836,7 @@ export default function CompilerCoveragePage() {
                 letterSpacing: "0.12em",
                 textTransform: "uppercase",
                 fontFamily: "var(--font-space-mono), Space Mono, monospace",
-                cursor: state.kind === "loading" ? "not-allowed" : "pointer",
+                cursor: (state.kind === "loading" || postingFill) ? "not-allowed" : "pointer",
                 transition: "background 0.15s ease, color 0.15s ease",
                 minWidth: 120,
                 whiteSpace: "nowrap",
@@ -757,6 +853,7 @@ export default function CompilerCoveragePage() {
               }}
             >
               {(() => {
+                if (postingFill) return "detecting…";
                 if (!fillStatus || !fillIsRunning(fillStatus)) return "fill missing";
                 const total = fillStatus.dates_total;
                 const done = fillStatus.dates_completed + fillStatus.dates_failed;
@@ -805,6 +902,7 @@ export default function CompilerCoveragePage() {
           init={fillModal}
           status={fillStatus}
           watching={fillStatus !== null}
+          logText={fillLogText}
           onWatch={handleStartWatching}
           onDismiss={handleDismissModal}
           onMinimize={() => setFillModal(null)}
@@ -834,6 +932,7 @@ function FillMissingModal({
   init,
   status,
   watching,
+  logText,
   onWatch,
   onDismiss,
   onMinimize,
@@ -842,6 +941,10 @@ function FillMissingModal({
   init: FillModalInit;
   status: FillStatus | null;
   watching: boolean;
+  // Live tail of the worker's metl log — rendered as a scrolling
+  // console inside the progress phase so the operator can see
+  // per-symbol fetch progress as it happens.
+  logText: string;
   onWatch: () => void;
   onDismiss: () => void;
   onMinimize: () => void;
@@ -940,7 +1043,7 @@ function FillMissingModal({
               Estimated time: ~{init.estMin} min (~7 min per day for metl re-fetch).
             </div>
             <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
-              <ModalButton variant="ghost" onClick={onDismiss}>Dismiss</ModalButton>
+              <ModalButton variant="ghost" onClick={onDismiss}>Run in background</ModalButton>
               <ModalButton variant="primary" onClick={onWatch}>Watch progress</ModalButton>
             </div>
           </>
@@ -982,6 +1085,7 @@ function FillMissingModal({
               </div>
             </div>
             <DayProgressList rows={dateRows} currentDate={status?.current_date ?? null} />
+            <LogConsole text={logText} />
             <div style={{ display: "flex", gap: 8, justifyContent: "flex-end", marginTop: 18 }}>
               <ModalButton variant="danger" onClick={handleCancelClick} disabled={cancelling}>
                 {cancelling ? "Cancelling…" : "Cancel job"}
@@ -1063,6 +1167,72 @@ function DayProgressList({
           </div>
         );
       })}
+    </div>
+  );
+}
+
+function LogConsole({ text }: { text: string }) {
+  // Auto-scroll to bottom on every text update unless the operator
+  // has scrolled up — that "stuck to bottom" UX matches what tail -f
+  // feels like in a terminal. Sticky-bottom is detected by checking
+  // whether the prior render had the scroll within ~24px of the end.
+  const ref = useRef<HTMLDivElement | null>(null);
+  const stickRef = useRef(true);
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    if (stickRef.current) {
+      el.scrollTop = el.scrollHeight;
+    }
+  }, [text]);
+  const onScroll = () => {
+    const el = ref.current;
+    if (!el) return;
+    stickRef.current = el.scrollTop + el.clientHeight >= el.scrollHeight - 24;
+  };
+  if (!text) {
+    // Empty placeholder while the worker hasn't logged anything yet —
+    // gives the panel a stable footprint so the modal doesn't jump
+    // when the first chunk arrives.
+    return (
+      <div
+        style={{
+          marginTop: 12,
+          padding: "10px 12px",
+          background: "var(--bg0)",
+          border: "1px solid var(--line)",
+          borderRadius: 4,
+          fontSize: 9,
+          color: "var(--t3)",
+          fontFamily: "var(--font-space-mono), Space Mono, monospace",
+          fontStyle: "italic",
+        }}
+      >
+        waiting for worker output…
+      </div>
+    );
+  }
+  return (
+    <div
+      ref={ref}
+      onScroll={onScroll}
+      style={{
+        marginTop: 12,
+        height: 200,
+        overflowY: "auto",
+        padding: "10px 12px",
+        background: "var(--bg0)",
+        border: "1px solid var(--line)",
+        borderRadius: 4,
+        fontSize: 9,
+        lineHeight: 1.45,
+        color: "var(--t1)",
+        fontFamily: "var(--font-space-mono), Space Mono, monospace",
+        whiteSpace: "pre-wrap",
+        wordBreak: "break-word",
+      }}
+    >
+      {text}
     </div>
   );
 }

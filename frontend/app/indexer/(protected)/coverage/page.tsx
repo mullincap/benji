@@ -560,6 +560,11 @@ export default function IndexerCoveragePage() {
   // null means closed; setting to an object opens the modal. The modal
   // renders confirm / progress / done internally based on fillStatus.
   const [fillModal, setFillModal] = useState<FillModalInit | null>(null);
+  // Live tail of the worker's log for in-modal streaming.
+  const [fillLogText, setFillLogText] = useState<string>("");
+  const fillLogOffsetRef = useRef<number>(0);
+  // POST in-flight guard so a double-click can't race two submissions.
+  const [postingFill, setPostingFill] = useState(false);
 
   const fillIsTerminal = (s: FillStatus | null) =>
     s !== null && (s.state === "done" || s.state === "failed" ||
@@ -590,6 +595,44 @@ export default function IndexerCoveragePage() {
     return () => window.clearInterval(interval);
   }, [fillStatus]);
 
+  // Poll worker's log file at the same cadence as /status.
+  useEffect(() => {
+    if (!fillStatus) {
+      setFillLogText("");
+      fillLogOffsetRef.current = 0;
+      return;
+    }
+    const job_id = fillStatus.job_id;
+    setFillLogText("");
+    fillLogOffsetRef.current = 0;
+
+    let cancelled = false;
+    const tick = async () => {
+      if (cancelled) return;
+      try {
+        const res = await fetch(
+          `${API_BASE}/api/indexer/coverage/fill-missing/log?job_id=${job_id}&since=${fillLogOffsetRef.current}`,
+          { credentials: "include" },
+        );
+        if (!res.ok) return;
+        const body = await res.json() as
+          { end: number; bytes: number; truncated: boolean; text: string };
+        if (cancelled) return;
+        fillLogOffsetRef.current = body.end;
+        if (body.bytes > 0) {
+          setFillLogText((prev) => {
+            const next = body.truncated ? body.text : prev + body.text;
+            const MAX = 80_000;
+            return next.length > MAX ? next.slice(next.length - MAX) : next;
+          });
+        }
+      } catch { /* swallow blips */ }
+    };
+    void tick();
+    const id = window.setInterval(tick, 3000);
+    return () => { cancelled = true; window.clearInterval(id); };
+  }, [fillStatus?.job_id]);
+
   // On page load, rehydrate any active job
   useEffect(() => {
     let cancelled = false;
@@ -606,7 +649,9 @@ export default function IndexerCoveragePage() {
 
   async function handleFillMissing() {
     if (fillIsRunning(fillStatus)) return;
+    if (postingFill) return;
     setFillError(null);
+    setPostingFill(true);
 
     let initial: { job_id: string; state: string; dates_total: number;
                    dates?: string[]; summary?: string };
@@ -615,6 +660,29 @@ export default function IndexerCoveragePage() {
         `${API_BASE}/api/indexer/coverage/fill-missing?days_back=30`,
         { method: "POST", credentials: "include" },
       );
+      if (res.status === 409) {
+        // Another indexer job already running — rehydrate from /status
+        // and reopen the modal in progress phase instead of erroring.
+        try {
+          const body = await res.json();
+          const existingJobId = body?.detail?.job_id;
+          if (existingJobId) {
+            const sres = await fetch(
+              `${API_BASE}/api/indexer/coverage/fill-missing/status?job_id=${existingJobId}`,
+              { credentials: "include" },
+            );
+            if (sres.ok) {
+              const live = (await sres.json()) as FillStatus;
+              setFillStatus(live);
+              setFillModal({
+                dates: (live.dates ?? []).map((d) => d.date),
+                estMin: 0,
+              });
+            }
+          }
+        } catch { /* fall through */ }
+        return;
+      }
       if (!res.ok) {
         const text = await res.text().catch(() => `HTTP ${res.status}`);
         setFillError(text.slice(0, 200));
@@ -624,6 +692,8 @@ export default function IndexerCoveragePage() {
     } catch (err) {
       setFillError(err instanceof Error ? err.message : String(err));
       return;
+    } finally {
+      setPostingFill(false);
     }
 
     if (initial.state === "done") {
@@ -681,6 +751,12 @@ export default function IndexerCoveragePage() {
   }
 
   function handleDismissModal() {
+    // Dismiss = "run in background" — close the modal but kick off
+    // chip tracking so the operator still has a visible signal that
+    // a worker is alive. See compiler/coverage/page.tsx for context.
+    if (pendingFillJobIdRef.current && fillStatus === null) {
+      handleStartWatching();
+    }
     setFillModal(null);
     pendingFillJobIdRef.current = null;
   }
@@ -786,11 +862,13 @@ export default function IndexerCoveragePage() {
                   handleFillMissing();
                 }
               }}
-              disabled={state.kind === "loading"}
+              disabled={state.kind === "loading" || postingFill}
               title={
-                fillIsRunning(fillStatus)
-                  ? "Click to re-open the progress modal"
-                  : "Detect partial days in market.leaderboards, force-rebuild each metric (price/OI/volume) per day, then refresh the continuous aggregate. Today (UTC) is always excluded from auto-detect."
+                postingFill
+                  ? "Detecting partial days…"
+                  : fillIsRunning(fillStatus)
+                    ? "Click to re-open the progress modal"
+                    : "Detect partial days in market.leaderboards, force-rebuild each metric (price/OI/volume) per day, then refresh the continuous aggregate. Today (UTC) is always excluded from auto-detect."
               }
               style={{
                 background: fillIsRunning(fillStatus) ? "var(--bg4)" : "var(--bg2)",
@@ -820,6 +898,7 @@ export default function IndexerCoveragePage() {
               }}
             >
               {(() => {
+                if (postingFill) return "detecting…";
                 if (!fillStatus || !fillIsRunning(fillStatus)) return "fill missing";
                 const total = fillStatus.dates_total;
                 const done = fillStatus.dates_completed + fillStatus.dates_failed;
@@ -902,6 +981,7 @@ export default function IndexerCoveragePage() {
           init={fillModal}
           status={fillStatus}
           watching={fillStatus !== null}
+          logText={fillLogText}
           onWatch={handleStartWatching}
           onDismiss={handleDismissModal}
           onMinimize={() => setFillModal(null)}
@@ -929,6 +1009,7 @@ function FillMissingModal({
   init,
   status,
   watching,
+  logText,
   onWatch,
   onDismiss,
   onMinimize,
@@ -937,6 +1018,7 @@ function FillMissingModal({
   init: FillModalInit;
   status: FillStatus | null;
   watching: boolean;
+  logText: string;
   onWatch: () => void;
   onDismiss: () => void;
   onMinimize: () => void;
@@ -1039,7 +1121,7 @@ function FillMissingModal({
               Estimated time: ~{init.estMin} min (3 metrics × ~45s per day).
             </div>
             <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
-              <ModalButton variant="ghost" onClick={onDismiss}>Dismiss</ModalButton>
+              <ModalButton variant="ghost" onClick={onDismiss}>Run in background</ModalButton>
               <ModalButton variant="primary" onClick={onWatch}>Watch progress</ModalButton>
             </div>
           </>
@@ -1081,6 +1163,7 @@ function FillMissingModal({
               </div>
             </div>
             <ProgressList rows={dateRows} currentDate={status?.current_date ?? null} currentState={status?.current_state ?? null} />
+            <LogConsole text={logText} />
             <div style={{ display: "flex", gap: 8, justifyContent: "flex-end", marginTop: 18 }}>
               <ModalButton variant="danger" onClick={handleCancelClick} disabled={cancelling}>
                 {cancelling ? "Cancelling…" : "Cancel job"}
@@ -1180,6 +1263,68 @@ function ProgressList({
           </div>
         );
       })}
+    </div>
+  );
+}
+
+function LogConsole({ text }: { text: string }) {
+  // Auto-scroll-to-bottom when sticky to the tail; lets the operator
+  // scroll up to read older lines without the panel snapping back.
+  // See compiler/coverage/page.tsx for the same component + comments.
+  const ref = useRef<HTMLDivElement | null>(null);
+  const stickRef = useRef(true);
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    if (stickRef.current) {
+      el.scrollTop = el.scrollHeight;
+    }
+  }, [text]);
+  const onScroll = () => {
+    const el = ref.current;
+    if (!el) return;
+    stickRef.current = el.scrollTop + el.clientHeight >= el.scrollHeight - 24;
+  };
+  if (!text) {
+    return (
+      <div
+        style={{
+          marginTop: 12,
+          padding: "10px 12px",
+          background: "var(--bg0)",
+          border: "1px solid var(--line)",
+          borderRadius: 4,
+          fontSize: 9,
+          color: "var(--t3)",
+          fontFamily: "var(--font-space-mono), Space Mono, monospace",
+          fontStyle: "italic",
+        }}
+      >
+        waiting for worker output…
+      </div>
+    );
+  }
+  return (
+    <div
+      ref={ref}
+      onScroll={onScroll}
+      style={{
+        marginTop: 12,
+        height: 200,
+        overflowY: "auto",
+        padding: "10px 12px",
+        background: "var(--bg0)",
+        border: "1px solid var(--line)",
+        borderRadius: 4,
+        fontSize: 9,
+        lineHeight: 1.45,
+        color: "var(--t1)",
+        fontFamily: "var(--font-space-mono), Space Mono, monospace",
+        whiteSpace: "pre-wrap",
+        wordBreak: "break-word",
+      }}
+    >
+      {text}
     </div>
   );
 }

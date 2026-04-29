@@ -572,6 +572,63 @@ def fill_missing_status(job_id: str) -> dict[str, Any]:
         raise HTTPException(status_code=503, detail="status mid-write, retry")
 
 
+@router.get("/coverage/fill-missing/log")
+def fill_missing_log(
+    job_id: str,
+    since: int = Query(0, ge=0,
+                       description="Byte offset to start reading from. "
+                                   "Frontend tracks this from prior responses "
+                                   "to stream incremental log output."),
+) -> dict[str, Any]:
+    """Tail the worker's log file for live in-modal streaming. Returns
+    new bytes since the caller's `since` offset, capped at 64KB per
+    request so a stale `since=0` against a long log doesn't blow up the
+    response. Frontend polls this alongside /status at ~3s intervals
+    and accumulates lines into a scrollable console panel.
+
+    Returns:
+      end:    new byte offset (caller passes this as `since` next poll)
+      bytes:  size returned in `text` (post-truncation)
+      truncated: True if we capped the response and skipped a tail chunk
+      text:   newline-joined log content
+    """
+    import os as _os
+
+    log_path = _fill_missing_status_path(job_id).replace(".json", ".log")
+    if not _os.path.exists(log_path):
+        # Worker may not have written its first log line yet — return
+        # an empty payload, not 404, so the frontend's polling loop
+        # doesn't keep noisily failing in the first ~1s after spawn.
+        return {"end": since, "bytes": 0, "truncated": False, "text": ""}
+
+    MAX_BYTES = 64 * 1024
+    try:
+        size = _os.path.getsize(log_path)
+        if size <= since:
+            return {"end": size, "bytes": 0, "truncated": False, "text": ""}
+        # If the caller is way behind, skip ahead — they'll see "[...]"
+        # and the latest 64KB. Better than choking on a 5MB read.
+        start = max(since, size - MAX_BYTES)
+        truncated = start > since
+        with open(log_path, "rb") as f:
+            f.seek(start)
+            raw = f.read(MAX_BYTES)
+        try:
+            text = raw.decode("utf-8", errors="replace")
+        except Exception:
+            text = raw.decode("latin-1", errors="replace")
+        if truncated:
+            text = "[…earlier output skipped…]\n" + text
+        return {
+            "end": start + len(raw),
+            "bytes": len(raw),
+            "truncated": truncated,
+            "text": text,
+        }
+    except FileNotFoundError:
+        return {"end": since, "bytes": 0, "truncated": False, "text": ""}
+
+
 @router.get("/coverage/fill-missing/active")
 def fill_missing_active() -> dict[str, Any]:
     """Return the most recent in-progress fill_missing job for the compiler

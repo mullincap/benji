@@ -397,6 +397,45 @@ def fill_missing_indexer_status(job_id: str) -> dict[str, Any]:
         raise HTTPException(status_code=503, detail="status mid-write, retry")
 
 
+@router.get("/coverage/fill-missing/log")
+def fill_missing_indexer_log(
+    job_id: str,
+    since: int = Query(0, ge=0),
+) -> dict[str, Any]:
+    """Tail the indexer worker's log file. Same contract as
+    compiler.fill_missing_log — see that for shape + caps."""
+    import os as _os
+
+    log_path = _fill_missing_indexer_status_path(job_id).replace(".json", ".log")
+    if not _os.path.exists(log_path):
+        return {"end": since, "bytes": 0, "truncated": False, "text": ""}
+
+    MAX_BYTES = 64 * 1024
+    try:
+        size = _os.path.getsize(log_path)
+        if size <= since:
+            return {"end": size, "bytes": 0, "truncated": False, "text": ""}
+        start = max(since, size - MAX_BYTES)
+        truncated = start > since
+        with open(log_path, "rb") as f:
+            f.seek(start)
+            raw = f.read(MAX_BYTES)
+        try:
+            text = raw.decode("utf-8", errors="replace")
+        except Exception:
+            text = raw.decode("latin-1", errors="replace")
+        if truncated:
+            text = "[…earlier output skipped…]\n" + text
+        return {
+            "end": start + len(raw),
+            "bytes": len(raw),
+            "truncated": truncated,
+            "text": text,
+        }
+    except FileNotFoundError:
+        return {"end": since, "bytes": 0, "truncated": False, "text": ""}
+
+
 @router.get("/coverage/fill-missing/active")
 def fill_missing_indexer_active() -> dict[str, Any]:
     """Most recent in-progress indexer fill-missing job; for page-load
