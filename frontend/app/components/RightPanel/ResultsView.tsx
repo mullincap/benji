@@ -3151,6 +3151,263 @@ function FilterConfluencePanel({ filters }: { filters: FilterRow[] }) {
   );
 }
 
+// ── Full Report — Charts gallery ──────────────────────────────────────────
+//
+// Audit subprocess writes ~50–100 chart PNG/JPG/SVG files into a timestamped
+// run-dir. The worker copies them into job_dir/charts/ post-audit. We list
+// them via GET /api/jobs/{id}/charts and serve individual files via GET
+// /api/jobs/{id}/charts/{filename}. UI: categorized accordion of lazy-loaded
+// thumbnails; click a thumbnail → fullscreen lightbox.
+
+type ChartFile = { filename: string; url: string; size_bytes: number };
+type ChartCategory = { name: string; files: ChartFile[] };
+
+function FullReportCharts({ jobId }: { jobId: string | null | undefined }) {
+  const [data, setData] = useState<
+    | { categories: ChartCategory[]; total_count: number; charts_dir_present: boolean }
+    | null
+  >(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [openCats, setOpenCats] = useState<Record<string, boolean>>({});
+  const [lightbox, setLightbox] = useState<ChartFile | null>(null);
+
+  useEffect(() => {
+    if (!jobId) return;
+    let cancelled = false;
+    setLoading(true);
+    setError(null);
+    const apiBase = process.env.NEXT_PUBLIC_API_BASE || '';
+    fetch(`${apiBase}/api/jobs/${jobId}/charts`)
+      .then((r) => (r.ok ? r.json() : Promise.reject(`HTTP ${r.status}`)))
+      .then((d) => {
+        if (cancelled) return;
+        setData(d);
+        const initialOpen: Record<string, boolean> = {};
+        const cats = (d.categories || []) as ChartCategory[];
+        // Auto-open the first 3 categories so the user sees something
+        // immediately without forcing them to click each one.
+        for (let i = 0; i < cats.length; i += 1) {
+          initialOpen[cats[i].name] = i < 3;
+        }
+        setOpenCats(initialOpen);
+      })
+      .catch((e) => {
+        if (!cancelled) setError(String(e));
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => { cancelled = true; };
+  }, [jobId]);
+
+  // Lightbox close on Escape
+  useEffect(() => {
+    if (!lightbox) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setLightbox(null);
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [lightbox]);
+
+  if (!jobId) return null;
+
+  if (loading) {
+    return <div style={{ fontSize: 10, color: 'var(--t3)', padding: '12px 4px' }}>Loading charts…</div>;
+  }
+  if (error) {
+    return <div style={{ fontSize: 10, color: 'var(--red)', padding: '12px 4px' }}>Charts: {error}</div>;
+  }
+  if (!data || !data.charts_dir_present || data.total_count === 0) {
+    return (
+      <div style={{ fontSize: 10, color: 'var(--t3)', padding: '12px 4px', lineHeight: 1.5 }}>
+        No charts available. Audits run before the chart-snapshot pipeline change won't have a charts directory — re-run the audit to generate one.
+      </div>
+    );
+  }
+
+  const apiBase = process.env.NEXT_PUBLIC_API_BASE || '';
+
+  const formatCatLabel = (name: string): string => {
+    if (name === 'comparison') return 'Cross-Filter Comparison';
+    if (name === 'blofin/comparison') return 'BloFin · Cross-Filter Comparison';
+    if (name.startsWith('blofin/')) {
+      return `BloFin · ${prettifyFilterName(name.slice('blofin/'.length))}`;
+    }
+    return prettifyFilterName(name);
+  };
+
+  return (
+    <>
+      <div
+        style={{
+          padding: '6px 4px 12px 4px',
+          fontSize: 10,
+          color: 'var(--t2)',
+          lineHeight: 1.55,
+        }}
+      >
+        <span style={{ color: 'var(--t1)' }}>{data.total_count}</span>
+        {' charts across '}
+        <span style={{ color: 'var(--t1)' }}>{data.categories.length}</span>
+        {' categor'}{data.categories.length === 1 ? 'y' : 'ies'}.
+        {' Click any thumbnail for full-size view (Esc to close).'}
+      </div>
+
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+        {data.categories.map((cat) => {
+          const isOpen = !!openCats[cat.name];
+          return (
+            <details
+              key={cat.name}
+              open={isOpen}
+              onToggle={(e) => {
+                const open = (e.currentTarget as HTMLDetailsElement).open;
+                setOpenCats((prev) => ({ ...prev, [cat.name]: open }));
+              }}
+              style={{
+                border: '1px solid var(--line2)',
+                borderRadius: 3,
+                padding: '6px 8px',
+                background: 'var(--bg0)',
+              }}
+            >
+              <summary
+                style={{
+                  cursor: 'pointer',
+                  fontSize: 10,
+                  color: 'var(--t1)',
+                  fontWeight: 700,
+                  letterSpacing: '0.08em',
+                  textTransform: 'uppercase',
+                }}
+              >
+                {formatCatLabel(cat.name)} <span style={{ color: 'var(--t3)' }}>· {cat.files.length}</span>
+              </summary>
+              <div
+                style={{
+                  marginTop: 8,
+                  display: 'grid',
+                  gridTemplateColumns: 'repeat(auto-fill, minmax(180px, 1fr))',
+                  gap: 8,
+                }}
+              >
+                {cat.files.map((f) => (
+                  <button
+                    key={f.filename}
+                    type="button"
+                    onClick={() => setLightbox(f)}
+                    style={{
+                      background: 'var(--bg2)',
+                      border: '1px solid var(--line)',
+                      borderRadius: 3,
+                      padding: 6,
+                      cursor: 'pointer',
+                      textAlign: 'left',
+                      fontFamily: 'inherit',
+                    }}
+                  >
+                    <img
+                      src={`${apiBase}${f.url}`}
+                      alt={f.filename}
+                      loading="lazy"
+                      style={{
+                        width: '100%',
+                        height: 130,
+                        objectFit: 'contain',
+                        background: '#000',
+                        display: 'block',
+                        borderRadius: 2,
+                      }}
+                    />
+                    <div
+                      style={{
+                        marginTop: 4,
+                        fontSize: 9,
+                        color: 'var(--t2)',
+                        fontFamily: 'var(--font-space-mono), Space Mono, monospace',
+                        wordBreak: 'break-all',
+                        lineHeight: 1.3,
+                      }}
+                    >
+                      {f.filename}
+                    </div>
+                  </button>
+                ))}
+              </div>
+            </details>
+          );
+        })}
+      </div>
+
+      {lightbox && (
+        <div
+          onClick={() => setLightbox(null)}
+          role="dialog"
+          aria-label="Chart full-size view"
+          style={{
+            position: 'fixed',
+            inset: 0,
+            background: 'rgba(8, 9, 13, 0.92)',
+            zIndex: 100,
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            padding: 24,
+            cursor: 'zoom-out',
+          }}
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            style={{
+              maxWidth: '95vw',
+              maxHeight: '95vh',
+              background: 'var(--bg1)',
+              border: '1px solid var(--line2)',
+              borderRadius: 3,
+              padding: 12,
+              cursor: 'default',
+            }}
+          >
+            <div
+              style={{
+                fontSize: 10,
+                color: 'var(--t2)',
+                fontFamily: 'var(--font-space-mono), Space Mono, monospace',
+                marginBottom: 8,
+                wordBreak: 'break-all',
+              }}
+            >
+              {lightbox.filename}
+            </div>
+            <img
+              src={`${apiBase}${lightbox.url}`}
+              alt={lightbox.filename}
+              style={{
+                maxWidth: '90vw',
+                maxHeight: '85vh',
+                objectFit: 'contain',
+                display: 'block',
+              }}
+            />
+          </div>
+        </div>
+      )}
+    </>
+  );
+}
+
+// Best-effort label cleanup: "tail_guardrail" → "Tail Guardrail",
+// "tail_+_disp_+_vol" → "Tail + Disp + Vol", etc.
+function prettifyFilterName(name: string): string {
+  return name
+    .replace(/_/g, ' ')
+    .replace(/\s+\+\s+/g, ' + ')
+    .replace(/\b\w/g, (c) => c.toUpperCase())
+    .trim();
+}
+
 function normalizeIntradaySeriesToDayReturn(
   bars: Array<number | null>,
   leverage: number,
@@ -16421,6 +16678,35 @@ export default function ResultsView({ results, jobId, startingCapital, params }:
                   {fullReportSections.length === 0 && (
                     <div style={{ fontSize: 10, color: 'var(--t3)' }}>No full report sections detected.</div>
                   )}
+                  {/* Charts gallery — sibling category that fetches per-job
+                      images instead of slicing the audit_output.txt. */}
+                  <details
+                    open
+                    style={{ border: '1px solid var(--line)', borderRadius: 3, padding: '6px 8px', background: 'var(--bg1)' }}
+                  >
+                    <summary
+                      style={{
+                        cursor: 'pointer',
+                        fontSize: 10,
+                        color: 'var(--t1)',
+                        fontWeight: 700,
+                        letterSpacing: '0.08em',
+                        textTransform: 'uppercase',
+                        position: 'sticky',
+                        top: fullReportTocOpen ? 104 : 34,
+                        zIndex: 9,
+                        background: 'var(--bg1)',
+                        padding: '6px 0',
+                        margin: '-6px 0',
+                      }}
+                    >
+                      Charts &amp; Visualizations
+                    </summary>
+                    <div style={{ marginTop: 8, marginLeft: 24, paddingLeft: 10 }}>
+                      <FullReportCharts jobId={jobId} />
+                    </div>
+                  </details>
+
                   {fullReportCategoryGroups.map((cat) => (
                     <details
                       key={`group-${cat.key}`}
