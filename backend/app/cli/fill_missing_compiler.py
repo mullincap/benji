@@ -38,6 +38,36 @@ CAGG_NAMES = [
     "market.symbol_day_counts",
 ]
 
+# metl's CSV cache locations. metl's AUTO_RESUME mode skips fetch when a
+# CSV exists — so to actually re-fetch a partial day from Amberdata we
+# need to remove the stale CSV first. Two paths because metl falls back
+# to a Mac-style path when CSV_BACKUP_DIR isn't exported. We don't pre-
+# DELETE DB rows (that was the 2026-04-29 data-loss vector); ON CONFLICT
+# DO NOTHING in metl's loader tops up missing rows safely. Net effect:
+# CSV cache busted → metl re-fetches → new rows insert; existing rows
+# stay if fetch fails partway through.
+_CSV_BACKUP_DIRS = [
+    Path(os.environ.get("CSV_BACKUP_DIR", "/mnt/quant-data/raw/amberdata/csv/")),
+    Path("/Users/johnmullin/Desktop/desk/import/oi_logger/ob-backfills/"),
+]
+
+
+def _delete_cached_csvs(date_str: str) -> list[str]:
+    """Wipe the day's CSV from both candidate locations so metl falls
+    out of AUTO_RESUME and re-fetches from Amberdata. Silent on missing
+    files. Returns paths that were actually removed."""
+    deleted: list[str] = []
+    fname = f"oi_{date_str.replace('-', '')}.csv"
+    for d in _CSV_BACKUP_DIRS:
+        p = d / fname
+        if p.exists():
+            try:
+                p.unlink()
+                deleted.append(str(p))
+            except Exception:
+                pass
+    return deleted
+
 
 def _now() -> float:
     return time.time()
@@ -137,14 +167,23 @@ def main() -> int:
     try:
         for i, d in enumerate(dates):
             status["current_date"] = d
-            # Single stage: run metl. metl auto-resumes from the cached
-            # CSV when present (no Amberdata fetch) and uses
-            # `INSERT ON CONFLICT DO NOTHING` so partial days get topped
-            # up safely. NO pre-DELETE: the 2026-04-29 incident wiped 11
+            # Step 1: bust the CSV cache so metl falls out of
+            # AUTO_RESUME and re-fetches the day from Amberdata. We do
+            # NOT delete DB rows — the 2026-04-29 incident wiped 11
             # days of good data because the worker DELETEd before
-            # confirming metl's re-fetch would succeed; when Amberdata
-            # rate-limited, the day went from full → empty. The new flow
-            # is fail-safe — a metl failure leaves existing data intact.
+            # confirming metl's re-fetch would succeed. Now: metl
+            # writes a fresh CSV + INSERT ON CONFLICT DO NOTHING tops
+            # up the day's rows. If the fetch fails partway, existing
+            # rows stay intact and the next run can resume.
+            csvs = _delete_cached_csvs(d)
+            with open(log_path, "a") as logf:
+                if csvs:
+                    logf.write(f"\n[{d}] cleared cached CSV(s) so metl re-fetches: {csvs}\n")
+                else:
+                    logf.write(f"\n[{d}] no cached CSV present; metl will fetch fresh\n")
+
+            # Step 2: run metl. fetching = network-bound Amberdata
+            # download + DB load.
             status["dates"][i]["state"] = "fetching"
             status["current_state"] = "fetching"
             status["elapsed_seconds"] = int(_now() - started)
