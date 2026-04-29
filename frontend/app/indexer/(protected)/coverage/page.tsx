@@ -31,7 +31,7 @@
  *   3. A gap table at the bottom of the page, grouped by metric
  */
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import Skeleton, { KPIGridSkeleton } from "../../../components/Skeleton";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE || "";
@@ -541,7 +541,14 @@ type FillStatus = {
   elapsed_seconds: number;
   summary: string | null;
   errors?: string[];
+  dates?: { date: string; state: "pending" | "running" | "done" | "failed";
+            metrics_done?: string[]; metrics_failed?: string[] }[];
 };
+
+// Confirm-phase metadata captured from the POST response — shown in the
+// modal before the user opts to track progress, and persisted while the
+// modal is open so a quick re-poll doesn't lose the dates list.
+type FillModalInit = { dates: string[]; estMin: number };
 
 export default function IndexerCoveragePage() {
   const [state, setState] = useState<LoadState>({ kind: "loading" });
@@ -549,6 +556,10 @@ export default function IndexerCoveragePage() {
   const [refreshNonce, setRefreshNonce] = useState(0);
   const [fillStatus, setFillStatus] = useState<FillStatus | null>(null);
   const [fillError, setFillError] = useState<string | null>(null);
+  // Modal openness + the initial confirm-phase data (dates list + ETA).
+  // null means closed; setting to an object opens the modal. The modal
+  // renders confirm / progress / done internally based on fillStatus.
+  const [fillModal, setFillModal] = useState<FillModalInit | null>(null);
 
   const fillIsTerminal = (s: FillStatus | null) =>
     s !== null && (s.state === "done" || s.state === "failed" ||
@@ -635,19 +646,29 @@ export default function IndexerCoveragePage() {
     // Indexer rebuild ~30-50s per metric per day, 3 metrics per day.
     // So ~2-3 min per day, much faster than compiler's metl-driven topup.
     const estMin = Math.ceil((dates.length * 2.5));
-    const ok = window.confirm(
-      `Found ${dates.length} partial day(s) in market.leaderboards:\n` +
-      `  ${dates.join(", ")}\n\n` +
-      `Estimated time: ~${estMin} min (3 metrics × ~45s per day).\n\n` +
-      `The job is already running in the background.\n` +
-      `OK = keep tracking it; Cancel = ignore (job continues regardless).`
-    );
-    if (!ok) return;
+    // Open the modal in confirm phase. Tracking only starts when the
+    // user clicks Watch — Dismiss leaves the job running detached with
+    // no chip, matching the prior window.confirm flow.
+    setFillModal({ dates, estMin });
+    pendingFillJobIdRef.current = initial.job_id;
+    pendingFillDatesTotalRef.current = dates.length;
+  }
 
+  // Refs hold the POST-returned job_id + dates_total between opening the
+  // confirm modal and the user clicking Watch. Stored in refs (not state)
+  // because they don't drive any rendering — they're consumed once and
+  // then forwarded into fillStatus via setFillStatus.
+  const pendingFillJobIdRef = useRef<string | null>(null);
+  const pendingFillDatesTotalRef = useRef<number>(0);
+
+  function handleStartWatching() {
+    const job_id = pendingFillJobIdRef.current;
+    const total = pendingFillDatesTotalRef.current;
+    if (!job_id) return;
     setFillStatus({
-      job_id: initial.job_id,
+      job_id,
       state: "queued",
-      dates_total: dates.length,
+      dates_total: total,
       dates_completed: 0,
       dates_failed: 0,
       current_date: null,
@@ -655,6 +676,12 @@ export default function IndexerCoveragePage() {
       elapsed_seconds: 0,
       summary: null,
     });
+    // Modal stays open; it will switch to progress phase on next poll.
+  }
+
+  function handleDismissModal() {
+    setFillModal(null);
+    pendingFillJobIdRef.current = null;
   }
 
   useEffect(() => {
@@ -742,9 +769,28 @@ export default function IndexerCoveragePage() {
             )}
             <button
               type="button"
-              onClick={handleFillMissing}
-              disabled={fillIsRunning(fillStatus) || state.kind === "loading"}
-              title="Detect partial days in market.leaderboards, force-rebuild each metric (price/OI/volume) per day, then refresh the continuous aggregate. Today (UTC) is always excluded from auto-detect."
+              onClick={() => {
+                // While a job is in flight, the chip becomes a re-opener
+                // for the progress modal — surfaces live per-date status
+                // again after the user minimized. Otherwise it kicks off
+                // a fresh fill-missing detection.
+                if (fillIsRunning(fillStatus)) {
+                  // Reuse the dates list from the live status so the
+                  // modal has rows to show even before init data is set.
+                  setFillModal({
+                    dates: (fillStatus?.dates ?? []).map((d) => d.date),
+                    estMin: 0,
+                  });
+                } else {
+                  handleFillMissing();
+                }
+              }}
+              disabled={state.kind === "loading"}
+              title={
+                fillIsRunning(fillStatus)
+                  ? "Click to re-open the progress modal"
+                  : "Detect partial days in market.leaderboards, force-rebuild each metric (price/OI/volume) per day, then refresh the continuous aggregate. Today (UTC) is always excluded from auto-detect."
+              }
               style={{
                 background: fillIsRunning(fillStatus) ? "var(--bg4)" : "var(--bg2)",
                 color: fillIsRunning(fillStatus) ? "var(--amber)" : "var(--t1)",
@@ -756,24 +802,20 @@ export default function IndexerCoveragePage() {
                 letterSpacing: "0.12em",
                 textTransform: "uppercase",
                 fontFamily: "var(--font-space-mono), Space Mono, monospace",
-                cursor: fillIsRunning(fillStatus) ? "wait"
-                  : state.kind === "loading" ? "not-allowed"
-                  : "pointer",
+                cursor: state.kind === "loading" ? "not-allowed" : "pointer",
                 transition: "background 0.15s ease, color 0.15s ease",
                 minWidth: 120,
                 whiteSpace: "nowrap",
               }}
               onMouseEnter={(e) => {
-                if (!fillIsRunning(fillStatus) && state.kind !== "loading") {
+                if (state.kind !== "loading") {
                   e.currentTarget.style.background = "var(--bg4)";
-                  e.currentTarget.style.color = "var(--t0)";
+                  if (!fillIsRunning(fillStatus)) e.currentTarget.style.color = "var(--t0)";
                 }
               }}
               onMouseLeave={(e) => {
-                if (!fillIsRunning(fillStatus)) {
-                  e.currentTarget.style.background = "var(--bg2)";
-                  e.currentTarget.style.color = "var(--t1)";
-                }
+                e.currentTarget.style.background = fillIsRunning(fillStatus) ? "var(--bg4)" : "var(--bg2)";
+                if (!fillIsRunning(fillStatus)) e.currentTarget.style.color = "var(--t1)";
               }}
             >
               {(() => {
@@ -854,7 +896,308 @@ export default function IndexerCoveragePage() {
 
         {state.kind === "ready" && <CoverageContent coverage={state.coverage} />}
       </div>
+      {fillModal && (
+        <FillMissingModal
+          init={fillModal}
+          status={fillStatus}
+          watching={fillStatus !== null}
+          onWatch={handleStartWatching}
+          onDismiss={handleDismissModal}
+          onMinimize={() => setFillModal(null)}
+          onStopTracking={() => {
+            setFillModal(null);
+            setFillStatus(null);
+          }}
+        />
+      )}
     </div>
+  );
+}
+
+function FillMissingModal({
+  init,
+  status,
+  watching,
+  onWatch,
+  onDismiss,
+  onMinimize,
+  onStopTracking,
+}: {
+  init: FillModalInit;
+  status: FillStatus | null;
+  watching: boolean;
+  onWatch: () => void;
+  onDismiss: () => void;
+  onMinimize: () => void;
+  onStopTracking: () => void;
+}) {
+  // Phase derives from status: confirm before tracking, progress while
+  // running, done after terminal. Confirm phase is the only one shown
+  // pre-watch — other phases imply fillStatus is set and being polled.
+  const isTerminal = status !== null &&
+    (status.state === "done" || status.state === "failed" ||
+     status.state === "completed_with_errors");
+  const phase: "confirm" | "progress" | "done" =
+    !watching ? "confirm"
+    : isTerminal ? "done"
+    : "progress";
+
+  const elapsed = status?.elapsed_seconds ?? 0;
+  const mm = Math.floor(elapsed / 60);
+  const ss = String(elapsed % 60).padStart(2, "0");
+
+  // Per-date progress lines. Prefer the live `status.dates` array (worker
+  // updates it as metrics complete); fall back to init.dates with a
+  // pending placeholder when the first poll hasn't landed yet.
+  const dateRows = status?.dates ?? init.dates.map((d) => ({
+    date: d, state: "pending" as const, metrics_done: [], metrics_failed: [],
+  }));
+
+  const titleLabel =
+    phase === "confirm" ? "Fill Missing — Confirm" :
+    phase === "progress" ? "Fill Missing — Running" :
+    status?.state === "done" ? "Fill Missing — Done" :
+    status?.state === "failed" ? "Fill Missing — Failed" :
+    "Fill Missing — Done with Errors";
+
+  const titleColor =
+    phase === "done" && status?.state === "done" ? "var(--green)" :
+    phase === "done" && status?.state === "failed" ? "var(--red)" :
+    phase === "done" ? "var(--amber)" :
+    "var(--t3)";
+
+  return (
+    <div
+      onClick={phase === "confirm" ? onDismiss : onMinimize}
+      style={{
+        position: "fixed", inset: 0,
+        background: "rgba(0,0,0,0.7)",
+        display: "flex", alignItems: "center", justifyContent: "center",
+        zIndex: 1000,
+      }}
+    >
+      <div
+        onClick={(e) => e.stopPropagation()}
+        style={{
+          background: "var(--bg2)",
+          border: "1px solid var(--line2)",
+          borderRadius: 6, padding: "20px 24px",
+          width: 560, maxWidth: "92vw",
+          maxHeight: "84vh", overflowY: "auto",
+          fontFamily: "var(--font-space-mono), Space Mono, monospace",
+        }}
+      >
+        <div style={{
+          fontSize: 9, fontWeight: 700, letterSpacing: "0.12em",
+          color: titleColor, textTransform: "uppercase",
+          marginBottom: 14,
+        }}>
+          {titleLabel}
+        </div>
+
+        {phase === "confirm" && (
+          <>
+            <div style={{ fontSize: 11, color: "var(--t1)", lineHeight: 1.6, marginBottom: 12 }}>
+              Found <span style={{ color: "var(--t0)", fontWeight: 700 }}>{init.dates.length}</span>{" "}
+              partial day{init.dates.length === 1 ? "" : "s"} in <code style={{ color: "var(--t0)" }}>market.leaderboards</code>.
+              The job has already been queued in the background.
+            </div>
+            <div style={{
+              background: "var(--bg3)",
+              border: "1px solid var(--line)",
+              borderRadius: 4,
+              padding: "10px 12px",
+              marginBottom: 12,
+              maxHeight: 180, overflowY: "auto",
+            }}>
+              {init.dates.map((d) => (
+                <div key={d} style={{ fontSize: 10, color: "var(--t1)", lineHeight: 1.7 }}>
+                  · {d}
+                </div>
+              ))}
+            </div>
+            <div style={{ fontSize: 10, color: "var(--t2)", marginBottom: 18 }}>
+              Estimated time: ~{init.estMin} min (3 metrics × ~45s per day).
+            </div>
+            <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
+              <ModalButton variant="ghost" onClick={onDismiss}>Dismiss</ModalButton>
+              <ModalButton variant="primary" onClick={onWatch}>Watch progress</ModalButton>
+            </div>
+          </>
+        )}
+
+        {phase === "progress" && (
+          <>
+            <div style={{
+              display: "flex", alignItems: "center",
+              justifyContent: "space-between",
+              marginBottom: 14, gap: 12,
+            }}>
+              <div style={{ fontSize: 11, color: "var(--t1)" }}>
+                {status?.current_date ? (
+                  <>
+                    <span style={{ color: "var(--amber)", fontWeight: 700 }}>
+                      {status.current_date}
+                    </span>
+                    {status.current_state && (
+                      <span style={{ color: "var(--t2)" }}> · {status.current_state}</span>
+                    )}
+                  </>
+                ) : status?.current_state === "refreshing_cagg" ? (
+                  <span style={{ color: "var(--amber)" }}>refreshing continuous aggregate…</span>
+                ) : (
+                  <span style={{ color: "var(--t2)" }}>queued</span>
+                )}
+              </div>
+              <div style={{
+                fontSize: 10, color: "var(--t2)",
+                fontVariantNumeric: "tabular-nums",
+              }}>
+                {mm}:{ss}
+                {status && status.dates_total > 0 && (
+                  <span style={{ marginLeft: 10, color: "var(--t3)" }}>
+                    {status.dates_completed + status.dates_failed}/{status.dates_total}
+                  </span>
+                )}
+              </div>
+            </div>
+            <ProgressList rows={dateRows} currentDate={status?.current_date ?? null} currentState={status?.current_state ?? null} />
+            <div style={{ display: "flex", gap: 8, justifyContent: "flex-end", marginTop: 18 }}>
+              <ModalButton variant="ghost" onClick={onStopTracking}>Stop tracking</ModalButton>
+              <ModalButton variant="primary" onClick={onMinimize}>Minimize</ModalButton>
+            </div>
+          </>
+        )}
+
+        {phase === "done" && (
+          <>
+            <div style={{ fontSize: 11, color: "var(--t1)", lineHeight: 1.6, marginBottom: 12 }}>
+              {status?.summary || "Done."}
+            </div>
+            <ProgressList rows={dateRows} currentDate={null} currentState={null} />
+            {status?.errors && status.errors.length > 0 && (
+              <div style={{
+                marginTop: 12,
+                background: "var(--red-dim)",
+                border: "1px solid var(--red)",
+                borderRadius: 4,
+                padding: "8px 12px",
+                fontSize: 10,
+                color: "var(--red)",
+                maxHeight: 120, overflowY: "auto",
+              }}>
+                {status.errors.map((e, i) => (
+                  <div key={i} style={{ lineHeight: 1.6 }}>· {e}</div>
+                ))}
+              </div>
+            )}
+            <div style={{ display: "flex", gap: 8, justifyContent: "flex-end", marginTop: 18 }}>
+              <ModalButton variant="primary" onClick={onMinimize}>Close</ModalButton>
+            </div>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function ProgressList({
+  rows,
+  currentDate,
+  currentState,
+}: {
+  rows: { date: string; state: "pending" | "running" | "done" | "failed";
+          metrics_done?: string[]; metrics_failed?: string[] }[];
+  currentDate: string | null;
+  currentState: string | null;
+}) {
+  return (
+    <div style={{
+      background: "var(--bg3)",
+      border: "1px solid var(--line)",
+      borderRadius: 4,
+      padding: "10px 12px",
+      maxHeight: 240, overflowY: "auto",
+    }}>
+      {rows.map((row) => {
+        const isCurrent = row.date === currentDate;
+        const dateColor =
+          row.state === "done" ? "var(--green)" :
+          row.state === "failed" ? "var(--red)" :
+          isCurrent ? "var(--amber)" :
+          "var(--t2)";
+        const marker =
+          row.state === "done" ? "✓" :
+          row.state === "failed" ? "✗" :
+          isCurrent ? "▸" :
+          "·";
+        return (
+          <div key={row.date} style={{
+            display: "flex", alignItems: "center",
+            gap: 10, fontSize: 10, lineHeight: 1.9,
+          }}>
+            <span style={{ color: dateColor, width: 12 }}>{marker}</span>
+            <span style={{ color: dateColor, minWidth: 88 }}>{row.date}</span>
+            <span style={{ color: "var(--t3)", display: "inline-flex", gap: 6 }}>
+              {METRICS.map((m) => {
+                const done = row.metrics_done?.includes(m);
+                const failed = row.metrics_failed?.includes(m);
+                const running = isCurrent && currentState === `rebuilding ${m}`;
+                const c = failed ? "var(--red)" :
+                          done ? "var(--green)" :
+                          running ? "var(--amber)" :
+                          "var(--t3)";
+                const sym = failed ? "✗" : done ? "✓" : running ? "▸" : "·";
+                return (
+                  <span key={m} style={{ color: c, display: "inline-flex", gap: 3 }}>
+                    <span>{sym}</span>
+                    <span>{METRIC_LABELS[m].toLowerCase()}</span>
+                  </span>
+                );
+              })}
+            </span>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function ModalButton({
+  children,
+  onClick,
+  variant,
+}: {
+  children: React.ReactNode;
+  onClick: () => void;
+  variant: "primary" | "ghost";
+}) {
+  const isPrimary = variant === "primary";
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      style={{
+        background: isPrimary ? "var(--green-dim)" : "var(--bg3)",
+        color: isPrimary ? "var(--green)" : "var(--t1)",
+        border: `1px solid ${isPrimary ? "var(--green)" : "var(--line)"}`,
+        borderRadius: 4,
+        padding: "6px 14px",
+        fontSize: 9, fontWeight: 700,
+        letterSpacing: "0.12em",
+        textTransform: "uppercase",
+        fontFamily: "var(--font-space-mono), Space Mono, monospace",
+        cursor: "pointer",
+      }}
+      onMouseEnter={(e) => {
+        e.currentTarget.style.background = isPrimary ? "var(--green-mid)" : "var(--bg4)";
+      }}
+      onMouseLeave={(e) => {
+        e.currentTarget.style.background = isPrimary ? "var(--green-dim)" : "var(--bg3)";
+      }}
+    >
+      {children}
+    </button>
   );
 }
 

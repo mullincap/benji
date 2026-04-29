@@ -19,7 +19,7 @@
  * No mock data anywhere.
  */
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import Skeleton from "../../../components/Skeleton";
 
@@ -471,7 +471,13 @@ type FillStatus = {
   elapsed_seconds: number;
   summary: string | null;
   errors?: string[];
+  dates?: { date: string; state: "pending" | "deleting" | "fetching" | "done" | "failed" }[];
 };
+
+// Confirm-phase metadata captured from the POST response — passed into
+// the modal so it can render the dates list + estimate before the user
+// opts in to live tracking.
+type FillModalInit = { dates: string[]; estMin: number };
 
 export default function CompilerCoveragePage() {
   const router = useRouter();
@@ -481,6 +487,33 @@ export default function CompilerCoveragePage() {
   // fillStatus: null = idle. Otherwise the latest poll result.
   const [fillStatus, setFillStatus] = useState<FillStatus | null>(null);
   const [fillError, setFillError] = useState<string | null>(null);
+  // Modal openness + the initial confirm-phase data (dates list + ETA).
+  // null means closed.
+  const [fillModal, setFillModal] = useState<FillModalInit | null>(null);
+  const pendingFillJobIdRef = useRef<string | null>(null);
+  const pendingFillDatesTotalRef = useRef<number>(0);
+
+  function handleStartWatching() {
+    const job_id = pendingFillJobIdRef.current;
+    const total = pendingFillDatesTotalRef.current;
+    if (!job_id) return;
+    setFillStatus({
+      job_id,
+      state: "queued",
+      dates_total: total,
+      dates_completed: 0,
+      dates_failed: 0,
+      current_date: null,
+      current_state: "queued",
+      elapsed_seconds: 0,
+      summary: null,
+    });
+  }
+
+  function handleDismissModal() {
+    setFillModal(null);
+    pendingFillJobIdRef.current = null;
+  }
 
   const goToDay = (date: string) => router.push(`/compiler/days/${date}`);
 
@@ -575,36 +608,15 @@ export default function CompilerCoveragePage() {
       return;
     }
 
-    // 3. Gaps found — confirm with the user before letting the worker proceed.
-    //    NOTE: the worker is already running (POST already kicked it off).
-    //    For MVP we let it run; future enhancement could split into preview +
-    //    commit endpoints. For now: prompt is informational, not blocking.
+    // 3. Gaps found — open the styled confirm modal. The worker is
+    //    already running (POST kicked it off); the modal is informational.
+    //    Watching starts the polling chip + live progress; Dismissing
+    //    leaves the worker running detached.
     const dates = initial.dates || [];
     const estMin = Math.ceil((dates.length * 7) / 1) || 1; // ~7 min/day for metl
-    const ok = window.confirm(
-      `Found ${dates.length} partial day(s):\n` +
-      `  ${dates.join(", ")}\n\n` +
-      `Estimated time: ~${estMin} min (metl re-fetches per day).\n\n` +
-      `The job is already running in the background.\n` +
-      `OK = keep tracking it; Cancel = ignore (job continues regardless).`
-    );
-    if (!ok) {
-      // Don't show progress UI but the worker is still running. User can
-      // refresh the page to pick it up via the /active endpoint.
-      return;
-    }
-
-    setFillStatus({
-      job_id: initial.job_id,
-      state: "queued",
-      dates_total: dates.length,
-      dates_completed: 0,
-      dates_failed: 0,
-      current_date: null,
-      current_state: "queued",
-      elapsed_seconds: 0,
-      summary: null,
-    });
+    setFillModal({ dates, estMin });
+    pendingFillJobIdRef.current = initial.job_id;
+    pendingFillDatesTotalRef.current = dates.length;
   }
 
   useEffect(() => {
@@ -700,9 +712,22 @@ export default function CompilerCoveragePage() {
             )}
             <button
               type="button"
-              onClick={handleFillMissing}
-              disabled={fillIsRunning(fillStatus) || state.kind === "loading"}
-              title="Detect days with incomplete data in market.futures_1m, delete + re-run metl for each, then refresh the continuous aggregates. Today (UTC) is always excluded from auto-detect."
+              onClick={() => {
+                if (fillIsRunning(fillStatus)) {
+                  setFillModal({
+                    dates: (fillStatus?.dates ?? []).map((d) => d.date),
+                    estMin: 0,
+                  });
+                } else {
+                  handleFillMissing();
+                }
+              }}
+              disabled={state.kind === "loading"}
+              title={
+                fillIsRunning(fillStatus)
+                  ? "Click to re-open the progress modal"
+                  : "Detect days with incomplete data in market.futures_1m, delete + re-run metl for each, then refresh the continuous aggregates. Today (UTC) is always excluded from auto-detect."
+              }
               style={{
                 background: fillIsRunning(fillStatus) ? "var(--bg4)" : "var(--bg2)",
                 color: fillIsRunning(fillStatus) ? "var(--amber)" : "var(--t1)",
@@ -714,24 +739,20 @@ export default function CompilerCoveragePage() {
                 letterSpacing: "0.12em",
                 textTransform: "uppercase",
                 fontFamily: "var(--font-space-mono), Space Mono, monospace",
-                cursor: fillIsRunning(fillStatus) ? "wait"
-                  : state.kind === "loading" ? "not-allowed"
-                  : "pointer",
+                cursor: state.kind === "loading" ? "not-allowed" : "pointer",
                 transition: "background 0.15s ease, color 0.15s ease",
                 minWidth: 120,
                 whiteSpace: "nowrap",
               }}
               onMouseEnter={(e) => {
-                if (!fillIsRunning(fillStatus) && state.kind !== "loading") {
+                if (state.kind !== "loading") {
                   e.currentTarget.style.background = "var(--bg4)";
-                  e.currentTarget.style.color = "var(--t0)";
+                  if (!fillIsRunning(fillStatus)) e.currentTarget.style.color = "var(--t0)";
                 }
               }}
               onMouseLeave={(e) => {
-                if (!fillIsRunning(fillStatus)) {
-                  e.currentTarget.style.background = "var(--bg2)";
-                  e.currentTarget.style.color = "var(--t1)";
-                }
+                e.currentTarget.style.background = fillIsRunning(fillStatus) ? "var(--bg4)" : "var(--bg2)";
+                if (!fillIsRunning(fillStatus)) e.currentTarget.style.color = "var(--t1)";
               }}
             >
               {(() => {
@@ -778,7 +799,287 @@ export default function CompilerCoveragePage() {
           <CoverageContent coverage={state.coverage} gaps={state.gaps} onDayClick={goToDay} />
         )}
       </div>
+      {fillModal && (
+        <FillMissingModal
+          init={fillModal}
+          status={fillStatus}
+          watching={fillStatus !== null}
+          onWatch={handleStartWatching}
+          onDismiss={handleDismissModal}
+          onMinimize={() => setFillModal(null)}
+          onStopTracking={() => {
+            setFillModal(null);
+            setFillStatus(null);
+          }}
+        />
+      )}
     </div>
+  );
+}
+
+// Per-day-stage modal (compiler version: each day moves through
+// pending → deleting → fetching → done/failed; no per-metric breakdown).
+function FillMissingModal({
+  init,
+  status,
+  watching,
+  onWatch,
+  onDismiss,
+  onMinimize,
+  onStopTracking,
+}: {
+  init: FillModalInit;
+  status: FillStatus | null;
+  watching: boolean;
+  onWatch: () => void;
+  onDismiss: () => void;
+  onMinimize: () => void;
+  onStopTracking: () => void;
+}) {
+  const isTerminal = status !== null &&
+    (status.state === "done" || status.state === "failed" ||
+     status.state === "completed_with_errors");
+  const phase: "confirm" | "progress" | "done" =
+    !watching ? "confirm"
+    : isTerminal ? "done"
+    : "progress";
+
+  const elapsed = status?.elapsed_seconds ?? 0;
+  const mm = Math.floor(elapsed / 60);
+  const ss = String(elapsed % 60).padStart(2, "0");
+
+  const dateRows = status?.dates ?? init.dates.map((d) => ({
+    date: d, state: "pending" as const,
+  }));
+
+  const titleLabel =
+    phase === "confirm" ? "Fill Missing — Confirm" :
+    phase === "progress" ? "Fill Missing — Running" :
+    status?.state === "done" ? "Fill Missing — Done" :
+    status?.state === "failed" ? "Fill Missing — Failed" :
+    "Fill Missing — Done with Errors";
+
+  const titleColor =
+    phase === "done" && status?.state === "done" ? "var(--green)" :
+    phase === "done" && status?.state === "failed" ? "var(--red)" :
+    phase === "done" ? "var(--amber)" :
+    "var(--t3)";
+
+  return (
+    <div
+      onClick={phase === "confirm" ? onDismiss : onMinimize}
+      style={{
+        position: "fixed", inset: 0,
+        background: "rgba(0,0,0,0.7)",
+        display: "flex", alignItems: "center", justifyContent: "center",
+        zIndex: 1000,
+      }}
+    >
+      <div
+        onClick={(e) => e.stopPropagation()}
+        style={{
+          background: "var(--bg2)",
+          border: "1px solid var(--line2)",
+          borderRadius: 6, padding: "20px 24px",
+          width: 560, maxWidth: "92vw",
+          maxHeight: "84vh", overflowY: "auto",
+          fontFamily: "var(--font-space-mono), Space Mono, monospace",
+        }}
+      >
+        <div style={{
+          fontSize: 9, fontWeight: 700, letterSpacing: "0.12em",
+          color: titleColor, textTransform: "uppercase",
+          marginBottom: 14,
+        }}>
+          {titleLabel}
+        </div>
+
+        {phase === "confirm" && (
+          <>
+            <div style={{ fontSize: 11, color: "var(--t1)", lineHeight: 1.6, marginBottom: 12 }}>
+              Found <span style={{ color: "var(--t0)", fontWeight: 700 }}>{init.dates.length}</span>{" "}
+              partial day{init.dates.length === 1 ? "" : "s"} in{" "}
+              <code style={{ color: "var(--t0)" }}>market.futures_1m</code>.
+              Each will be deleted and refetched via metl.
+            </div>
+            <div style={{
+              background: "var(--bg3)",
+              border: "1px solid var(--line)",
+              borderRadius: 4,
+              padding: "10px 12px",
+              marginBottom: 12,
+              maxHeight: 180, overflowY: "auto",
+            }}>
+              {init.dates.map((d) => (
+                <div key={d} style={{ fontSize: 10, color: "var(--t1)", lineHeight: 1.7 }}>
+                  · {d}
+                </div>
+              ))}
+            </div>
+            <div style={{ fontSize: 10, color: "var(--t2)", marginBottom: 18 }}>
+              Estimated time: ~{init.estMin} min (~7 min per day for metl re-fetch).
+            </div>
+            <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
+              <ModalButton variant="ghost" onClick={onDismiss}>Dismiss</ModalButton>
+              <ModalButton variant="primary" onClick={onWatch}>Watch progress</ModalButton>
+            </div>
+          </>
+        )}
+
+        {phase === "progress" && (
+          <>
+            <div style={{
+              display: "flex", alignItems: "center",
+              justifyContent: "space-between",
+              marginBottom: 14, gap: 12,
+            }}>
+              <div style={{ fontSize: 11, color: "var(--t1)" }}>
+                {status?.current_date ? (
+                  <>
+                    <span style={{ color: "var(--amber)", fontWeight: 700 }}>
+                      {status.current_date}
+                    </span>
+                    {status.current_state && (
+                      <span style={{ color: "var(--t2)" }}> · {status.current_state}</span>
+                    )}
+                  </>
+                ) : status?.current_state === "refreshing_caggs" ? (
+                  <span style={{ color: "var(--amber)" }}>refreshing continuous aggregates…</span>
+                ) : (
+                  <span style={{ color: "var(--t2)" }}>queued</span>
+                )}
+              </div>
+              <div style={{
+                fontSize: 10, color: "var(--t2)",
+                fontVariantNumeric: "tabular-nums",
+              }}>
+                {mm}:{ss}
+                {status && status.dates_total > 0 && (
+                  <span style={{ marginLeft: 10, color: "var(--t3)" }}>
+                    {status.dates_completed + status.dates_failed}/{status.dates_total}
+                  </span>
+                )}
+              </div>
+            </div>
+            <DayProgressList rows={dateRows} currentDate={status?.current_date ?? null} />
+            <div style={{ display: "flex", gap: 8, justifyContent: "flex-end", marginTop: 18 }}>
+              <ModalButton variant="ghost" onClick={onStopTracking}>Stop tracking</ModalButton>
+              <ModalButton variant="primary" onClick={onMinimize}>Minimize</ModalButton>
+            </div>
+          </>
+        )}
+
+        {phase === "done" && (
+          <>
+            <div style={{ fontSize: 11, color: "var(--t1)", lineHeight: 1.6, marginBottom: 12 }}>
+              {status?.summary || "Done."}
+            </div>
+            <DayProgressList rows={dateRows} currentDate={null} />
+            {status?.errors && status.errors.length > 0 && (
+              <div style={{
+                marginTop: 12,
+                background: "var(--red-dim)",
+                border: "1px solid var(--red)",
+                borderRadius: 4,
+                padding: "8px 12px",
+                fontSize: 10,
+                color: "var(--red)",
+                maxHeight: 120, overflowY: "auto",
+              }}>
+                {status.errors.map((e, i) => (
+                  <div key={i} style={{ lineHeight: 1.6 }}>· {e}</div>
+                ))}
+              </div>
+            )}
+            <div style={{ display: "flex", gap: 8, justifyContent: "flex-end", marginTop: 18 }}>
+              <ModalButton variant="primary" onClick={onMinimize}>Close</ModalButton>
+            </div>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function DayProgressList({
+  rows,
+  currentDate,
+}: {
+  rows: { date: string; state: "pending" | "deleting" | "fetching" | "done" | "failed" }[];
+  currentDate: string | null;
+}) {
+  return (
+    <div style={{
+      background: "var(--bg3)",
+      border: "1px solid var(--line)",
+      borderRadius: 4,
+      padding: "10px 12px",
+      maxHeight: 240, overflowY: "auto",
+    }}>
+      {rows.map((row) => {
+        const isCurrent = row.date === currentDate;
+        const c =
+          row.state === "done" ? "var(--green)" :
+          row.state === "failed" ? "var(--red)" :
+          isCurrent || row.state === "deleting" || row.state === "fetching" ? "var(--amber)" :
+          "var(--t2)";
+        const marker =
+          row.state === "done" ? "✓" :
+          row.state === "failed" ? "✗" :
+          isCurrent || row.state === "deleting" || row.state === "fetching" ? "▸" :
+          "·";
+        return (
+          <div key={row.date} style={{
+            display: "flex", alignItems: "center",
+            gap: 10, fontSize: 10, lineHeight: 1.9,
+          }}>
+            <span style={{ color: c, width: 12 }}>{marker}</span>
+            <span style={{ color: c, minWidth: 88 }}>{row.date}</span>
+            <span style={{ color: "var(--t3)" }}>
+              {row.state === "pending" ? "" : row.state}
+            </span>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function ModalButton({
+  children,
+  onClick,
+  variant,
+}: {
+  children: React.ReactNode;
+  onClick: () => void;
+  variant: "primary" | "ghost";
+}) {
+  const isPrimary = variant === "primary";
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      style={{
+        background: isPrimary ? "var(--green-dim)" : "var(--bg3)",
+        color: isPrimary ? "var(--green)" : "var(--t1)",
+        border: `1px solid ${isPrimary ? "var(--green)" : "var(--line)"}`,
+        borderRadius: 4,
+        padding: "6px 14px",
+        fontSize: 9, fontWeight: 700,
+        letterSpacing: "0.12em",
+        textTransform: "uppercase",
+        fontFamily: "var(--font-space-mono), Space Mono, monospace",
+        cursor: "pointer",
+      }}
+      onMouseEnter={(e) => {
+        e.currentTarget.style.background = isPrimary ? "var(--green-mid)" : "var(--bg4)";
+      }}
+      onMouseLeave={(e) => {
+        e.currentTarget.style.background = isPrimary ? "var(--green-dim)" : "var(--bg3)";
+      }}
+    >
+      {children}
+    </button>
   );
 }
 
