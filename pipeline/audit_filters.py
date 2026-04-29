@@ -280,35 +280,28 @@ def compute_dispersion_filter_detail(
     baseline_win: Optional[int] = None,
     n_symbols: Optional[int] = None,
 ) -> dict:
-    """Cross-sectional dispersion gate (matches audit.py:3104) with full
-    numeric breakdown.
+    """Cross-sectional dispersion gate — DELEGATES to audit.py for full
+    methodological parity.
 
-    Lagged by 1 day:
-      yesterday_dispersion = std of yesterday's daily log-returns across
-                             top-N mcap symbols
-      baseline             = rolling median over baseline_win days of
-                             dispersion values, ending yesterday
-      disp_ratio           = yesterday_dispersion / baseline
-      sit_flat today       if disp_ratio < threshold
+    Calls audit.fetch_altcoin_daily_returns + _load_mcap_from_db +
+    build_dynamic_symbol_mask + build_dispersion_filter (the same chain
+    audit.py runs). This eliminates the prior approximation that used a
+    static today's-top-N universe and no mcap lag — verified 2026-04-29:
+    the static approximation diverged from audit on 6/30 borderline days,
+    almost all due to audit's 1-day mcap lag (build_dynamic_symbol_mask
+    line 3097: `mask[T] uses mcap[T-1]`) and per-day mask re-evaluation.
 
-    Approximation vs the audit: live uses today's top-N mcap universe
-    for the full baseline window (simpler than per-day re-querying);
-    dominant effect is yesterday's dispersion which uses yesterday's
-    data directly.
+    Logic: at date T, gate fires if `disp_ratio[T-1] < threshold` where
+      mask[T-1]      = top-N by mcap[T-2]    (lag in build_dynamic_symbol_mask)
+      dispersion[T-1] = std of returns[T-1] over symbols where mask[T-1]
+      baseline[T-1]  = rolling_median(dispersion, win) ending at T-1
+      disp_ratio[T-1] = dispersion[T-1] / baseline[T-1]
+    The shift(1) in build_dispersion_filter then maps that to the gate
+    decision for T.
 
-    Returns a dict with keys:
-        sit_flat: bool
-        reason: str | None
-        yesterday_dispersion: float | None
-        baseline_median: float | None
-        dispersion_ratio: float | None
-        threshold: float
-        baseline_win: int
-        n_symbols_target: int  — top-N mcap target
-        n_symbols_eligible: int — passed mcap filters today
-        n_symbols_with_klines: int — returned klines from FAPI
-        n_baseline_values: int — daily dispersion values in window
-        fail_open_reason: str | None — set when we couldn't compute
+    Returns the same detail dict shape as before (yesterday_dispersion,
+    baseline_median, dispersion_ratio, threshold, ...) so peek.py /
+    daily_signal_v3 display logic is unchanged.
     """
     thr = threshold if threshold is not None else DISPERSION_THRESHOLD
     win = baseline_win if baseline_win is not None else DISPERSION_BASELINE_WIN
@@ -316,7 +309,7 @@ def compute_dispersion_filter_detail(
 
     log.info(
         f"Computing Dispersion filter (threshold={thr}, "
-        f"baseline_win={win}d, n={n})..."
+        f"baseline_win={win}d, n={n}) — via audit.py"
     )
 
     base_detail: dict = {
@@ -332,164 +325,122 @@ def compute_dispersion_filter_detail(
         "fail_open_reason": None,
     }
 
-    # 1. Today's top-N mcap symbols.
-    conn = _get_conn()
-    cur = conn.cursor()
-    cur.execute(
-        """
-        SELECT base
-          FROM market.market_cap_daily
-         WHERE date = %s
-           AND base NOT IN ('USDT','USDC','BUSD','DAI','TUSD','FDUSD','USDE',
-                            'USDS','PYUSD','USD1','FRAX','USDP')
-           AND base !~ '[^A-Z0-9]'
-           AND base NOT IN ('XAU','XAG','XPD','XPT')
-         ORDER BY market_cap_usd DESC
-         LIMIT %s
-        """,
-        (ref_date, n),
-    )
-    symbols = [r[0] for r in cur.fetchall()]
-    cur.close()
-    conn.close()
-
-    base_detail["n_symbols_eligible"] = len(symbols)
-
-    if len(symbols) < DISPERSION_MIN_SYMBOLS:
-        log.warning(
-            f"  Dispersion: only {len(symbols)} eligible mcap symbols for "
-            f"{ref_date} (< {DISPERSION_MIN_SYMBOLS}). Fail-open."
-        )
+    # Lazy import: audit.py has heavy module-level work + emits
+    # DISPERSION_UNIVERSE_SIZE banner on import. Keep audit_filters'
+    # import path cheap for callers that don't need dispersion. pandas
+    # and numpy are also lazy-imported here since the existing tail-
+    # guardrail path doesn't use them.
+    try:
+        import sys as _sys
+        from pathlib import Path as _Path
+        _here = _Path(__file__).resolve().parent
+        if str(_here) not in _sys.path:
+            _sys.path.insert(0, str(_here))   # so `import audit` works
+        if str(_here.parent) not in _sys.path:
+            _sys.path.insert(0, str(_here.parent))  # so audit's pipeline.* works
+        import audit as _audit
+        import pandas as _pd
+        import numpy as _np
+    except Exception as e:
+        log.warning(f"  Dispersion: audit import failed ({e}); fail-open")
         return {**base_detail, "sit_flat": False, "reason": None,
-                "fail_open_reason": "insufficient_eligible_symbols"}
+                "fail_open_reason": f"audit_import_failed: {e}"}
 
-    # 2. Fetch (win + buffer) days of 1d klines per symbol.
-    fetch_days = win + 2
-    end_dt = _dt.datetime.combine(ref_date, _dt.time(0, 0, 0), tzinfo=_dt.timezone.utc)
-    start_dt = end_dt - _dt.timedelta(days=fetch_days)
-    start_ms = int(start_dt.timestamp() * 1000)
-    end_ms = int(end_dt.timestamp() * 1000)
-
-    def _fetch_daily(sym: str):
-        ticker = _base_to_binance_ticker(sym)
-        try:
-            r = requests.get(
-                f"{_BINANCE_FAPI}/fapi/v1/klines",
-                params={
-                    "symbol": ticker,
-                    "interval": "1d",
-                    "startTime": start_ms,
-                    "endTime": end_ms,
-                    "limit": fetch_days + 5,
-                },
-                timeout=_REST_TIMEOUT,
-            )
-            if r.status_code != 200:
-                return sym, None
-            klines = r.json()
-            if not klines:
-                return sym, None
-            return sym, [(k[0], float(k[4])) for k in klines]
-        except Exception:
-            return sym, None
-
-    log.info(
-        f"  Fetching {fetch_days}d of 1d klines for {len(symbols)} symbols..."
-    )
-    results: dict = {}
-    with ThreadPoolExecutor(max_workers=_REST_WORKERS) as pool:
-        for sym, series in pool.map(_fetch_daily, symbols):
-            if series:
-                results[sym] = series
-
-    base_detail["n_symbols_with_klines"] = len(results)
-
-    if len(results) < DISPERSION_MIN_SYMBOLS:
-        log.warning(
-            f"  Dispersion: only {len(results)}/{len(symbols)} symbols "
-            f"returned klines (< {DISPERSION_MIN_SYMBOLS}). Fail-open."
-        )
+    # Window: ref_date back through enough warmup for the rolling baseline
+    # to fully populate. audit's fetch_altcoin_daily_returns honours its
+    # own DISPERSION_CACHE_FILE so repeated live calls within a day reuse
+    # the cache.
+    end_str   = (ref_date + _dt.timedelta(days=1)).isoformat()
+    start_str = (ref_date - _dt.timedelta(days=win + 200)).isoformat()
+    universe_tickers = _audit.DISPERSION_UNIVERSE.get(n)
+    if universe_tickers is None:
+        log.warning(f"  Dispersion: no universe slice for n={n} in "
+                    f"audit.DISPERSION_UNIVERSE; available={sorted(_audit.DISPERSION_UNIVERSE)}")
         return {**base_detail, "sit_flat": False, "reason": None,
-                "fail_open_reason": "insufficient_klines"}
+                "fail_open_reason": f"no_universe_for_n_{n}"}
 
-    # 3. Per-day cross-sectional std of log-returns.
-    per_symbol_closes: dict = {}
-    all_dates: set = set()
-    for sym, series in results.items():
-        d_map: dict = {}
-        for ts_ms, close in series:
-            d = _dt.datetime.fromtimestamp(
-                ts_ms / 1000, tz=_dt.timezone.utc
-            ).date()
-            d_map[d] = close
-            all_dates.add(d)
-        per_symbol_closes[sym] = d_map
-
-    sorted_dates = sorted(all_dates)
-    daily_dispersion: dict = {}
-    for i in range(1, len(sorted_dates)):
-        d = sorted_dates[i]
-        d_prev = sorted_dates[i - 1]
-        rets: list[float] = []
-        for sym, d_map in per_symbol_closes.items():
-            c = d_map.get(d)
-            c_prev = d_map.get(d_prev)
-            if c is not None and c_prev is not None and c_prev > 0 and c > 0:
-                rets.append(math.log(c / c_prev))
-        if len(rets) >= DISPERSION_MIN_SYMBOLS:
-            m = sum(rets) / len(rets)
-            var = sum((x - m) ** 2 for x in rets) / (len(rets) - 1)
-            daily_dispersion[d] = math.sqrt(var)
-
-    # 4. Yesterday's dispersion vs baseline median.
-    yesterday = ref_date - _dt.timedelta(days=1)
-    if yesterday not in daily_dispersion:
-        log.warning(
-            f"  Dispersion: no value for yesterday ({yesterday}). Fail-open."
+    try:
+        alt_returns = _audit.fetch_altcoin_daily_returns(
+            symbols=universe_tickers, start=start_str, end=end_str,
         )
+    except Exception as e:
+        log.warning(f"  Dispersion: alt_returns fetch failed ({e})")
+        return {**base_detail, "sit_flat": False, "reason": None,
+                "fail_open_reason": f"alt_returns_failed: {e}"}
+    if alt_returns is None or alt_returns.empty:
+        return {**base_detail, "sit_flat": False, "reason": None,
+                "fail_open_reason": "alt_returns_empty"}
+    base_detail["n_symbols_with_klines"] = int(alt_returns.shape[1])
+
+    # Mcap from DB (matches audit's default DISPERSION_UNIVERSE_MODE='all').
+    try:
+        mcap_df = _audit._load_mcap_from_db(start_str, end_str)
+    except Exception as e:
+        log.warning(f"  Dispersion: mcap load failed ({e})")
+        return {**base_detail, "sit_flat": False, "reason": None,
+                "fail_open_reason": f"mcap_load_failed: {e}"}
+
+    # Dynamic mask: build_dynamic_symbol_mask applies the .shift(1) so
+    # mask[T] uses mcap[T-1] — the per-day mcap-lag discipline.
+    try:
+        mask_df = _audit.build_dynamic_symbol_mask(mcap_df, alt_returns, n=n)
+    except Exception as e:
+        log.warning(f"  Dispersion: dynamic mask build failed ({e})")
+        return {**base_detail, "sit_flat": False, "reason": None,
+                "fail_open_reason": f"dynamic_mask_failed: {e}"}
+
+    base_detail["n_symbols_eligible"] = int(
+        mask_df.sum(axis=1).reindex([_pd.Timestamp(ref_date)]).iloc[0]
+        if _pd.Timestamp(ref_date) in mask_df.index else 0
+    )
+
+    # Compute dispersion / baseline / ratio inline (rather than calling
+    # build_dispersion_filter and discarding intermediates) so we can
+    # surface the underlying numerics in the detail dict for cross-checks
+    # against audit's stored values.
+    masked_returns = alt_returns.where(mask_df, other=_np.nan)
+    valid_mask = masked_returns.notna().sum(axis=1) >= DISPERSION_MIN_SYMBOLS
+    masked_returns = masked_returns[valid_mask]
+    if masked_returns.empty:
+        return {**base_detail, "sit_flat": False, "reason": None,
+                "fail_open_reason": "no_valid_dispersion_days"}
+    dispersion = masked_returns.std(axis=1)
+    baseline = dispersion.rolling(
+        win, min_periods=max(5, win // 2),
+    ).median()
+    disp_ratio = dispersion / baseline.replace(0, _np.nan)
+
+    # Gate at ref_date = "did dispersion fire at ref_date - 1 day?"
+    yesterday = _pd.Timestamp(ref_date - _dt.timedelta(days=1))
+    if yesterday not in disp_ratio.index or _pd.isna(disp_ratio.loc[yesterday]):
         return {**base_detail, "sit_flat": False, "reason": None,
                 "fail_open_reason": "no_yesterday_dispersion"}
 
-    window_start = yesterday - _dt.timedelta(days=win - 1)
-    baseline_vals = sorted(
-        v for d, v in daily_dispersion.items()
-        if window_start <= d <= yesterday
+    yest_disp = float(dispersion.loc[yesterday])
+    yest_base = float(baseline.loc[yesterday])
+    yest_ratio = float(disp_ratio.loc[yesterday])
+    base_detail["n_baseline_values"] = int(
+        dispersion.loc[: yesterday]
+                  .tail(win)
+                  .notna().sum()
     )
-    base_detail["n_baseline_values"] = len(baseline_vals)
-    min_for_baseline = max(5, win // 2)
-    if len(baseline_vals) < min_for_baseline:
-        log.warning(
-            f"  Dispersion: only {len(baseline_vals)} baseline values "
-            f"(need >= {min_for_baseline}). Fail-open."
-        )
-        return {**base_detail, "sit_flat": False, "reason": None,
-                "fail_open_reason": "insufficient_baseline_values"}
-
-    n_b = len(baseline_vals)
-    baseline = (
-        baseline_vals[n_b // 2]
-        if n_b % 2 == 1
-        else (baseline_vals[n_b // 2 - 1] + baseline_vals[n_b // 2]) / 2
-    )
-    yesterday_disp = daily_dispersion[yesterday]
-    disp_ratio = (yesterday_disp / baseline) if baseline > 0 else 0.0
 
     log.info(
-        f"  Dispersion[{yesterday}]={yesterday_disp:.5f}  "
-        f"baseline_median={baseline:.5f}  "
-        f"ratio={disp_ratio:.3f}  threshold={thr}"
+        f"  Dispersion[{yesterday.date()}]={yest_disp:.5f}  "
+        f"baseline_median={yest_base:.5f}  ratio={yest_ratio:.3f}  "
+        f"threshold={thr}"
     )
 
     detail = {
         **base_detail,
-        "yesterday_dispersion": yesterday_disp,
-        "baseline_median": baseline,
-        "dispersion_ratio": disp_ratio,
+        "yesterday_dispersion": yest_disp,
+        "baseline_median": yest_base,
+        "dispersion_ratio": yest_ratio,
     }
 
-    if disp_ratio < thr:
+    if yest_ratio < thr:
         return {**detail, "sit_flat": True,
-                "reason": f"dispersion_low: ratio={disp_ratio:.3f} < {thr}"}
+                "reason": f"dispersion_low: ratio={yest_ratio:.3f} < {thr}"}
     return {**detail, "sit_flat": False, "reason": None}
 
 
