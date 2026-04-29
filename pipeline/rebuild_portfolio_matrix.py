@@ -116,6 +116,15 @@ DEPLOYMENT_END_MINUTE = _SESSION_END_MINUTES % 60
 LEVERAGE           = float(os.environ.get("LEVERAGE", "4.0"))     # 4x per symbol
 STOP_RAW_PCT       = float(os.environ.get("STOP_RAW_PCT", "-6"))    # per-symbol stop on unleveraged return (%)
 
+# BloFin universe restriction — pre-mode universe modifier.
+# When BLOFIN_UNIVERSE_ENABLED is True, eligible_bases for each deploy
+# day is intersected with BloFin's tradeable symbols (USDT+USDC perps)
+# whose listTime <= deploy_date. Produces a strategy that only ever
+# considers symbols actually tradeable on BloFin at the time. Output
+# matrix is the input the audit consumes for "BloFin variant" filters.
+BLOFIN_UNIVERSE_ENABLED = False
+BLOFIN_SNAPSHOT_PATH    = ""    # optional pre-saved {base, list_ms, list_date_utc} CSV
+
 # Eligibility gate
 MIN_LISTING_AGE_DAYS = int(os.environ.get("MIN_LISTING_AGE", "0"))
 
@@ -488,6 +497,22 @@ def main():
     first_seen, first_seen_raw = load_first_seen(FIRST_SEEN_CSV)
     print(f"Deploy days:    {len(deploys)}")
     print(f"First-seen map: {len(first_seen)} symbols")
+
+    # ── BloFin universe (pre-mode restriction) ────────────────────────────
+    blofin_universe: dict = {}
+    if BLOFIN_UNIVERSE_ENABLED:
+        # Same-dir sibling import; works whether run as a script or via subprocess
+        import sys
+        from pathlib import Path as _P
+        sys.path.insert(0, str(_P(__file__).resolve().parent))
+        from blofin_universe import load_blofin_universe
+        print("Loading BloFin universe (USDT+USDC SWAP listTime index)...")
+        blofin_universe = load_blofin_universe(snapshot_path=BLOFIN_SNAPSHOT_PATH)
+        if not blofin_universe:
+            print("⚠ BloFin universe came back empty — every day would be filtered to nothing.\n"
+                  "  Aborting so the matrix isn't silently zeroed out.")
+            raise SystemExit(2)
+        print(f"  BloFin universe: {len(blofin_universe)} bases")
     print()
 
     # Canonical bar grid (same for every day — only time portion matters)
@@ -532,7 +557,32 @@ def main():
         n_drop = n_dep - n_elig
         dropped_syms = [g["symbol"] for g in gate_detail if not g["eligible"]]
 
-        # ── Cap to MAX_PORT (applied after eligibility gate) ──────────
+        # ── BloFin universe restriction (pre-mode) ─────────────────────
+        # Drop any eligible symbol whose BloFin listTime > deploy_date
+        # (or that's never been on BloFin). Applied BEFORE MAX_PORT so
+        # the cap is computed against the BloFin-restricted set, not
+        # the full universe.
+        n_blofin_drop = 0
+        blofin_dropped_syms: list = []
+        if BLOFIN_UNIVERSE_ENABLED and blofin_universe and not in_warmup:
+            from blofin_universe import is_listed_at  # local import to avoid bare-script import issues
+            kept = []
+            for s in eligible_bases:
+                if is_listed_at(s, deploy_date, blofin_universe):
+                    kept.append(s)
+                else:
+                    blofin_dropped_syms.append(s)
+            n_blofin_drop = len(blofin_dropped_syms)
+            eligible_bases = kept
+            n_drop += n_blofin_drop
+            dropped_syms += blofin_dropped_syms
+            n_elig = len(eligible_bases)
+            for d in gate_detail:
+                if d["symbol"] in blofin_dropped_syms:
+                    d["eligible"] = False
+                    d["reason"] = "not_on_blofin_at_date"
+
+        # ── Cap to MAX_PORT (applied after eligibility gate + BloFin) ──
         capped_syms = []
         if MAX_PORT is not None and n_elig > MAX_PORT:
             capped_syms    = eligible_bases[MAX_PORT:]
@@ -760,6 +810,19 @@ if __name__ == "__main__":
                         action="store_false",
                         help="Cap the deployment window at 23:55 UTC on the same calendar day "
                              "when start + runtime overflows midnight. Truncates N_BARS to fit.")
+    parser.add_argument("--blofin-universe", dest="blofin_universe",
+                        action="store_true", default=False,
+                        help="Restrict each day's basket to symbols listed on BloFin "
+                             "(USDT or USDC perpetual SWAP) at or before the deploy date. "
+                             "Uses BloFin's instruments endpoint listTime field for "
+                             "point-in-time correctness. Output should normally include "
+                             "a `_blofin` suffix to distinguish from the vanilla matrix.")
+    parser.add_argument("--blofin-snapshot", dest="blofin_snapshot",
+                        type=str, default=None,
+                        help="Optional path to a saved BloFin universe snapshot CSV "
+                             "(columns: base, list_ms, list_date_utc). When provided, "
+                             "the universe is loaded from disk instead of hitting the "
+                             "BloFin API — useful for offline / deterministic runs.")
     args = parser.parse_args()
 
     if args.deploys:
@@ -791,5 +854,9 @@ if __name__ == "__main__":
         _END_CROSSES_MIDNIGHT = _SESSION_END_MINUTES >= 24 * 60
         DEPLOYMENT_END_HOUR   = (_SESSION_END_MINUTES % (24 * 60)) // 60
         DEPLOYMENT_END_MINUTE = _SESSION_END_MINUTES % 60
+    if args.blofin_universe:
+        BLOFIN_UNIVERSE_ENABLED = True
+    if args.blofin_snapshot:
+        BLOFIN_SNAPSHOT_PATH = args.blofin_snapshot
 
     main()
