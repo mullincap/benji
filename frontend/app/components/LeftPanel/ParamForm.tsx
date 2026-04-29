@@ -673,6 +673,15 @@ export default function ParamForm({ params, onChange, onSubmit }: ParamFormProps
                   ]}
                 />
               </Row>
+              <Row
+                label="dispersion_universe_strict_dynamic"
+                help="When ON, the returns universe is built dynamically from market.market_cap_daily (union of per-day top-N, lagged) — no hardcoded ticker pool. When OFF (default for now), uses the legacy hardcoded DISPERSION_SYMBOLS_<N> list. Threshold may need re-tuning when flipping ON; sweep it after dispersion_n."
+              >
+                <Toggle
+                  checked={!!p.dispersion_universe_strict_dynamic}
+                  onChange={(v) => set('dispersion_universe_strict_dynamic', v)}
+                />
+              </Row>
             </ConditionalParams>
           </ConditionalParams>
           <ConditionalParams show={!!p.enable_vol_filter}>

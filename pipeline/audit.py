@@ -471,6 +471,16 @@ DISPERSION_N                = int(os.environ.get("DISPERSION_N", "40"))      # t
 # so the simulator can sweep this knob and the live trader can pick the
 # best Sharpe/MaxDD-adjusted setting.
 DISPERSION_UNIVERSE_LAG_DAYS = int(os.environ.get("DISPERSION_UNIVERSE_LAG_DAYS", "1"))
+
+# Strict dynamic universe: when True, build the dispersion returns
+# universe directly from market.market_cap_daily (union of per-day
+# top-N by mcap, lagged) instead of using the hardcoded
+# DISPERSION_SYMBOLS_<N> list. The hardcoded lists hand-pick a 40/60/90
+# ticker pool from a March-2026 mcap snapshot — strict_dynamic uses the
+# *current* per-day top-N from the DB so the universe genuinely tracks
+# the market. False (default) preserves the legacy behaviour for A/B
+# testing; live ops should flip True via stored strategy config.
+DISPERSION_UNIVERSE_STRICT_DYNAMIC = _env_bool("DISPERSION_UNIVERSE_STRICT_DYNAMIC", False)
                                       # must be <= len(COINGECKO_TO_BINANCE)
 
 DISPERSION_UNIVERSE_SIZE = DISPERSION_N
@@ -3050,6 +3060,54 @@ def fetch_mcap_history(
         print(f"    Cache write failed: {e}")
 
     return mcap_df
+
+
+def build_dynamic_returns_universe(
+    mcap_df:       pd.DataFrame,
+    n:             int = None,
+    lag_days:      int = None,
+    target_dates:  "Optional[pd.DatetimeIndex]" = None,
+) -> list:
+    """Build the dynamic returns universe: the union of all distinct tickers
+    that ever appear in the lagged top-N by mcap across `target_dates`
+    (or all dates in mcap_df when target_dates is None).
+
+    Replaces the legacy hardcoded DISPERSION_SYMBOLS_<N> lists. Used when
+    DISPERSION_UNIVERSE_STRICT_DYNAMIC=True. The returned list is the SET
+    of binance_tickers we need klines for; build_dynamic_symbol_mask then
+    decides per-day which of them are active that day.
+
+    Lag discipline matches build_dynamic_symbol_mask: top-N at date T uses
+    mcap[T - lag_days]. Without the lag, we'd leak end-of-day mcap into
+    morning trade decisions.
+
+    Returns: sorted list[str] of binance_tickers (e.g. ["1000PEPEUSDT",
+    "BTCUSDT", ...]). Empty list if mcap_df is empty.
+    """
+    if mcap_df.empty:
+        return []
+    if n is None:
+        n = DISPERSION_N
+    if lag_days is None:
+        lag_days = DISPERSION_UNIVERSE_LAG_DAYS
+
+    # Apply lag: lagged_mcap[T] = mcap[T - lag_days]. ffill first so weekends
+    # / holidays don't leave holes that would shift rankings to NaN-dominated.
+    lagged = mcap_df.ffill().shift(lag_days)
+    if target_dates is not None:
+        lagged = lagged.reindex(target_dates)
+
+    universe: set = set()
+    for d in lagged.index:
+        row = lagged.loc[d]
+        if row.isna().all():
+            continue
+        # Top-N by mcap on this lagged day. nlargest handles NaNs by
+        # placing them last, so we never select a ticker without mcap.
+        top_n = row.nlargest(n).dropna().index.tolist()
+        universe.update(top_n)
+
+    return sorted(universe)
 
 
 def build_dynamic_symbol_mask(

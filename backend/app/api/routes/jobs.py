@@ -184,6 +184,13 @@ class JobRequest(BaseModel):
     # universe. 1 (default) = mask[T] uses mcap[T-1] — canonical
     # no-lookahead. 0 = same-day mcap. 2 = extra cautious.
     dispersion_universe_lag_days: int = 1
+    # When True, the dispersion returns universe is the union of per-day
+    # top-N (lagged) symbols from market.market_cap_daily — a genuinely
+    # dynamic pool that tracks the market. When False (default for
+    # backward compat), uses the hardcoded audit.DISPERSION_SYMBOLS_<N>
+    # list. Live ops should flip True via stored strategy config once
+    # the dispersion_n sweep settles on a winner.
+    dispersion_universe_strict_dynamic: bool = False
     vol_lookback:               int   = 10
     vol_percentile:             float = 0.25
     vol_baseline_win:           int   = 90

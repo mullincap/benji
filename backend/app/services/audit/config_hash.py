@@ -30,6 +30,7 @@ IDENTITY_FIELDS = frozenset([
     "dispersion_threshold",
     "dispersion_baseline_win",
     "dispersion_universe_lag_days",
+    "dispersion_universe_strict_dynamic",
     "freq_cutoff",
     "freq_width",
     # VOL leverage parameters (identity, not runtime state)

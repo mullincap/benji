@@ -280,6 +280,7 @@ def compute_dispersion_filter_detail(
     baseline_win: Optional[int] = None,
     n_symbols: Optional[int] = None,
     lag_days: Optional[int] = None,
+    strict_dynamic: Optional[bool] = None,
 ) -> dict:
     """Cross-sectional dispersion gate — DELEGATES to audit.py for full
     methodological parity.
@@ -312,11 +313,18 @@ def compute_dispersion_filter_detail(
     # care. When daily_signal_v3 plumbs per-strategy values, it'll pass
     # an explicit int here.
     lag = lag_days
+    # strict_dynamic=None means "use audit.py's
+    # DISPERSION_UNIVERSE_STRICT_DYNAMIC env default (False)" — preserves
+    # legacy behaviour. When True, the returns universe is built dynamically
+    # from market.market_cap_daily (union of per-day top-N, lagged) instead
+    # of using audit.DISPERSION_UNIVERSE.get(n) (the hardcoded list).
+    sd = strict_dynamic
 
     log.info(
         f"Computing Dispersion filter (threshold={thr}, "
         f"baseline_win={win}d, n={n}, "
-        f"lag={lag if lag is not None else 'audit-default'}) — via audit.py"
+        f"lag={lag if lag is not None else 'audit-default'}, "
+        f"strict_dynamic={sd if sd is not None else 'audit-default'}) — via audit.py"
     )
 
     base_detail: dict = {
@@ -324,6 +332,7 @@ def compute_dispersion_filter_detail(
         "baseline_win": win,
         "n_symbols_target": n,
         "lag_days": lag,
+        "strict_dynamic": sd,
         "n_symbols_eligible": 0,
         "n_symbols_with_klines": 0,
         "n_baseline_values": 0,
@@ -360,16 +369,75 @@ def compute_dispersion_filter_detail(
     # the cache.
     end_str   = (ref_date + _dt.timedelta(days=1)).isoformat()
     start_str = (ref_date - _dt.timedelta(days=win + 200)).isoformat()
-    universe_tickers = _audit.DISPERSION_UNIVERSE.get(n)
-    if universe_tickers is None:
-        log.warning(f"  Dispersion: no universe slice for n={n} in "
-                    f"audit.DISPERSION_UNIVERSE; available={sorted(_audit.DISPERSION_UNIVERSE)}")
+
+    # Resolve effective strict_dynamic from audit's env default if caller
+    # didn't pass an explicit bool. Done after audit is imported so the
+    # env-derived module constant is available.
+    eff_sd = sd if sd is not None else bool(getattr(_audit, "DISPERSION_UNIVERSE_STRICT_DYNAMIC", False))
+
+    # Mcap from DB (matches audit's default DISPERSION_UNIVERSE_MODE='all').
+    # Loaded BEFORE alt_returns now so strict_dynamic mode can derive the
+    # returns universe from mcap_df via build_dynamic_returns_universe
+    # instead of the hardcoded DISPERSION_UNIVERSE list.
+    try:
+        mcap_df = _audit._load_mcap_from_db(start_str, end_str)
+    except Exception as e:
+        log.warning(f"  Dispersion: mcap load failed ({e})")
+        return {**base_detail, "sit_flat": False, "reason": None,
+                "fail_open_reason": f"mcap_load_failed: {e}"}
+
+    # Universe selection:
+    #   strict_dynamic=True  → union of per-day top-N (lagged) from mcap_df.
+    #                          Universe genuinely tracks the market each day.
+    #   strict_dynamic=False → audit.DISPERSION_UNIVERSE.get(n) hardcoded
+    #                          list (current legacy behaviour). Kept as
+    #                          A/B fallback during the strict_dynamic
+    #                          rollout / tuning sweep.
+    if eff_sd:
+        try:
+            effective_lag = lag if lag is not None else int(
+                getattr(_audit, "DISPERSION_UNIVERSE_LAG_DAYS", 1)
+            )
+            universe_tickers = _audit.build_dynamic_returns_universe(
+                mcap_df, n=n, lag_days=effective_lag,
+            )
+            log.info(
+                f"  Dispersion[strict_dynamic]: built universe of "
+                f"{len(universe_tickers)} tickers from mcap_df "
+                f"(union of top-{n} over {len(mcap_df)} days, lag={effective_lag})"
+            )
+        except Exception as e:
+            log.warning(f"  Dispersion: dynamic universe build failed ({e}); "
+                        f"falling back to hardcoded list")
+            universe_tickers = _audit.DISPERSION_UNIVERSE.get(n)
+    else:
+        universe_tickers = _audit.DISPERSION_UNIVERSE.get(n)
+
+    if not universe_tickers:
+        log.warning(
+            f"  Dispersion: no universe resolved for n={n} "
+            f"(strict_dynamic={eff_sd}); fail-open"
+        )
         return {**base_detail, "sit_flat": False, "reason": None,
                 "fail_open_reason": f"no_universe_for_n_{n}"}
 
     try:
+        # In strict_dynamic mode the universe is a function of the mcap
+        # window, so the default DISPERSION_CACHE_FILE (keyed by N only)
+        # would alias different runs. Derive a per-universe cache file so
+        # n=40 dynamic and n=40 static don't collide and so different
+        # date ranges (or lag values) get their own cache.
+        if eff_sd:
+            import hashlib as _hashlib
+            sym_hash = _hashlib.md5(
+                ",".join(universe_tickers).encode()
+            ).hexdigest()[:10]
+            cache_file = f"dispersion_cache_dyn_{sym_hash}.csv"
+        else:
+            cache_file = None  # use audit's default
         alt_returns = _audit.fetch_altcoin_daily_returns(
             symbols=universe_tickers, start=start_str, end=end_str,
+            **({"cache_file": cache_file} if cache_file else {}),
         )
     except Exception as e:
         log.warning(f"  Dispersion: alt_returns fetch failed ({e})")
@@ -379,14 +447,6 @@ def compute_dispersion_filter_detail(
         return {**base_detail, "sit_flat": False, "reason": None,
                 "fail_open_reason": "alt_returns_empty"}
     base_detail["n_symbols_with_klines"] = int(alt_returns.shape[1])
-
-    # Mcap from DB (matches audit's default DISPERSION_UNIVERSE_MODE='all').
-    try:
-        mcap_df = _audit._load_mcap_from_db(start_str, end_str)
-    except Exception as e:
-        log.warning(f"  Dispersion: mcap load failed ({e})")
-        return {**base_detail, "sit_flat": False, "reason": None,
-                "fail_open_reason": f"mcap_load_failed: {e}"}
 
     # Dynamic mask: build_dynamic_symbol_mask applies a `.shift(lag_days)`
     # so mask[T] uses mcap[T-lag_days]. Passing lag explicitly when the
@@ -465,6 +525,7 @@ def compute_dispersion_filter(
     baseline_win: Optional[int] = None,
     n_symbols: Optional[int] = None,
     lag_days: Optional[int] = None,
+    strict_dynamic: Optional[bool] = None,
 ) -> tuple[bool, Optional[str]]:
     """Backward-compatible thin wrapper over compute_dispersion_filter_detail.
     Returns (sit_flat, reason|None). New callers should prefer the _detail
@@ -472,5 +533,6 @@ def compute_dispersion_filter(
     d = compute_dispersion_filter_detail(ref_date, threshold=threshold,
                                           baseline_win=baseline_win,
                                           n_symbols=n_symbols,
-                                          lag_days=lag_days)
+                                          lag_days=lag_days,
+                                          strict_dynamic=strict_dynamic)
     return d["sit_flat"], d["reason"]

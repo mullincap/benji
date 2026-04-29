@@ -586,16 +586,17 @@ def compute_per_strategy_decisions(
 
         # Per-strategy dispersion. Build a key tuple from the strategy's
         # config; None entries mean "use audit_filters default" (which is
-        # what the canonical decision already used). When ALL four are
+        # what the canonical decision already used). When ALL five are
         # None the key is _CANONICAL → reuses the shared decision.
         sv_dthr = cfg.get("dispersion_threshold")
         sv_dwin = cfg.get("dispersion_baseline_win")
         sv_dn   = cfg.get("dispersion_n")
         sv_dlag = cfg.get("dispersion_universe_lag_days")
-        if all(v is None for v in (sv_dthr, sv_dwin, sv_dn, sv_dlag)):
+        sv_dsd  = cfg.get("dispersion_universe_strict_dynamic")
+        if all(v is None for v in (sv_dthr, sv_dwin, sv_dn, sv_dlag, sv_dsd)):
             sv_disp_decision = disp_cache[_CANONICAL]
         else:
-            key = (sv_dthr, sv_dwin, sv_dn, sv_dlag)
+            key = (sv_dthr, sv_dwin, sv_dn, sv_dlag, sv_dsd)
             if key not in disp_cache:
                 try:
                     detail = compute_dispersion_filter_detail(
@@ -604,11 +605,13 @@ def compute_per_strategy_decisions(
                         baseline_win=int(sv_dwin) if sv_dwin is not None else None,
                         n_symbols=int(sv_dn) if sv_dn is not None else None,
                         lag_days=int(sv_dlag) if sv_dlag is not None else None,
+                        strict_dynamic=bool(sv_dsd) if sv_dsd is not None else None,
                     )
                     disp_cache[key] = (detail["sit_flat"], detail["reason"])
                     log.info(
                         f"  [per-strategy disp {name!r}] thr={sv_dthr} "
-                        f"win={sv_dwin} n={sv_dn} lag={sv_dlag} → "
+                        f"win={sv_dwin} n={sv_dn} lag={sv_dlag} "
+                        f"strict_dyn={sv_dsd} → "
                         f"sit_flat={detail['sit_flat']}  "
                         f"ratio={detail.get('dispersion_ratio')}"
                     )
