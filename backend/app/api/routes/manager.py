@@ -2035,7 +2035,8 @@ def list_portfolios(
             ar_latest AS (
                 SELECT DISTINCT ON (allocation_id, session_date)
                        allocation_id, session_date,
-                       exit_reason, signal_count, conviction_roi_x, logged_at
+                       exit_reason, signal_count, conviction_roi_x,
+                       capital_deployed_usd, net_return_pct, logged_at
                   FROM user_mgmt.allocation_returns
                  WHERE allocation_id = ANY(%s::uuid[])
                  ORDER BY allocation_id, session_date, logged_at DESC
@@ -2044,6 +2045,8 @@ def list_portfolios(
                    ar.exit_reason                          AS ar_exit_reason,
                    ar.signal_count                         AS ar_signal_count,
                    ar.conviction_roi_x,
+                   ar.capital_deployed_usd::double precision AS ar_capital,
+                   ar.net_return_pct::double precision     AS ar_net_pct,
                    (ar.exit_reason NOT IN (
                        'filtered', 'no_entry_conviction', 'missed_window',
                        'stale_close_failed', 'no_entry', 'errored', 'entry_failed'
@@ -2117,6 +2120,21 @@ def list_portfolios(
             else:
                 entry_status = "no_entry"
 
+            # PnL in USD: prefer the allocation_returns capital_deployed_usd
+            # snapshot (captured at session close, accounts for compounding)
+            # times the leveraged final_incr from portfolio_sessions. AR's
+            # net_return_pct is fee/funding-net while final_incr is gross —
+            # use ar.net_return_pct when present so the USD figure matches
+            # what hits the BloFin balance.
+            ar_capital = r["ar_capital"]
+            ar_net_pct = r["ar_net_pct"]
+            if ar_capital is not None and ar_net_pct is not None:
+                pnl_usd = ar_capital * (ar_net_pct / 100.0)
+            elif ar_capital is not None and r["final_incr"] is not None:
+                pnl_usd = ar_capital * r["final_incr"]
+            else:
+                pnl_usd = None
+
             portfolios.append({
                 "date":              r["session_date"].isoformat(),
                 "allocation_id":     str(r["allocation_id"]),
@@ -2139,6 +2157,8 @@ def list_portfolios(
                 "peak":              r["peak"],
                 "max_dd_from_peak":  r["max_dd_from_peak"],
                 "sym_stops":         sorted(list(r["sym_stops"] or [])),
+                "capital_deployed_usd": ar_capital,
+                "pnl_usd":           pnl_usd,
             })
 
     return {

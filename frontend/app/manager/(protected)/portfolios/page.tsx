@@ -44,6 +44,14 @@ interface PortfolioSummary {
   peak: number;
   max_dd_from_peak: number;
   sym_stops: string[];
+  // Capital deployed at session start (USD). Reflects compounding mode
+  // updates — historical days are the actual capital that traded that day,
+  // not today's. null when no allocation_returns row exists yet.
+  capital_deployed_usd: number | null;
+  // Realized PnL in USD = capital_deployed_usd * (net_return_pct / 100).
+  // Net of fees + funding (matches BloFin balance delta). null when
+  // capital_deployed or returns aren't available.
+  pnl_usd: number | null;
 }
 
 interface AvailableAlloc {
@@ -99,6 +107,15 @@ function fmtPct(v: number | null | undefined, digits = 2): string {
   if (v === null || v === undefined || Number.isNaN(v)) return "—";
   const sign = v > 0 ? "+" : "";
   return `${sign}${v.toFixed(digits)}%`;
+}
+
+function fmtUsd(v: number | null | undefined): string {
+  if (v === null || v === undefined || Number.isNaN(v)) return "—";
+  const sign = v > 0 ? "+" : v < 0 ? "−" : "";
+  const abs = Math.abs(v);
+  return `${sign}$${abs.toLocaleString(undefined, {
+    minimumFractionDigits: 2, maximumFractionDigits: 2,
+  })}`;
 }
 
 function exitBadge(reason: string | null) {
@@ -276,6 +293,7 @@ export default function PortfoliosListPage() {
                     "Symbols",
                     "Lev",
                     "Portfolio ROI",
+                    "PnL (USD)",
                     "Peak",
                     "Max DD",
                     "Bars",
@@ -385,6 +403,17 @@ export default function PortfoliosListPage() {
                         }}
                       >
                         {fmtPct(final)}
+                      </td>
+                      <td
+                        style={{
+                          ...tdStyle,
+                          color: p.pnl_usd === null
+                            ? "var(--t3)"
+                            : p.pnl_usd >= 0 ? "var(--green)" : "var(--red)",
+                          fontWeight: 700,
+                        }}
+                      >
+                        {fmtUsd(p.pnl_usd)}
                       </td>
                       <td style={{ ...tdStyle, color: "var(--t1)" }}>
                         {fmtPct(peakPct)}
