@@ -19915,6 +19915,18 @@ if __name__ == "__main__":
         help="Output path for the rebuilt matrix CSV (default: portfolio_matrix_gated.csv)."
     )
     parser.add_argument(
+        "--blofin-universe",
+        action="store_true",
+        default=False,
+        help="Pass --blofin-universe through to rebuild_portfolio_matrix.py, "
+             "restricting each day's basket to symbols whose BloFin SWAP "
+             "listTime is on or before that day. Use a `_blofin` suffix on "
+             "--matrix-out to keep this distinct from a vanilla matrix. "
+             "Combine with --apply-blofin-filter (passed to overlap_analysis "
+             "via env vars) for full pre-mode universe restriction at both "
+             "the ranking step and the rebuild step."
+    )
+    parser.add_argument(
         "--quick",
         action="store_true",
         default=False,
@@ -20350,6 +20362,17 @@ if __name__ == "__main__":
         if getattr(args, "end_cross_midnight", None) is not None:
             rebuild_cmd += ["--end-cross-midnight" if args.end_cross_midnight
                             else "--no-end-cross-midnight"]
+        # Pre-mode BloFin universe restriction via listTime (time-correct).
+        # The CLI flag and BLOFIN_UNIVERSE_ENABLED env var are equivalent —
+        # the env var lets the backend pipeline_runner toggle this without
+        # plumbing a new CLI arg through the worker.
+        _blofin_universe_on = (
+            args.blofin_universe
+            or os.environ.get("BLOFIN_UNIVERSE_ENABLED", "").lower() in ("1", "true", "yes")
+        )
+        if _blofin_universe_on:
+            rebuild_cmd += ["--blofin-universe"]
+            print("[CLI] BloFin universe restriction (pre-mode, listTime-aware) enabled")
         result = subprocess.run(rebuild_cmd, check=True)
         print(f"[CLI] Matrix built → {args.matrix_out}")
         # Override the global so load_matrix() picks up the local CSV
