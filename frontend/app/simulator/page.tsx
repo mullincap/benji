@@ -101,6 +101,7 @@ const DEFAULT_PARAMS: Record<string, unknown> = {
   dispersion_baseline_win: 33,
   dispersion_n: 40,
   dispersion_dynamic_universe: true,
+  dispersion_universe_lag_days: 1,
   vol_lookback: 10,
   vol_percentile: 0.25,
   vol_baseline_win: 90,

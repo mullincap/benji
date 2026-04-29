@@ -463,6 +463,14 @@ DISPERSION_BASELINE_WIN  = int(os.environ.get("DISPERSION_BASELINE_WIN", "33")) 
 DISPERSION_DYNAMIC_UNIVERSE = _env_bool("DISPERSION_DYNAMIC_UNIVERSE", True)   # True  = top-N by market cap per day (lagged)
                                       # False = use DISPERSION_SYMBOLS list (default)
 DISPERSION_N                = int(os.environ.get("DISPERSION_N", "40"))      # top-N symbols to select per day (dynamic mode)
+# Universe lag: build_dynamic_symbol_mask uses mcap[T - LAG] to decide
+# which symbols are in the dispersion calc on day T. Default 1 day
+# matches the documented "no lookahead" discipline. 0 = same-day mcap
+# (mcap reported at end-of-day, so a tiny same-day lookahead is possible
+# if any symbol's mcap is updated intraday); 2 = extra cautious. Tunable
+# so the simulator can sweep this knob and the live trader can pick the
+# best Sharpe/MaxDD-adjusted setting.
+DISPERSION_UNIVERSE_LAG_DAYS = int(os.environ.get("DISPERSION_UNIVERSE_LAG_DAYS", "1"))
                                       # must be <= len(COINGECKO_TO_BINANCE)
 
 DISPERSION_UNIVERSE_SIZE = DISPERSION_N
@@ -3048,6 +3056,7 @@ def build_dynamic_symbol_mask(
     mcap_df:       pd.DataFrame,
     alt_returns:   pd.DataFrame,
     n:             int = None,
+    lag_days:      int = None,
 ) -> pd.DataFrame:
     """
     Build a daily boolean mask selecting the top-N symbols by market cap.
@@ -3062,9 +3071,13 @@ def build_dynamic_symbol_mask(
 
     Lag discipline
     --------------
-    mask[T] is derived from mcap[T-1] via a .shift(1) on the
-    date-aligned mcap_df. Combined with build_dispersion_filter's own
-    .shift(1), trades on day T+1 use mcap data from day T-1 — clean.
+    mask[T] is derived from mcap[T - lag_days] via a `.shift(lag_days)`
+    on the date-aligned mcap_df. Default `lag_days=1` (DISPERSION_UNIVERSE_
+    LAG_DAYS env, set to 1) matches the canonical "no lookahead" rule:
+    trades on day T+1 use mcap data from day T-1 (combined with
+    build_dispersion_filter's own .shift(1)). Tunable so the simulator
+    can sweep {0, 1, 2} to find the best-performing setting; live picks
+    that setting via the same env knob.
 
     Edge cases handled
     ------------------
@@ -3078,6 +3091,8 @@ def build_dynamic_symbol_mask(
     """
     if n is None:
         n = DISPERSION_N
+    if lag_days is None:
+        lag_days = DISPERSION_UNIVERSE_LAG_DAYS
 
     if mcap_df.empty:
         print("    [dynamic mask] mcap_df empty — returning all-True mask "
@@ -3091,10 +3106,11 @@ def build_dynamic_symbol_mask(
         return pd.DataFrame(True, index=alt_returns.index, columns=alt_returns.columns)
 
     # Align mcap to alt_returns date index; forward-fill gaps (weekends etc.)
+    # then apply the configured lag (default 1 = mask[T] uses mcap[T-1]).
     mcap_aligned = (
         mcap_df[common_tickers]
         .reindex(alt_returns.index, method="ffill")
-        .shift(1)              # ← 1-day lag: mask[T] uses mcap[T-1]
+        .shift(lag_days)
     )
 
     # Identify warmup rows where all mcap values are NaN (before data starts).
@@ -17540,7 +17556,8 @@ def main():
 
     if DISPERSION_DYNAMIC_UNIVERSE and ENABLE_DISPERSION_FILTER:
         print(f"\nFetching market cap history for dynamic dispersion universe "
-              f"(top-{DISPERSION_N} per day, 1-day lag) ...")
+              f"(top-{DISPERSION_N} per day, "
+              f"{DISPERSION_UNIVERSE_LAG_DAYS}-day lag) ...")
         # Bug fix 2026-04-27 (part 2): pass `end` so the DB / parquet /
         # CoinGecko paths in fetch_mcap_history actually load mcap rows
         # past the function's hardcoded default end='2026-03-02'. Without
@@ -17557,6 +17574,7 @@ def main():
                     mcap_df     = mcap_df,
                     alt_returns = alt_rets,
                     n           = DISPERSION_N,
+                    lag_days    = DISPERSION_UNIVERSE_LAG_DAYS,
                 )
             else:
                 print("    ! mcap_df or alt_rets empty — dynamic mode unavailable")

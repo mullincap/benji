@@ -118,7 +118,12 @@ function getInactiveChildKeys(params: Record<string, unknown>): Set<string> {
     hide(['fixed_notional_cap']);
   }
   if (!params.enable_dispersion_filter) {
-    hide(['dispersion_threshold', 'dispersion_baseline_win', 'dispersion_n', 'dispersion_dynamic_universe', 'run_filter_dispersion']);
+    hide(['dispersion_threshold', 'dispersion_baseline_win', 'dispersion_n',
+          'dispersion_dynamic_universe', 'dispersion_universe_lag_days',
+          'run_filter_dispersion']);
+  } else if (!params.dispersion_dynamic_universe) {
+    // Lag is only meaningful when the dynamic universe is on.
+    hide(['dispersion_universe_lag_days']);
   }
   if (!params.enable_vol_filter) {
     hide(['vol_lookback', 'vol_percentile', 'vol_baseline_win', 'run_filter_vol']);
@@ -221,7 +226,8 @@ const CONFIG_SECTIONS: ConfigSection[] = [
   {
     title: 'ADVANCED • STRATEGY TUNING',
     keys: [
-      'dispersion_threshold', 'dispersion_baseline_win', 'dispersion_n', 'dispersion_dynamic_universe',
+      'dispersion_threshold', 'dispersion_baseline_win', 'dispersion_n',
+      'dispersion_dynamic_universe', 'dispersion_universe_lag_days',
       'vol_lookback', 'vol_percentile', 'vol_baseline_win', 'tail_drop_pct', 'tail_vol_mult',
       'ic_signal', 'ic_window', 'ic_threshold', 'btc_ma_days', 'blofin_min_symbols',
       'leaderboard_top_n', 'train_test_split', 'n_trials',

@@ -661,6 +661,19 @@ export default function ParamForm({ params, onChange, onSubmit }: ParamFormProps
             <Row label="dispersion_dynamic_universe">
               <Toggle checked={!!p.dispersion_dynamic_universe} onChange={(v) => set('dispersion_dynamic_universe', v)} />
             </Row>
+            <ConditionalParams show={!!p.dispersion_dynamic_universe}>
+              <Row label="dispersion_universe_lag_days">
+                <SelInput
+                  value={String(p.dispersion_universe_lag_days ?? 1)}
+                  onChange={(v) => set('dispersion_universe_lag_days', Number(v))}
+                  options={[
+                    { value: "0", label: "0 days (same-day mcap)" },
+                    { value: "1", label: "1 day  (canonical, default)" },
+                    { value: "2", label: "2 days (extra cautious)" },
+                  ]}
+                />
+              </Row>
+            </ConditionalParams>
           </ConditionalParams>
           <ConditionalParams show={!!p.enable_vol_filter}>
             <Row label="vol_lookback">

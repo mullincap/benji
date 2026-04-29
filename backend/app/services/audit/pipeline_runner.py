@@ -202,6 +202,7 @@ def build_pipeline_env(params: dict) -> dict[str, str]:
         "DISPERSION_BASELINE_WIN":      str(params.get("dispersion_baseline_win", 33)),
         "DISPERSION_DYNAMIC_UNIVERSE":  _boolenv(params.get("dispersion_dynamic_universe", True)),
         "DISPERSION_N":                 str(params.get("dispersion_n", 40)),
+        "DISPERSION_UNIVERSE_LAG_DAYS": str(params.get("dispersion_universe_lag_days", 1)),
         "VOL_LOOKBACK":                 str(params.get("vol_lookback", 10)),
         "VOL_PERCENTILE":               str(params.get("vol_percentile", 0.25)),
         "VOL_BASELINE_WIN":             str(params.get("vol_baseline_win", 90)),

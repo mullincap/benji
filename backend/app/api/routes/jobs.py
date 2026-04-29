@@ -176,6 +176,10 @@ class JobRequest(BaseModel):
     dispersion_baseline_win:    int   = 33
     dispersion_dynamic_universe: bool = True
     dispersion_n:               int   = 40
+    # Days to lag the mcap snapshot when picking the per-day dispersion
+    # universe. 1 (default) = mask[T] uses mcap[T-1] — canonical
+    # no-lookahead. 0 = same-day mcap. 2 = extra cautious.
+    dispersion_universe_lag_days: int = 1
     vol_lookback:               int   = 10
     vol_percentile:             float = 0.25
     vol_baseline_win:           int   = 90
