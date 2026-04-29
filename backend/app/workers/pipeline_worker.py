@@ -202,6 +202,15 @@ def run_pipeline(self, job_id: str, params: dict) -> dict:
         update_job(job_id, status="cancelled", stage="done", error="Cancelled by user.")
         return {}
 
+    # Persist the audit.jobs row FIRST — audit.daily_baskets has a FK to
+    # audit.jobs.job_id, so any later ingest needs the parent row in
+    # place. Previously this lived AFTER _ingest_daily_baskets, which
+    # caused every JobRequest run since the FK was added (commit f8f3a4e)
+    # to silently lose its per-day basket detail (FK violation logged +
+    # swallowed). Discovered 2026-04-29 during the dispersion-lag sweep.
+    # Best-effort: failure here is logged but doesn't disrupt anything.
+    _persist_audit_job_row(job_id, params, metrics)
+
     # Snapshot the gate report into job_dir BEFORE ingestion so a
     # concurrent audit can't overwrite the shared file at
     # $PIPELINE_DIR/eligibility_gate_report.csv between when this
@@ -233,13 +242,6 @@ def run_pipeline(self, job_id: str, params: dict) -> dict:
     }
 
     update_job(job_id, status="complete", stage="done", progress=100, results=results)
-
-    # Best-effort: also persist a lightweight audit.jobs row. This seeds the
-    # allocator-visible history without populating audit.results (promotion is
-    # a separate explicit action). Any failure here is logged but must not
-    # disrupt the JSON-file write above — that's still the source of truth
-    # for in-progress jobs and crash recovery.
-    _persist_audit_job_row(job_id, params, metrics)
 
     return results
 
