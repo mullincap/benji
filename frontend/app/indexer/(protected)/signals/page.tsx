@@ -26,11 +26,17 @@ import { useCallback, useEffect, useState } from "react";
 import { TableSkeleton } from "../../../components/Skeleton";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE || "";
-const LOOKBACK_DAYS = 90;
-// Research mode is server-computed on-demand (audit_filters series build);
-// 10 days is the operator-relevant window without paying the full 90-day
-// compute cost. Easy to bump if needed.
-const RESEARCH_LOOKBACK_DAYS = 10;
+// Per-filter lookbacks. Each fetch hits 3 endpoints (signals + raw-roi +
+// strat-roi) and the strat-roi join over futures_1m grows linearly with
+// lookback × basket size, so right-sizing the window per filter keeps
+// page renders snappy. Most operator sessions only need recent data;
+// longer history can be reached via the audit / simulator pages.
+const LOOKBACK_DAYS_ALL      = 10;   // baseline visibility for the All chip
+const LOOKBACK_DAYS_TODAY    = 2;    // today + 1-day UTC-edge buffer
+const LOOKBACK_DAYS_RESEARCH = 10;   // capped by server-side compute cost
+// Legacy reference used for the empty-state copy. Set to LOOKBACK_DAYS_ALL
+// since that's the most-common visible window.
+const LOOKBACK_DAYS = LOOKBACK_DAYS_ALL;
 
 // ─── Response shapes ─────────────────────────────────────────────────────────
 
@@ -641,14 +647,13 @@ export default function IndexerSignalsPage() {
     setRawRoi({});
     setStratRoi({});
     try {
-      // Research mode is computed on-demand server-side and is comparatively
-      // expensive (full audit_filters series build), so cap its lookback at
-      // 10 days — the typical research view is "what would each filter mode
-      // have done over the past week or so", not 90 days. Other modes use
-      // the full LOOKBACK_DAYS (=90).
-      const lookback = sourceFilter === "research"
-        ? RESEARCH_LOOKBACK_DAYS
-        : LOOKBACK_DAYS;
+      // Per-filter lookback: each filter has a different optimal window.
+      // Today only needs ~2 days to render today's row; All baselines at
+      // 10 days; Research is capped at 10 by the on-demand compute cost.
+      const lookback =
+        sourceFilter === "today"    ? LOOKBACK_DAYS_TODAY    :
+        sourceFilter === "research" ? LOOKBACK_DAYS_RESEARCH :
+                                      LOOKBACK_DAYS_ALL;
       const params = new URLSearchParams({ days: String(lookback) });
       // "today" is a client-side date filter (applied below in render path),
       // so it fetches everything from the server. Only "research" maps to
@@ -669,9 +674,10 @@ export default function IndexerSignalsPage() {
       const data = (await res.json()) as SignalsResponse;
       setState({ kind: "ready", signals: data.signals, killY: data.conviction_kill_y });
 
-      // Fetch raw ROI + strat ROI in background
+      // Fetch raw ROI + strat ROI in background — match the main fetch's
+      // lookback so we don't pay for ROI computes on rows we won't render.
       setRawRoiLoading(true);
-      fetch(`${API_BASE}/api/indexer/signals/raw-roi?days=${LOOKBACK_DAYS}`, { credentials: "include" })
+      fetch(`${API_BASE}/api/indexer/signals/raw-roi?days=${lookback}`, { credentials: "include" })
         .then(async (r) => {
           if (r.ok) {
             const d = await r.json();
@@ -682,7 +688,7 @@ export default function IndexerSignalsPage() {
         .finally(() => setRawRoiLoading(false));
 
       setStratRoiLoading(true);
-      fetch(`${API_BASE}/api/indexer/signals/strat-roi?days=${LOOKBACK_DAYS}`, { credentials: "include" })
+      fetch(`${API_BASE}/api/indexer/signals/strat-roi?days=${lookback}`, { credentials: "include" })
         .then(async (r) => {
           if (r.ok) {
             const d = await r.json();
