@@ -89,8 +89,13 @@ const DEFAULT_PARAMS: Record<string, unknown> = {
   run_filter_tail_or_vol: false,
   enable_tail_and_vol: false,
   run_filter_tail_and_vol: false,
+  // Legacy BloFin sit-flat — kept off by default, replaced by blofin_variants
   enable_blofin_filter: false,
   run_filter_tail_blofin: false,
+  // Universe modifier (replaces legacy BloFin sit-flat).
+  // "off" | "blofin_only" | "both"
+  blofin_variants: 'off',
+  blofin_universe_enabled: false,
   run_filter_none: true,
   enable_btc_ma_filter: false,
   enable_ic_diagnostic: false,

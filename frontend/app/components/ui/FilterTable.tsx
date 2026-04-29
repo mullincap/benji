@@ -14,8 +14,18 @@ interface FilterRow {
   eq?: number | null;
   grade?: string | null;
   not_run?: boolean;
+  blofin_variant?: boolean;
   [key: string]: unknown;
 }
+
+// Strip " (BloFin)" suffix to get the base filter label. The label is set
+// by backend's merge_audit_metrics; we also accept a pre-tagged
+// blofin_variant flag for forward-compat.
+const stripBlofinSuffix = (label: string): string =>
+  label.replace(/\s*\(BloFin\)\s*$/i, '');
+
+const isBlofinRow = (row: FilterRow): boolean =>
+  !!row.blofin_variant || /\(BloFin\)\s*$/i.test(String(row.filter ?? ''));
 
 interface FilterTableProps {
   rows: FilterRow[] | null | undefined;
@@ -32,9 +42,37 @@ export default function FilterTable({ rows, selectedFilter, onSelectFilter }: Fi
     );
   }
 
-  const sorted = [...rows].sort((a, b) => (b.sharpe ?? -Infinity) - (a.sharpe ?? -Infinity));
+  // Group filters by base label so vanilla and " (BloFin)" pairs render
+  // adjacent. Group order is the group's best Sharpe descending; within a
+  // group, vanilla comes first then BloFin.
+  const groupBest: Record<string, number> = {};
+  for (const r of rows) {
+    const base = stripBlofinSuffix(String(r.filter ?? ''));
+    const sh = r.sharpe ?? Number.NEGATIVE_INFINITY;
+    if (!(base in groupBest) || sh > groupBest[base]) {
+      groupBest[base] = sh;
+    }
+  }
+  const sorted = [...rows].sort((a, b) => {
+    const baseA = stripBlofinSuffix(String(a.filter ?? ''));
+    const baseB = stripBlofinSuffix(String(b.filter ?? ''));
+    if (baseA !== baseB) {
+      return (groupBest[baseB] ?? Number.NEGATIVE_INFINITY) - (groupBest[baseA] ?? Number.NEGATIVE_INFINITY);
+    }
+    // Same group: vanilla before BloFin variant
+    return Number(isBlofinRow(a)) - Number(isBlofinRow(b));
+  });
   const maxSharpe = Math.max(...sorted.map((r) => r.sharpe ?? 0));
-  const bestIdx = 0;
+  // BEST = single highest-Sharpe row across vanilla + BloFin variants
+  let bestIdx = 0;
+  let bestSharpe = sorted[0]?.sharpe ?? Number.NEGATIVE_INFINITY;
+  for (let i = 1; i < sorted.length; i += 1) {
+    const sh = sorted[i].sharpe ?? Number.NEGATIVE_INFINITY;
+    if (sh > bestSharpe) {
+      bestSharpe = sh;
+      bestIdx = i;
+    }
+  }
   const selectedNorm = normalizeFilterLabel(selectedFilter ?? '');
 
   return (
@@ -62,9 +100,12 @@ export default function FilterTable({ rows, selectedFilter, onSelectFilter }: Fi
         {sorted.map((row, i) => {
           const isBest = i === bestIdx;
           const isMissing = !!row.not_run;
+          const isBlofin = isBlofinRow(row);
           const rowFilter = String(row.filter ?? '—');
           const isSelected = selectedNorm !== '' && selectedNorm === normalizeFilterLabel(rowFilter);
           const rowOpacity = selectedNorm !== '' && !isSelected ? 0.66 : 1;
+          // BloFin variant rows get a faint blue tint so the eye can scan them
+          const blofinTint = 'rgba(70, 130, 180, 0.05)';
           return (
             <tr
               key={rowFilter || i}
@@ -79,7 +120,9 @@ export default function FilterTable({ rows, selectedFilter, onSelectFilter }: Fi
                     ? 'var(--green-dim)'
                     : isMissing
                       ? 'rgba(255,255,255,0.03)'
-                      : 'transparent',
+                      : isBlofin
+                        ? blofinTint
+                        : 'transparent',
                 cursor: isMissing ? 'default' : 'pointer',
                 opacity: rowOpacity,
               }}
@@ -89,9 +132,28 @@ export default function FilterTable({ rows, selectedFilter, onSelectFilter }: Fi
                   padding: '6px 4px',
                   color: isSelected ? '#e8e8e8' : isBest ? 'var(--green)' : isMissing ? 'var(--t3)' : 'var(--t1)',
                   whiteSpace: 'nowrap',
+                  paddingLeft: isBlofin ? 16 : 4,
                 }}
               >
-                {row.filter ?? '—'}{isMissing ? ' (not run)' : ''}{' '}
+                {/* Strip the " (BloFin)" suffix from the visible label and
+                    show a small chip instead — keeps the column compact. */}
+                {isBlofin ? stripBlofinSuffix(String(row.filter ?? '—')) : (row.filter ?? '—')}
+                {isMissing ? ' (not run)' : ''}{' '}
+                {isBlofin && (
+                  <span
+                    style={{
+                      fontSize: 8,
+                      letterSpacing: '0.08em',
+                      border: '1px solid rgba(70, 130, 180, 0.5)',
+                      color: '#79a8d8',
+                      borderRadius: 2,
+                      padding: '1px 4px',
+                      marginRight: 4,
+                    }}
+                  >
+                    BLOFIN
+                  </span>
+                )}
                 {isBest && (
                   <span
                     style={{

@@ -609,7 +609,6 @@ export default function ParamForm({ params, onChange, onSubmit }: ParamFormProps
             ['Tail+Disp+Vol', 'enable_tail_disp_vol', 'run_filter_tail_disp_vol'],
             ['Tail OR Vol', 'enable_tail_or_vol', 'run_filter_tail_or_vol'],
             ['Tail AND Vol', 'enable_tail_and_vol', 'run_filter_tail_and_vol'],
-            ['BloFin', 'enable_blofin_filter', 'run_filter_tail_blofin'],
           ] as [string, string, string][]
         ).map(([label, enableKey, runKey]) => (
           <div key={label} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 4 }}>
@@ -641,6 +640,64 @@ export default function ParamForm({ params, onChange, onSubmit }: ParamFormProps
             <Toggle checked={!!p.run_filter_calendar} onChange={(v) => set('run_filter_calendar', v)} />
           </Row>
         </div>
+      </CollapsibleSection>
+
+      {/* ── EXCHANGES ── */}
+      <CollapsibleSection title="EXCHANGES" open={isOpen('exchanges')} onToggle={() => toggleSection('exchanges')}>
+        <div style={{ marginBottom: 6, fontSize: 9, color: 'var(--t3)', lineHeight: 1.5 }}>
+          Restrict the symbol universe to a specific exchange. Time-correct via
+          per-symbol listTime — historical days only see symbols listed at that
+          point in time.
+        </div>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 4 }}>
+          <span style={fieldLabel}>BloFin</span>
+          <Toggle
+            checked={(p.blofin_variants ?? 'off') !== 'off'}
+            onChange={(v) => {
+              // Toggle on → default to "both" (vanilla + BloFin pairs).
+              // Toggle off → "off". The pair-vs-only refinement lives in the
+              // sub-control below.
+              set('blofin_variants', v ? 'both' : 'off');
+            }}
+          />
+        </div>
+        {(p.blofin_variants ?? 'off') !== 'off' && (
+          <div style={{ marginTop: 6, paddingLeft: 8, borderLeft: '1px solid var(--line)' }}>
+            <div style={{ fontSize: 9, color: 'var(--t3)', textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: 4 }}>
+              Variants
+            </div>
+            {([
+              ['both', 'Both (vanilla + BloFin pairs)'],
+              ['blofin_only', 'BloFin only'],
+            ] as [string, string][]).map(([value, label]) => {
+              const selected = (p.blofin_variants ?? 'off') === value;
+              return (
+                <button
+                  key={value}
+                  type="button"
+                  onClick={() => set('blofin_variants', value)}
+                  style={{
+                    display: 'block',
+                    width: '100%',
+                    textAlign: 'left',
+                    padding: '4px 6px',
+                    marginBottom: 3,
+                    background: selected ? 'var(--green-dim)' : 'transparent',
+                    border: `1px solid ${selected ? 'var(--green-mid)' : 'var(--line2)'}`,
+                    color: selected ? 'var(--green)' : 'var(--t1)',
+                    cursor: 'pointer',
+                    fontFamily: 'var(--font-space-mono), Space Mono, monospace',
+                    fontSize: 10,
+                    borderRadius: 2,
+                  }}
+                >
+                  <span style={{ marginRight: 6, opacity: selected ? 1 : 0.4 }}>{selected ? '●' : '○'}</span>
+                  {label}
+                </button>
+              );
+            })}
+          </div>
+        )}
       </CollapsibleSection>
 
       {/* ── ADVANCED TIER ── */}
