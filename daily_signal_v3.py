@@ -80,7 +80,8 @@ ANCHOR_HOUR           = 0      # 00:00 UTC anchor
 from pipeline.audit_filters import (  # noqa: E402  (sys.path is script dir)
     fetch_btc_daily_closes as _fetch_btc_daily_closes,
     compute_tail_guardrail,
-    compute_dispersion_filter,
+    compute_tail_guardrail_detail,
+    compute_dispersion_filter_detail,
 )
 
 FILTER_NAME           = "Tail Guardrail"
@@ -836,9 +837,34 @@ def main():
     #     defaults for the CSV writer + pass closes to write_to_db so
     #     each strategy evaluates with its OWN config thresholds (critical
     #     when ALTS MAIN's 0.03 tail_drop_pct coexists with Alpha Main's
-    #     0.04).
+    #     0.04). Use the *_detail variants so we can log the underlying
+    #     numeric values (BTC prev-day return, rvol short/long/ratio) —
+    #     these are the inputs that audit.py and peek.py compute against
+    #     identical methodology, so logging them lets us cross-check that
+    #     all three paths agree on the underlying numbers, not just the
+    #     final sit-flat decision.
     btc_closes = _fetch_btc_daily_closes(today)
-    sit_flat, tg_reason = compute_tail_guardrail(today, closes=btc_closes)
+    tg_detail = compute_tail_guardrail_detail(today, closes=btc_closes)
+    sit_flat = tg_detail["sit_flat"]
+    tg_reason = tg_detail["reason"]
+    if tg_detail.get("insufficient_history"):
+        log.info(
+            f"[TG values] insufficient_history (n_closes={tg_detail['n_closes']})"
+        )
+    else:
+        pdr = tg_detail.get("prev_day_return") or 0.0
+        rs = tg_detail.get("rvol_short") or 0.0
+        rl = tg_detail.get("rvol_long") or 0.0
+        rr = tg_detail.get("rvol_ratio") or 0.0
+        log.info(
+            f"[TG values] prev_day_return={pdr*100:+.3f}%  "
+            f"rvol_short={rs*100:.3f}%  rvol_long={rl*100:.3f}%  "
+            f"rvol_ratio={rr:.3f}x  "
+            f"thresholds(drop=-{tg_detail['tail_drop_pct']*100:.1f}% "
+            f"vol={tg_detail['tail_vol_mult']:g}x)  "
+            f"crash_fires={tg_detail['crash_fires']} "
+            f"vol_fires={tg_detail['vol_fires']}"
+        )
 
     # 4b. Dispersion filter. Computed ONCE (shared across strategies since
     #     DISPERSION_THRESHOLD / DISPERSION_N / DISPERSION_BASELINE_WIN are
@@ -846,7 +872,26 @@ def main():
     #     override support can be added later by moving the call inside the
     #     write_to_db loop). Result passed to write_to_db so strategies
     #     whose active_filter includes Dispersion can combine it with Tail.
-    disp_flat, disp_reason = compute_dispersion_filter(today)
+    disp_detail = compute_dispersion_filter_detail(today)
+    disp_flat = disp_detail["sit_flat"]
+    disp_reason = disp_detail["reason"]
+    if disp_detail.get("fail_open_reason"):
+        log.info(
+            f"[Disp values] FAIL-OPEN ({disp_detail['fail_open_reason']})  "
+            f"eligible={disp_detail['n_symbols_eligible']} "
+            f"klines={disp_detail['n_symbols_with_klines']} "
+            f"baseline_n={disp_detail['n_baseline_values']}"
+        )
+    else:
+        yd = disp_detail.get("yesterday_dispersion") or 0.0
+        bm = disp_detail.get("baseline_median") or 0.0
+        dr = disp_detail.get("dispersion_ratio") or 0.0
+        log.info(
+            f"[Disp values] yesterday_dispersion={yd:.5f}  "
+            f"baseline_median={bm:.5f}  ratio={dr:.3f}  "
+            f"threshold={disp_detail['threshold']:g}  "
+            f"baseline_n={disp_detail['n_baseline_values']}"
+        )
 
     # 5. Final decision for CSV — CSV writer uses the CANONICAL strategy's
     #    methodology (Alpha Main = Tail Guardrail only). The DB write path

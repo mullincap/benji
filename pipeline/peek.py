@@ -55,7 +55,17 @@ os.environ.setdefault("SAMPLE_INTERVAL", "5")
 os.environ.setdefault("LEADERBOARD_TOP_N", "333")
 
 _HERE = Path(__file__).resolve().parent
+# Project root must be on sys.path so `from pipeline.X import ...` resolves.
 sys.path.insert(0, str(_HERE.parent))
+# pipeline/ itself must ALSO be on sys.path because overlap_analysis.py does
+# a top-level `from config import leaderboard_dir_for_metric` (config.py
+# lives in pipeline/, not project root). When peek is invoked directly,
+# Python adds peek's dir to sys.path automatically and this is fine; when
+# peek is imported lazily by daily_signal_v3 (compute_canonical_basket),
+# only the project root is added — so we need this insertion or
+# overlap_analysis fails on `from config import` and the whole signal
+# cron crashes. Caused 2026-04-28 v3 cutover failure.
+sys.path.insert(0, str(_HERE))
 
 from pipeline import overlap_analysis as oa  # noqa: E402
 from pipeline.db.connection import get_conn  # noqa: E402
@@ -75,12 +85,18 @@ SORT_BY = "price"
 OVERLAP_DIMENSIONS = "price_oi"
 DEPLOYMENT_START_HOUR = 6
 
-# Amberdata config (mirrors metl.py).
+# Amberdata config (mirrors metl.py, but with higher concurrency since
+# peek is interactive and the user accepted higher API quota usage).
 AMBER_BASE = "https://api.amberdata.com/markets/futures"
-AMBER_RATE_LIMIT_RPS = 15
-AMBER_MAX_WORKERS = 15
+AMBER_RATE_LIMIT_RPS = int(os.environ.get("PEEK_AMBER_RPS", "30"))
+AMBER_MAX_WORKERS = int(os.environ.get("PEEK_AMBER_WORKERS", "30"))
 AMBER_TIMEOUT = 30
 AMBER_RETRY_LIMIT = 5
+
+# Audit cross-reference: when --audit-id is passed we pull strategy config
+# from audit.jobs.config_overrides (jsonb) so peek's filter + conviction
+# math matches that specific audit run exactly.
+PIVOT_LEVERAGE_DEFAULT = 4.0
 
 # Cache root. Lives under the shared mount so containers + host see same files.
 PEEK_CACHE_DIR = Path("/mnt/quant-data/peek_cache")
@@ -499,7 +515,12 @@ def freq_at_exact_timestamp_db(metric: str, ts: datetime.datetime,
     return {peek_date: counter}
 
 
-def compute_strategy_filters(peek_dt: datetime.date) -> dict | None:
+def compute_strategy_filters(
+    peek_dt: datetime.date,
+    tail_drop_pct: float | None = None,
+    tail_vol_mult: float | None = None,
+    dispersion_threshold: float | None = None,
+) -> dict | None:
     """Run Tail Guardrail + Dispersion filters for peek_dt using the SAME
     canonical helpers the live trader uses (pipeline.audit_filters), which
     are documented to produce identical decisions to audit.py's
@@ -508,52 +529,52 @@ def compute_strategy_filters(peek_dt: datetime.date) -> dict | None:
     Returns None on import failure (defensive — peek's basket output is
     still useful even if filter helpers can't be loaded).
 
-    Returns a dict with both individual gate states and the canonical
-    per-strategy combinations the live trader applies:
-        {
-            "tail_guardrail": {"sit_flat": bool, "reason": str|None},
-            "dispersion":     {"sit_flat": bool, "reason": str|None},
-            "combined": {
-                "tail_only":          {"sit_flat": bool, "reason": str|None},
-                "tail_plus_dispersion": {"sit_flat": bool, "reason": str|None},
-            },
-        }
+    Returns a dict with both individual gate states (including underlying
+    numeric values for cross-comparison with audit.py and daily_signal)
+    and the canonical per-strategy combinations the live trader applies.
+    Each gate dict carries:
+        sit_flat, reason, plus the *_detail keys exposed by
+        compute_tail_guardrail_detail / compute_dispersion_filter_detail.
     """
     try:
         from pipeline.audit_filters import (
-            compute_tail_guardrail as _ctg,
-            compute_dispersion_filter as _cdf,
+            compute_tail_guardrail_detail as _ctg_d,
+            compute_dispersion_filter_detail as _cdf_d,
         )
     except Exception as e:
         return {"error": f"audit_filters import failed: {e}"}
 
     try:
-        tg_flat, tg_reason = _ctg(peek_dt)
+        tg_detail = _ctg_d(peek_dt, tail_drop_pct=tail_drop_pct,
+                            tail_vol_mult=tail_vol_mult)
     except Exception as e:
-        tg_flat, tg_reason = None, f"tail_guardrail_error: {e}"
+        tg_detail = {"sit_flat": None, "reason": f"tail_guardrail_error: {e}"}
     try:
-        disp_flat, disp_reason = _cdf(peek_dt)
+        disp_detail = _cdf_d(peek_dt, threshold=dispersion_threshold)
     except Exception as e:
-        disp_flat, disp_reason = None, f"dispersion_error: {e}"
+        disp_detail = {"sit_flat": None, "reason": f"dispersion_error: {e}"}
+
+    tg_flat = tg_detail.get("sit_flat")
+    disp_flat = disp_detail.get("sit_flat")
 
     # Per-strategy combinations:
     #   "Tail Guardrail" strategies: only TG fires
     #   "Tail + Dispersion" strategies: either TG or Dispersion fires
     tail_only_flat = bool(tg_flat) if tg_flat is not None else None
-    tail_only_reason = tg_reason if tg_flat else None
+    tail_only_reason = tg_detail.get("reason") if tg_flat else None
 
     if tg_flat is None or disp_flat is None:
         td_flat, td_reason = None, "filter_error"
     elif tg_flat:
-        td_flat, td_reason = True, tg_reason
+        td_flat, td_reason = True, tg_detail.get("reason")
     elif disp_flat:
-        td_flat, td_reason = True, disp_reason
+        td_flat, td_reason = True, disp_detail.get("reason")
     else:
         td_flat, td_reason = False, None
 
     return {
-        "tail_guardrail": {"sit_flat": tg_flat, "reason": tg_reason},
-        "dispersion": {"sit_flat": disp_flat, "reason": disp_reason},
+        "tail_guardrail": tg_detail,
+        "dispersion": disp_detail,
         "combined": {
             "tail_only": {"sit_flat": tail_only_flat, "reason": tail_only_reason},
             "tail_plus_dispersion": {"sit_flat": td_flat, "reason": td_reason},
@@ -562,15 +583,69 @@ def compute_strategy_filters(peek_dt: datetime.date) -> dict | None:
 
 
 def print_strategy_filters(filters: dict) -> None:
-    """Pretty-print the filter block to stdout."""
+    """Pretty-print the filter block to stdout — includes the numeric
+    values behind each gate's decision so peek/daily_signal/audit can be
+    cross-checked side-by-side."""
     if not filters:
         return
     if "error" in filters:
         print(f"\n[filters]  ⚠ {filters['error']}")
         return
 
-    def _fmt(name: str, gate: dict) -> str:
-        f = gate["sit_flat"]
+    print()
+    print(f"[filters]  audit_filters.py canonical helpers")
+
+    # ── Tail Guardrail ─────────────────────────────────────────────
+    tg = filters["tail_guardrail"]
+    tg_flat = tg.get("sit_flat")
+    tdp = tg.get("tail_drop_pct")
+    tvm = tg.get("tail_vol_mult")
+    pdr = tg.get("prev_day_return")
+    rs = tg.get("rvol_short")
+    rl = tg.get("rvol_long")
+    rr = tg.get("rvol_ratio")
+    if tg_flat is None:
+        print(f"  tail guardrail               ERROR — {tg.get('reason', '')}")
+    elif tg.get("insufficient_history"):
+        print(f"  tail guardrail               SIT FLAT  — insufficient history "
+              f"(n_closes={tg.get('n_closes')})")
+    else:
+        verdict = "SIT FLAT " if tg_flat else "PASS     "
+        cf = "★" if tg.get("crash_fires") else " "
+        vf = "★" if tg.get("vol_fires") else " "
+        print(f"  tail guardrail               {verdict}  "
+              f"(thr drop=-{tdp*100:.1f}% vol={tvm:g}×)")
+        print(f"    {cf} prev_day_return  = {pdr*100:+7.3f}%   (fires if < -{tdp*100:.1f}%)")
+        print(f"    {vf} rvol_ratio       = {rr:7.3f}×   "
+              f"(short {rs*100:.3f}% / long {rl*100:.3f}%; fires if > {tvm:g}×)")
+
+    # ── Dispersion ─────────────────────────────────────────────────
+    dp = filters["dispersion"]
+    dp_flat = dp.get("sit_flat")
+    thr = dp.get("threshold")
+    yd = dp.get("yesterday_dispersion")
+    bm = dp.get("baseline_median")
+    dr = dp.get("dispersion_ratio")
+    fail_open = dp.get("fail_open_reason")
+    if dp_flat is None:
+        print(f"  dispersion                   ERROR — {dp.get('reason', '')}")
+    elif fail_open:
+        print(f"  dispersion                   PASS     "
+              f"(fail-open: {fail_open}; "
+              f"eligible={dp.get('n_symbols_eligible')} klines={dp.get('n_symbols_with_klines')} "
+              f"baseline_n={dp.get('n_baseline_values')})")
+    else:
+        verdict = "SIT FLAT " if dp_flat else "PASS     "
+        flag = "★" if dp_flat else " "
+        print(f"  dispersion                   {verdict}  "
+              f"(thr={thr:g}, baseline_win={dp.get('baseline_win')}d, "
+              f"n={dp.get('n_symbols_target')})")
+        print(f"    {flag} dispersion_ratio = {dr:7.3f}    "
+              f"(yesterday={yd:.5f} / baseline_med={bm:.5f}; fires if < {thr:g})")
+
+    # ── Combined ───────────────────────────────────────────────────
+    def _combined_line(name: str, gate: dict) -> str:
+        f = gate.get("sit_flat")
         if f is None:
             return f"  {name:<28} ERROR — {gate.get('reason', '')}"
         if f:
@@ -578,13 +653,9 @@ def print_strategy_filters(filters: dict) -> None:
             return f"  {name:<28} SIT FLAT  — {r}"
         return f"  {name:<28} PASS"
 
-    print()
-    print(f"[filters]  audit_filters.py canonical helpers")
-    print(_fmt("tail guardrail:", filters["tail_guardrail"]))
-    print(_fmt("dispersion:", filters["dispersion"]))
     print(f"  ─────────────────────────")
-    print(_fmt("combined: Tail Guardrail", filters["combined"]["tail_only"]))
-    print(_fmt("combined: Tail + Disp", filters["combined"]["tail_plus_dispersion"]))
+    print(_combined_line("combined: Tail Guardrail", filters["combined"]["tail_only"]))
+    print(_combined_line("combined: Tail + Disp", filters["combined"]["tail_plus_dispersion"]))
 
 
 def fetch_blofin_status(bases: list[str]) -> dict[str, bool]:
@@ -648,12 +719,63 @@ def fetch_close_bars_db(bases: list[str],
         conn.close()
 
 
+def fetch_audit_config(audit_id: str) -> dict | None:
+    """Look up audit.jobs.config_overrides for a given audit job_id (or
+    prefix). Returns the relevant filter / conviction config keys as a
+    dict — None if not found or DB unreachable. Used by --audit-id flag
+    to make peek match a specific audit run's strategy thresholds.
+
+    Recognized keys we extract (others ignored):
+        tail_drop_pct, tail_vol_mult, dispersion_threshold,
+        early_kill_y, l_high, leverage
+    All are optional in the override JSON; missing keys mean defaults.
+    """
+    if not audit_id:
+        return None
+    try:
+        conn = get_conn()
+    except Exception as e:
+        print(f"[peek] fetch_audit_config: DB unavailable ({e})", file=sys.stderr)
+        return None
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            SELECT job_id::text, config_overrides
+              FROM audit.jobs
+             WHERE job_id::text LIKE %s
+             ORDER BY created_at DESC
+             LIMIT 1
+            """,
+            (audit_id + "%",),
+        )
+        row = cur.fetchone()
+        cur.close()
+    finally:
+        conn.close()
+    if not row:
+        return None
+    full_id, cfg = row
+    if not isinstance(cfg, dict):
+        # psycopg2 with extras may return jsonb as str
+        try:
+            cfg = json.loads(cfg) if cfg else {}
+        except Exception:
+            cfg = {}
+    keys = ("tail_drop_pct", "tail_vol_mult", "dispersion_threshold",
+            "early_kill_y", "l_high", "leverage")
+    extracted = {k: cfg.get(k) for k in keys if cfg.get(k) is not None}
+    extracted["_audit_job_id"] = full_id
+    return extracted
+
+
 def compute_window_roi(basket: list[str],
                         peek_date: datetime.date,
                         start_time: datetime.time,
                         end_time: datetime.time,
                         stop_loss_pct: float = -0.06,
-                        leverage: float = 1.0) -> dict | None:
+                        leverage: float = 1.0,
+                        kill_y_1x: float | None = None) -> dict | None:
     """Compute equal-weight, sticky-stop simulated return for the basket
     over [start_time, end_time] UTC of peek_date.
 
@@ -664,6 +786,11 @@ def compute_window_roi(basket: list[str],
     Used for two windows:
       - conviction gate: 06:00 → 06:35 UTC (pre-deploy momentum check)
       - trade window: 06:35 → 23:55 UTC (post-deploy realized return)
+
+    If `kill_y_1x` is provided (already in 1× space — caller is
+    responsible for dividing by PIVOT_LEVERAGE if they hold the 4×
+    threshold), the result dict includes `conviction_passed: bool`
+    where pass = portfolio_pct_return >= kill_y_1x.
     """
     if not basket:
         return None
@@ -720,7 +847,7 @@ def compute_window_roi(basket: list[str],
         return None
     portfolio_pct = sum(r["pct_return"] for r in realized) / len(realized)
 
-    return {
+    out = {
         "symbols": symbol_results,
         "portfolio_pct_return": portfolio_pct,
         "n_symbols_with_data": len(realized),
@@ -732,10 +859,21 @@ def compute_window_roi(basket: list[str],
         "leverage": leverage,
         "weighting": "equal",
     }
+    if kill_y_1x is not None:
+        # PIVOT_LEVERAGE-corrected conviction gate: at the close of the
+        # conviction window (06:35) the strategy keeps the position iff
+        # the (live) cumulative pct return >= early_kill_y/PIVOT_LEVERAGE.
+        # Caller is responsible for the 4× → 1× conversion.
+        out["kill_y_1x"] = kill_y_1x
+        out["conviction_passed"] = bool(portfolio_pct >= kill_y_1x)
+    return out
 
 
 def print_window_roi(label: str, roi: dict) -> None:
-    """Pretty-print one window's ROI block to stdout."""
+    """Pretty-print one window's ROI block to stdout. When `kill_y_1x` was
+    passed to compute_window_roi, the portfolio line shows the conviction
+    PASS/FAIL verdict alongside the underlying threshold for direct
+    comparison against audit.py's PIVOT_LEVERAGE-scaled early_kill_y."""
     if not roi:
         return
     state = "in progress" if roi["in_progress"] else "complete"
@@ -758,7 +896,16 @@ def print_window_roi(label: str, roi: dict) -> None:
         print(f"  ({roi['n_symbols_with_data']}/{roi['n_symbols_total']} "
               f"symbols had bars in window)")
     print(f"  ─────────────────────────")
-    print(f"  portfolio:    {roi['portfolio_pct_return']*100:+8.3f}%")
+    pp = roi["portfolio_pct_return"]
+    if "conviction_passed" in roi:
+        ky_1x = roi["kill_y_1x"]
+        verdict = "PASS" if roi["conviction_passed"] else "FAIL"
+        print(f"  portfolio:    {pp*100:+8.3f}%   conviction {verdict}  "
+              f"(needed >= {ky_1x*100:+.3f}% @ 1×; "
+              f"audit threshold = {ky_1x*PIVOT_LEVERAGE_DEFAULT*100:+.3f}% @ "
+              f"{PIVOT_LEVERAGE_DEFAULT:g}×)")
+    else:
+        print(f"  portfolio:    {pp*100:+8.3f}%")
 
 
 def rank_table_at_timestamp_db(metric: str, ts: datetime.datetime) -> list:
@@ -1108,7 +1255,59 @@ def main() -> None:
                          "has no rows for today). Useful for validating that "
                          "the amber-direct path matches market.leaderboards "
                          "for historical dates.")
+    ap.add_argument("--audit-id", type=str, default=None, metavar="JOB_ID",
+                    help="Match peek's filter + conviction thresholds to a "
+                         "specific audit run by pulling audit.jobs.config_overrides. "
+                         "Accepts a job_id prefix (most-recent match wins). "
+                         "Individual --tail-drop-pct / --tail-vol-mult / "
+                         "--dispersion-threshold / --kill-y flags override "
+                         "the audit's values.")
+    ap.add_argument("--tail-drop-pct", type=float, default=None,
+                    help="Override Tail Guardrail crash threshold (decimal; "
+                         "default 0.04).")
+    ap.add_argument("--tail-vol-mult", type=float, default=None,
+                    help="Override Tail Guardrail vol-spike multiplier "
+                         "(default 1.4).")
+    ap.add_argument("--dispersion-threshold", type=float, default=None,
+                    help="Override Dispersion filter ratio threshold "
+                         "(default 0.66; sit-flat if disp_ratio < this).")
+    ap.add_argument("--kill-y", type=float, default=None,
+                    help="Conviction kill threshold at PIVOT_LEVERAGE (4×). "
+                         "Peek divides by 4 internally to compare against the "
+                         "1× simulated 06:00–06:35 portfolio return. When set, "
+                         "peek's conviction-window block reports PASS/FAIL.")
     args = ap.parse_args()
+
+    # Resolve effective filter / conviction params with this precedence:
+    # explicit CLI flag > --audit-id config_overrides > audit_filters defaults.
+    audit_cfg: dict = {}
+    if args.audit_id:
+        audit_cfg = fetch_audit_config(args.audit_id) or {}
+        if audit_cfg:
+            full_id = audit_cfg.get("_audit_job_id", args.audit_id)
+            print(f"[peek] audit-id {full_id[:8]}…  config_overrides:")
+            for k, v in audit_cfg.items():
+                if k.startswith("_"):
+                    continue
+                print(f"    {k:<22}= {v}")
+        else:
+            print(f"[peek] ⚠ no audit row found for prefix {args.audit_id!r}",
+                  file=sys.stderr)
+
+    eff_tail_drop_pct = (args.tail_drop_pct
+                          if args.tail_drop_pct is not None
+                          else audit_cfg.get("tail_drop_pct"))
+    eff_tail_vol_mult = (args.tail_vol_mult
+                          if args.tail_vol_mult is not None
+                          else audit_cfg.get("tail_vol_mult"))
+    eff_dispersion_threshold = (args.dispersion_threshold
+                                  if args.dispersion_threshold is not None
+                                  else audit_cfg.get("dispersion_threshold"))
+    eff_kill_y_4x = (args.kill_y
+                       if args.kill_y is not None
+                       else audit_cfg.get("early_kill_y"))
+    eff_pivot_lev = audit_cfg.get("leverage") or PIVOT_LEVERAGE_DEFAULT
+    eff_kill_y_1x = (eff_kill_y_4x / eff_pivot_lev) if eff_kill_y_4x else None
 
     if args.clear_cache:
         try:
@@ -1250,7 +1449,12 @@ def main() -> None:
     # build_dispersion_filter on identical inputs). Surfaces both
     # individual gate states and the per-strategy combinations the
     # live trader applies ("Tail Guardrail" alone, "Tail + Dispersion").
-    filters_block = compute_strategy_filters(peek_dt) if basket else None
+    filters_block = compute_strategy_filters(
+        peek_dt,
+        tail_drop_pct=eff_tail_drop_pct,
+        tail_vol_mult=eff_tail_vol_mult,
+        dispersion_threshold=eff_dispersion_threshold,
+    ) if basket else None
     if filters_block:
         print_strategy_filters(filters_block)
 
@@ -1268,6 +1472,7 @@ def main() -> None:
         conviction_roi = compute_window_roi(
             basket, peek_dt,
             datetime.time(6, 0), datetime.time(6, 35),
+            kill_y_1x=eff_kill_y_1x,
         )
         trade_roi = compute_window_roi(
             basket, peek_dt,

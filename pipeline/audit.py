@@ -2017,6 +2017,30 @@ def build_tail_guardrail(
         total   = mask.sum()
         print(f"      {s[:10]}->{e[:10]}: {flagged}/{total} guardrail-covered")
 
+    # Per-day numeric breakdown for the LAST date in the index. This is the
+    # row daily_signal_v3 and peek.py compute against the live DB at 06:00 UTC,
+    # so logging it here lets the three paths be cross-checked numerically.
+    # NOTE: audit's rvol values are sqrt(ANNUALIZATION_FACTOR) scaled but the
+    # rvol_RATIO cancels that scaling, so ratios across paths are directly
+    # comparable; rvol_short/long magnitudes are not (audit shows annualized,
+    # audit_filters shows raw daily stdev).
+    try:
+        last_day = idx[-1]
+        last_pdr = float(prev_ret.reindex([last_day]).iloc[0])
+        last_rs  = float(rvol_short.reindex([last_day]).iloc[0])
+        last_rl  = float(rvol_long.reindex([last_day]).iloc[0])
+        last_rr  = float(vol_ratio.reindex([last_day]).iloc[0])
+        # log_return → simple return for legibility
+        last_pdr_simple = float(np.expm1(last_pdr)) if pd.notna(last_pdr) else float("nan")
+        print(f"    [TG values @ {last_day:%Y-%m-%d}]  "
+              f"prev_day_return={last_pdr_simple*100:+.3f}%  "
+              f"rvol_short={last_rs*100:.3f}% (annualized)  "
+              f"rvol_long={last_rl*100:.3f}% (annualized)  "
+              f"rvol_ratio={last_rr:.3f}x  "
+              f"thresholds(drop=-{drop_pct*100:.1f}% vol={vol_mult:g}x)")
+    except Exception as _e:
+        print(f"    [TG values] could not extract last-day breakdown: {_e}")
+
     return bad_raw
 
 
@@ -3197,6 +3221,27 @@ def build_dispersion_filter(
     print(f"      disp_ratio: mean={disp_ratio.mean():.3f}  "
           f"days below threshold: {(disp_ratio < threshold).sum()} raw "
           f"(before reindex/lag)")
+
+    # Per-day numeric breakdown for the LAST date that has a valid disp_ratio.
+    # daily_signal_v3 and peek.py compute the same values against the live DB
+    # at 06:00 UTC so logging them here lets the three paths be cross-checked
+    # numerically. Note: audit's value is yesterday's (no lag applied yet); the
+    # gate it implies is for next day = last_day+1.
+    try:
+        valid_ratio = disp_ratio.dropna()
+        if not valid_ratio.empty:
+            last_day = valid_ratio.index[-1]
+            last_disp = float(dispersion.reindex([last_day]).iloc[0])
+            last_base = float(baseline.reindex([last_day]).iloc[0])
+            last_ratio = float(valid_ratio.iloc[-1])
+            print(f"      [Disp values @ {last_day:%Y-%m-%d}]  "
+                  f"yesterday_dispersion={last_disp:.5f}  "
+                  f"baseline_median={last_base:.5f}  "
+                  f"ratio={last_ratio:.3f}  "
+                  f"threshold={threshold:g}  "
+                  f"(gates day {last_day + pd.Timedelta(days=1):%Y-%m-%d})")
+    except Exception as _e:
+        print(f"      [Disp values] could not extract last-day breakdown: {_e}")
 
     return low_disp_flag
 

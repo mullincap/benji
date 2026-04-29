@@ -132,20 +132,34 @@ def fetch_btc_daily_closes(ref_date: _dt.date) -> list[float]:
     return [float(r[1]) for r in rows]
 
 
-def compute_tail_guardrail(
+def compute_tail_guardrail_detail(
     ref_date: _dt.date,
     closes: Optional[list[float]] = None,
     tail_drop_pct: Optional[float] = None,
     tail_vol_mult: Optional[float] = None,
-) -> tuple[bool, Optional[str]]:
-    """Tail Guardrail sit-flat decision.
+) -> dict:
+    """Tail Guardrail sit-flat decision with full numeric breakdown.
 
-    Logic (matches pipeline/audit.py:1950 build_tail_guardrail):
+    Logic (matches pipeline/audit.py:1974 build_tail_guardrail):
       - prev_day_return: log-return between (ref_date-2) and (ref_date-1)
         daily closes. Fires if < -tail_drop_pct.
       - rvol ratio: stdev(short window of daily log-returns) /
         stdev(long window). Fires if > tail_vol_mult.
-    Either gate firing → sit flat. Returns (sit_flat, reason|None).
+    Either gate firing → sit flat.
+
+    Returns a dict with keys:
+        sit_flat: bool — final gate decision
+        reason: str | None
+        prev_day_return: float | None — decimal (e.g. -0.052 for -5.2%)
+        rvol_short: float | None — stdev of last short-window log-returns
+        rvol_long: float | None — stdev of last long-window log-returns
+        rvol_ratio: float | None — rvol_short / rvol_long
+        tail_drop_pct: float — threshold used (decimal)
+        tail_vol_mult: float — threshold used (multiplier)
+        crash_fires: bool
+        vol_fires: bool
+        n_closes: int — count of daily closes available
+        insufficient_history: bool
 
     `closes` may be pre-fetched via fetch_btc_daily_closes when the
     caller is computing TG for multiple strategies in one invocation —
@@ -159,13 +173,33 @@ def compute_tail_guardrail(
     if closes is None:
         closes = fetch_btc_daily_closes(ref_date)
 
+    base_detail: dict = {
+        "tail_drop_pct": tdp,
+        "tail_vol_mult": tvm,
+        "tail_vol_short_window": TAIL_VOL_SHORT_WINDOW,
+        "tail_vol_long_window": TAIL_VOL_LONG_WINDOW,
+        "n_closes": len(closes),
+        "prev_day_return": None,
+        "rvol_short": None,
+        "rvol_long": None,
+        "rvol_ratio": None,
+        "crash_fires": False,
+        "vol_fires": False,
+        "insufficient_history": False,
+    }
+
     if len(closes) < TAIL_VOL_LONG_WINDOW + 1:
         log.warning(
             f"Tail Guardrail needs >={TAIL_VOL_LONG_WINDOW+1} daily closes "
             f"prior to {ref_date}; have {len(closes)}. Forcing sit-flat "
             f"(fail-closed)."
         )
-        return True, "tail_guardrail_insufficient_history"
+        return {
+            **base_detail,
+            "sit_flat": True,
+            "reason": "tail_guardrail_insufficient_history",
+            "insufficient_history": True,
+        }
 
     log_rets: list[float] = []
     for i in range(1, len(closes)):
@@ -195,32 +229,59 @@ def compute_tail_guardrail(
     crash_fires = prev_day_ret < -tdp
     vol_fires = ratio > tvm
 
+    detail = {
+        **base_detail,
+        "prev_day_return": prev_day_ret,
+        "rvol_short": rvol_short,
+        "rvol_long": rvol_long,
+        "rvol_ratio": ratio,
+        "crash_fires": bool(crash_fires),
+        "vol_fires": bool(vol_fires),
+    }
+
     if crash_fires and vol_fires:
-        return True, (
+        return {**detail, "sit_flat": True, "reason": (
             f"tail_guardrail_crash_and_vol: prev_day={prev_day_ret*100:.2f}% "
             f"rvol_ratio={ratio:.3f}x"
-        )
+        )}
     if crash_fires:
-        return True, (
+        return {**detail, "sit_flat": True, "reason": (
             f"tail_guardrail_crash: prev_day={prev_day_ret*100:.2f}% "
             f"< -{tdp*100:.1f}%"
-        )
+        )}
     if vol_fires:
-        return True, f"tail_guardrail_vol: rvol_ratio={ratio:.3f}x > {tvm}x"
-    return False, None
+        return {**detail, "sit_flat": True,
+                "reason": f"tail_guardrail_vol: rvol_ratio={ratio:.3f}x > {tvm}x"}
+    return {**detail, "sit_flat": False, "reason": None}
+
+
+def compute_tail_guardrail(
+    ref_date: _dt.date,
+    closes: Optional[list[float]] = None,
+    tail_drop_pct: Optional[float] = None,
+    tail_vol_mult: Optional[float] = None,
+) -> tuple[bool, Optional[str]]:
+    """Backward-compatible thin wrapper over compute_tail_guardrail_detail.
+    Returns (sit_flat, reason|None). New callers should prefer the _detail
+    variant so they have access to the underlying numeric values."""
+    d = compute_tail_guardrail_detail(ref_date, closes=closes,
+                                       tail_drop_pct=tail_drop_pct,
+                                       tail_vol_mult=tail_vol_mult)
+    return d["sit_flat"], d["reason"]
 
 
 # ==========================================================================
 # DISPERSION FILTER
 # ==========================================================================
 
-def compute_dispersion_filter(
+def compute_dispersion_filter_detail(
     ref_date: _dt.date,
     threshold: Optional[float] = None,
     baseline_win: Optional[int] = None,
     n_symbols: Optional[int] = None,
-) -> tuple[bool, Optional[str]]:
-    """Cross-sectional dispersion gate (matches audit.py:2765).
+) -> dict:
+    """Cross-sectional dispersion gate (matches audit.py:3104) with full
+    numeric breakdown.
 
     Lagged by 1 day:
       yesterday_dispersion = std of yesterday's daily log-returns across
@@ -234,6 +295,20 @@ def compute_dispersion_filter(
     for the full baseline window (simpler than per-day re-querying);
     dominant effect is yesterday's dispersion which uses yesterday's
     data directly.
+
+    Returns a dict with keys:
+        sit_flat: bool
+        reason: str | None
+        yesterday_dispersion: float | None
+        baseline_median: float | None
+        dispersion_ratio: float | None
+        threshold: float
+        baseline_win: int
+        n_symbols_target: int  — top-N mcap target
+        n_symbols_eligible: int — passed mcap filters today
+        n_symbols_with_klines: int — returned klines from FAPI
+        n_baseline_values: int — daily dispersion values in window
+        fail_open_reason: str | None — set when we couldn't compute
     """
     thr = threshold if threshold is not None else DISPERSION_THRESHOLD
     win = baseline_win if baseline_win is not None else DISPERSION_BASELINE_WIN
@@ -243,6 +318,19 @@ def compute_dispersion_filter(
         f"Computing Dispersion filter (threshold={thr}, "
         f"baseline_win={win}d, n={n})..."
     )
+
+    base_detail: dict = {
+        "threshold": thr,
+        "baseline_win": win,
+        "n_symbols_target": n,
+        "n_symbols_eligible": 0,
+        "n_symbols_with_klines": 0,
+        "n_baseline_values": 0,
+        "yesterday_dispersion": None,
+        "baseline_median": None,
+        "dispersion_ratio": None,
+        "fail_open_reason": None,
+    }
 
     # 1. Today's top-N mcap symbols.
     conn = _get_conn()
@@ -265,12 +353,15 @@ def compute_dispersion_filter(
     cur.close()
     conn.close()
 
+    base_detail["n_symbols_eligible"] = len(symbols)
+
     if len(symbols) < DISPERSION_MIN_SYMBOLS:
         log.warning(
             f"  Dispersion: only {len(symbols)} eligible mcap symbols for "
             f"{ref_date} (< {DISPERSION_MIN_SYMBOLS}). Fail-open."
         )
-        return False, None
+        return {**base_detail, "sit_flat": False, "reason": None,
+                "fail_open_reason": "insufficient_eligible_symbols"}
 
     # 2. Fetch (win + buffer) days of 1d klines per symbol.
     fetch_days = win + 2
@@ -311,12 +402,15 @@ def compute_dispersion_filter(
             if series:
                 results[sym] = series
 
+    base_detail["n_symbols_with_klines"] = len(results)
+
     if len(results) < DISPERSION_MIN_SYMBOLS:
         log.warning(
             f"  Dispersion: only {len(results)}/{len(symbols)} symbols "
             f"returned klines (< {DISPERSION_MIN_SYMBOLS}). Fail-open."
         )
-        return False, None
+        return {**base_detail, "sit_flat": False, "reason": None,
+                "fail_open_reason": "insufficient_klines"}
 
     # 3. Per-day cross-sectional std of log-returns.
     per_symbol_closes: dict = {}
@@ -353,20 +447,23 @@ def compute_dispersion_filter(
         log.warning(
             f"  Dispersion: no value for yesterday ({yesterday}). Fail-open."
         )
-        return False, None
+        return {**base_detail, "sit_flat": False, "reason": None,
+                "fail_open_reason": "no_yesterday_dispersion"}
 
     window_start = yesterday - _dt.timedelta(days=win - 1)
     baseline_vals = sorted(
         v for d, v in daily_dispersion.items()
         if window_start <= d <= yesterday
     )
+    base_detail["n_baseline_values"] = len(baseline_vals)
     min_for_baseline = max(5, win // 2)
     if len(baseline_vals) < min_for_baseline:
         log.warning(
             f"  Dispersion: only {len(baseline_vals)} baseline values "
             f"(need >= {min_for_baseline}). Fail-open."
         )
-        return False, None
+        return {**base_detail, "sit_flat": False, "reason": None,
+                "fail_open_reason": "insufficient_baseline_values"}
 
     n_b = len(baseline_vals)
     baseline = (
@@ -383,6 +480,29 @@ def compute_dispersion_filter(
         f"ratio={disp_ratio:.3f}  threshold={thr}"
     )
 
+    detail = {
+        **base_detail,
+        "yesterday_dispersion": yesterday_disp,
+        "baseline_median": baseline,
+        "dispersion_ratio": disp_ratio,
+    }
+
     if disp_ratio < thr:
-        return True, f"dispersion_low: ratio={disp_ratio:.3f} < {thr}"
-    return False, None
+        return {**detail, "sit_flat": True,
+                "reason": f"dispersion_low: ratio={disp_ratio:.3f} < {thr}"}
+    return {**detail, "sit_flat": False, "reason": None}
+
+
+def compute_dispersion_filter(
+    ref_date: _dt.date,
+    threshold: Optional[float] = None,
+    baseline_win: Optional[int] = None,
+    n_symbols: Optional[int] = None,
+) -> tuple[bool, Optional[str]]:
+    """Backward-compatible thin wrapper over compute_dispersion_filter_detail.
+    Returns (sit_flat, reason|None). New callers should prefer the _detail
+    variant for access to numeric values."""
+    d = compute_dispersion_filter_detail(ref_date, threshold=threshold,
+                                          baseline_win=baseline_win,
+                                          n_symbols=n_symbols)
+    return d["sit_flat"], d["reason"]
