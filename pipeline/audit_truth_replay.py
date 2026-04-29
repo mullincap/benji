@@ -41,7 +41,6 @@ from __future__ import annotations
 
 import argparse
 import datetime as _dt
-import json
 import logging
 import sys
 import time
@@ -91,18 +90,23 @@ def _parse_args() -> argparse.Namespace:
 # ==========================================================================
 
 def _load_target(audit_id: str, override_filter_mode: str | None) -> dict:
-    """Load audit metadata: result_id, filter_mode, sv_id, config, date range."""
+    """Load audit metadata: result_id, filter_mode, sv_id, config, date range.
+
+    Reads config from audit.jobs.config_overrides (always present for
+    completed audits) rather than audit.strategy_versions.config —
+    user-driven re-runs have strategy_version_id NULL until promoted,
+    so the JOIN-to-strategy-versions approach drops them.
+    """
     conn = get_conn()
     try:
         cur = conn.cursor()
         cur.execute(
             """
             SELECT j.job_id::text, j.date_from, j.date_to,
-                   j.strategy_version_id::text, sv.config,
-                   (sv.config->>'active_filter') AS active_filter
+                   j.strategy_version_id::text,
+                   j.config_overrides,
+                   (j.config_overrides->>'active_filter') AS active_filter
               FROM audit.jobs j
-              JOIN audit.strategy_versions sv
-                ON sv.strategy_version_id = j.strategy_version_id
              WHERE j.job_id = %s::uuid
             """,
             (audit_id,),
@@ -114,7 +118,8 @@ def _load_target(audit_id: str, override_filter_mode: str | None) -> dict:
         target_filter_mode = override_filter_mode or active_filter
         if not target_filter_mode:
             raise RuntimeError(
-                f"No active_filter in config for {sv_id}; pass --filter-mode."
+                f"No active_filter in config_overrides for job {job_id}; "
+                f"pass --filter-mode."
             )
 
         cur.execute(
@@ -127,15 +132,21 @@ def _load_target(audit_id: str, override_filter_mode: str | None) -> dict:
         )
         result_row = cur.fetchone()
         if not result_row:
+            cur.execute(
+                "SELECT filter_mode FROM audit.results WHERE job_id = %s::uuid",
+                (audit_id,),
+            )
+            available = [r[0] for r in cur.fetchall()]
             raise RuntimeError(
-                f"No audit.results row for filter_mode={target_filter_mode!r}"
+                f"No audit.results row for (job_id={audit_id}, "
+                f"filter_mode={target_filter_mode!r}). Available: {available}"
             )
         cur.close()
         return {
             "audit_id":    job_id,
             "result_id":   result_row[0],
             "filter_mode": target_filter_mode,
-            "sv_id":       sv_id,
+            "sv_id":       sv_id,  # may be None for unpromoted re-runs
             "config":      config or {},
             "date_from":   date_from,
             "date_to":     date_to,
@@ -157,6 +168,8 @@ def _fetch_btc_ohlcv() -> pd.DataFrame:
     if btc_raw is None or btc_raw.empty:
         raise RuntimeError("yfinance returned empty BTC history")
     btc_ohlcv = btc_raw[["Open", "High", "Low", "Close", "Volume"]].copy()
+    # audit.py expects lowercase column names — match its normalization.
+    btc_ohlcv.columns = ["open", "high", "low", "close", "volume"]
     btc_ohlcv.index = pd.to_datetime(btc_ohlcv.index).tz_localize(None).normalize()
     log.info(f"  {len(btc_ohlcv)} days, "
              f"{btc_ohlcv.index.min().date()} → {btc_ohlcv.index.max().date()}")
