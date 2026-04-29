@@ -472,6 +472,380 @@ def get_job(job_id: str, cur=Depends(get_cursor)) -> dict[str, Any]:
 
 # ─── /signals ────────────────────────────────────────────────────────────────
 
+# ── Research mode (source='research') ───────────────────────────────────────
+# The 'research' filter chip on /indexer/signals shows the same canonical
+# basket viewed through every supported filter mode in parallel — same
+# basket, different filter-gate decisions. Lets the operator see "what
+# would each filter mode have done?" alongside the live-active strategy.
+#
+# Implementation: on-demand compute (no persistence). For each date in the
+# lookback window:
+#   1. Pull canonical basket from audit.daily_baskets (any audit's row;
+#      they all share the same overlap selection per day).
+#   2. Compute Tail Guardrail + Dispersion decisions via audit_filters
+#      (canonical thresholds — defaults match the audit pipeline's
+#      legacy / non-strategy-specific path).
+#   3. Synthesize one signal-shaped row per filter mode:
+#        A - No Filter   (always trade)
+#        A - Tail Guardrail
+#        A - Dispersion
+#        A - Tail + Dispersion
+#   4. Conviction roi_x is identical across modes for a given date (it's
+#      basket-derived, not filter-derived) — compute once and broadcast.
+#
+# Trade-offs vs persisted approach:
+#   + No backfill cron, no schema change
+#   + Stays in lockstep with audit_filters (threshold tweaks visible
+#     immediately without re-running anything)
+#   - Slower endpoint (~30-60s for 90 days; mostly first dispersion
+#     compute warming the alt_returns cache; subsequent days are fast)
+
+_RESEARCH_FILTER_MODES = (
+    "A - No Filter",
+    "A - Tail Guardrail",
+    "A - Dispersion",
+    "A - Tail + Dispersion",
+)
+
+
+def _research_signals(cur, days: int) -> list[dict[str, Any]]:
+    """Synthesize per-(date, filter_mode) research rows for the lookback
+    window. Returns a list of signal-shaped dicts ready for the response,
+    with the SAME schema as live-source rows (signal_batch_id is a
+    deterministic synthetic UUID-like string, strategy_version_id=None).
+
+    Implementation: SERIES-BASED compute. Loads BTC closes + alt_returns
+    + mcap_df ONCE up front, builds the full tail-guardrail and
+    dispersion bool series via audit.py's canonical builders, then does
+    O(1) per-date lookups. Avoids the 3.5s/day overhead the previous
+    per-date compute_dispersion_filter_detail loop incurred (which
+    re-loaded mcap_df + alt_returns 90 times for a 90-day request).
+    """
+    import datetime as _dt
+    import uuid as _uuid
+
+    import pandas as _pd
+    import numpy as _np
+
+    # audit.py imports siblings (institutional_audit, etc.) at the top
+    # level, which only works when the pipeline/ directory itself is on
+    # sys.path. audit_filters.py does the same trick — replicate here.
+    import sys as _sys
+    from pathlib import Path as _Path
+    _pipeline_dir = _Path("/app/pipeline")
+    if _pipeline_dir.exists() and str(_pipeline_dir) not in _sys.path:
+        _sys.path.insert(0, str(_pipeline_dir))
+
+    # Lazy-import: audit.py + audit_filters — heavy module-level work, kept
+    # out of the route module's load path for non-research requests.
+    from pipeline import audit as _audit
+    from pipeline.audit_filters import (
+        DISPERSION_THRESHOLD, DISPERSION_BASELINE_WIN,
+        TAIL_DROP_PCT, TAIL_VOL_MULT,
+        TAIL_VOL_SHORT_WINDOW, TAIL_VOL_LONG_WINDOW,
+        fetch_btc_daily_closes,
+    )
+
+    # Step 1: pull canonical baskets per date.
+    #
+    # Primary source: user_mgmt.daily_signals (the live signal table). This
+    # has today's basket immediately after the 06:00 UTC cron fires, so the
+    # research view reflects today's results within ~1 minute of the live
+    # signal — no waiting for the nightly audit cron to write
+    # audit.daily_baskets. Multiple strategy_versions may share the same
+    # signal_date with the SAME basket (filter mode varies but symbols are
+    # the same canonical overlap selection); pick any one row per date.
+    #
+    # Fallback: audit.daily_baskets — covers historical dates where
+    # daily_signals may have been pruned, and the very early days of the
+    # audit history before daily_signals existed.
+    cur.execute(
+        """
+        SELECT DISTINCT ON (ds.signal_date)
+               ds.signal_date AS date,
+               COALESCE(items.symbols, '[]'::jsonb) AS symbols
+          FROM user_mgmt.daily_signals ds
+          LEFT JOIN LATERAL (
+              SELECT jsonb_agg(s.base ORDER BY dsi.rank) AS symbols
+                FROM user_mgmt.daily_signal_items dsi
+                JOIN market.symbols s ON s.symbol_id = dsi.symbol_id
+               WHERE dsi.signal_batch_id = ds.signal_batch_id
+                 AND dsi.is_selected = TRUE
+          ) items ON TRUE
+         WHERE ds.signal_date >= (NOW() - %s::interval)::date
+         ORDER BY ds.signal_date DESC, ds.computed_at DESC
+        """,
+        (f"{days} days",),
+    )
+    baskets_by_date: dict[_dt.date, list[str]] = {}
+    for r in cur.fetchall():
+        d = r["date"]
+        syms = r["symbols"] or []
+        if d not in baskets_by_date and syms:
+            baskets_by_date[d] = list(syms)
+
+    # Fallback: dates with no daily_signals row (historical) → audit.daily_baskets
+    cur.execute(
+        """
+        SELECT DISTINCT ON (db.date) db.date, db.basket
+          FROM audit.daily_baskets db
+          JOIN audit.jobs j ON j.job_id = db.job_id
+         WHERE db.date >= (NOW() - %s::interval)::date
+         ORDER BY db.date DESC, j.created_at DESC
+        """,
+        (f"{days} days",),
+    )
+    for r in cur.fetchall():
+        if r["date"] not in baskets_by_date:
+            baskets_by_date[r["date"]] = list(r["basket"] or [])
+
+    if not baskets_by_date:
+        return []
+
+    # Step 2: build full filter SERIES once — covers the entire lookback
+    # window plus enough warmup for the rolling baselines (60d for TG,
+    # 33d for Dispersion). Series indexed by date; per-date decision is
+    # an O(1) lookup.
+    earliest = min(baskets_by_date.keys())
+    latest = max(baskets_by_date.keys())
+    # Warmup: 60d (TG long window) + 33d (Disp baseline) + safety margin
+    series_start = (earliest - _dt.timedelta(days=120)).isoformat()
+    series_end   = (latest + _dt.timedelta(days=1)).isoformat()
+
+    decisions: dict[_dt.date, dict] = {d: {} for d in baskets_by_date}
+
+    # ── Tail Guardrail series ─────────────────────────────────────────────
+    try:
+        # Use a ref date past the lookback so fetch_btc_daily_closes
+        # returns the full window of closes ending at today.
+        closes = fetch_btc_daily_closes(latest + _dt.timedelta(days=1))
+        if len(closes) >= TAIL_VOL_LONG_WINDOW + 1:
+            # Map closes to dates: fetch_btc_daily_closes returns oldest→newest
+            # ending at ref_date - 1. Build a dated series.
+            close_dates = [(latest - _dt.timedelta(days=len(closes) - 1 - i))
+                           for i in range(len(closes))]
+            close_series = _pd.Series(closes, index=_pd.to_datetime(close_dates))
+            log_rets = _np.log(close_series / close_series.shift(1))
+            # rvol windows; ratio cancels annualization so use raw stdev
+            rvol_short = log_rets.rolling(TAIL_VOL_SHORT_WINDOW, min_periods=3).std()
+            rvol_long  = log_rets.rolling(TAIL_VOL_LONG_WINDOW, min_periods=30).std()
+            vol_ratio  = (rvol_short / rvol_long.replace(0, _np.nan)).shift(1)
+            prev_ret   = log_rets.shift(1)
+            crash = (prev_ret < -TAIL_DROP_PCT)
+            spike = (vol_ratio > TAIL_VOL_MULT)
+            # Per-date lookup: convert datetimes back to dates for indexing
+            for d in baskets_by_date:
+                ts = _pd.Timestamp(d)
+                if ts in crash.index:
+                    c = bool(crash.loc[ts]) if _pd.notna(crash.loc[ts]) else False
+                    s = bool(spike.loc[ts]) if _pd.notna(spike.loc[ts]) else False
+                    pdr = float(_np.expm1(prev_ret.loc[ts])) if _pd.notna(prev_ret.loc[ts]) else None
+                    rr = float(vol_ratio.loc[ts]) if _pd.notna(vol_ratio.loc[ts]) else None
+                    if c and s:
+                        reason = (f"tail_guardrail_crash_and_vol: "
+                                  f"prev_day={pdr*100:.2f}% rvol_ratio={rr:.3f}x")
+                    elif c:
+                        reason = (f"tail_guardrail_crash: prev_day={pdr*100:.2f}% "
+                                  f"< -{TAIL_DROP_PCT*100:.1f}%")
+                    elif s:
+                        reason = f"tail_guardrail_vol: rvol_ratio={rr:.3f}x > {TAIL_VOL_MULT}x"
+                    else:
+                        reason = None
+                    decisions[d]["tg"] = {"sit_flat": c or s, "reason": reason}
+                else:
+                    decisions[d]["tg"] = {"sit_flat": None, "reason": "no_btc_close"}
+        else:
+            for d in baskets_by_date:
+                decisions[d]["tg"] = {"sit_flat": True,
+                                      "reason": "tail_guardrail_insufficient_history"}
+    except Exception as e:
+        for d in baskets_by_date:
+            decisions[d]["tg"] = {"sit_flat": None, "reason": f"tg_error: {e}"}
+
+    # ── Dispersion series ────────────────────────────────────────────────
+    try:
+        # Build dynamic universe + alt_returns + mcap_df + mask once. This
+        # is the heavy step (~10-30s for FAPI fetch on cold cache; sub-
+        # second on cache hit). The full bool series covers every date in
+        # the window; per-date lookup is O(1).
+        mcap_df = _audit._load_mcap_from_db(series_start, series_end)
+        # Build dynamic universe matching what live audit_filters does
+        universe = _audit.build_dynamic_returns_universe(
+            mcap_df,
+            n=_audit.DISPERSION_N,
+            lag_days=_audit.DISPERSION_UNIVERSE_LAG_DAYS,
+        )
+        if not universe:
+            raise RuntimeError("dynamic universe empty")
+        alt_returns = _audit.fetch_altcoin_daily_returns(
+            symbols=universe, start=series_start, end=series_end,
+        )
+        if alt_returns is None or alt_returns.empty:
+            raise RuntimeError("alt_returns empty")
+        mask_df = _audit.build_dynamic_symbol_mask(
+            mcap_df, alt_returns,
+            n=_audit.DISPERSION_N,
+            lag_days=_audit.DISPERSION_UNIVERSE_LAG_DAYS,
+        )
+        # Run audit's canonical filter to get the gate series. .shift(1)
+        # is already applied internally so disp_series[d] is the gate
+        # decision for trading on day d.
+        disp_series = _audit.build_dispersion_filter(
+            alt_returns,
+            threshold=DISPERSION_THRESHOLD,
+            baseline_win=DISPERSION_BASELINE_WIN,
+            symbol_mask_df=mask_df,
+        )
+        # We also want the human-readable ratio for the reason string —
+        # recompute dispersion + baseline + ratio to surface them.
+        masked_returns = alt_returns.where(mask_df, other=_np.nan)
+        valid_mask = masked_returns.notna().sum(axis=1) >= 1
+        masked_returns = masked_returns[valid_mask]
+        dispersion_s = masked_returns.std(axis=1)
+        baseline_s = dispersion_s.rolling(
+            DISPERSION_BASELINE_WIN,
+            min_periods=max(5, DISPERSION_BASELINE_WIN // 2),
+        ).median()
+        ratio_s = dispersion_s / baseline_s.replace(0, _np.nan)
+
+        for d in baskets_by_date:
+            ts = _pd.Timestamp(d)
+            yest_ts = ts - _pd.Timedelta(days=1)
+            if ts in disp_series.index and _pd.notna(disp_series.loc[ts]):
+                fired = bool(disp_series.loc[ts])
+                # The shifted gate at d corresponds to ratio at d-1
+                yest_ratio = (float(ratio_s.loc[yest_ts])
+                              if yest_ts in ratio_s.index and _pd.notna(ratio_s.loc[yest_ts])
+                              else None)
+                if fired and yest_ratio is not None:
+                    reason = (f"dispersion_low: ratio={yest_ratio:.3f} "
+                              f"< {DISPERSION_THRESHOLD}")
+                elif fired:
+                    reason = "dispersion_low"
+                else:
+                    reason = None
+                decisions[d]["dp"] = {"sit_flat": fired, "reason": reason}
+            else:
+                decisions[d]["dp"] = {"sit_flat": False, "reason": None,
+                                      "fail_open": "no_disp_value"}
+    except Exception as e:
+        for d in baskets_by_date:
+            decisions[d]["dp"] = {"sit_flat": None, "reason": f"disp_error: {e}"}
+
+    # Step 3: per-date conviction roi_x from futures_1m (06:00 → 06:35
+    # equal-weight average across the day's basket). Symbols come from
+    # market.symbols.base; the basket is base-symbol strings. Single
+    # bulk query.
+    sig_dates = sorted(baskets_by_date.keys())
+    conviction_by_date: dict[_dt.date, float | None] = {d: None for d in sig_dates}
+    if sig_dates:
+        # Build a per-date base list, flattened for SQL
+        per_date_bases: list[tuple[_dt.date, str]] = [
+            (d, b) for d, basket in baskets_by_date.items() for b in basket
+        ]
+        if per_date_bases:
+            cur.execute(
+                """
+                WITH bases (signal_date, base) AS (
+                    SELECT * FROM unnest(%s::date[], %s::text[])
+                ),
+                sym AS (
+                    SELECT b.signal_date, b.base, s.symbol_id
+                      FROM bases b
+                      JOIN market.symbols s ON s.base = b.base
+                ),
+                open_px AS (
+                    SELECT s.signal_date, s.symbol_id, f.close AS px
+                      FROM sym s
+                      JOIN market.futures_1m f ON f.symbol_id = s.symbol_id
+                     WHERE f.source_id = 1
+                       AND f.timestamp_utc >= (s.signal_date + TIME '06:00')
+                       AND f.timestamp_utc <  (s.signal_date + TIME '06:01')
+                ),
+                bar6_px AS (
+                    SELECT s.signal_date, s.symbol_id, f.close AS px
+                      FROM sym s
+                      JOIN market.futures_1m f ON f.symbol_id = s.symbol_id
+                     WHERE f.source_id = 1
+                       AND f.timestamp_utc >= (s.signal_date + TIME '06:35')
+                       AND f.timestamp_utc <  (s.signal_date + TIME '06:36')
+                )
+                SELECT o.signal_date,
+                       AVG((b.px / NULLIF(o.px, 0) - 1) * 100) AS roi_x
+                  FROM open_px o
+                  JOIN bar6_px b ON b.signal_date = o.signal_date
+                                AND b.symbol_id = o.symbol_id
+                 GROUP BY o.signal_date
+                """,
+                ([d for d, _ in per_date_bases], [b for _, b in per_date_bases]),
+            )
+            for r in cur.fetchall():
+                conviction_by_date[r["signal_date"]] = (
+                    round(float(r["roi_x"]), 4) if r["roi_x"] is not None else None
+                )
+
+    # Step 4: synthesize one row per (date, filter_mode). signal_batch_id
+    # uses a deterministic UUID-like string keyed on (date, mode) so the
+    # frontend's expandedId state is stable across re-fetches.
+    out: list[dict[str, Any]] = []
+    now_iso = _dt.datetime.now(_dt.timezone.utc).isoformat()
+    for d in sorted(baskets_by_date.keys(), reverse=True):
+        basket = baskets_by_date[d]
+        symbols = [
+            {"rank": i + 1, "base": b, "weight": None}
+            for i, b in enumerate(basket)
+        ]
+        d_decisions = decisions.get(d, {"tg": {}, "dp": {}})
+        tg = d_decisions["tg"]
+        dp = d_decisions["dp"]
+        conv = conviction_by_date.get(d)
+
+        for mode in _RESEARCH_FILTER_MODES:
+            # Resolve sit_flat + reason per mode
+            if mode == "A - No Filter":
+                sit_flat = False
+                reason = "pass"
+            elif mode == "A - Tail Guardrail":
+                sit_flat = bool(tg.get("sit_flat"))
+                reason = tg.get("reason") or ("pass" if not sit_flat else "")
+            elif mode == "A - Dispersion":
+                sit_flat = bool(dp.get("sit_flat"))
+                reason = dp.get("reason") or ("pass" if not sit_flat else "")
+            elif mode == "A - Tail + Dispersion":
+                tg_flat = bool(tg.get("sit_flat"))
+                dp_flat = bool(dp.get("sit_flat"))
+                sit_flat = tg_flat or dp_flat
+                if tg_flat and dp_flat:
+                    reason = f"tail+disp_both: {tg.get('reason')} | {dp.get('reason')}"
+                elif tg_flat:
+                    reason = f"tail+disp_tail_only: {tg.get('reason')}"
+                elif dp_flat:
+                    reason = f"tail+disp_disp_only: {dp.get('reason')}"
+                else:
+                    reason = "pass"
+
+            # Deterministic synthetic batch id so the row's expand state
+            # is stable across page refreshes
+            batch_id = str(_uuid.uuid5(
+                _uuid.NAMESPACE_URL,
+                f"research:{d.isoformat()}:{mode}",
+            ))
+            out.append({
+                "signal_batch_id":     batch_id,
+                "signal_date":         d.isoformat(),
+                "strategy_version_id": None,
+                "signal_source":       "research",
+                "sit_flat":            sit_flat,
+                "filter_name":         mode,
+                "filter_reason":       reason,
+                "computed_at":         now_iso,
+                "symbol_count":        len(basket),
+                "symbols":             symbols,
+                "conviction_roi_x":    conv,
+            })
+    return out
+
+
 @router.get("/signals")
 def list_signals(
     days: int = Query(90, ge=1, le=365),
@@ -491,7 +865,26 @@ def list_signals(
 
     Symbols are pre-aggregated server-side using a LATERAL subquery so the
     response is one row per signal batch, not one row per (batch, symbol).
+
+    Research mode (`source='research'`): branches to _research_signals
+    which synthesizes per-(date, filter_mode) rows on the fly from
+    audit.daily_baskets + audit_filters. No persistence; fully derived
+    from the canonical basket each day. See _research_signals docstring
+    for design notes.
     """
+    if source == "research":
+        # Conviction kill threshold (kept consistent with the live path
+        # below — frontend's StatusBadge compares against this value).
+        KILL_Y = 0.3
+        research_rows = _research_signals(cur, days)
+        return {
+            "lookback_days":     days,
+            "source_filter":     "research",
+            "signals_returned":  len(research_rows),
+            "conviction_kill_y": KILL_Y,
+            "signals":           research_rows,
+        }
+
     where_source = "AND ds.signal_source = %s" if source else ""
     params: list[Any] = [f"{days} days"]
     if source:

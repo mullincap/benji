@@ -27,6 +27,10 @@ import { TableSkeleton } from "../../../components/Skeleton";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE || "";
 const LOOKBACK_DAYS = 90;
+// Research mode is server-computed on-demand (audit_filters series build);
+// 10 days is the operator-relevant window without paying the full 90-day
+// compute cost. Easy to bump if needed.
+const RESEARCH_LOOKBACK_DAYS = 10;
 
 // ─── Response shapes ─────────────────────────────────────────────────────────
 
@@ -637,7 +641,15 @@ export default function IndexerSignalsPage() {
     setRawRoi({});
     setStratRoi({});
     try {
-      const params = new URLSearchParams({ days: String(LOOKBACK_DAYS) });
+      // Research mode is computed on-demand server-side and is comparatively
+      // expensive (full audit_filters series build), so cap its lookback at
+      // 10 days — the typical research view is "what would each filter mode
+      // have done over the past week or so", not 90 days. Other modes use
+      // the full LOOKBACK_DAYS (=90).
+      const lookback = sourceFilter === "research"
+        ? RESEARCH_LOOKBACK_DAYS
+        : LOOKBACK_DAYS;
+      const params = new URLSearchParams({ days: String(lookback) });
       // "today" is a client-side date filter (applied below in render path),
       // so it fetches everything from the server. Only "research" maps to
       // the source param; "all" omits it.
