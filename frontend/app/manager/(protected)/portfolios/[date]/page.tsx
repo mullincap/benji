@@ -869,6 +869,11 @@ export default function PortfolioDetailPage() {
   // portfolio-only view. Forcing local state ensures the default never
   // drifts from "portfolio" regardless of how the page is reached.
   const [hiddenSymbols, setHiddenSymbols] = useState<Set<string>>(new Set());
+  // Portfolio line visibility — same UX as the per-symbol legend chips
+  // (click to toggle). Useful when SYMBOLS overlay is on and the
+  // operator wants to compare the symbol traces without the thicker
+  // portfolio line dominating the visual.
+  const [portfolioHidden, setPortfolioHidden] = useState(false);
   // Right-edge session-logs panel state — lifted from the panel component
   // so the page wrapper can reflow its main content via a margin-right
   // transition. Initial value reads from the same localStorage key the
@@ -1300,6 +1305,7 @@ export default function PortfolioDetailPage() {
     // Same gap-bridging rationale as the symbol datasets — missing bars
     // (trader-down windows, etc.) are stitched across visually.
     spanGaps: true,
+    hidden: portfolioHidden,
     _isSymbol: false,
   };
 
@@ -2285,7 +2291,13 @@ export default function PortfolioDetailPage() {
                     color: "var(--t1)",
                   }}
                 >
-                  <LegendChip label="Portfolio" color={PORTFOLIO_COLOR} thick />
+                  <LegendChip
+                    label="Portfolio"
+                    color={PORTFOLIO_COLOR}
+                    thick
+                    hidden={portfolioHidden}
+                    onClick={() => setPortfolioHidden((v) => !v)}
+                  />
                   {symbolsOrdered.map((sym, idx) => {
                     const display = sym.replace("-USDT", "");
                     return (
