@@ -33,14 +33,6 @@ sys.path.insert(0, "/app")
 PIPELINE_DIR = Path(os.environ.get("PIPELINE_DIR", "/app/pipeline"))
 METL_SCRIPT = PIPELINE_DIR / "compiler" / "metl.py"
 
-# metl's CSV cache locations. The script falls back to a Mac path when
-# CSV_BACKUP_DIR isn't exported from secrets.env (a known regression).
-# We delete from BOTH locations to be safe.
-_CSV_BACKUP_DIRS = [
-    Path(os.environ.get("CSV_BACKUP_DIR", "/mnt/quant-data/raw/amberdata/csv/")),
-    Path("/Users/johnmullin/Desktop/desk/import/oi_logger/ob-backfills/"),
-]
-
 CAGG_NAMES = [
     "market.futures_1m_daily_symbol_count",
     "market.symbol_day_counts",
@@ -58,41 +50,6 @@ def _write_status(status_file: Path, status: dict) -> None:
     with open(tmp, "w") as f:
         json.dump(status, f, indent=2)
     os.replace(tmp, status_file)
-
-
-def _delete_day_rows(date_str: str) -> int:
-    from pipeline.db.connection import get_conn
-    conn = get_conn()
-    try:
-        cur = conn.cursor()
-        cur.execute(
-            "DELETE FROM market.futures_1m "
-            "WHERE timestamp_utc >= %s::timestamptz "
-            "  AND timestamp_utc <  (%s::timestamptz + INTERVAL '1 day')",
-            (date_str, date_str),
-        )
-        n = cur.rowcount
-        conn.commit()
-        cur.close()
-        return int(n or 0)
-    finally:
-        conn.close()
-
-
-def _delete_cached_csvs(date_str: str) -> list[str]:
-    """metl skips fetch if the day's CSV is on disk (AUTO_RESUME). Wipe both
-    candidate CSV locations for the date."""
-    deleted: list[str] = []
-    fname = f"oi_{date_str.replace('-', '')}.csv"
-    for d in _CSV_BACKUP_DIRS:
-        p = d / fname
-        if p.exists():
-            try:
-                p.unlink()
-                deleted.append(str(p))
-            except Exception:
-                pass
-    return deleted
 
 
 def _run_metl(date_str: str, log_path: Path) -> int:
@@ -158,6 +115,9 @@ def main() -> int:
     status: dict = {
         "job_id": args.job_id,
         "page": "compiler",
+        # Worker PID — read by the cancel endpoint (DELETE
+        # /coverage/fill-missing/{job_id}) to SIGTERM this process.
+        "pid": os.getpid(),
         "state": "running",
         "started_at": started,
         "finished_at": None,
@@ -177,27 +137,14 @@ def main() -> int:
     try:
         for i, d in enumerate(dates):
             status["current_date"] = d
-            status["dates"][i]["state"] = "deleting"
-            status["current_state"] = "deleting"
-            status["elapsed_seconds"] = int(_now() - started)
-            _write_status(status_file, status)
-
-            try:
-                deleted_rows = _delete_day_rows(d)
-                with open(log_path, "a") as logf:
-                    logf.write(f"\n[{d}] DELETE: {deleted_rows:,} rows removed from market.futures_1m\n")
-            except Exception as e:
-                status["errors"].append(f"{d}: DELETE failed: {e}")
-                status["dates"][i]["state"] = "failed"
-                status["dates_failed"] += 1
-                _write_status(status_file, status)
-                continue
-
-            csvs = _delete_cached_csvs(d)
-            if csvs:
-                with open(log_path, "a") as logf:
-                    logf.write(f"[{d}] cleared cached CSV(s): {csvs}\n")
-
+            # Single stage: run metl. metl auto-resumes from the cached
+            # CSV when present (no Amberdata fetch) and uses
+            # `INSERT ON CONFLICT DO NOTHING` so partial days get topped
+            # up safely. NO pre-DELETE: the 2026-04-29 incident wiped 11
+            # days of good data because the worker DELETEd before
+            # confirming metl's re-fetch would succeed; when Amberdata
+            # rate-limited, the day went from full → empty. The new flow
+            # is fail-safe — a metl failure leaves existing data intact.
             status["dates"][i]["state"] = "fetching"
             status["current_state"] = "fetching"
             status["elapsed_seconds"] = int(_now() - started)

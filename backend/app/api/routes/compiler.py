@@ -350,57 +350,72 @@ def _fill_missing_status_path(job_id: str) -> str:
     return f"{_FILL_MISSING_DIR}/{job_id}.json"
 
 
-def _detect_partial_dates_compiler(lookback_days: int = 30) -> list[str]:
-    """Return ISO dates in the last `lookback_days` where futures_1m has
-    < 95% complete coverage on close/vol/OI.
+def _detect_partial_dates_compiler(lookback_days: int = 30,
+                                    source_id: int = 1) -> list[str]:
+    """Return ISO dates in the last `lookback_days` that the coverage page
+    classifies as 'partial' — same definition the operator sees on
+    /compiler/coverage. Excludes today (UTC) which is always in-progress.
 
-    DEFENSIVE: today (UTC) is always in-progress and would always appear
-    partial regardless of any data fix — we exclude it from auto-detect.
-    The query uses `timestamp_utc < today_start` (exclusive) AND a final
-    `day < CURRENT_DATE` filter so today can't slip through even if the
-    DB's notion of "today" disagrees with the application's UTC clock.
+    Definition (mirrors coverage()):
+      - per-symbol "complete" = close_count >= 1296 AND oi_count >= 1296
+      - per-day "complete" pct = symbols_complete / compiler_jobs.symbols_total
+        (falls back to symbols_with_data when no job_truth exists)
+      - day is "partial" when min(close_pct, oi_pct) <= COMPLETE_THRESHOLD_PCT
+        AND symbols_with_data > 0 (zero-data days are 'missing', not partial,
+        and we don't want fill-missing to delete data on those — they may be
+        legitimate gaps before metl ever ran).
+
+    Prior version divided by `count(active=true)` from market.symbols which
+    grows over time, so old days got artificially low completeness scores
+    and falsely flagged as partial. The 2026-04-29 incident wiped 11 days
+    of good data because of this bug.
     """
-    import datetime as _dt
     from ...db import get_conn
 
-    today = _dt.datetime.now(_dt.timezone.utc).date()
-    start = today - _dt.timedelta(days=lookback_days)
+    interval = f"{lookback_days} days"
     conn = get_conn()
     try:
         cur = conn.cursor()
-        cur.execute("""
-            WITH per_symbol_day AS (
+        cur.execute(
+            """
+            WITH day_stats AS (
                 SELECT
-                    timestamp_utc::date AS day,
-                    symbol_id,
-                    COUNT(close) AS close_n,
-                    COUNT(volume) AS vol_n,
-                    COUNT(open_interest) AS oi_n
-                FROM market.futures_1m
-                WHERE timestamp_utc >= %s::timestamptz
-                  AND timestamp_utc <  %s::timestamptz
-                GROUP BY timestamp_utc::date, symbol_id
-            ),
-            per_day AS (
-                SELECT
-                    day,
-                    COUNT(*) AS syms,
-                    COUNT(*) FILTER (WHERE close_n >= 1296
-                                       AND vol_n  >= 1296
-                                       AND oi_n   >= 1296) AS syms_complete
-                FROM per_symbol_day
+                    day::date AS day,
+                    COUNT(DISTINCT symbol_id) AS symbols_with_data,
+                    COUNT(DISTINCT symbol_id) FILTER (WHERE close_count >= 1296)
+                        AS sc_close,
+                    COUNT(DISTINCT symbol_id) FILTER (WHERE oi_count    >= 1296)
+                        AS sc_oi
+                FROM market.futures_1m_daily_symbol_count
+                WHERE source_id = %s
+                  AND day >= NOW() - %s::interval
                 GROUP BY day
             ),
-            active_count AS (
-                SELECT COUNT(*) AS expected
-                FROM market.symbols WHERE active
+            job_totals AS (
+                SELECT DISTINCT ON (date_from::date)
+                    date_from::date AS day,
+                    symbols_total
+                FROM market.compiler_jobs
+                WHERE status = 'complete'
+                  AND source_id = %s
+                  AND symbols_total IS NOT NULL
+                  AND symbols_total > 0
+                  AND date_from = date_to
+                ORDER BY date_from::date, completed_at DESC NULLS LAST
             )
-            SELECT day::text
-            FROM per_day, active_count
-            WHERE syms_complete::numeric / NULLIF(expected, 0) < 0.95
-              AND day < (timezone('UTC', NOW()))::date  -- never include today
-            ORDER BY day DESC
-        """, (start, today))
+            SELECT d.day::text
+              FROM day_stats d
+              LEFT JOIN job_totals j ON j.day = d.day
+             WHERE d.symbols_with_data > 0
+               AND d.day < (timezone('UTC', NOW()))::date
+               AND LEAST(
+                     d.sc_close::numeric / NULLIF(COALESCE(j.symbols_total, d.symbols_with_data), 0),
+                     d.sc_oi   ::numeric / NULLIF(COALESCE(j.symbols_total, d.symbols_with_data), 0)
+                   ) * 100.0 <= %s
+             ORDER BY d.day DESC
+            """,
+            (source_id, interval, source_id, COMPLETE_THRESHOLD_PCT),
+        )
         return [r[0] for r in cur.fetchall()]
     finally:
         try:
@@ -434,7 +449,28 @@ def fill_missing_coverage(
     import uuid as _uuid
     import time as _time
     import json as _json
+    import glob as _glob
     from ...db import get_conn
+
+    # 0. Singleton lock: refuse if another compiler fill-missing job is
+    # running or queued. Prevents the parallel-worker race that, on
+    # 2026-04-29, spawned 3 concurrent workers DELETEing the same dates.
+    _os.makedirs(_FILL_MISSING_DIR, exist_ok=True)
+    for path in _glob.glob(f"{_FILL_MISSING_DIR}/*.json"):
+        try:
+            with open(path) as f:
+                doc = _json.load(f)
+        except Exception:
+            continue
+        if doc.get("page") == "compiler" and doc.get("state") in ("running", "queued"):
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "message": "A compiler fill-missing job is already running.",
+                    "job_id": doc.get("job_id"),
+                    "state":  doc.get("state"),
+                },
+            )
 
     # 1. Determine which dates to fill.
     if dates:
@@ -443,7 +479,6 @@ def fill_missing_coverage(
         target_dates = _detect_partial_dates_compiler(lookback_days=days_back)
 
     job_id = str(_uuid.uuid4())
-    _os.makedirs(_FILL_MISSING_DIR, exist_ok=True)
     status_path = _fill_missing_status_path(job_id)
 
     # 2. Zero-gap fast path: just refresh caggs synchronously.
@@ -564,6 +599,54 @@ def fill_missing_active() -> dict[str, Any]:
         return {"job_id": None}
     candidates.sort(key=lambda x: x[0], reverse=True)
     return candidates[0][1]
+
+
+@router.delete("/coverage/fill-missing/{job_id}")
+def fill_missing_cancel(job_id: str) -> dict[str, Any]:
+    """Cancel a running fill_missing job: SIGTERM the worker subprocess
+    (PID written into the status file at startup) and stamp the status
+    JSON as 'cancelled'. Idempotent — calling on an already-terminal job
+    just returns its current state.
+    """
+    import json as _json
+    import os as _os
+    import signal as _signal
+    import time as _time
+
+    path = _fill_missing_status_path(job_id)
+    if not _os.path.exists(path):
+        raise HTTPException(status_code=404, detail="job not found")
+
+    with open(path) as f:
+        status = _json.load(f)
+
+    if status.get("state") not in ("running", "queued"):
+        return {"job_id": job_id, "state": status.get("state"),
+                "message": "job already terminal — no action taken"}
+
+    pid = status.get("pid")
+    pid_killed = False
+    if isinstance(pid, int) and pid > 0:
+        try:
+            _os.kill(pid, _signal.SIGTERM)
+            pid_killed = True
+        except ProcessLookupError:
+            pass  # already gone — flag as cancelled anyway
+        except PermissionError as e:
+            raise HTTPException(status_code=500,
+                                detail=f"could not signal pid {pid}: {e}")
+
+    # Stamp as cancelled so the modal sees a terminal state on next poll.
+    status["state"] = "cancelled"
+    status["finished_at"] = _time.time()
+    status["summary"] = (status.get("summary") or
+                         f"Cancelled by operator (pid_killed={pid_killed})")
+    tmp = path + ".tmp"
+    with open(tmp, "w") as f:
+        _json.dump(status, f, indent=2)
+    _os.replace(tmp, path)
+
+    return {"job_id": job_id, "state": "cancelled", "pid_killed": pid_killed}
 
 
 # ─── /gaps ────────────────────────────────────────────────────────────────────

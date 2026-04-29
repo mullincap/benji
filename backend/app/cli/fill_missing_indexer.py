@@ -117,6 +117,8 @@ def main() -> int:
     status: dict = {
         "job_id": args.job_id,
         "page": "indexer",
+        # Worker PID — read by DELETE /coverage/fill-missing/{job_id}.
+        "pid": os.getpid(),
         "state": "running",
         "started_at": started,
         "finished_at": None,

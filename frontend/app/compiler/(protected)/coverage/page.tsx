@@ -462,7 +462,7 @@ function StatusBadge({ status }: { status: "missing" | "partial" }) {
 
 type FillStatus = {
   job_id: string;
-  state: "queued" | "running" | "done" | "completed_with_errors" | "failed";
+  state: "queued" | "running" | "done" | "completed_with_errors" | "failed" | "cancelled";
   dates_total: number;
   dates_completed: number;
   dates_failed: number;
@@ -519,7 +519,8 @@ export default function CompilerCoveragePage() {
 
   const fillIsTerminal = (s: FillStatus | null) =>
     s !== null && (s.state === "done" || s.state === "failed" ||
-                   s.state === "completed_with_errors");
+                   s.state === "completed_with_errors" ||
+                   s.state === "cancelled");
   const fillIsRunning = (s: FillStatus | null) =>
     s !== null && (s.state === "queued" || s.state === "running");
 
@@ -807,9 +808,19 @@ export default function CompilerCoveragePage() {
           onWatch={handleStartWatching}
           onDismiss={handleDismissModal}
           onMinimize={() => setFillModal(null)}
-          onStopTracking={() => {
-            setFillModal(null);
-            setFillStatus(null);
+          onCancel={async () => {
+            // Real cancel — DELETE endpoint SIGTERMs the worker subprocess
+            // (PID is stamped into status JSON at startup). Polling will
+            // observe state=cancelled on the next tick.
+            if (!fillStatus?.job_id) return;
+            try {
+              await fetch(
+                `${API_BASE}/api/compiler/coverage/fill-missing/${fillStatus.job_id}`,
+                { method: "DELETE", credentials: "include" },
+              );
+            } catch (err) {
+              setFillError(err instanceof Error ? err.message : String(err));
+            }
           }}
         />
       )}
@@ -818,7 +829,7 @@ export default function CompilerCoveragePage() {
 }
 
 // Per-day-stage modal (compiler version: each day moves through
-// pending → deleting → fetching → done/failed; no per-metric breakdown).
+// pending → fetching → done/failed; no per-metric breakdown).
 function FillMissingModal({
   init,
   status,
@@ -826,7 +837,7 @@ function FillMissingModal({
   onWatch,
   onDismiss,
   onMinimize,
-  onStopTracking,
+  onCancel,
 }: {
   init: FillModalInit;
   status: FillStatus | null;
@@ -834,11 +845,12 @@ function FillMissingModal({
   onWatch: () => void;
   onDismiss: () => void;
   onMinimize: () => void;
-  onStopTracking: () => void;
+  onCancel: () => Promise<void>;
 }) {
   const isTerminal = status !== null &&
     (status.state === "done" || status.state === "failed" ||
-     status.state === "completed_with_errors");
+     status.state === "completed_with_errors" ||
+     status.state === "cancelled");
   const phase: "confirm" | "progress" | "done" =
     !watching ? "confirm"
     : isTerminal ? "done"
@@ -857,13 +869,21 @@ function FillMissingModal({
     phase === "progress" ? "Fill Missing — Running" :
     status?.state === "done" ? "Fill Missing — Done" :
     status?.state === "failed" ? "Fill Missing — Failed" :
+    status?.state === "cancelled" ? "Fill Missing — Cancelled" :
     "Fill Missing — Done with Errors";
 
   const titleColor =
     phase === "done" && status?.state === "done" ? "var(--green)" :
     phase === "done" && status?.state === "failed" ? "var(--red)" :
+    phase === "done" && status?.state === "cancelled" ? "var(--amber)" :
     phase === "done" ? "var(--amber)" :
     "var(--t3)";
+
+  const [cancelling, setCancelling] = useState(false);
+  async function handleCancelClick() {
+    setCancelling(true);
+    try { await onCancel(); } finally { /* polling will mark cancelled */ }
+  }
 
   return (
     <div
@@ -963,7 +983,9 @@ function FillMissingModal({
             </div>
             <DayProgressList rows={dateRows} currentDate={status?.current_date ?? null} />
             <div style={{ display: "flex", gap: 8, justifyContent: "flex-end", marginTop: 18 }}>
-              <ModalButton variant="ghost" onClick={onStopTracking}>Stop tracking</ModalButton>
+              <ModalButton variant="danger" onClick={handleCancelClick} disabled={cancelling}>
+                {cancelling ? "Cancelling…" : "Cancel job"}
+              </ModalButton>
               <ModalButton variant="primary" onClick={onMinimize}>Minimize</ModalButton>
             </div>
           </>
@@ -1049,33 +1071,41 @@ function ModalButton({
   children,
   onClick,
   variant,
+  disabled = false,
 }: {
   children: React.ReactNode;
   onClick: () => void;
-  variant: "primary" | "ghost";
+  variant: "primary" | "ghost" | "danger";
+  disabled?: boolean;
 }) {
-  const isPrimary = variant === "primary";
+  const palette = variant === "primary"
+    ? { bg: "var(--green-dim)", bgHover: "var(--green-mid)", color: "var(--green)", border: "var(--green)" }
+    : variant === "danger"
+    ? { bg: "var(--red-dim)",   bgHover: "var(--red)",       color: "var(--red)",   border: "var(--red)" }
+    : { bg: "var(--bg3)",       bgHover: "var(--bg4)",       color: "var(--t1)",    border: "var(--line)" };
   return (
     <button
       type="button"
       onClick={onClick}
+      disabled={disabled}
       style={{
-        background: isPrimary ? "var(--green-dim)" : "var(--bg3)",
-        color: isPrimary ? "var(--green)" : "var(--t1)",
-        border: `1px solid ${isPrimary ? "var(--green)" : "var(--line)"}`,
+        background: palette.bg,
+        color: palette.color,
+        border: `1px solid ${palette.border}`,
         borderRadius: 4,
         padding: "6px 14px",
         fontSize: 9, fontWeight: 700,
         letterSpacing: "0.12em",
         textTransform: "uppercase",
         fontFamily: "var(--font-space-mono), Space Mono, monospace",
-        cursor: "pointer",
+        cursor: disabled ? "not-allowed" : "pointer",
+        opacity: disabled ? 0.5 : 1,
       }}
       onMouseEnter={(e) => {
-        e.currentTarget.style.background = isPrimary ? "var(--green-mid)" : "var(--bg4)";
+        if (!disabled) e.currentTarget.style.background = palette.bgHover;
       }}
       onMouseLeave={(e) => {
-        e.currentTarget.style.background = isPrimary ? "var(--green-dim)" : "var(--bg3)";
+        if (!disabled) e.currentTarget.style.background = palette.bg;
       }}
     >
       {children}

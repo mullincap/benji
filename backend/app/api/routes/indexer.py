@@ -283,7 +283,28 @@ def fill_missing_indexer(
     import uuid as _uuid
     import time as _time
     import json as _json
+    import glob as _glob
     from ...db import get_conn
+
+    # Singleton lock — refuse if another indexer fill-missing job is
+    # running or queued. Same defensive pattern as the compiler route
+    # after the 2026-04-29 parallel-worker incident.
+    _os.makedirs(_FILL_MISSING_DIR_INDEXER, exist_ok=True)
+    for path in _glob.glob(f"{_FILL_MISSING_DIR_INDEXER}/*.json"):
+        try:
+            with open(path) as f:
+                doc = _json.load(f)
+        except Exception:
+            continue
+        if doc.get("page") == "indexer" and doc.get("state") in ("running", "queued"):
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "message": "An indexer fill-missing job is already running.",
+                    "job_id": doc.get("job_id"),
+                    "state":  doc.get("state"),
+                },
+            )
 
     if dates:
         target_dates = [d.strip() for d in dates.split(",") if d.strip()]
@@ -291,7 +312,6 @@ def fill_missing_indexer(
         target_dates = _detect_partial_dates_indexer(lookback_days=days_back)
 
     job_id = str(_uuid.uuid4())
-    _os.makedirs(_FILL_MISSING_DIR_INDEXER, exist_ok=True)
     status_path = _fill_missing_indexer_status_path(job_id)
 
     # Zero-gap fast path
@@ -403,6 +423,50 @@ def fill_missing_indexer_active() -> dict[str, Any]:
         return {"job_id": None}
     candidates.sort(key=lambda x: x[0], reverse=True)
     return candidates[0][1]
+
+
+@router.delete("/coverage/fill-missing/{job_id}")
+def fill_missing_indexer_cancel(job_id: str) -> dict[str, Any]:
+    """Cancel a running indexer fill_missing job — SIGTERM the worker
+    subprocess (PID stamped into the status JSON) and stamp state=cancelled."""
+    import json as _json
+    import os as _os
+    import signal as _signal
+    import time as _time
+
+    path = _fill_missing_indexer_status_path(job_id)
+    if not _os.path.exists(path):
+        raise HTTPException(status_code=404, detail="job not found")
+
+    with open(path) as f:
+        status = _json.load(f)
+
+    if status.get("state") not in ("running", "queued"):
+        return {"job_id": job_id, "state": status.get("state"),
+                "message": "job already terminal — no action taken"}
+
+    pid = status.get("pid")
+    pid_killed = False
+    if isinstance(pid, int) and pid > 0:
+        try:
+            _os.kill(pid, _signal.SIGTERM)
+            pid_killed = True
+        except ProcessLookupError:
+            pass
+        except PermissionError as e:
+            raise HTTPException(status_code=500,
+                                detail=f"could not signal pid {pid}: {e}")
+
+    status["state"] = "cancelled"
+    status["finished_at"] = _time.time()
+    status["summary"] = (status.get("summary") or
+                         f"Cancelled by operator (pid_killed={pid_killed})")
+    tmp = path + ".tmp"
+    with open(tmp, "w") as f:
+        _json.dump(status, f, indent=2)
+    _os.replace(tmp, path)
+
+    return {"job_id": job_id, "state": "cancelled", "pid_killed": pid_killed}
 
 
 @router.get("/jobs")
