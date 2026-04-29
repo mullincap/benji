@@ -2223,9 +2223,20 @@ def close_all_positions(api: ExchangeAdapter, positions, reason, dry_run) -> lis
     """
     Close all tracked positions with position reconciliation.
 
-    Before closing, fetches actual BloFin positions to catch:
+    Before closing, fetches actual exchange positions to catch:
       - Positions already closed (liquidation, manual close) -> skip sell
-      - State file / BloFin size mismatch -> log warning
+      - State-file vs exchange size mismatch -> log warning
+      - Multi-bucket positions (e.g. trader=isolated/long + manual=cross/long
+        on the same inst_id) -> close each bucket separately
+
+    After closing, runs a verify-and-cleanup pass:
+      - Re-queries the exchange for any inst_id we tried to close
+      - Any leftover (size > 0) is closed with its actual margin_mode +
+        position_side, matching its real BloFin bucket. Logged loudly so
+        the operator sees that a manual fill in an off-config bucket was
+        cleaned up automatically.
+      - Final re-query; if anything STILL open, fires an alert.
+
     Returns list of positions that FAILED to close (for state persistence).
     """
     log.info(f"CLOSE ALL -- reason: {reason}")
@@ -2234,27 +2245,42 @@ def close_all_positions(api: ExchangeAdapter, positions, reason, dry_run) -> lis
 
     inst_ids = [p["inst_id"] for p in positions]
 
-    # Reconcile with actual BloFin positions
+    # Bucket-aware reconciliation: a single inst_id can have multiple
+    # position rows on BloFin (different margin_mode / position_side).
+    # Match each tracked position to its specific bucket. Drop tracked
+    # positions whose bucket is empty on the exchange (already-closed).
+    def _bucket(mm: str | None, ps: str | None) -> tuple[str, str]:
+        return ((mm or "_").lower(), (ps or "_").lower())
+
     if not dry_run:
         actual_list = get_actual_positions(api, inst_ids)
-        actual = {p.inst_id: p.contracts for p in actual_list}
+        actual_by_bucket = {
+            (p.inst_id, *_bucket(p.margin_mode, p.position_side)): p
+            for p in actual_list if p.contracts > 0
+        }
         reconciled = []
         for pos in positions:
             iid = pos["inst_id"]
-            if iid not in actual:
+            mm = pos.get("marginMode") or MARGIN_MODE
+            ps = pos.get("positionSide") or POSITION_SIDE
+            key = (iid, *_bucket(mm, ps))
+            ap = actual_by_bucket.get(key)
+            if ap is None:
                 log.warning(
-                    f"  {iid}: not found in BloFin positions -- "
-                    "already closed (liquidated or manual). Skipping sell."
+                    f"  {iid} ({mm}/{ps}): not found in {api.exchange_name} "
+                    f"positions -- already closed (liquidated or manual). "
+                    f"Skipping sell."
                 )
             else:
-                blofin_size = actual[iid]
-                if abs(blofin_size - pos["contracts"]) > 0.5:
+                if abs(ap.contracts - pos["contracts"]) > 0.5:
                     log.warning(
-                        f"  {iid}: size mismatch -- state={pos['contracts']} "
-                        f"BloFin={blofin_size}. Closing BloFin size."
+                        f"  {iid} ({mm}/{ps}): size mismatch -- "
+                        f"state={pos['contracts']} "
+                        f"{api.exchange_name}={ap.contracts}. "
+                        f"Closing {api.exchange_name} size."
                     )
                     pos = dict(pos)
-                    pos["contracts"] = int(blofin_size)
+                    pos["contracts"] = int(ap.contracts)
                 reconciled.append(pos)
         positions = reconciled
 
@@ -2262,6 +2288,8 @@ def close_all_positions(api: ExchangeAdapter, positions, reason, dry_run) -> lis
     for pos in positions:
         inst_id   = pos["inst_id"]
         contracts = pos["contracts"]
+        mm        = pos.get("marginMode")    # may be None on legacy state
+        ps        = pos.get("positionSide")
 
         if dry_run:
             log.info(f"  [DRY RUN] sell {contracts}x {inst_id}")
@@ -2270,9 +2298,12 @@ def close_all_positions(api: ExchangeAdapter, positions, reason, dry_run) -> lis
         try:
             # Primary: native close endpoint (BloFin /trade/close-position;
             # Binance margin: MARKET SELL of free balance with AUTO_REPAY).
-            # More reliable than reduce-only for BloFin; adapter handles
-            # margin_mode/position_side internally.
-            result = api.close_position(inst_id)
+            # Pass the position's actual margin_mode + position_side so
+            # the call targets the right bucket (Binance margin ignores
+            # them; BloFin uses them to disambiguate).
+            result = api.close_position(
+                inst_id, margin_mode=mm, position_side=ps,
+            )
             if result.success:
                 log.info(f"  ✅ {inst_id}  closed via {api.exchange_name} close-position")
             else:
@@ -2293,6 +2324,100 @@ def close_all_positions(api: ExchangeAdapter, positions, reason, dry_run) -> lis
         except Exception as e:
             log.error(f"  ❌ {inst_id}: {e} -- position may still be open!")
             failed.append(pos)
+
+    # ── Verify-and-cleanup pass ────────────────────────────────────────────
+    # Belt-and-suspenders: even if the per-position close calls succeeded,
+    # re-query the exchange for every inst_id we touched. Any leftover
+    # row (size > 0) is a position the trader didn't track — typically a
+    # manual fill in an off-config bucket the reconcile loop missed (e.g.
+    # a fill placed *between* the last reconcile bar and session close,
+    # or in a margin_mode the trader didn't enter). Close each leftover
+    # using its OWN margin_mode + position_side. This pattern caught the
+    # 04-28 GOAT-USDT cross-mode leak post-mortem and prevents recurrence.
+    if not dry_run and inst_ids:
+        try:
+            leftover_list = get_actual_positions(api, list(set(inst_ids)))
+            leftovers = [p for p in leftover_list if p.contracts > 0]
+            if leftovers:
+                log.warning(
+                    f"VERIFY: {len(leftovers)} position(s) still open on "
+                    f"{api.exchange_name} after primary close pass — "
+                    f"attempting bucket-aware cleanup. Likely cause: "
+                    f"manual fill in an off-config margin_mode/side that "
+                    f"the in-loop reconcile didn't see."
+                )
+                cleanup_failed: list = []
+                for lp in leftovers:
+                    log.warning(
+                        f"  CLEANUP: {lp.inst_id} size={lp.contracts}ct "
+                        f"({lp.margin_mode}/{lp.position_side}) — "
+                        f"closing in actual bucket"
+                    )
+                    try:
+                        cresult = api.close_position(
+                            lp.inst_id,
+                            margin_mode=lp.margin_mode,
+                            position_side=lp.position_side,
+                        )
+                        if cresult.success:
+                            log.info(
+                                f"  ✅ {lp.inst_id} cleanup-closed "
+                                f"({lp.margin_mode}/{lp.position_side})"
+                            )
+                        else:
+                            # Reduce-only fallback for cleanup too
+                            log.warning(
+                                f"  {lp.inst_id}: cleanup close-position "
+                                f"returned code={cresult.error_code} "
+                                f"msg={cresult.error_msg} -- trying reduce-only"
+                            )
+                            r2 = api.place_reduce_order(lp.inst_id, lp.contracts)
+                            if r2.success:
+                                log.info(f"  ✅ {lp.inst_id} cleanup reduce-only orderId={r2.order_id}")
+                            else:
+                                log.error(
+                                    f"  ❌ {lp.inst_id} cleanup FAILED: "
+                                    f"code={r2.error_code} msg={r2.error_msg}"
+                                )
+                                cleanup_failed.append(lp)
+                    except Exception as _e:
+                        log.error(f"  ❌ {lp.inst_id} cleanup raised: {_e}")
+                        cleanup_failed.append(lp)
+
+                # Final verification — anything still open AFTER the
+                # cleanup pass is a hard failure that requires operator
+                # intervention. Alert loudly so the page goes out.
+                try:
+                    final_list = get_actual_positions(api, list(set(inst_ids)))
+                    final_open = [p for p in final_list if p.contracts > 0]
+                except Exception as _e:
+                    log.error(f"VERIFY: final position re-fetch failed: {_e}")
+                    final_open = cleanup_failed  # best-effort
+                if final_open:
+                    alert(
+                        f"{len(final_open)} position(s) STILL OPEN after "
+                        f"cleanup pass on {utc_today()}: "
+                        f"{[(p.inst_id, p.margin_mode, p.position_side, p.contracts) for p in final_open]}. "
+                        f"Manual intervention required.",
+                        subject="trader-blofin UNCLOSED POSITIONS (post-cleanup)",
+                    )
+                    # Mirror into the function's `failed` list so callers
+                    # see them in the persistence path. Construct minimal
+                    # dicts since callers only need inst_id + contracts.
+                    for fp in final_open:
+                        if not any(f.get("inst_id") == fp.inst_id and
+                                   (f.get("marginMode") or "").lower() ==
+                                   (fp.margin_mode or "").lower()
+                                   for f in failed):
+                            failed.append({
+                                "inst_id":      fp.inst_id,
+                                "contracts":    fp.contracts,
+                                "marginMode":   fp.margin_mode,
+                                "positionSide": fp.position_side,
+                                "cleanup_failed": True,
+                            })
+        except Exception as _e:
+            log.error(f"VERIFY: post-close re-query failed: {_e}")
 
     if failed:
         alert(
@@ -2790,15 +2915,41 @@ def _reconcile_positions_with_exchange(
                     f"loop starts with runtime_state positions only")
         return positions
 
-    known_iids = {p["inst_id"] for p in positions}
-    live_by_iid = {p.inst_id: p for p in live_positions if p.contracts > 0}
+    # Group live positions by (inst_id, margin_mode, position_side). BloFin
+    # may return MULTIPLE rows for the same inst_id when an operator's
+    # manual fill was placed in a different bucket than the trader's entry
+    # (e.g. trader=isolated/long, manual=cross/long). Each bucket is a
+    # distinct close target — collapsing by inst_id alone (the prior bug)
+    # silently dropped one of them, leaving it open after session close.
+    # Discovered 2026-04-29 from the 04-28 GOAT-USDT incident.
+    def _bucket_key(mm: str | None, ps: str | None) -> tuple[str, str]:
+        return ((mm or "_").lower(), (ps or "_").lower())
 
-    added: list = []
-    for iid in inst_ids:
-        if iid in known_iids:
+    live_by_bucket: dict[tuple[str, str, str], object] = {}
+    for lp in live_positions:
+        if lp.contracts <= 0:
             continue
-        lp = live_by_iid.get(iid)
-        if lp is None:
+        live_by_bucket[(lp.inst_id, *_bucket_key(lp.margin_mode, lp.position_side))] = lp
+
+    # Build set of buckets already known to the trader. Pre-existing
+    # records may not have margin_mode/positionSide stamped, so a None
+    # value matches the configured trader defaults (MARGIN_MODE,
+    # POSITION_SIDE) — that's the bucket they were placed in.
+    def _known_key(pos: dict) -> tuple[str, str, str]:
+        mm = (pos.get("marginMode") or MARGIN_MODE)
+        ps = (pos.get("positionSide") or POSITION_SIDE)
+        return (pos["inst_id"], *_bucket_key(mm, ps))
+
+    known_buckets = {_known_key(p) for p in positions}
+
+    inst_id_set = set(inst_ids)
+    added: list = []
+    for bucket_key, lp in live_by_bucket.items():
+        iid = bucket_key[0]
+        if iid not in inst_id_set:
+            # Position outside today's basket — operator's own; don't touch.
+            continue
+        if bucket_key in known_buckets:
             continue
         avg = lp.average_price
         if avg is None or avg <= 0:
@@ -2808,9 +2959,9 @@ def _reconcile_positions_with_exchange(
             if avg is None or avg <= 0:
                 log.warning(
                     f"{log_prefix}Reconcile: {iid} open on exchange "
-                    f"({lp.contracts}ct) but no entry price available — "
-                    f"skipping (monitoring loop would have no basis for "
-                    f"return calculation)"
+                    f"({lp.contracts}ct, {lp.margin_mode}/{lp.position_side}) "
+                    f"but no entry price available — skipping (monitoring "
+                    f"loop would have no basis for return calculation)"
                 )
                 continue
         # Fetch contract_value so downstream pnl_usd math works (the
@@ -2822,14 +2973,42 @@ def _reconcile_positions_with_exchange(
         except Exception as _e:
             log.warning(f"{log_prefix}Reconcile: get_instrument_info({iid}) failed ({_e}); ctval unavailable")
             _ctval = None
+
+        # Preserve the LIVE position's actual margin_mode + position_side
+        # so the close-out path can target the correct bucket. Falls back
+        # to trader defaults only when the exchange didn't report them.
+        adopted_mm = lp.margin_mode or MARGIN_MODE
+        adopted_ps = lp.position_side or POSITION_SIDE
+
+        # Loud mismatch alert: an operator-placed position in a non-trader
+        # bucket WILL still be closed (we now stamp the actual bucket
+        # below), but the operator should know what happened so they
+        # can correct the placement next time.
+        if (lp.margin_mode and
+                lp.margin_mode.lower() != MARGIN_MODE.lower()):
+            log.warning(
+                f"{log_prefix}⚠️  Reconcile: adopting {iid} in "
+                f"{adopted_mm.upper()} margin mode (trader configured "
+                f"{MARGIN_MODE.upper()}). Close-out will target the "
+                f"{adopted_mm.upper()} bucket — no leftover risk."
+            )
+        if (lp.position_side and
+                lp.position_side.lower() != POSITION_SIDE.lower()):
+            log.warning(
+                f"{log_prefix}⚠️  Reconcile: adopting {iid} on "
+                f"{adopted_ps.upper()} side (trader configured "
+                f"{POSITION_SIDE.upper()}). Close-out will target the "
+                f"{adopted_ps.upper()} side."
+            )
+
         added.append({
             "inst_id":            iid,
             "lev_int":            max(1, int(math.ceil(eff_lev))),
             "order_id":           "RECONCILED_MANUAL",
             "contracts":          lp.contracts,
-            "marginMode":         MARGIN_MODE,
+            "marginMode":         adopted_mm,
             "entry_price":        avg,
-            "positionSide":       POSITION_SIDE,
+            "positionSide":       adopted_ps,
             "retry_rounds":       0,
             # Round to match reconcile_fill_prices (6 decimals) so UI doesn't
             # render the raw 18-decimal float from the exchange response.
@@ -2851,7 +3030,7 @@ def _reconcile_positions_with_exchange(
         log.info(
             f"{log_prefix}Reconcile: picked up {len(added)} live position(s) "
             f"missing from runtime_state: "
-            f"{[p['inst_id'] for p in added]} "
+            f"{[(p['inst_id'], p['marginMode'], p['positionSide']) for p in added]} "
             f"— will be managed by the monitoring loop alongside "
             f"programmatically-placed positions"
         )

@@ -57,6 +57,15 @@ class PositionInfo:
     inst_id:       str
     contracts:     float            # base-unit size; positive = long
     average_price: float | None
+    # Position-mode metadata. BloFin returns these per row and the trader
+    # needs them to close the right bucket — a manually-filled cross
+    # position is a different row from an isolated one and close-position
+    # only operates on the (margin_mode, position_side) bucket the call
+    # specifies. None when the underlying exchange doesn't expose them
+    # (Binance margin: position rows are synthesized from userAssets,
+    # there's no per-row mode).
+    margin_mode:   str | None = None     # e.g. "isolated" | "cross"
+    position_side: str | None = None     # e.g. "long" | "short" | "net"
 
 
 @dataclass(frozen=True)
@@ -174,8 +183,20 @@ class ExchangeAdapter(ABC):
         """
 
     @abstractmethod
-    def close_position(self, inst_id: str) -> OrderResult:
+    def close_position(
+        self, inst_id: str,
+        margin_mode:   str | None = None,
+        position_side: str | None = None,
+    ) -> OrderResult:
         """Fully close the position in `inst_id`, repaying any borrowed asset.
+
+        margin_mode / position_side: when provided, target that specific
+        position bucket. Important on BloFin where a single inst_id can
+        have separate cross + isolated rows (or hedge-mode long + short)
+        that close-position only operates on per-bucket. When None, the
+        adapter falls back to its module-level defaults (isolated / long
+        for BloFin's trader). Adapters whose underlying exchange has no
+        per-bucket concept (Binance margin) MAY ignore both kwargs.
 
         BloFin: /trade/close-position (native atomic endpoint).
         Binance margin: read userAssets.free for base asset, MARKET SELL with

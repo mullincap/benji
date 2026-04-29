@@ -447,9 +447,20 @@ class BinanceMarginAdapter(ExchangeAdapter):
                 error_msg=str(e),
             )
 
-    def close_position(self, inst_id: str) -> OrderResult:
+    def close_position(
+        self, inst_id: str,
+        margin_mode:   str | None = None,    # noqa: ARG002 — ABC conformance only
+        position_side: str | None = None,    # noqa: ARG002 — ABC conformance only
+    ) -> OrderResult:
         """Read userAssets.free for base asset, MARKET SELL with AUTO_REPAY.
-        On NOTIONAL rejection, retry with quoteOrderQty (dust cleanup)."""
+        On NOTIONAL rejection, retry with quoteOrderQty (dust cleanup).
+
+        margin_mode / position_side: ignored — Binance margin synthesizes
+        positions from userAssets, there's no per-bucket concept to target.
+        Accepted in the signature so callers can pass the same kwargs they
+        pass to BloFin without exchange-specific branching.
+        """
+        del margin_mode, position_side  # ABC conformance only — see docstring
         base = self._base_asset(inst_id)
         try:
             acct = self._client.get_margin_account()

@@ -205,8 +205,17 @@ class BloFinAdapter(ExchangeAdapter):
             except (TypeError, ValueError):
                 avg = None
 
+            # Preserve the position's actual margin_mode + position_side so
+            # the trader's close-out path can target the correct bucket
+            # (a manually-filled cross-mode position is a separate BloFin
+            # row from the trader's isolated entry and close-position only
+            # operates on the bucket the call names).
+            mm_raw = pos.get("marginMode")
+            ps_raw = pos.get("positionSide")
             results.append(PositionInfo(
                 inst_id=iid, contracts=contracts, average_price=avg,
+                margin_mode=(str(mm_raw).lower() if mm_raw else None),
+                position_side=(str(ps_raw).lower() if ps_raw else None),
             ))
 
         return results
@@ -253,13 +262,23 @@ class BloFinAdapter(ExchangeAdapter):
             reduce_only=True, sl_trigger_price=None,
         )
 
-    def close_position(self, inst_id: str) -> OrderResult:
-        """Native /trade/close-position. Matches trader_blofin.py:1650."""
+    def close_position(
+        self, inst_id: str,
+        margin_mode:   str | None = None,
+        position_side: str | None = None,
+    ) -> OrderResult:
+        """Native /trade/close-position. Matches trader_blofin.py:1650.
+
+        margin_mode / position_side override the module-level defaults
+        when the caller knows the actual bucket of the position to close
+        (e.g. reconcile-adopted manual fill in cross mode while the
+        trader normally trades isolated).
+        """
         try:
             resp = self._rest.close_position(
                 inst_id=inst_id,
-                margin_mode=_MARGIN_MODE,
-                position_side=_POSITION_SIDE,
+                margin_mode=(margin_mode or _MARGIN_MODE),
+                position_side=(position_side or _POSITION_SIDE),
             )
             code = str(resp.get("code", ""))
             data = resp.get("data") or [{}]
