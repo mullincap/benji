@@ -488,14 +488,14 @@ export default function ParamForm({ params, onChange, onSubmit }: ParamFormProps
         </Row>
         <Row
           label="dispersion_universe_mode"
-          help="curated = audit's 90-coin whitelist (current default; threshold tuned for this). all = full mcap table (matches live trader's universe scope; may need threshold re-tune)."
+          help="all = full mcap table (default; matches live trader's universe scope). curated = audit's legacy 90-coin whitelist (kept for A/B testing; threshold was tuned for this pool)."
         >
           <SelInput
-            value={p.dispersion_universe_mode as string ?? 'curated'}
+            value={p.dispersion_universe_mode as string ?? 'all'}
             onChange={(v) => set('dispersion_universe_mode', v)}
             options={[
+              { value: 'all', label: 'all (full mcap table, default)' },
               { value: 'curated', label: 'curated (90 coins)' },
-              { value: 'all', label: 'all (full mcap table)' },
             ]}
           />
         </Row>

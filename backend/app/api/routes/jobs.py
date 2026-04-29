@@ -117,7 +117,11 @@ class JobRequest(BaseModel):
     #             current default — dispersion threshold tuned for this)
     # 'all'     = no whitelist; join market.symbols.binance_id (matches
     #             live trader's compute_dispersion_filter universe scope)
-    dispersion_universe_mode:   str   = "curated"
+    # Default 'all' since 2026-04-29: matches audit.py's own default and
+    # the live trader's universe scope (memory note `feedback_dispersion_
+    # universe_default`: locked to mode='all'+dynamic-on regardless of
+    # Sharpe; if it degrades, re-tune threshold not pool).
+    dispersion_universe_mode:   str   = "all"
     # Mid-session splice — when True, audit.py appends today's
     # partial intraday column to the matrix using Binance 5m kline
     # closes (read live for the basket from live_deploys_signal.csv).

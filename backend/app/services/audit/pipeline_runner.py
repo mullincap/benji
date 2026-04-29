@@ -148,7 +148,7 @@ def build_pipeline_env(params: dict) -> dict[str, str]:
         "STOP_RAW_PCT":               str(params.get("stop_raw_pct", -6.0)),
         "PRICE_SOURCE":               str(params.get("price_source", "db")),
         "MCAP_SOURCE":                str(params.get("mcap_source", "db")),
-        "DISPERSION_UNIVERSE_MODE":   str(params.get("dispersion_universe_mode", "curated")),
+        "DISPERSION_UNIVERSE_MODE":   str(params.get("dispersion_universe_mode", "all")),
         # Mid-session splice — when True, audit.py appends today's
         # partial intraday column fetched live from Binance klines
         # (read from live_deploys_signal.csv for today's basket). See
