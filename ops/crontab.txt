@@ -68,6 +68,26 @@ PATH=/usr/local/sbin:/usr/local/bin:/sbin:/bin:/usr/sbin:/usr/bin
 # is always the latest CLOSED bar. Trade deployment at 06:35 unchanged.
 0 6 * * * . /mnt/quant-data/credentials/secrets.env && /root/benji/pipeline/.venv/bin/python /root/benji/daily_signal_v2.py >> /mnt/quant-data/logs/signal/cron.log 2>&1
 
+# ── Pre-flight signal sanity — 05:30 UTC (30 min before signal cron) ─────────
+# Walks every is_published=TRUE strategy_version and exercises audit_filters
+# with that strategy's stored config (Tail Guardrail + Dispersion when used).
+# Catches: import-chain failures (the v2→v3 cutover bug class), mcap data
+# staleness (dispersion fail-open), threshold misconfig, missing universe,
+# audit-import side effects. Exit 1 = alert-worthy; cron-mailer pickup
+# triggers an operator page. Read-only — never writes anywhere outside its
+# own log file. See pipeline/precheck_signal.py.
+30 5 * * * . /mnt/quant-data/credentials/secrets.env && mkdir -p /mnt/quant-data/logs/precheck && /root/benji/pipeline/.venv/bin/python /root/benji/pipeline/precheck_signal.py --phase pre >> /mnt/quant-data/logs/precheck/cron.log 2>&1
+
+# ── Post-cron signal verify — 06:02 UTC (2 min after signal cron) ────────────
+# Confirms daily_signal_v3 actually ran with the expected per-strategy params:
+#   1. cron log has today's run with no tracebacks
+#   2. [per-strategy disp] log lines (when present) show n + strict_dyn matching
+#      each strategy's stored config (lock-in actually took effect)
+#   3. user_mgmt.daily_signals has a row for every published+active strategy_version
+#   4. live_deploys_signal.csv has today's row
+# Exit 1 = alert-worthy; cron-mailer pickup triggers an operator page.
+2 6 * * * . /mnt/quant-data/credentials/secrets.env && mkdir -p /mnt/quant-data/logs/precheck && /root/benji/pipeline/.venv/bin/python /root/benji/pipeline/precheck_signal.py --phase post >> /mnt/quant-data/logs/precheck/cron.log 2>&1
+
 # ── Audit gate verifier — 06:01 UTC ──────────────────────────────────────────
 # Re-computes today's (sit_flat, filter_name) decision per published+active
 # strategy version using pipeline.audit_filters (single source of truth,

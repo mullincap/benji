@@ -68,7 +68,15 @@ def _fetch_alt_returns(end_date: _dt.date, days: int) -> pd.DataFrame:
 
     Reuses audit's own DISPERSION_CACHE_FILE so both sides of the
     comparison (truth and peek-via-audit_filters) hit identical cached
-    klines — eliminates cache-timing as a confound."""
+    klines — eliminates cache-timing as a confound.
+
+    When `strict_dynamic` is True, the returns universe is built from
+    market.market_cap_daily (union of per-day top-N, lagged) instead of
+    the legacy hardcoded DISPERSION_SYMBOLS list, matching the audit
+    pipeline's strict-dynamic path. Live ALTS MAIN now runs with this
+    flag set in stored config (locked 2026-04-29), so cron-context
+    comparisons should use strict_dynamic=True from now on.
+    """
     start = (end_date - _dt.timedelta(days=days + 200)).isoformat()
     end = (end_date + _dt.timedelta(days=1)).isoformat()
     print(f"fetching alt_returns {start} → {end} via audit helper...",
@@ -79,7 +87,8 @@ def _fetch_alt_returns(end_date: _dt.date, days: int) -> pd.DataFrame:
 def _audit_truth_series(btc_ohlcv: pd.DataFrame, alt_returns: pd.DataFrame,
                         tdp: float, tvm: float,
                         dth: float, baseline_win: int,
-                        n_symbols: int = 40) -> pd.DataFrame:
+                        n_symbols: int = 40,
+                        lag_days: int | None = None) -> pd.DataFrame:
     """Run audit.build_tail_guardrail + build_dispersion_filter (with the
     dynamic mcap mask the real audit jobs use) over the full series.
 
@@ -87,6 +96,12 @@ def _audit_truth_series(btc_ohlcv: pd.DataFrame, alt_returns: pd.DataFrame,
       - tail (bool: True = TG fires/sit-flat)
       - disp (bool: True = Disp fires/sit-flat — dynamic universe mode)
       - tail_or_disp (bool: union, for Tail+Dispersion mode)
+
+    `lag_days` is forwarded to build_dynamic_symbol_mask. None → use
+    audit's DISPERSION_UNIVERSE_LAG_DAYS env default. The audit's
+    strict-dynamic path is implicit when alt_returns came from a
+    dynamic-universe fetch (which is the case here when the caller
+    used build_dynamic_returns_universe upstream).
     """
     print(f"computing audit truth: TG(drop={tdp}, vol={tvm}) | "
           f"Disp(thr={dth}, win={baseline_win}, n={n_symbols} dynamic)...",
@@ -100,7 +115,10 @@ def _audit_truth_series(btc_ohlcv: pd.DataFrame, alt_returns: pd.DataFrame,
     start_str = alt_returns.index.min().date().isoformat()
     end_str = alt_returns.index.max().date().isoformat()
     mcap_df = audit._load_mcap_from_db(start_str, end_str)
-    mask_df = audit.build_dynamic_symbol_mask(mcap_df, alt_returns, n=n_symbols)
+    mask_kwargs = {"n": n_symbols}
+    if lag_days is not None:
+        mask_kwargs["lag_days"] = lag_days
+    mask_df = audit.build_dynamic_symbol_mask(mcap_df, alt_returns, **mask_kwargs)
     disp = audit.build_dispersion_filter(
         alt_returns, threshold=dth, baseline_win=baseline_win,
         symbol_mask_df=mask_df,
@@ -134,6 +152,15 @@ def main() -> None:
                     help="dispersion_threshold (default 0.66)")
     ap.add_argument("--baseline-win", type=int, default=33,
                     help="dispersion baseline_win (default 33)")
+    ap.add_argument("--n", type=int, default=40,
+                    help="dispersion_n (default 40; ALTS MAIN locked at 20)")
+    ap.add_argument("--lag-days", type=int, default=None,
+                    help="dispersion universe lag (default = audit env, =1)")
+    ap.add_argument("--strict-dynamic", action="store_true",
+                    help="Use strict_dynamic universe on BOTH peek and audit "
+                         "sides — required to compare against the regime live "
+                         "now runs (locked-in 2026-04-29 for ALTS MAIN). When "
+                         "off, runs the legacy hardcoded-pool comparison.")
     args = ap.parse_args()
 
     end = (_dt.date.fromisoformat(args.end) if args.end
@@ -143,13 +170,39 @@ def main() -> None:
     print(f"\nComparing peek vs audit-py for {args.days} days "
           f"({dates[0]} → {dates[-1]})")
     print(f"Thresholds: tdp={args.tdp}  tvm={args.tvm}  dth={args.dth}  "
-          f"baseline_win={args.baseline_win}\n")
+          f"baseline_win={args.baseline_win}  n={args.n}  "
+          f"lag_days={args.lag_days}  strict_dynamic={args.strict_dynamic}\n")
 
     t0 = time.time()
     btc = _fetch_btc_ohlcv()
     alt = _fetch_alt_returns(end, args.days)
+
+    # When strict_dynamic, override the alt_returns universe with the
+    # mcap-derived dynamic universe BEFORE building the truth series.
+    # This matches what live audit_filters now does per-strategy.
+    if args.strict_dynamic:
+        mcap_for_universe = audit._load_mcap_from_db(
+            (end - _dt.timedelta(days=args.days + 200)).isoformat(),
+            (end + _dt.timedelta(days=1)).isoformat(),
+        )
+        dyn_lag = args.lag_days if args.lag_days is not None else 1
+        dyn_universe = audit.build_dynamic_returns_universe(
+            mcap_for_universe, n=args.n, lag_days=dyn_lag,
+        )
+        print(f"strict_dynamic: built {len(dyn_universe)}-ticker universe "
+              f"(union of top-{args.n} mcap, lagged {dyn_lag}d)\n",
+              flush=True)
+        # Re-fetch alt_returns scoped to the dynamic universe
+        start_str = (end - _dt.timedelta(days=args.days + 200)).isoformat()
+        end_str = (end + _dt.timedelta(days=1)).isoformat()
+        alt = audit.fetch_altcoin_daily_returns(
+            symbols=dyn_universe, start=start_str, end=end_str,
+        )
+
     truth = _audit_truth_series(btc, alt, args.tdp, args.tvm,
-                                  args.dth, args.baseline_win)
+                                  args.dth, args.baseline_win,
+                                  n_symbols=args.n,
+                                  lag_days=args.lag_days)
     print(f"audit truth ready ({time.time()-t0:.1f}s)\n", flush=True)
 
     # Compute peek per day.
@@ -158,8 +211,14 @@ def main() -> None:
     for d in dates:
         tg = compute_tail_guardrail_detail(d, tail_drop_pct=args.tdp,
                                             tail_vol_mult=args.tvm)
-        dp = compute_dispersion_filter_detail(d, threshold=args.dth,
-                                                baseline_win=args.baseline_win)
+        dp = compute_dispersion_filter_detail(
+            d,
+            threshold=args.dth,
+            baseline_win=args.baseline_win,
+            n_symbols=args.n,
+            lag_days=args.lag_days,
+            strict_dynamic=args.strict_dynamic,
+        )
         ts = pd.Timestamp(d)
         rows.append({
             "date": d,
