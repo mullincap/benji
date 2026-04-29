@@ -1023,7 +1023,10 @@ function FillMissingModal({
               Found <span style={{ color: "var(--t0)", fontWeight: 700 }}>{init.dates.length}</span>{" "}
               partial day{init.dates.length === 1 ? "" : "s"} in{" "}
               <code style={{ color: "var(--t0)" }}>market.futures_1m</code>.
-              Each will be deleted and refetched via metl.
+              For each, the cached CSV is deleted (forces metl to re-fetch
+              from Amberdata) and missing rows are inserted with
+              ON&nbsp;CONFLICT&nbsp;DO&nbsp;NOTHING — existing rows stay
+              intact if a fetch fails partway.
             </div>
             <div style={{
               background: "var(--bg3)",
@@ -1084,6 +1087,11 @@ function FillMissingModal({
                 )}
               </div>
             </div>
+            <ProgressMetrics
+              status={status}
+              logText={logText}
+              elapsedSec={elapsed}
+            />
             <DayProgressList rows={dateRows} currentDate={status?.current_date ?? null} />
             <LogConsole text={logText} />
             <div style={{ display: "flex", gap: 8, justifyContent: "flex-end", marginTop: 18 }}>
@@ -1233,6 +1241,113 @@ function LogConsole({ text }: { text: string }) {
       }}
     >
       {text}
+    </div>
+  );
+}
+
+function ProgressMetrics({
+  status,
+  logText,
+  elapsedSec,
+}: {
+  status: FillStatus | null;
+  logText: string;
+  elapsedSec: number;
+}) {
+  // Two-tier progress:
+  //   1. Day count (status.dates_completed / status.dates_total)
+  //   2. Within the in-flight day, parse the latest `(N.N%)` from the
+  //      metl log — metl already prints this per symbol, e.g.
+  //      "✅ BTCUSDT done → 0:00:07.776 (22.07%)". We grab the last
+  //      occurrence in the log buffer and treat it as the current
+  //      day's intra-day progress.
+  // Then: overallPct = (days_done + intraDayPct/100) / total_days * 100
+  //       etaSec = elapsedSec * (1 - overallPct/100) / (overallPct/100)
+  if (!status) return null;
+  const total = status.dates_total;
+  const daysDone = status.dates_completed + status.dates_failed;
+
+  // Latest intra-day percentage from the streamed log.
+  // Greedy match to grab the most recent "(NN.NN%)" anywhere.
+  let intraDayPct: number | null = null;
+  if (logText) {
+    const matches = logText.match(/\(([\d.]+)%\)/g);
+    if (matches && matches.length > 0) {
+      const last = matches[matches.length - 1];
+      const m = last.match(/\(([\d.]+)%\)/);
+      if (m) {
+        const v = Number(m[1]);
+        if (!Number.isNaN(v) && v >= 0 && v <= 100) intraDayPct = v;
+      }
+    }
+  }
+  const intraDayFrac = intraDayPct === null ? 0 : intraDayPct / 100;
+
+  // Don't double-count: if metl has already finished a day and is
+  // between days, intraDayPct from the log might still be 100% from
+  // the last completed day. Guard with current_date being set + state
+  // being 'fetching' / 'running'.
+  const isMidDay = !!status.current_date &&
+                   status.state === "running" &&
+                   status.current_state !== "refreshing_caggs";
+  const completedFraction = total > 0
+    ? (daysDone + (isMidDay ? intraDayFrac : 0)) / total
+    : 0;
+  const overallPct = Math.min(100, Math.max(0, completedFraction * 100));
+  const remainingPct = 100 - overallPct;
+
+  // ETA: linear extrapolation. Suppressed when:
+  //   - <10s elapsed (regression too noisy)
+  //   - <2% complete (denominator too small, ETA jitters wildly)
+  //   - we're on the cagg-refresh tail (no log percentages to project)
+  let etaText: string | null = null;
+  if (elapsedSec >= 10 && overallPct >= 2 && overallPct < 100) {
+    const remainingSec = elapsedSec * (100 - overallPct) / overallPct;
+    if (Number.isFinite(remainingSec) && remainingSec >= 0) {
+      const rmm = Math.floor(remainingSec / 60);
+      const rss = Math.floor(remainingSec % 60);
+      etaText = rmm > 0 ? `${rmm}m ${rss}s` : `${rss}s`;
+    }
+  }
+
+  return (
+    <div
+      style={{
+        display: "grid",
+        gridTemplateColumns: "1fr 1fr 1fr",
+        gap: 12,
+        marginBottom: 12,
+        padding: "10px 12px",
+        background: "var(--bg3)",
+        border: "1px solid var(--line)",
+        borderRadius: 4,
+        fontFamily: "var(--font-space-mono), Space Mono, monospace",
+        fontVariantNumeric: "tabular-nums",
+      }}
+    >
+      <Metric label="DONE" value={`${overallPct.toFixed(1)}%`} color="var(--green)" />
+      <Metric label="REMAINING" value={`${remainingPct.toFixed(1)}%`} color="var(--amber)" />
+      <Metric
+        label="ETA"
+        value={etaText ?? "computing…"}
+        color={etaText ? "var(--t1)" : "var(--t3)"}
+      />
+    </div>
+  );
+}
+
+function Metric({ label, value, color }: { label: string; value: string; color: string }) {
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+      <span style={{
+        fontSize: 8, fontWeight: 700, letterSpacing: "0.12em",
+        color: "var(--t3)", textTransform: "uppercase",
+      }}>
+        {label}
+      </span>
+      <span style={{ fontSize: 13, fontWeight: 700, color }}>
+        {value}
+      </span>
     </div>
   );
 }

@@ -56,7 +56,11 @@ def _run_indexer(metric: str, date_str: str, log_path: Path) -> int:
     anchor_hour, date) tuple before INSERTing fresh ranks (added in commit
     3bdce9b). Returns subprocess exit code."""
     cmd = [
-        sys.executable, str(INDEXER_SCRIPT),
+        # -u (+ PYTHONUNBUFFERED=1) forces line-buffered stdout so the
+        # modal's live console panel sees lines as they're printed —
+        # without this, Python block-buffers ~4KB and the panel
+        # arrives in jarring chunks instead of streaming.
+        sys.executable, "-u", str(INDEXER_SCRIPT),
         "--metric", metric,
         "--source", "db",
         "--start", date_str,
@@ -65,13 +69,15 @@ def _run_indexer(metric: str, date_str: str, log_path: Path) -> int:
         "--triggered-by", "cli",
         "--run-tag", "fill_missing_indexer",
     ]
+    env = os.environ.copy()
+    env["PYTHONUNBUFFERED"] = "1"
     with open(log_path, "a") as logf:
         logf.write(f"\n\n=== indexer {metric} {date_str} starting at "
                    f"{datetime.now(timezone.utc).isoformat()} ===\n")
         logf.flush()
         proc = subprocess.run(
             cmd, cwd=str(PIPELINE_DIR), stdout=logf, stderr=subprocess.STDOUT,
-            check=False,
+            check=False, env=env,
         )
     return proc.returncode
 

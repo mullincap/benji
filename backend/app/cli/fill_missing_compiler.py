@@ -84,19 +84,29 @@ def _write_status(status_file: Path, status: dict) -> None:
 
 def _run_metl(date_str: str, log_path: Path) -> int:
     """Run metl --start date --end date, append output to log_path. Returns
-    the subprocess exit code."""
+    the subprocess exit code.
+
+    Forces unbuffered stdout (`-u` / PYTHONUNBUFFERED=1) so every
+    `✅ XYZUSDT done → ...` line lands in the log file immediately
+    instead of sitting in Python's internal block buffer until it
+    hits ~4KB. Without this, the modal's live console arrives in
+    chunky bursts (~24% of the run at a time) and the operator is
+    left wondering whether anything is happening.
+    """
     cmd = [
-        sys.executable, str(METL_SCRIPT),
+        sys.executable, "-u", str(METL_SCRIPT),
         "--start", date_str, "--end", date_str,
         "--triggered-by", "cli",
         "--run-tag", "fill_missing",
     ]
+    env = os.environ.copy()
+    env["PYTHONUNBUFFERED"] = "1"
     with open(log_path, "a") as logf:
         logf.write(f"\n\n=== metl {date_str} starting at {datetime.now(timezone.utc).isoformat()} ===\n")
         logf.flush()
         proc = subprocess.run(
             cmd, cwd=str(PIPELINE_DIR), stdout=logf, stderr=subprocess.STDOUT,
-            check=False,
+            check=False, env=env,
         )
     return proc.returncode
 
