@@ -175,6 +175,18 @@ class JobRequest(BaseModel):
     run_filter_tail_blofin:     bool  = False
     run_filter_calendar:        bool  = False
 
+    # ── Exchanges — universe modifier ─────────────────────────────────────────
+    # New BloFin model (replaces the legacy run_filter_tail_blofin sit-flat).
+    # blofin_variants:
+    #   "off"          → vanilla audit only
+    #   "blofin_only"  → single audit run with BloFin universe restriction
+    #   "both"         → two runs (vanilla + BloFin), merged into 10-row pairs
+    # The backend's run_audit_with_blofin_variants derives apply_blofin_filter
+    # and blofin_universe_enabled from this enum — frontend should pass
+    # blofin_variants only and leave the underlying flags alone.
+    blofin_variants:            str   = "off"
+    blofin_universe_enabled:    bool  = False
+
     # ── ADVANCED — Strategy tuning ────────────────────────────────────────────
     dispersion_threshold:       float = 0.66
     dispersion_baseline_win:    int   = 33
