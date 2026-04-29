@@ -415,7 +415,24 @@ export default function PortfoliosListPage() {
                       >
                         {fmtUsd(p.pnl_usd)}
                       </td>
-                      <td style={{ ...tdStyle, color: "var(--t1)" }}>
+                      <td
+                        style={{
+                          ...tdStyle,
+                          // Peak should be positive on a real session — a 0
+                          // peak means the strategy never went green at any
+                          // bar, which is a quality signal worth flagging
+                          // red. Negative peaks are flagged red for the same
+                          // reason. Anything > 0 is green to match the ROI
+                          // column's positive-is-good treatment.
+                          color: peakPct > 0 ? "var(--green)"
+                               : peakPct < 0 ? "var(--red)"
+                               // Zero peak: only flag red on rows the trader
+                               // actually entered — for filtered/no-entry
+                               // days the 0 is structural, not a signal.
+                               : (p.entry_status === "passed" ? "var(--red)"
+                                                              : "var(--t1)"),
+                        }}
+                      >
                         {fmtPct(peakPct)}
                       </td>
                       <td
