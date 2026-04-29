@@ -17276,6 +17276,13 @@ def main():
     run_dir = Path(OUTPUT_DIR_BASE) / dt.now().strftime("run_%Y%m%d_%H%M%S")
     run_dir.mkdir(parents=True, exist_ok=True)
 
+    # Emit a machine-parseable line so the backend worker can locate the
+    # generated chart PNGs after the subprocess exits and copy them into
+    # job_dir/charts/ for serving via the Charts section in the Full
+    # Report tab. Print to BOTH stdout (captured by subprocess pipe) and
+    # the run-dir's audit_output.txt before the Tee redirect kicks in.
+    print(f"[AUDIT_RUN_DIR] {run_dir.resolve()}", flush=True)
+
     # ── Mirror stdout to audit_output.txt inside this run folder ─────
     class _Tee:
         def __init__(self, *streams): self._streams = streams

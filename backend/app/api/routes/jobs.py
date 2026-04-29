@@ -565,6 +565,137 @@ def download_report(job_id: str) -> FileResponse:
 
 
 # ---------------------------------------------------------------------------
+# Charts — audit-generated image gallery
+# ---------------------------------------------------------------------------
+#
+# At audit time, the pipeline drops dozens of PNG/JPG/SVG files (equity
+# curves, drawdown analysis, sensitivity heatmaps, regime comparisons,
+# etc.) into a timestamped run-dir. The worker copies them into
+# job_dir/charts/ so they can be served per-job.
+#
+# Charts are categorized for UI grouping:
+#   - "comparison"  Files that span multiple filters (regime_filter_*,
+#                   pbo_cscv_*, monthly_cumulative_*, equity_curve_ensemble_*)
+#   - "<filter>"    Per-filter files, identified by leading "A_-_<Filter>_"
+#                   or other strategy-specific prefix
+#   - "blofin/<…>"  Same shape, but from the BloFin variant pass — kept in a
+#                   parallel category so 10-row pair audits don't crowd
+
+_CHART_EXTS = {".png", ".jpg", ".jpeg", ".svg"}
+
+
+def _classify_chart(filename: str) -> str:
+    """Return a UI category string for a chart filename."""
+    stem = filename.lower()
+    is_blofin = stem.startswith("blofin_")
+    if is_blofin:
+        stem = stem[len("blofin_"):]
+    prefix = "blofin/" if is_blofin else ""
+
+    # Comparison-style filenames don't have a per-filter prefix
+    comparison_markers = (
+        "regime_filter_comparison",
+        "monthly_cumulative_returns",
+        "equity_curve_ensemble",
+        "pbo_cscv",
+    )
+    if any(m in stem for m in comparison_markers):
+        return f"{prefix}comparison"
+
+    # Per-filter prefix: "a_-_<filter>_..." (e.g. a_-_tail_guardrail_*)
+    # The audit normalizes spaces / pluses to underscores in filenames.
+    if stem.startswith("a_-_") or stem.startswith("a__"):
+        rest = stem[4:] if stem.startswith("a_-_") else stem[3:]
+        # Stop at the first known plot-type token to leave the filter name
+        for sep in (
+            "_drawdown_analysis", "_equity_curve", "_performance_dashboard",
+            "_disp_decile", "_disp_surface", "_dispersion_scatter",
+            "_btc_vol_scatter", "_skew_vs_equity", "_sharpe_vs_corr",
+            "_regime_heatmap", "_strategy_vs_btc",
+        ):
+            if sep in rest:
+                rest = rest.split(sep, 1)[0]
+                break
+        # Compress trailing underscores
+        rest = rest.rstrip("_") or "filter"
+        return f"{prefix}{rest}"
+
+    return f"{prefix}other"
+
+
+@router.get("/{job_id}/charts")
+def list_charts(job_id: str) -> dict:
+    """List audit-generated chart files for a job, grouped by category."""
+    job = get_job(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Job not found")
+    charts_dir = Path(settings.JOBS_DIR) / job_id / "charts"
+    if not charts_dir.is_dir():
+        return {"job_id": job_id, "charts_dir_present": False, "categories": []}
+
+    by_cat: dict[str, list[dict]] = {}
+    for p in sorted(charts_dir.iterdir()):
+        if not p.is_file() or p.suffix.lower() not in _CHART_EXTS:
+            continue
+        cat = _classify_chart(p.name)
+        by_cat.setdefault(cat, []).append({
+            "filename":  p.name,
+            "url":       f"/api/jobs/{job_id}/charts/{p.name}",
+            "size_bytes": p.stat().st_size,
+        })
+
+    # Stable category ordering: comparison first, then per-filter alpha,
+    # then blofin/ variants at the end.
+    def _cat_sort(c: str) -> tuple[int, str]:
+        if c == "comparison":           return (0, c)
+        if c.startswith("blofin/comparison"):  return (10, c)
+        if c.startswith("blofin/"):     return (20, c)
+        return (5, c)
+
+    categories = []
+    for cat in sorted(by_cat.keys(), key=_cat_sort):
+        categories.append({"name": cat, "files": by_cat[cat]})
+
+    total_count = sum(len(c["files"]) for c in categories)
+    return {
+        "job_id": job_id,
+        "charts_dir_present": True,
+        "total_count": total_count,
+        "categories": categories,
+    }
+
+
+@router.get("/{job_id}/charts/{filename}")
+def serve_chart(job_id: str, filename: str) -> FileResponse:
+    """Serve a single chart file from job_dir/charts/."""
+    job = get_job(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Job not found")
+    # Path-traversal guard: filename must be a single component, no slashes
+    if "/" in filename or "\\" in filename or filename.startswith(".."):
+        raise HTTPException(status_code=400, detail="Invalid filename")
+    charts_dir = Path(settings.JOBS_DIR) / job_id / "charts"
+    target = (charts_dir / filename).resolve()
+    # Resolve loop just in case + final containment check
+    if not str(target).startswith(str(charts_dir.resolve())):
+        raise HTTPException(status_code=400, detail="Invalid filename")
+    if not target.is_file() or target.suffix.lower() not in _CHART_EXTS:
+        raise HTTPException(status_code=404, detail="Chart not found")
+    media_type = {
+        ".png":  "image/png",
+        ".jpg":  "image/jpeg",
+        ".jpeg": "image/jpeg",
+        ".svg":  "image/svg+xml",
+    }.get(target.suffix.lower(), "application/octet-stream")
+    return FileResponse(
+        path=str(target),
+        media_type=media_type,
+        # Hint browsers to cache aggressively; charts are immutable per-job
+        headers={"Cache-Control": "private, max-age=86400"},
+    )
+
+
+# ---------------------------------------------------------------------------
 # Folder endpoints
 # ---------------------------------------------------------------------------
 

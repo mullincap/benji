@@ -76,6 +76,71 @@ def _is_cancelled(job_id: str) -> bool:
 
 _GATE_REPORT_NAME = "eligibility_gate_report.csv"
 
+# Image extensions to copy from the audit's run_dir into job_dir/charts/
+_CHART_EXTS = {".png", ".jpg", ".jpeg", ".svg"}
+# Marker line audit.py prints at startup so the worker can locate run_dir
+_AUDIT_RUN_DIR_MARKER = "[AUDIT_RUN_DIR]"
+
+
+def _snapshot_audit_charts(job_id: str, job_dir: Path) -> int:
+    """Copy chart PNG/JPG files from the audit's timestamped run_dir(s)
+    into job_dir/charts/ so the frontend can serve them.
+
+    The audit prints a `[AUDIT_RUN_DIR] <abs path>` line at startup
+    (audit.py main()). For BloFin variants=both we get two such lines
+    (one per pass). Charts from both passes are merged into job_dir/
+    charts/, with BloFin-pass files prefixed `blofin_` to avoid name
+    collisions with the vanilla pass.
+
+    Returns the number of files copied. Best-effort — any error is
+    logged and swallowed.
+    """
+    out_dir = job_dir / "charts"
+    audit_log = job_dir / "audit_output.txt"
+    if not audit_log.exists():
+        return 0
+    try:
+        run_dirs: list[Path] = []
+        with audit_log.open() as fh:
+            for line in fh:
+                if _AUDIT_RUN_DIR_MARKER in line:
+                    parts = line.strip().split(_AUDIT_RUN_DIR_MARKER, 1)
+                    if len(parts) != 2:
+                        continue
+                    p = Path(parts[1].strip())
+                    if p.is_dir() and p not in run_dirs:
+                        run_dirs.append(p)
+        if not run_dirs:
+            return 0
+        out_dir.mkdir(parents=True, exist_ok=True)
+        copied = 0
+        for idx, run_dir in enumerate(run_dirs):
+            # First run = vanilla / single-mode; second run = blofin variant.
+            # Prefix blofin files so they don't collide with vanilla.
+            prefix = "blofin_" if idx >= 1 else ""
+            for src in run_dir.iterdir():
+                if not src.is_file() or src.suffix.lower() not in _CHART_EXTS:
+                    continue
+                dst = out_dir / f"{prefix}{src.name}"
+                try:
+                    shutil.copy2(src, dst)
+                    copied += 1
+                except Exception as e:
+                    _worker_log.warning(
+                        "charts: failed to copy %s for job %s: %s",
+                        src.name, job_id, e,
+                    )
+        _worker_log.info(
+            "charts: copied %d files from %d run dir(s) into %s for job %s",
+            copied, len(run_dirs), out_dir, job_id,
+        )
+        return copied
+    except Exception as e:
+        _worker_log.warning(
+            "charts: snapshot failed for job %s: %s", job_id, e,
+        )
+        return 0
+
 
 def _split_pipe(value: Optional[str]) -> list[str]:
     """Split a pipe-joined string into a list of bases, dropping empties."""
@@ -238,6 +303,15 @@ def run_pipeline(self, job_id: str, params: dict) -> dict:
             "audit.daily_baskets: %s missing after subprocess for job %s — "
             "skipping basket ingestion", src_gate_report, job_id,
         )
+
+    # Snapshot the audit's chart PNGs into job_dir/charts/ so the
+    # frontend's Full Report tab can serve them. Pipeline writes them
+    # to a timestamped run_<TS>/ subdir at $PIPELINE_DIR/audit_outputs_*/.
+    # We scrape "[AUDIT_RUN_DIR] <abs path>" lines from the captured
+    # stdout (one per run for vanilla, one for BloFin) and copy *.png /
+    # *.jpg from each into job_dir/charts/. Best-effort — chart absence
+    # doesn't disrupt the rest of the result write.
+    _snapshot_audit_charts(job_id, job_dir)
 
     # audit_output.txt is written by the wrapper:
     #   off / blofin_only → directly at this path
