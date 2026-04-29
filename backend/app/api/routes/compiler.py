@@ -476,6 +476,28 @@ def fill_missing_coverage(
     if dates:
         target_dates = [d.strip() for d in dates.split(",") if d.strip()]
     else:
+        # Refresh the daily-symbol-count cagg first so the detector
+        # sees the most recent rows (mid-run loads from a previous
+        # worker, last night's metl cron, etc.) rather than ~minutes-
+        # stale aggregate state. ~1s cost on the POST is acceptable;
+        # avoids the case where a recently-cancelled run's persisted
+        # rows aren't yet reflected and the operator queues a
+        # redundant fetch over data they already have.
+        try:
+            conn = get_conn()
+            try:
+                conn.autocommit = True
+                cur = conn.cursor()
+                cur.execute(
+                    "CALL refresh_continuous_aggregate(%s, "
+                    "NOW() - INTERVAL '7 days', NOW())",
+                    ("market.futures_1m_daily_symbol_count",),
+                )
+                cur.close()
+            finally:
+                conn.close()
+        except Exception:
+            pass  # detector still runs; just on slightly stale cagg
         target_dates = _detect_partial_dates_compiler(lookback_days=days_back)
 
     job_id = str(_uuid.uuid4())

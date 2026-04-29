@@ -861,8 +861,13 @@ export default function CompilerCoveragePage() {
                 const elapsed = fillStatus.elapsed_seconds;
                 const mm = Math.floor(elapsed / 60);
                 const ss = String(elapsed % 60).padStart(2, "0");
+                // Same intra-day % parse as the modal's ProgressMetrics
+                // — keep the chip's number consistent with what the
+                // operator sees when they re-open the modal.
+                const overallPct = computeOverallPct(fillStatus, fillLogText);
+                const pctStr = overallPct === null ? "" : `${overallPct.toFixed(0)}% · `;
                 if (cur) {
-                  return `filling ${done + 1}/${total}: ${cur} ${mm}:${ss}`;
+                  return `${pctStr}${done + 1}/${total}: ${cur} ${mm}:${ss}`;
                 }
                 if (fillStatus.current_state === "refreshing_caggs") {
                   return `refreshing caggs ${mm}:${ss}`;
@@ -1245,30 +1250,25 @@ function LogConsole({ text }: { text: string }) {
   );
 }
 
-function ProgressMetrics({
-  status,
-  logText,
-  elapsedSec,
-}: {
-  status: FillStatus | null;
-  logText: string;
-  elapsedSec: number;
-}) {
-  // Two-tier progress:
-  //   1. Day count (status.dates_completed / status.dates_total)
-  //   2. Within the in-flight day, parse the latest `(N.N%)` from the
-  //      metl log — metl already prints this per symbol, e.g.
-  //      "✅ BTCUSDT done → 0:00:07.776 (22.07%)". We grab the last
-  //      occurrence in the log buffer and treat it as the current
-  //      day's intra-day progress.
-  // Then: overallPct = (days_done + intraDayPct/100) / total_days * 100
-  //       etaSec = elapsedSec * (1 - overallPct/100) / (overallPct/100)
+// Two-tier progress calc shared by ProgressMetrics (modal) and the
+// chip's running label (page header). Returns null when there's no
+// running job to compute against.
+//
+//   1. Day count from /status (dates_completed / dates_total)
+//   2. Within the in-flight day, parse the latest `(N.N%)` from the
+//      streamed metl log — metl prints this per symbol, e.g.
+//      "✅ BTCUSDT done → 0:00:07.776 (22.07%)".
+//
+// Then: overallPct = (days_done + intraDayPct/100) / total_days * 100
+function computeOverallPct(
+  status: FillStatus | null,
+  logText: string,
+): number | null {
   if (!status) return null;
   const total = status.dates_total;
+  if (total <= 0) return null;
   const daysDone = status.dates_completed + status.dates_failed;
 
-  // Latest intra-day percentage from the streamed log.
-  // Greedy match to grab the most recent "(NN.NN%)" anywhere.
   let intraDayPct: number | null = null;
   if (logText) {
     const matches = logText.match(/\(([\d.]+)%\)/g);
@@ -1283,17 +1283,28 @@ function ProgressMetrics({
   }
   const intraDayFrac = intraDayPct === null ? 0 : intraDayPct / 100;
 
-  // Don't double-count: if metl has already finished a day and is
-  // between days, intraDayPct from the log might still be 100% from
-  // the last completed day. Guard with current_date being set + state
-  // being 'fetching' / 'running'.
+  // Don't double-count: between-day moments still have last day's
+  // 100% in the log. Only credit intra-day when current_date is set
+  // and we're actively running.
   const isMidDay = !!status.current_date &&
                    status.state === "running" &&
                    status.current_state !== "refreshing_caggs";
-  const completedFraction = total > 0
-    ? (daysDone + (isMidDay ? intraDayFrac : 0)) / total
-    : 0;
-  const overallPct = Math.min(100, Math.max(0, completedFraction * 100));
+  const completedFraction = (daysDone + (isMidDay ? intraDayFrac : 0)) / total;
+  return Math.min(100, Math.max(0, completedFraction * 100));
+}
+
+function ProgressMetrics({
+  status,
+  logText,
+  elapsedSec,
+}: {
+  status: FillStatus | null;
+  logText: string;
+  elapsedSec: number;
+}) {
+  if (!status) return null;
+  const overallPctRaw = computeOverallPct(status, logText);
+  const overallPct = overallPctRaw ?? 0;
   const remainingPct = 100 - overallPct;
 
   // ETA: linear extrapolation. Suppressed when:
