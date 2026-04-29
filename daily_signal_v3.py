@@ -543,15 +543,28 @@ def compute_per_strategy_decisions(
     canonical_filter_reason: str,
 ) -> list:
     """For each strategy, compute the final (sit_flat, reason, filter_label)
-    using the strategy's own TG thresholds + shared Disp decision, resolved
+    using the strategy's OWN dispersion config + TG thresholds, resolved
     via its active_filter.
+
+    Per-strategy dispersion: each strategy's stored config can override
+    dispersion_threshold / dispersion_baseline_win / dispersion_n /
+    dispersion_universe_lag_days. We memoize on the 4-tuple so that two
+    strategies with identical dispersion configs only trigger one
+    compute_dispersion_filter_detail call. Strategies whose config matches
+    the canonical defaults reuse the `disp_decision` passed in (the
+    once-computed canonical decision).
 
     Returns list of dicts ready for both the CSV writer and the DB writer:
         [{sv_id, display_name, config, sit_flat, filter_reason,
-          filter_name, tg_decision}]
+          filter_name, tg_decision, disp_decision}]
     """
     out = []
     fallback = (canonical_tg_decision[0], canonical_filter_reason)
+    # Memo cache: dispersion params tuple → (sit_flat, reason, detail).
+    # Sentinel `_CANONICAL` reuses the caller's pre-computed disp_decision
+    # so strategies on default params don't redo the heavy compute.
+    _CANONICAL = "__canonical__"
+    disp_cache: dict[tuple | str, tuple] = {_CANONICAL: disp_decision}
     for s in strategies:
         sv_id = s["sv_id"]
         cfg   = s["config"]
@@ -571,8 +584,44 @@ def compute_per_strategy_decisions(
             except (TypeError, ValueError):
                 pass
 
+        # Per-strategy dispersion. Build a key tuple from the strategy's
+        # config; None entries mean "use audit_filters default" (which is
+        # what the canonical decision already used). When ALL four are
+        # None the key is _CANONICAL → reuses the shared decision.
+        sv_dthr = cfg.get("dispersion_threshold")
+        sv_dwin = cfg.get("dispersion_baseline_win")
+        sv_dn   = cfg.get("dispersion_n")
+        sv_dlag = cfg.get("dispersion_universe_lag_days")
+        if all(v is None for v in (sv_dthr, sv_dwin, sv_dn, sv_dlag)):
+            sv_disp_decision = disp_cache[_CANONICAL]
+        else:
+            key = (sv_dthr, sv_dwin, sv_dn, sv_dlag)
+            if key not in disp_cache:
+                try:
+                    detail = compute_dispersion_filter_detail(
+                        today,
+                        threshold=float(sv_dthr) if sv_dthr is not None else None,
+                        baseline_win=int(sv_dwin) if sv_dwin is not None else None,
+                        n_symbols=int(sv_dn) if sv_dn is not None else None,
+                        lag_days=int(sv_dlag) if sv_dlag is not None else None,
+                    )
+                    disp_cache[key] = (detail["sit_flat"], detail["reason"])
+                    log.info(
+                        f"  [per-strategy disp {name!r}] thr={sv_dthr} "
+                        f"win={sv_dwin} n={sv_dn} lag={sv_dlag} → "
+                        f"sit_flat={detail['sit_flat']}  "
+                        f"ratio={detail.get('dispersion_ratio')}"
+                    )
+                except Exception as e:
+                    log.warning(
+                        f"  [per-strategy disp {name!r}] compute failed "
+                        f"({e}); using canonical disp_decision"
+                    )
+                    disp_cache[key] = disp_cache[_CANONICAL]
+            sv_disp_decision = disp_cache[key]
+
         flat, reason, label = _resolve_strategy_filter(
-            cfg, tg_decision, disp_decision, fallback=fallback,
+            cfg, tg_decision, sv_disp_decision, fallback=fallback,
         )
         out.append({
             "sv_id":          sv_id,
@@ -582,6 +631,7 @@ def compute_per_strategy_decisions(
             "filter_reason":  reason,
             "filter_name":    label,
             "tg_decision":    tg_decision,
+            "disp_decision":  sv_disp_decision,
         })
     return out
 
@@ -634,16 +684,23 @@ def _resolve_strategy_filter(
 
 def write_to_db(date_str, filter_name, overlap_pool, sit_flat, filter_reason,
                 btc_closes: list | None = None, today=None,
-                disp_decision: tuple | None = None):
+                disp_decision: tuple | None = None,
+                per_strategy_decisions: list | None = None):
     """Insert today's signal into user_mgmt.daily_signals + daily_signal_items.
 
     Writes one row per published+active strategy_version_id. Each strategy's
     Tail Guardrail decision is computed using THAT strategy's own
     tail_drop_pct / tail_vol_mult (read from `audit.strategy_versions.config`)
     — critical for correctness when strategies run with divergent thresholds
-    (e.g. ALTS MAIN's 0.03 vs Alpha Main's 0.04). The caller-supplied
-    `sit_flat` + `filter_reason` are used as FALLBACKS when a strategy's
-    config doesn't specify thresholds or when BTC closes can't be fetched.
+    (e.g. ALTS MAIN's 0.03 vs Alpha Main's 0.04). Same per-strategy
+    treatment for Dispersion (threshold / baseline_win / n / lag_days)
+    when `per_strategy_decisions` is provided — the cleanest path is to
+    pass the output of compute_per_strategy_decisions() so we don't
+    re-do the dispersion compute here.
+
+    Caller-supplied `sit_flat` + `filter_reason` are used as FALLBACKS
+    when a strategy isn't found in `per_strategy_decisions` (or when
+    `per_strategy_decisions=None` for legacy callers).
 
     `btc_closes` avoids re-fetching from DB when main() already has the
     series in hand. Pass today=ref_date (datetime.date) to enable per-
@@ -710,6 +767,17 @@ def write_to_db(date_str, filter_name, overlap_pool, sit_flat, filter_reason,
         # handles the absent-Dispersion case by defaulting to Tail-only.
         disp_fallback = disp_decision if disp_decision is not None else (False, None)
 
+        # Index per-strategy decisions by sv_id for O(1) lookup. When
+        # the caller passed `per_strategy_decisions`, each strategy's
+        # disp_decision was already computed against its own config
+        # (threshold / baseline_win / n / lag_days). We reuse those
+        # here instead of falling back to the canonical disp_fallback,
+        # so the trader honors per-strategy dispersion settings.
+        decisions_by_sv: dict[str, dict] = {}
+        if per_strategy_decisions:
+            for d in per_strategy_decisions:
+                decisions_by_sv[str(d["sv_id"])] = d
+
         rows_written = 0
         for sv_id in version_ids:
             cfg = version_configs.get(sv_id, {})
@@ -737,9 +805,19 @@ def write_to_db(date_str, filter_name, overlap_pool, sit_flat, filter_reason,
                     log.warning(f"  [per-strategy TG] {sv_name}: invalid "
                                 f"thresholds ({e}); fallback to caller")
 
+            # Per-strategy Dispersion decision. Prefer the pre-computed
+            # value from compute_per_strategy_decisions (which honored
+            # this strategy's threshold/win/n/lag); fall back to the
+            # canonical disp_decision when not pre-computed.
+            sv_disp_decision = disp_fallback
+            if sv_id in decisions_by_sv:
+                pre = decisions_by_sv[sv_id].get("disp_decision")
+                if pre is not None:
+                    sv_disp_decision = pre
+
             # Resolve per-strategy active_filter into final sit_flat decision
             sv_sit_flat, sv_reason, sv_filter_label = _resolve_strategy_filter(
-                cfg, tg_decision, disp_fallback, fallback=(sit_flat, filter_reason),
+                cfg, tg_decision, sv_disp_decision, fallback=(sit_flat, filter_reason),
             )
             log.info(f"  [{sv_name}] active_filter={cfg.get('active_filter')!r} "
                      f"→ sit_flat={sv_sit_flat}  reason={sv_reason!r}")
@@ -946,10 +1024,14 @@ def main():
     #    Trader spawn at 06:05 UTC reads these — without them, allocations
     #    find no signal and sit flat. Per-strategy sit_flat computed inside
     #    write_to_db by combining TG + Dispersion per active_filter.
+    #    `per_strategy_decisions=decisions` carries each strategy's already-
+    #    computed disp_decision (with its own threshold/baseline_win/n/lag)
+    #    so write_to_db doesn't redo the dispersion compute.
     write_to_db(today.isoformat(), FILTER_NAME, final_basket,
                 sit_flat, filter_reason,
                 btc_closes=btc_closes, today=today,
-                disp_decision=(disp_flat, disp_reason))
+                disp_decision=(disp_flat, disp_reason),
+                per_strategy_decisions=decisions)
 
     elapsed = time.time() - t_start
     log.info(f"Done. ({elapsed:.1f}s) — v3 LIVE at 06:00 UTC (cutover 2026-04-28; basket source: peek amber-direct)")

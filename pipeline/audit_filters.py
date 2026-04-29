@@ -279,6 +279,7 @@ def compute_dispersion_filter_detail(
     threshold: Optional[float] = None,
     baseline_win: Optional[int] = None,
     n_symbols: Optional[int] = None,
+    lag_days: Optional[int] = None,
 ) -> dict:
     """Cross-sectional dispersion gate — DELEGATES to audit.py for full
     methodological parity.
@@ -306,16 +307,23 @@ def compute_dispersion_filter_detail(
     thr = threshold if threshold is not None else DISPERSION_THRESHOLD
     win = baseline_win if baseline_win is not None else DISPERSION_BASELINE_WIN
     n = n_symbols if n_symbols is not None else DISPERSION_N
+    # lag_days=None means "use audit.py's DISPERSION_UNIVERSE_LAG_DAYS env
+    # default" — preserve the existing behaviour for callers who don't
+    # care. When daily_signal_v3 plumbs per-strategy values, it'll pass
+    # an explicit int here.
+    lag = lag_days
 
     log.info(
         f"Computing Dispersion filter (threshold={thr}, "
-        f"baseline_win={win}d, n={n}) — via audit.py"
+        f"baseline_win={win}d, n={n}, "
+        f"lag={lag if lag is not None else 'audit-default'}) — via audit.py"
     )
 
     base_detail: dict = {
         "threshold": thr,
         "baseline_win": win,
         "n_symbols_target": n,
+        "lag_days": lag,
         "n_symbols_eligible": 0,
         "n_symbols_with_klines": 0,
         "n_baseline_values": 0,
@@ -380,10 +388,17 @@ def compute_dispersion_filter_detail(
         return {**base_detail, "sit_flat": False, "reason": None,
                 "fail_open_reason": f"mcap_load_failed: {e}"}
 
-    # Dynamic mask: build_dynamic_symbol_mask applies the .shift(1) so
-    # mask[T] uses mcap[T-1] — the per-day mcap-lag discipline.
+    # Dynamic mask: build_dynamic_symbol_mask applies a `.shift(lag_days)`
+    # so mask[T] uses mcap[T-lag_days]. Passing lag explicitly when the
+    # caller specifies it (per-strategy plumbing); otherwise None falls
+    # to audit's DISPERSION_UNIVERSE_LAG_DAYS env default (=1).
     try:
-        mask_df = _audit.build_dynamic_symbol_mask(mcap_df, alt_returns, n=n)
+        if lag is None:
+            mask_df = _audit.build_dynamic_symbol_mask(mcap_df, alt_returns, n=n)
+        else:
+            mask_df = _audit.build_dynamic_symbol_mask(
+                mcap_df, alt_returns, n=n, lag_days=lag,
+            )
     except Exception as e:
         log.warning(f"  Dispersion: dynamic mask build failed ({e})")
         return {**base_detail, "sit_flat": False, "reason": None,
@@ -449,11 +464,13 @@ def compute_dispersion_filter(
     threshold: Optional[float] = None,
     baseline_win: Optional[int] = None,
     n_symbols: Optional[int] = None,
+    lag_days: Optional[int] = None,
 ) -> tuple[bool, Optional[str]]:
     """Backward-compatible thin wrapper over compute_dispersion_filter_detail.
     Returns (sit_flat, reason|None). New callers should prefer the _detail
     variant for access to numeric values."""
     d = compute_dispersion_filter_detail(ref_date, threshold=threshold,
                                           baseline_win=baseline_win,
-                                          n_symbols=n_symbols)
+                                          n_symbols=n_symbols,
+                                          lag_days=lag_days)
     return d["sit_flat"], d["reason"]
