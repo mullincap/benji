@@ -3203,7 +3203,7 @@ def build_dispersion_filter(
     alt_returns:    pd.DataFrame,
     threshold:      float = 0.75,
     baseline_win:   int   = 20,
-    min_symbols:    int   = 20,
+    min_symbols:    int   = 0,    # was 20; floor removed so dispersion_n sweeps below 20 actually compute (2026-04-29).
     symbol_mask_df: "Optional[pd.DataFrame]" = None,
 ) -> pd.Series:
     """

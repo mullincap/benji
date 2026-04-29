@@ -52,7 +52,17 @@ TAIL_VOL_LONG_WINDOW = 60
 DISPERSION_N = 40
 DISPERSION_BASELINE_WIN = 33
 DISPERSION_THRESHOLD = 0.66
-DISPERSION_MIN_SYMBOLS = 20
+# Minimum non-NaN return count required for cross-sectional std to be
+# computed on a given day. Was 20 historically (matched the smallest
+# DISPERSION_SYMBOLS_<N> floor), but with strict_dynamic mode the
+# universe size now follows dispersion_n directly — N=10 (or smaller)
+# is a legitimate sweep target and the 20-floor was silently stripping
+# every day from the dispersion series, effectively disabling the
+# filter. Floor removed (set to 0) so any operator-chosen N produces a
+# real signal — pandas .std() with <2 valid values returns NaN, which
+# the rolling-baseline + ratio path then handles as fail-open for that
+# specific day rather than dropping the entire day from the series.
+DISPERSION_MIN_SYMBOLS = 0
 
 # Binance FAPI (used by Dispersion)
 _BINANCE_FAPI = "https://fapi.binance.com"
