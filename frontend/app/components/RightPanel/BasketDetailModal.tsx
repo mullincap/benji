@@ -89,6 +89,60 @@ function fmtTime(ts: string): string {
   return t.slice(0, 5);
 }
 
+// Card shape mirrors the manager portfolio-detail page (page.tsx:643).
+function KpiCard({
+  label,
+  value,
+  color,
+  subtitle,
+}: {
+  label: string;
+  value: React.ReactNode;
+  color?: string;
+  subtitle?: string;
+}) {
+  return (
+    <div
+      style={{
+        flex: 1,
+        background: 'var(--bg1)',
+        border: '1px solid var(--line)',
+        borderRadius: 5,
+        padding: '14px 16px',
+        minWidth: 0,
+      }}
+    >
+      <div
+        style={{
+          fontSize: 9,
+          fontWeight: 700,
+          letterSpacing: '0.12em',
+          color: 'var(--t3)',
+          textTransform: 'uppercase',
+          marginBottom: 6,
+        }}
+      >
+        {label}
+      </div>
+      <div
+        style={{
+          fontSize: 18,
+          fontWeight: 700,
+          color: color || 'var(--t0)',
+          fontFamily: 'var(--font-space-mono), Space Mono, monospace',
+        }}
+      >
+        {value}
+      </div>
+      {subtitle && (
+        <div style={{ fontSize: 9, color: 'var(--t3)', marginTop: 4, fontFamily: 'var(--font-space-mono), Space Mono, monospace' }}>
+          {subtitle}
+        </div>
+      )}
+    </div>
+  );
+}
+
 interface ModalProps {
   jobId: string;
   date: string;
@@ -162,6 +216,71 @@ export default function BasketDetailModal({ jobId, date, onClose }: ModalProps) 
     if (!data || data.bars.length === 0) return {} as Record<string, number | null>;
     return data.bars[data.bars.length - 1].sym_returns;
   }, [data]);
+
+  // KPIs — react to the Binance/BloFin toggle. Computes leveraged
+  // portfolio metrics from the per-bar series the backend already
+  // produced for the active view, plus best/worst-symbol from the
+  // session-end per-symbol unleveraged returns.
+  const kpis = useMemo(() => {
+    if (!data || data.bars.length === 0) {
+      return {
+        finalRoi: 0,
+        peakRoi: 0,
+        peakBarTs: '',
+        maxDD: 0,
+        maxDDBarTs: '',
+        symbolsTotal: 0,
+        symbolsStopped: 0,
+        bestSym: null as { base: string; ret: number } | null,
+        worstSym: null as { base: string; ret: number } | null,
+      };
+    }
+    const portKey: 'portfolio_binance' | 'portfolio_blofin' =
+      view === 'blofin' ? 'portfolio_blofin' : 'portfolio_binance';
+    let runningPeak = 0;
+    let peakBarTs = data.bars[0].ts;
+    let maxDD = 0;
+    let maxDDBarTs = data.bars[0].ts;
+    for (const bar of data.bars) {
+      const v = bar[portKey];
+      if (v > runningPeak) {
+        runningPeak = v;
+        peakBarTs = bar.ts;
+      }
+      const dd = v - runningPeak;
+      if (dd < maxDD) {
+        maxDD = dd;
+        maxDDBarTs = bar.ts;
+      }
+    }
+    const lastBar = data.bars[data.bars.length - 1];
+    const finalRoi = lastBar[portKey];
+
+    // Best / worst per-symbol final ROI (unleveraged %)
+    let bestSym: { base: string; ret: number } | null = null;
+    let worstSym: { base: string; ret: number } | null = null;
+    let stoppedCount = 0;
+    const stopFloor = data.stop_raw_pct + 0.001; // tolerance for float compare
+    for (const sym of visibleSymbols) {
+      const v = finalRowReturns[sym];
+      if (v == null || !Number.isFinite(v)) continue;
+      if (v <= stopFloor) stoppedCount += 1;
+      if (bestSym == null || v > bestSym.ret) bestSym = { base: sym, ret: v };
+      if (worstSym == null || v < worstSym.ret) worstSym = { base: sym, ret: v };
+    }
+
+    return {
+      finalRoi,
+      peakRoi: runningPeak,
+      peakBarTs,
+      maxDD,
+      maxDDBarTs,
+      symbolsTotal: visibleSymbols.length,
+      symbolsStopped: stoppedCount,
+      bestSym,
+      worstSym,
+    };
+  }, [data, view, visibleSymbols, finalRowReturns]);
 
   // ── Render ────────────────────────────────────────────────────────────
   return (
@@ -273,6 +392,67 @@ export default function BasketDetailModal({ jobId, date, onClose }: ModalProps) 
 
         {data && !loading && (
           <>
+            {/* KPI strip — mirrors manager portfolio-detail page layout. */}
+            <div style={{ display: 'flex', gap: 10 }}>
+              {(() => {
+                const portColor = kpis.finalRoi >= 0 ? 'var(--green)' : 'var(--red)';
+                const oneXFinal = data.leverage > 0 ? kpis.finalRoi / data.leverage : kpis.finalRoi;
+                const portSubtitle = data.leverage > 0
+                  ? `${oneXFinal >= 0 ? '+' : ''}${oneXFinal.toFixed(2)}% (${data.leverage.toFixed(0)}x 1x)`
+                  : undefined;
+                const peakSubtitle = (() => {
+                  // bar timestamp like "2025-07-29T14:30:00" — extract HH:MM
+                  const t = (kpis.peakBarTs || '').replace(/Z$/, '').split('T')[1] || '';
+                  return t ? `at ${t.slice(0, 5)} UTC` : undefined;
+                })();
+                const ddSubtitle = (() => {
+                  if (kpis.maxDD === 0) return undefined;
+                  const recovery = kpis.finalRoi - kpis.maxDD;
+                  return `${recovery >= 0 ? '+' : ''}${recovery.toFixed(2)}% since`;
+                })();
+                const stoppedSubtitle = kpis.symbolsStopped > 0
+                  ? `${kpis.symbolsStopped} stopped`
+                  : 'none stopped';
+                return (
+                  <>
+                    <KpiCard
+                      label="Portfolio ROI"
+                      value={fmtPct(kpis.finalRoi, 2)}
+                      color={portColor}
+                      subtitle={portSubtitle}
+                    />
+                    <KpiCard
+                      label="Peak ROI"
+                      value={fmtPct(kpis.peakRoi, 2)}
+                      subtitle={peakSubtitle}
+                    />
+                    <KpiCard
+                      label="Max Drawdown"
+                      value={fmtPct(kpis.maxDD, 2)}
+                      color={kpis.maxDD <= -2 ? 'var(--red)' : undefined}
+                      subtitle={ddSubtitle}
+                    />
+                    <KpiCard
+                      label="Symbols"
+                      value={`${kpis.symbolsTotal - kpis.symbolsStopped} / ${kpis.symbolsTotal}`}
+                      subtitle={stoppedSubtitle}
+                    />
+                    <KpiCard
+                      label="Eff Leverage"
+                      value={`${data.leverage.toFixed(2)}x`}
+                      subtitle="deployed: 100%"
+                    />
+                    <KpiCard
+                      label="Best Symbol"
+                      value={kpis.bestSym ? kpis.bestSym.base : '—'}
+                      color={kpis.bestSym && kpis.bestSym.ret >= 0 ? 'var(--green)' : 'var(--red)'}
+                      subtitle={kpis.bestSym ? fmtPct(kpis.bestSym.ret, 2) : undefined}
+                    />
+                  </>
+                );
+              })()}
+            </div>
+
             {/* Chart */}
             <div style={{ height: 360, background: 'var(--bg0)', border: '1px solid var(--line)', borderRadius: 3, padding: 8 }}>
               <ResponsiveContainer width="100%" height="100%">
