@@ -16334,8 +16334,17 @@ export default function ResultsView({ results, jobId, startingCapital, params }:
                         const convColor = d.conviction === 'pass' ? 'var(--green)' : d.conviction === 'fail' ? 'var(--red)' : 'var(--t3)';
                         const convBg = d.conviction === 'pass' ? 'var(--green-dim)' : d.conviction === 'fail' ? 'var(--red-dim)' : 'transparent';
                         const exitLabel = d.exit_reason === 'held' ? '' : d.exit_reason === 'filtered' ? '' : d.exit_reason === 'no_entry' ? '' : d.exit_reason === 'early_exit' ? 'EXIT' : d.exit_reason.toUpperCase();
+                        const clickable = !!jobId && d.symbols.length > 0;
                         return (
-                          <tr key={date} style={{ borderBottom: '1px solid var(--line)' }}>
+                          <tr
+                            key={date}
+                            onClick={clickable ? () => setBasketModalDate(date) : undefined}
+                            title={clickable ? 'Click to open per-day basket detail' : undefined}
+                            style={{
+                              borderBottom: '1px solid var(--line)',
+                              cursor: clickable ? 'pointer' : 'default',
+                            }}
+                          >
                             <td style={{ fontSize: 10, color: 'var(--t0)', fontWeight: 700, padding: '6px 8px', whiteSpace: 'nowrap', textAlign: 'right' }}>{date}</td>
                             <td style={{ fontSize: 9, color: 'var(--t2)', padding: '6px 8px', maxWidth: 300, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={d.symbols.join(', ')}>
                               {d.symbols.length > 0 ? d.symbols.join(', ') : '—'}
