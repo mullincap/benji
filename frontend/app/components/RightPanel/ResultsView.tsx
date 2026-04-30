@@ -15029,13 +15029,16 @@ export default function ResultsView({ results, jobId, startingCapital, params }:
                                     border = 'rgba(255, 77, 77, 0.35)';
                                   }
                                 }
-                                const title = `${cell.key}${typeof r === 'number' && Number.isFinite(r) ? ` | ${r >= 0 ? '+' : ''}${r.toFixed(2)}%` : ' | no return'}`;
+                                const hasReturn = typeof r === 'number' && Number.isFinite(r);
+                                const clickable = !!jobId && hasReturn;
+                                const title = `${cell.key}${hasReturn ? ` | ${r >= 0 ? '+' : ''}${r.toFixed(2)}%` : ' | no return'}${clickable ? ' · click for basket detail' : ''}`;
                                 return (
                                   <div
                                     key={cell.key}
                                     title={title}
+                                    onClick={clickable ? () => setBasketModalDate(cell.key) : undefined}
                                     onMouseEnter={(e) => {
-                                      if (typeof r !== 'number' || !Number.isFinite(r)) return;
+                                      if (!hasReturn) return;
                                       setCalendarHover({
                                         x: e.clientX,
                                         y: e.clientY,
@@ -15043,7 +15046,7 @@ export default function ResultsView({ results, jobId, startingCapital, params }:
                                       });
                                     }}
                                     onMouseMove={(e) => {
-                                      if (typeof r !== 'number' || !Number.isFinite(r)) return;
+                                      if (!hasReturn) return;
                                       setCalendarHover((prev) => (prev
                                         ? { ...prev, x: e.clientX, y: e.clientY }
                                         : {
@@ -15065,6 +15068,7 @@ export default function ResultsView({ results, jobId, startingCapital, params }:
                                       color: 'rgba(255,255,255,0.9)',
                                       fontFamily: 'var(--font-space-mono), Space Mono, monospace',
                                       lineHeight: 1,
+                                      cursor: clickable ? 'pointer' : 'default',
                                     }}
                                   >
                                     {cell.day}
