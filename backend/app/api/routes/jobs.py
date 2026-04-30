@@ -508,11 +508,41 @@ def get_job_results(job_id: str) -> dict[str, Any]:
 
 @router.get("/{job_id}/output")
 def get_job_output(job_id: str) -> dict[str, str]:
+    """Live audit log for the simulator's STREAMING panel.
+
+    For single-variant runs (blofin_variants in {off, blofin_only}), audit
+    stdout streams into audit_output.txt directly.
+
+    For blofin_variants=both, the wrapper writes vanilla output into
+    audit_output_vanilla.txt during the vanilla pass, then BloFin output
+    into audit_output_blofin.txt during the BloFin pass, and only
+    concatenates into audit_output.txt at the very end. To keep the
+    panel populated during both passes, fall back to synthesizing from
+    the per-variant files in order, with separators.
+    """
     job_dir = Path(settings.JOBS_DIR) / job_id
-    output_path = job_dir / "audit_output.txt"
-    if not output_path.exists():
-        return {"text": ""}
-    return {"text": output_path.read_text(errors="replace")}
+    final = job_dir / "audit_output.txt"
+    if final.exists():
+        return {"text": final.read_text(errors="replace")}
+    parts: list[str] = []
+    vanilla = job_dir / "audit_output_vanilla.txt"
+    if vanilla.exists():
+        parts.append(
+            "══════════════════════════════════════════════════════════════════\n"
+            "  VANILLA PASS (no BloFin universe restriction)\n"
+            "══════════════════════════════════════════════════════════════════\n"
+        )
+        parts.append(vanilla.read_text(errors="replace"))
+    blofin = job_dir / "audit_output_blofin.txt"
+    if blofin.exists():
+        if parts:
+            parts.append(
+                "\n\n══════════════════════════════════════════════════════════════════\n"
+                "  BLOFIN PASS (universe restricted to BloFin SWAP listings)\n"
+                "══════════════════════════════════════════════════════════════════\n"
+            )
+        parts.append(blofin.read_text(errors="replace"))
+    return {"text": "".join(parts)}
 
 
 @router.post("/{job_id}/report")
