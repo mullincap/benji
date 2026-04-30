@@ -63,6 +63,12 @@ services:
       - jobs_data:/app/backend/jobs
       - /data:/data
       - /mnt/quant-data:/mnt/quant-data
+      # audit.py writes per-run dirs (run_<ts>_sh<sharpe>/) into
+      # /app/pipeline/audit_outputs_BEFORE/. Without this mount they
+      # live in the celery image's writable layer and get wiped on
+      # every rebuild — which races with mid-run audits (worker
+      # snapshots charts post-rename in _snapshot_audit_charts).
+      - audit_outputs:/app/pipeline/audit_outputs_BEFORE
     depends_on:
       redis:
         condition: service_healthy
@@ -99,3 +105,4 @@ volumes:
   redis_data:
   jobs_data:
   backend_data:
+  audit_outputs:
