@@ -16,6 +16,7 @@ import {
 
 import MetricCard from '../ui/MetricCard';
 import FilterTable from '../ui/FilterTable';
+import BasketDetailModal from './BasketDetailModal';
 import { asNum, fmtPercent2, metricColor, normalizeFilterLabel, normalizeFilterLabelCore } from '@/app/lib/format';
 
 interface ResultsViewProps {
@@ -12902,6 +12903,7 @@ export default function ResultsView({ results, jobId, startingCapital, params }:
   const [activeTab, setActiveTab] = useState<ReportTab>('summary');
   const [hideFlatDays, setHideFlatDays] = useState(false);
   const [breakdownPeriod, setBreakdownPeriod] = useState<'daily' | 'weekly' | 'monthly'>('monthly');
+  const [basketModalDate, setBasketModalDate] = useState<string | null>(null);
   const [auditOutput, setAuditOutput] = useState<string>('');
   const [outputLoading, setOutputLoading] = useState(false);
   const [outputError, setOutputError] = useState<string | null>(null);
@@ -15568,13 +15570,17 @@ export default function ResultsView({ results, jobId, startingCapital, params }:
                         const retNetColor = row.no_entry
                           ? 'var(--t1)'
                           : (row.ret_net ?? 0) >= 0 ? 'var(--green)' : 'var(--red)';
+                        const clickable = jobId && !row.no_entry && row.date;
                         return (
                           <tr
                             key={`fees-row-${row.date}-${i}`}
+                            onClick={clickable ? () => setBasketModalDate(row.date) : undefined}
+                            title={clickable ? 'Click to open per-day basket detail' : undefined}
                             style={{
                               background: bg,
                               borderBottom: '1px solid var(--line)',
                               opacity: row.no_entry ? 0.5 : 1,
+                              cursor: clickable ? 'pointer' : 'default',
                             }}
                           >
                             <td style={{ padding: '6px 8px', fontSize: 10, color: 'var(--t2)', fontFamily: 'var(--font-space-mono), Space Mono, monospace', whiteSpace: 'nowrap' }}>{row.date}</td>
@@ -16893,6 +16899,14 @@ export default function ResultsView({ results, jobId, startingCapital, params }:
             </button>
           )}
         </>
+      )}
+
+      {basketModalDate && jobId && (
+        <BasketDetailModal
+          jobId={jobId}
+          date={basketModalDate}
+          onClose={() => setBasketModalDate(null)}
+        />
       )}
     </div>
   );
