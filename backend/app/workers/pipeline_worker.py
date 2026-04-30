@@ -108,8 +108,23 @@ def _snapshot_audit_charts(job_id: str, job_dir: Path) -> int:
                     if len(parts) != 2:
                         continue
                     p = Path(parts[1].strip())
-                    if p.is_dir() and p not in run_dirs:
-                        run_dirs.append(p)
+                    if p.is_dir():
+                        if p not in run_dirs:
+                            run_dirs.append(p)
+                        continue
+                    # audit.py renames run_dir at end-of-audit by appending
+                    # `_sh<sharpe>` (e.g. run_20260430_040142 →
+                    # run_20260430_040142_sh3.646). The marker line above
+                    # was printed at startup with the pre-rename path, so
+                    # fall back to a glob on `<basename>*` in the parent.
+                    parent = p.parent
+                    if not parent.is_dir():
+                        continue
+                    matches = sorted(parent.glob(f"{p.name}*"))
+                    for m in matches:
+                        if m.is_dir() and m not in run_dirs:
+                            run_dirs.append(m)
+                            break  # first match — same start timestamp
         if not run_dirs:
             return 0
         out_dir.mkdir(parents=True, exist_ok=True)
