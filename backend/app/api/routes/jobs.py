@@ -889,34 +889,102 @@ def get_basket_detail(job_id: str, date: str):
         raise HTTPException(status_code=400, detail=f"Invalid date: {date!r}")
     target_str = target_ts.strftime("%Y-%m-%d")
 
-    # Read this job's gate report and find the row for date
+    # Read this job's gate report and find the row for date.
+    # Falls back to audit.daily_baskets DB table for older jobs that
+    # predate the gate-report-snapshot worker logic — those audits
+    # have basket data in postgres but no on-disk CSV. The DB row
+    # only carries the post-rebuild eligible basket (no drop_reasons),
+    # so we reconstruct BO/BF classification via listTime in that path.
     gate_path = Path(settings.JOBS_DIR) / job_id / "eligibility_gate_report.csv"
-    if not gate_path.exists():
-        raise HTTPException(status_code=404, detail="No gate report for this job")
-
     eligible_bases: list[str] = []
     dropped_bases: list[str] = []
     drop_reasons:  list[str] = []
     found = False
-    with gate_path.open(newline="") as f:
-        reader = _csv.DictReader(f)
-        for row in reader:
-            if (row.get("date") or "").strip() != target_str:
-                continue
-            found = True
-            eligible_bases = [s for s in (row.get("eligible") or "").split("|") if s]
-            dropped_bases  = [s for s in (row.get("dropped") or "").split("|") if s]
-            drop_reasons   = [r for r in (row.get("drop_reasons") or "").split("|") if r]
-            break
-    if not found:
-        raise HTTPException(status_code=404, detail=f"Date {target_str} not in this job's gate report")
+    csv_was_present = gate_path.exists()
+    if csv_was_present:
+        with gate_path.open(newline="") as f:
+            reader = _csv.DictReader(f)
+            for row in reader:
+                if (row.get("date") or "").strip() != target_str:
+                    continue
+                found = True
+                eligible_bases = [s for s in (row.get("eligible") or "").split("|") if s]
+                dropped_bases  = [s for s in (row.get("dropped") or "").split("|") if s]
+                drop_reasons   = [r for r in (row.get("drop_reasons") or "").split("|") if r]
+                break
 
-    non_blofin_dropped = [
-        sym for sym, reason in zip(dropped_bases, drop_reasons)
-        if reason == "not_on_blofin_at_date"
-    ]
-    blofin_basket = sorted(set(eligible_bases))
-    binance_basket = sorted(set(eligible_bases) | set(non_blofin_dropped))
+    fallback_used = False
+    if not found:
+        # DB fallback — audit.daily_baskets
+        try:
+            conn = get_worker_conn()
+            try:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        SELECT basket
+                        FROM audit.daily_baskets
+                        WHERE job_id = %s::uuid AND date = %s
+                        LIMIT 1
+                        """,
+                        (job_id, target_str),
+                    )
+                    db_row = cur.fetchone()
+            finally:
+                conn.close()
+        except Exception as e:
+            _jobs_log.warning("basket_detail: daily_baskets DB lookup failed: %s", e)
+            db_row = None
+
+        if db_row and db_row[0]:
+            eligible_bases = list(db_row[0])
+            fallback_used = True
+            found = True
+
+    if not found:
+        if csv_was_present:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Date {target_str} not in this job's gate report",
+            )
+        raise HTTPException(
+            status_code=404,
+            detail="No basket data for this job (no gate report on disk and no audit.daily_baskets row).",
+        )
+
+    if fallback_used:
+        # The DB-backed basket has no drop_reasons. Classify each symbol
+        # via listTime: bases NOT on BloFin at the target date are the
+        # implied non_blofin_dropped set. This works correctly for vanilla
+        # audits (the DB basket IS the Binance basket). For old BloFin-
+        # variant audits the DB basket is already filtered, so this path
+        # under-reports non_blofin_dropped — acceptable trade-off.
+        try:
+            import sys as _sys
+            _pdir = str(Path(settings.PIPELINE_DIR))
+            if _pdir not in _sys.path:
+                _sys.path.insert(0, _pdir)
+            from blofin_universe import (  # type: ignore[import-not-found]
+                load_blofin_universe,
+                is_listed_at,
+            )
+            _early_universe = load_blofin_universe()
+        except Exception as e:
+            _jobs_log.warning("basket_detail: BloFin universe load failed: %s", e)
+            _early_universe = {}
+        non_blofin_dropped = [
+            s for s in eligible_bases
+            if _early_universe and not is_listed_at(s, target_str, _early_universe)
+        ]
+        blofin_basket = sorted({s for s in eligible_bases if s not in non_blofin_dropped})
+        binance_basket = sorted(set(eligible_bases))
+    else:
+        non_blofin_dropped = [
+            sym for sym, reason in zip(dropped_bases, drop_reasons)
+            if reason == "not_on_blofin_at_date"
+        ]
+        blofin_basket = sorted(set(eligible_bases))
+        binance_basket = sorted(set(eligible_bases) | set(non_blofin_dropped))
 
     # Job params for session config
     params = job.get("params") or {}
@@ -1055,24 +1123,72 @@ def _compute_attribution(job_id: str, job: dict) -> dict:
     stop_raw_pct = float(params.get("stop_raw_pct", -6.0))
 
     gate_path = Path(settings.JOBS_DIR) / job_id / "eligibility_gate_report.csv"
-    if not gate_path.exists():
-        raise HTTPException(status_code=404, detail="No gate report for this job")
+    csv_present = gate_path.exists()
 
-    # BO classification comes from the gate report's drop_reasons column
-    # ('not_on_blofin_at_date'), not listTime — so no need to load the
-    # BloFin universe here. first_seen_raw is needed for ticker resolution.
+    # Build the per-day basket source. CSV path gives us drop_reasons
+    # (so we know which symbols were filtered out by BloFin filter at
+    # rebuild). DB fallback gives us only the eligible basket — for BO
+    # classification we re-derive via listTime when CSV is absent.
+    rows: list[dict] = []
+    if csv_present:
+        with gate_path.open(newline="") as f:
+            rows = list(_csv.DictReader(f))
+    else:
+        try:
+            conn = get_worker_conn()
+            try:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        SELECT date::text AS date, basket
+                        FROM audit.daily_baskets
+                        WHERE job_id = %s::uuid
+                        ORDER BY date
+                        """,
+                        (job_id,),
+                    )
+                    db_rows = cur.fetchall()
+            finally:
+                conn.close()
+        except Exception as e:
+            _jobs_log.warning("attribution: daily_baskets DB lookup failed: %s", e)
+            db_rows = []
+        if not db_rows:
+            raise HTTPException(
+                status_code=404,
+                detail="No basket data for this job (no gate report on disk and no audit.daily_baskets rows).",
+            )
+        rows = [{"date": r[0], "eligible": "|".join(r[1] or []), "dropped": "", "drop_reasons": ""}
+                for r in db_rows]
+
+    # Lazy-load BloFin universe (only needed in DB-fallback mode)
+    blofin_universe_cache: dict[str, int] | None = None
+
+    def _is_bo_via_listtime(sym: str, date_str: str) -> bool:
+        nonlocal blofin_universe_cache
+        if blofin_universe_cache is None:
+            try:
+                import sys as _sys
+                _pdir = str(Path(settings.PIPELINE_DIR))
+                if _pdir not in _sys.path:
+                    _sys.path.insert(0, _pdir)
+                from blofin_universe import (  # type: ignore[import-not-found]
+                    load_blofin_universe,
+                )
+                blofin_universe_cache = load_blofin_universe()
+            except Exception:
+                blofin_universe_cache = {}
+        if not blofin_universe_cache:
+            return False
+        from blofin_universe import is_listed_at  # type: ignore[import-not-found]
+        return not is_listed_at(sym, date_str, blofin_universe_cache)
+
     first_seen_raw = _load_first_seen_raw()
-
-    # Per-symbol roll-ups
     sym_contrib_total: dict[str, float] = {}
     sym_count: dict[str, int] = {}
     sym_is_bo: dict[str, bool] = {}
-
-    per_day = []
+    per_day: list[dict] = []
     started = _time.time()
-    with gate_path.open(newline="") as f:
-        reader = _csv.DictReader(f)
-        rows = list(reader)
 
     for row in rows:
         date = (row.get("date") or "").strip()
@@ -1081,10 +1197,20 @@ def _compute_attribution(job_id: str, job: dict) -> dict:
         eligible = [s for s in (row.get("eligible") or "").split("|") if s]
         dropped = [s for s in (row.get("dropped") or "").split("|") if s]
         drop_reasons = [r for r in (row.get("drop_reasons") or "").split("|") if r]
-        binance_only = {sym for sym, reason in zip(dropped, drop_reasons)
-                        if reason == "not_on_blofin_at_date"}
-        blofin_basket = set(eligible)
-        binance_basket = sorted(blofin_basket | binance_only)
+        if csv_present:
+            binance_only = {sym for sym, reason in zip(dropped, drop_reasons)
+                            if reason == "not_on_blofin_at_date"}
+            blofin_basket = set(eligible)
+            binance_basket = sorted(blofin_basket | binance_only)
+        else:
+            # DB fallback: classify via listTime. Note `eligible` may
+            # already be BloFin-filtered for old BloFin-variant audits;
+            # we treat the basket as Binance-equivalent and back-derive
+            # the BO subset from listTime — best we can do without
+            # drop_reasons.
+            binance_basket = sorted(set(eligible))
+            binance_only = {s for s in binance_basket if _is_bo_via_listtime(s, date)}
+            blofin_basket = set(binance_basket) - binance_only
         if not binance_basket:
             continue
 
