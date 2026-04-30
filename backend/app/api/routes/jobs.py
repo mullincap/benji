@@ -696,6 +696,331 @@ def serve_chart(job_id: str, filename: str) -> FileResponse:
 
 
 # ---------------------------------------------------------------------------
+# Per-day basket detail — diagnostic modal for the Breakdown tab
+# ---------------------------------------------------------------------------
+#
+# Returns per-symbol intraday cumulative ROI for a specific basket date,
+# plus Binance and BloFin basket lists derived from the job's eligibility
+# gate report. Used by the Breakdown tab's per-day click-to-expand modal.
+#
+# The "Binance basket" is reconstructed by union-ing the gate-report's
+# `eligible` symbols (= what the audit actually traded) with `dropped`
+# symbols whose drop_reason was "not_on_blofin_at_date" (i.e. dropped by
+# the BloFin universe filter — present in the original strategy basket
+# but unavailable on BloFin at the date). The "BloFin basket" is just
+# `eligible`.
+#
+# Per-symbol cumulative ROI: for each base in the Binance basket, query
+# market.futures_1m for 5-min closes from session-start to session-end,
+# resample / forward-fill to a fixed bar grid, then apply per-symbol
+# stop (-6% default) — same formula as
+# pipeline/rebuild_portfolio_matrix.py:apply_raw_stop. Returns
+# UNLEVERAGED per-symbol % paths so the frontend can compute portfolio
+# averages on the fly when the user toggles Binance vs BloFin.
+
+import csv as _csv
+
+_BAR_MINUTES = 5
+_N_BARS_DEFAULT = 216  # 18 hours × 12 bars/hour (06:00 → 23:55)
+
+
+def _apply_raw_stop_pct(prices: list[float], stop_raw_pct: float) -> list[float | None]:
+    """Per-symbol cumulative %% return from entry, clamped at stop_raw_pct.
+    Mirrors pipeline.rebuild_portfolio_matrix.apply_raw_stop. Returns a
+    list (None for NaN or pre-entry bars)."""
+    if not prices:
+        return []
+    p0 = prices[0]
+    if p0 is None or p0 == 0:
+        return [None] * len(prices)
+    out: list[float | None] = []
+    stopped = False
+    for p in prices:
+        if p is None:
+            out.append(None)
+            continue
+        if stopped:
+            out.append(stop_raw_pct)
+            continue
+        raw = (p / p0 - 1.0) * 100.0
+        if raw <= stop_raw_pct:
+            out.append(stop_raw_pct)
+            stopped = True
+        else:
+            out.append(raw)
+    return out
+
+
+def _to_ticker(base: str, first_seen_raw: dict[str, str]) -> str:
+    """Reconstruct the futures market symbol from a base, e.g. BTC → BTCUSDT.
+    1000RATS → 1000RATSUSDT (via first_seen_raw lookup). Mirrors
+    pipeline.rebuild_portfolio_matrix.to_ticker."""
+    raw = first_seen_raw.get(base)
+    if raw:
+        return raw
+    if base.endswith("USDT"):
+        return base
+    if base.endswith("USD"):
+        return base + "T"
+    return base + "USDT"
+
+
+def _load_first_seen_raw() -> dict[str, str]:
+    """Load BASE_DATA_DIR/symbol_first_seen.csv → {base: full_ticker}.
+    Empty dict if the file is absent."""
+    path = Path(settings.BASE_DATA_DIR) / "symbol_first_seen.csv"
+    if not path.exists():
+        return {}
+    out: dict[str, str] = {}
+    with path.open(newline="") as f:
+        reader = _csv.DictReader(f)
+        for row in reader:
+            sym_full = (row.get("symbol") or "").strip()
+            if not sym_full:
+                continue
+            base = sym_full.replace("USDT", "").replace("USDC", "")
+            out[base] = sym_full
+    return out
+
+
+def _query_futures_1m_pivot(
+    symbols: list[str],
+    t_start,
+    t_end,
+):
+    """Query market.futures_1m for prices, return {symbol: [bar_prices]}
+    after resampling to 5-min bars on a fixed grid t_start → t_end."""
+    import pandas as pd
+    if not symbols:
+        return {}, []
+    conn = get_worker_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT f.timestamp_utc, s.binance_id AS symbol, f.close AS price
+                FROM market.futures_1m f
+                JOIN market.symbols s ON s.symbol_id = f.symbol_id
+                WHERE f.source_id = 1
+                  AND f.timestamp_utc >= %s
+                  AND f.timestamp_utc <= %s
+                  AND s.binance_id = ANY(%s)
+                  AND f.close IS NOT NULL
+                ORDER BY f.timestamp_utc
+                """,
+                (
+                    pd.Timestamp(t_start).to_pydatetime(),
+                    pd.Timestamp(t_end).to_pydatetime(),
+                    list(symbols),
+                ),
+            )
+            rows = cur.fetchall()
+    finally:
+        conn.close()
+
+    if not rows:
+        return {}, []
+
+    df = pd.DataFrame(rows, columns=["timestamp_utc", "symbol", "price"])
+    df["timestamp_utc"] = pd.to_datetime(df["timestamp_utc"])
+    if df["timestamp_utc"].dt.tz is not None:
+        df["timestamp_utc"] = df["timestamp_utc"].dt.tz_localize(None)
+    pivot = df.pivot_table(
+        index="timestamp_utc", columns="symbol",
+        values="price", aggfunc="last",
+    )
+    bar_grid = pd.date_range(
+        start=pd.Timestamp(t_start),
+        end=pd.Timestamp(t_end) - pd.Timedelta(minutes=_BAR_MINUTES),
+        freq=f"{_BAR_MINUTES}min",
+    )
+    resampled = (
+        pivot.resample(f"{_BAR_MINUTES}min").last()
+              .reindex(bar_grid)
+              .ffill().bfill()
+    )
+    out: dict[str, list[float | None]] = {}
+    for sym in resampled.columns:
+        col_vals = resampled[sym].tolist()
+        out[sym] = [None if (v is None or (isinstance(v, float) and v != v)) else float(v) for v in col_vals]
+    return out, [ts.isoformat() for ts in bar_grid]
+
+
+@router.get("/{job_id}/baskets/{date}")
+def get_basket_detail(job_id: str, date: str):
+    """Per-symbol intraday data for a single basket date.
+
+    Response shape:
+      {
+        "job_id":             str,
+        "date":               "YYYY-MM-DD",
+        "session_start":      "YYYY-MM-DDTHH:MM:SS",
+        "leverage":           4.0,
+        "stop_raw_pct":       -6.0,
+        "binance_basket":     ["BTC", "ETH", ...],   # what the strategy intended
+        "blofin_basket":      ["BTC", "ETH", ...],   # subset, BloFin-tradeable
+        "non_blofin_dropped": ["FARTCOIN", ...],     # in Binance but not BloFin
+        "bar_timestamps":     ["2025-02-13T06:00:00", ...],
+        "bars":               [
+          {
+            "ts": "2025-02-13T06:00:00",
+            "sym_returns": {"BTC": 0.0, "ETH": 0.0, ...},  # unleveraged %
+            "portfolio_binance": 0.0,                      # leveraged %
+            "portfolio_blofin": 0.0,                       # leveraged %
+          }, ...
+        ],
+        "symbols": [
+          {"base": "BTC", "in_binance_basket": true, "in_blofin_basket": true,
+           "blofin_listed_at_date": true, "list_ms": 1673517600000, "list_date": "2023-01-12"},
+          ...
+        ]
+      }
+    """
+    job = get_job(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    # Validate date
+    try:
+        import pandas as pd
+        target_ts = pd.Timestamp(date).normalize()
+    except Exception:
+        raise HTTPException(status_code=400, detail=f"Invalid date: {date!r}")
+    target_str = target_ts.strftime("%Y-%m-%d")
+
+    # Read this job's gate report and find the row for date
+    gate_path = Path(settings.JOBS_DIR) / job_id / "eligibility_gate_report.csv"
+    if not gate_path.exists():
+        raise HTTPException(status_code=404, detail="No gate report for this job")
+
+    eligible_bases: list[str] = []
+    dropped_bases: list[str] = []
+    drop_reasons:  list[str] = []
+    found = False
+    with gate_path.open(newline="") as f:
+        reader = _csv.DictReader(f)
+        for row in reader:
+            if (row.get("date") or "").strip() != target_str:
+                continue
+            found = True
+            eligible_bases = [s for s in (row.get("eligible") or "").split("|") if s]
+            dropped_bases  = [s for s in (row.get("dropped") or "").split("|") if s]
+            drop_reasons   = [r for r in (row.get("drop_reasons") or "").split("|") if r]
+            break
+    if not found:
+        raise HTTPException(status_code=404, detail=f"Date {target_str} not in this job's gate report")
+
+    non_blofin_dropped = [
+        sym for sym, reason in zip(dropped_bases, drop_reasons)
+        if reason == "not_on_blofin_at_date"
+    ]
+    blofin_basket = sorted(set(eligible_bases))
+    binance_basket = sorted(set(eligible_bases) | set(non_blofin_dropped))
+
+    # Job params for session config
+    params = job.get("params") or {}
+    start_hour = int(params.get("deployment_start_hour", 6))
+    leverage = float(params.get("leverage", 4.0))
+    stop_raw_pct = float(params.get("stop_raw_pct", -6.0))
+
+    # Bar grid
+    session_start = target_ts + pd.Timedelta(hours=start_hour)
+    t_start = session_start
+    t_end = session_start + pd.Timedelta(minutes=_BAR_MINUTES * _N_BARS_DEFAULT)
+
+    # Resolve symbols → market tickers (BTC → BTCUSDT, 1000RATS → 1000RATSUSDT)
+    first_seen_raw = _load_first_seen_raw()
+    sym_to_ticker = {b: _to_ticker(b, first_seen_raw) for b in binance_basket}
+    ticker_to_sym = {v: k for k, v in sym_to_ticker.items()}
+
+    # Query prices
+    sym_prices, bar_timestamps = _query_futures_1m_pivot(
+        symbols=list(sym_to_ticker.values()),
+        t_start=t_start,
+        t_end=t_end,
+    )
+
+    # Compute per-symbol cumulative ROI with stop applied
+    sym_returns_per_bar: dict[str, list[float | None]] = {}
+    for ticker, prices in sym_prices.items():
+        base = ticker_to_sym.get(ticker)
+        if not base:
+            continue
+        sym_returns_per_bar[base] = _apply_raw_stop_pct(prices, stop_raw_pct)
+
+    # Build bars[] array with per-bar sym_returns + portfolio aggregates
+    n_bars = len(bar_timestamps)
+    bars_out = []
+    for i in range(n_bars):
+        sym_at_bar = {
+            base: vals[i] for base, vals in sym_returns_per_bar.items()
+            if i < len(vals)
+        }
+        valid_b = [v for sym, v in sym_at_bar.items()
+                   if sym in binance_basket and v is not None]
+        valid_bf = [v for sym, v in sym_at_bar.items()
+                    if sym in blofin_basket and v is not None]
+        port_b = (sum(valid_b) / len(valid_b) * leverage) if valid_b else 0.0
+        port_bf = (sum(valid_bf) / len(valid_bf) * leverage) if valid_bf else 0.0
+        bars_out.append({
+            "ts": bar_timestamps[i],
+            "sym_returns": sym_at_bar,
+            "portfolio_binance": port_b,
+            "portfolio_blofin": port_bf,
+        })
+
+    # BloFin universe metadata (listTime per base)
+    universe = {}
+    try:
+        # Same-process import to avoid subprocess overhead
+        import sys as _sys
+        _pipeline_dir = str(Path(settings.PIPELINE_DIR))
+        if _pipeline_dir not in _sys.path:
+            _sys.path.insert(0, _pipeline_dir)
+        from blofin_universe import (  # type: ignore[import-not-found]
+            load_blofin_universe,
+            is_listed_at,
+        )
+        universe = load_blofin_universe()
+    except Exception as e:
+        _jobs_log.warning("basket_detail: BloFin universe load failed: %s", e)
+        universe = {}
+
+    sym_meta = []
+    for base in binance_basket:
+        list_ms = universe.get(base) if universe else None
+        listed_at_date = bool(universe) and (
+            is_listed_at(base, target_str, universe) if universe else False
+        )
+        list_date_iso = None
+        if list_ms:
+            list_date_iso = pd.Timestamp(list_ms, unit="ms", tz="UTC").strftime("%Y-%m-%d")
+        sym_meta.append({
+            "base": base,
+            "in_binance_basket": base in binance_basket,
+            "in_blofin_basket":  base in blofin_basket,
+            "blofin_listed_at_date": listed_at_date,
+            "list_ms": list_ms,
+            "list_date": list_date_iso,
+        })
+
+    return {
+        "job_id":               job_id,
+        "date":                 target_str,
+        "session_start":        session_start.isoformat(),
+        "bar_minutes":          _BAR_MINUTES,
+        "leverage":             leverage,
+        "stop_raw_pct":         stop_raw_pct,
+        "binance_basket":       binance_basket,
+        "blofin_basket":        blofin_basket,
+        "non_blofin_dropped":   sorted(non_blofin_dropped),
+        "bar_timestamps":       bar_timestamps,
+        "bars":                 bars_out,
+        "symbols":              sym_meta,
+    }
+
+
+# ---------------------------------------------------------------------------
 # Folder endpoints
 # ---------------------------------------------------------------------------
 
