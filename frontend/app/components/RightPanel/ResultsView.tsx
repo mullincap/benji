@@ -16931,6 +16931,7 @@ export default function ResultsView({ results, jobId, startingCapital, params }:
         <BasketDetailModal
           jobId={jobId}
           date={basketModalDate}
+          filter={selectedFilter || null}
           onClose={() => setBasketModalDate(null)}
         />
       )}

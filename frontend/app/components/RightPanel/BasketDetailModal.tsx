@@ -58,6 +58,14 @@ interface BasketDetail {
   bar_timestamps: string[];
   bars: Bar[];
   symbols: SymbolMeta[];
+  // Audit-canonical fields. Present when the modal is opened with a
+  // filter prop and that filter has a fees_table row for `date`. These
+  // mirror the equity-curve / monthly-heatmap / fees-panel for the
+  // same filter+date so all four views agree.
+  audit_filter_label?: string | null;
+  audit_daily_return_pct?: number | null;  // e.g. -9.01 for -9.01%
+  audit_no_entry?: boolean | null;
+  audit_no_entry_reason?: string | null;   // "filter" | "conviction_gate"
 }
 
 const PALETTE = [
@@ -146,10 +154,14 @@ function KpiCard({
 interface ModalProps {
   jobId: string;
   date: string;
+  /** Currently-selected filter label (e.g. "A - Tail Guardrail"). When
+   *  passed, the modal shows the audit-canonical daily return for that
+   *  filter as the headline KPI, matching the equity curve. */
+  filter?: string | null;
   onClose: () => void;
 }
 
-export default function BasketDetailModal({ jobId, date, onClose }: ModalProps) {
+export default function BasketDetailModal({ jobId, date, filter, onClose }: ModalProps) {
   const [data, setData] = useState<BasketDetail | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -161,13 +173,14 @@ export default function BasketDetailModal({ jobId, date, onClose }: ModalProps) 
     setError(null);
     setData(null);
     const apiBase = process.env.NEXT_PUBLIC_API_BASE || '';
-    fetch(`${apiBase}/api/jobs/${jobId}/baskets/${date}`)
+    const qs = filter ? `?filter=${encodeURIComponent(filter)}` : '';
+    fetch(`${apiBase}/api/jobs/${jobId}/baskets/${date}${qs}`)
       .then((r) => (r.ok ? r.json() : r.text().then((t) => Promise.reject(`HTTP ${r.status}: ${t}`))))
       .then((d) => { if (!cancelled) setData(d as BasketDetail); })
       .catch((e) => { if (!cancelled) setError(String(e)); })
       .finally(() => { if (!cancelled) setLoading(false); });
     return () => { cancelled = true; };
-  }, [jobId, date]);
+  }, [jobId, date, filter]);
 
   // Esc to close
   useEffect(() => {
@@ -282,6 +295,22 @@ export default function BasketDetailModal({ jobId, date, onClose }: ModalProps) 
     };
   }, [data, view, visibleSymbols, finalRowReturns]);
 
+  // Audit-canonical daily return (from metrics.fees_tables_by_filter).
+  // When present, this is the source of truth — same number the equity
+  // curve, monthly heatmap, and fees panel all read. The basket-aggregate
+  // KPI is shown as a secondary "if no exits had fired" reference.
+  const auditCanonical = useMemo(() => {
+    if (!data) return null;
+    const r = data.audit_daily_return_pct;
+    if (typeof r !== 'number' || !Number.isFinite(r)) return null;
+    return {
+      retNetPct: r,
+      noEntry: data.audit_no_entry === true,
+      noEntryReason: data.audit_no_entry_reason || null,
+      filterLabel: data.audit_filter_label || null,
+    };
+  }, [data]);
+
   // ── Render ────────────────────────────────────────────────────────────
   return (
     <div
@@ -392,14 +421,24 @@ export default function BasketDetailModal({ jobId, date, onClose }: ModalProps) 
 
         {data && !loading && (
           <>
-            {/* KPI strip — mirrors manager portfolio-detail page layout. */}
+            {/* KPI strip — mirrors manager portfolio-detail page layout.
+                When audit-canonical data is available, Portfolio ROI uses
+                the audit's reported daily return (matches equity curve /
+                heatmap / fees panel). Otherwise falls back to the naive
+                basket aggregate. */}
             <div style={{ display: 'flex', gap: 10 }}>
               {(() => {
-                const portColor = kpis.finalRoi >= 0 ? 'var(--green)' : 'var(--red)';
-                const oneXFinal = data.leverage > 0 ? kpis.finalRoi / data.leverage : kpis.finalRoi;
-                const portSubtitle = data.leverage > 0
-                  ? `${oneXFinal >= 0 ? '+' : ''}${oneXFinal.toFixed(2)}% (${data.leverage.toFixed(0)}x 1x)`
-                  : undefined;
+                const useCanonical = auditCanonical !== null;
+                const headlineRoi = useCanonical ? auditCanonical!.retNetPct : kpis.finalRoi;
+                const portColor = headlineRoi >= 0 ? 'var(--green)' : 'var(--red)';
+                const oneXFinal = data.leverage > 0 ? headlineRoi / data.leverage : headlineRoi;
+                const portSubtitle = useCanonical
+                  ? (auditCanonical!.noEntry
+                      ? `SIT-FLAT (${auditCanonical!.noEntryReason || 'no entry'})`
+                      : `audit · ${oneXFinal >= 0 ? '+' : ''}${oneXFinal.toFixed(2)}% (${data.leverage.toFixed(0)}x 1x)`)
+                  : (data.leverage > 0
+                      ? `${oneXFinal >= 0 ? '+' : ''}${oneXFinal.toFixed(2)}% (${data.leverage.toFixed(0)}x 1x)`
+                      : undefined);
                 const peakSubtitle = (() => {
                   // bar timestamp like "2025-07-29T14:30:00" — extract HH:MM
                   const t = (kpis.peakBarTs || '').replace(/Z$/, '').split('T')[1] || '';
@@ -417,7 +456,7 @@ export default function BasketDetailModal({ jobId, date, onClose }: ModalProps) 
                   <>
                     <KpiCard
                       label="Portfolio ROI"
-                      value={fmtPct(kpis.finalRoi, 2)}
+                      value={fmtPct(headlineRoi, 2)}
                       color={portColor}
                       subtitle={portSubtitle}
                     />
@@ -547,6 +586,18 @@ export default function BasketDetailModal({ jobId, date, onClose }: ModalProps) 
                 </ComposedChart>
               </ResponsiveContainer>
             </div>
+
+            {auditCanonical && (
+              <div style={{ fontSize: 9, color: 'var(--t3)', textAlign: 'right', marginTop: -6, fontStyle: 'italic' }}>
+                Chart's white line is the intraday basket aggregate (no portfolio-level exits applied).
+                Audit's reported daily return —
+                <span style={{ color: pctColor(auditCanonical.retNetPct), fontWeight: 700, marginLeft: 4 }}>
+                  {fmtPct(auditCanonical.retNetPct, 2)}
+                </span>
+                {auditCanonical.filterLabel ? ` · ${auditCanonical.filterLabel}` : ''}
+                {' '}— is shown above (matches equity curve / heatmap / fees panel).
+              </div>
+            )}
 
             {/* Symbol summary row */}
             <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, fontSize: 10 }}>

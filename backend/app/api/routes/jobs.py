@@ -848,8 +848,18 @@ def _query_futures_1m_pivot(
 
 
 @router.get("/{job_id}/baskets/{date}")
-def get_basket_detail(job_id: str, date: str):
+def get_basket_detail(job_id: str, date: str, filter: str | None = None):
     """Per-symbol intraday data for a single basket date.
+
+    The optional `filter` query param (e.g. "A - Tail Guardrail") makes the
+    response carry the audit's canonical daily return for that filter+date,
+    sourced from `metrics.fees_tables_by_filter` — the same source the fees
+    panel reads. The frontend uses this for the Portfolio ROI KPI so the
+    modal stays consistent with the equity curve / monthly heatmap / fees
+    panel (all four read the same simulation output).
+
+    Without the param the canonical fields come back null and the modal
+    falls back to the naive intraday basket aggregate.
 
     Response shape:
       {
@@ -1096,19 +1106,60 @@ def get_basket_detail(job_id: str, date: str):
             "list_date": list_date_iso,
         })
 
+    # Audit-canonical daily return for this filter+date (from the same
+    # simulation pass that drives the equity curve, monthly heatmap, and
+    # fees panel). When filter is None or no matching row is found, these
+    # come back None and the frontend falls back to the naive intraday
+    # basket aggregate. ret_net is "%", e.g. -9.01 for a -9.01% day.
+    audit_daily_return_pct: float | None = None
+    audit_no_entry: bool | None = None
+    audit_no_entry_reason: str | None = None
+    audit_filter_label: str | None = None
+    if filter:
+        m = (job.get("results") or {}).get("metrics") or {}
+        fees_by_filter = m.get("fees_tables_by_filter") or {}
+        # Tolerant lookup: exact match first, then case-insensitive whitespace-normalized.
+        rows = fees_by_filter.get(filter)
+        if rows is None and isinstance(fees_by_filter, dict):
+            wanted = " ".join(filter.split()).lower()
+            for k, v in fees_by_filter.items():
+                if " ".join(str(k).split()).lower() == wanted:
+                    rows = v
+                    audit_filter_label = k
+                    break
+        else:
+            audit_filter_label = filter
+        if isinstance(rows, list):
+            for r in rows:
+                if isinstance(r, dict) and (r.get("date") or "") == target_str:
+                    rn = r.get("ret_net")
+                    if isinstance(rn, (int, float)):
+                        audit_daily_return_pct = float(rn)
+                    ne = r.get("no_entry")
+                    if isinstance(ne, bool):
+                        audit_no_entry = ne
+                    ner = r.get("no_entry_reason")
+                    if isinstance(ner, str):
+                        audit_no_entry_reason = ner
+                    break
+
     return {
-        "job_id":               job_id,
-        "date":                 target_str,
-        "session_start":        session_start.isoformat(),
-        "bar_minutes":          _BAR_MINUTES,
-        "leverage":             leverage,
-        "stop_raw_pct":         stop_raw_pct,
-        "binance_basket":       binance_basket,
-        "blofin_basket":        blofin_basket,
-        "non_blofin_dropped":   sorted(non_blofin_dropped),
-        "bar_timestamps":       bar_timestamps,
-        "bars":                 bars_out,
-        "symbols":              sym_meta,
+        "job_id":                   job_id,
+        "date":                     target_str,
+        "session_start":            session_start.isoformat(),
+        "bar_minutes":              _BAR_MINUTES,
+        "leverage":                 leverage,
+        "stop_raw_pct":             stop_raw_pct,
+        "binance_basket":           binance_basket,
+        "blofin_basket":            blofin_basket,
+        "non_blofin_dropped":       sorted(non_blofin_dropped),
+        "bar_timestamps":           bar_timestamps,
+        "bars":                     bars_out,
+        "symbols":                  sym_meta,
+        "audit_filter_label":       audit_filter_label,
+        "audit_daily_return_pct":   audit_daily_return_pct,
+        "audit_no_entry":           audit_no_entry,
+        "audit_no_entry_reason":    audit_no_entry_reason,
     }
 
 
