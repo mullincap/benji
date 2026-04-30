@@ -915,7 +915,8 @@ def get_basket_detail(job_id: str, date: str):
 
     fallback_used = False
     if not found:
-        # DB fallback — audit.daily_baskets
+        # Fallback 1 — audit.daily_baskets (DB-backed, populated by the
+        # simulator celery worker; nightly cron audits don't write here).
         try:
             conn = get_worker_conn()
             try:
@@ -942,6 +943,24 @@ def get_basket_detail(job_id: str, date: str):
             found = True
 
     if not found:
+        # Fallback 2 — metrics.daily_portfolio in job.json. Always present
+        # for completed audits (written by audit.py at end-of-run regardless
+        # of which celery path triggered the audit). Each entry is a dict:
+        #   {symbols, filter, filter_name, conviction, raw_roi,
+        #    strat_roi, exit_reason}
+        # The 'symbols' list IS the day's basket as evaluated by the audit.
+        m = (job.get("results") or {}).get("metrics") or {}
+        daily_portfolio = m.get("daily_portfolio") or {}
+        if isinstance(daily_portfolio, dict):
+            entry = daily_portfolio.get(target_str)
+            if isinstance(entry, dict):
+                syms = entry.get("symbols") or []
+                if syms:
+                    eligible_bases = list(syms)
+                    fallback_used = True
+                    found = True
+
+    if not found:
         if csv_was_present:
             raise HTTPException(
                 status_code=404,
@@ -949,7 +968,11 @@ def get_basket_detail(job_id: str, date: str):
             )
         raise HTTPException(
             status_code=404,
-            detail="No basket data for this job (no gate report on disk and no audit.daily_baskets row).",
+            detail=(
+                f"No basket data for this job on {target_str}. Tried: "
+                "gate-report CSV (job_dir), audit.daily_baskets (DB), "
+                "metrics.daily_portfolio (job.json)."
+            ),
         )
 
     if fallback_used:
@@ -1134,6 +1157,8 @@ def _compute_attribution(job_id: str, job: dict) -> dict:
         with gate_path.open(newline="") as f:
             rows = list(_csv.DictReader(f))
     else:
+        # Fallback 1 — audit.daily_baskets (DB)
+        db_rows: list = []
         try:
             conn = get_worker_conn()
             try:
@@ -1153,13 +1178,35 @@ def _compute_attribution(job_id: str, job: dict) -> dict:
         except Exception as e:
             _jobs_log.warning("attribution: daily_baskets DB lookup failed: %s", e)
             db_rows = []
-        if not db_rows:
+        if db_rows:
+            rows = [
+                {"date": r[0], "eligible": "|".join(r[1] or []),
+                 "dropped": "", "drop_reasons": ""}
+                for r in db_rows
+            ]
+        else:
+            # Fallback 2 — metrics.daily_portfolio in job.json (always
+            # written by audit.py at end-of-run; the only universally
+            # available source for nightly-cron audits).
+            m = (job.get("results") or {}).get("metrics") or {}
+            daily_portfolio = m.get("daily_portfolio") or {}
+            if isinstance(daily_portfolio, dict):
+                rows = [
+                    {"date": date_str,
+                     "eligible": "|".join((entry or {}).get("symbols") or []),
+                     "dropped": "",
+                     "drop_reasons": ""}
+                    for date_str, entry in daily_portfolio.items()
+                    if isinstance(entry, dict) and (entry.get("symbols") or [])
+                ]
+        if not rows:
             raise HTTPException(
                 status_code=404,
-                detail="No basket data for this job (no gate report on disk and no audit.daily_baskets rows).",
+                detail=(
+                    "No basket data for this job. Tried: gate-report CSV, "
+                    "audit.daily_baskets DB, metrics.daily_portfolio."
+                ),
             )
-        rows = [{"date": r[0], "eligible": "|".join(r[1] or []), "dropped": "", "drop_reasons": ""}
-                for r in db_rows]
 
     # Lazy-load BloFin universe (only needed in DB-fallback mode)
     blofin_universe_cache: dict[str, int] | None = None
