@@ -97,6 +97,16 @@ function parseDateLike(v: XValue | undefined): Date | null {
   if (v === undefined || v === null) return null;
   if (v instanceof Date && !Number.isNaN(v.getTime())) return v;
   if (typeof v === 'string') {
+    // YYYY-MM-DD strings (audit's fees_date format) must be parsed as
+    // local-midnight, not UTC. `new Date("2026-04-09")` parses as UTC
+    // midnight, which in negative-UTC timezones (e.g. EDT) shifts back
+    // to the prior day — causing the calendar heatmap to mislabel each
+    // tile by one day. Audit dates are trading-day labels, not UTC
+    // instants, so local parsing is the correct interpretation.
+    const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(v);
+    if (m) {
+      return new Date(parseInt(m[1], 10), parseInt(m[2], 10) - 1, parseInt(m[3], 10));
+    }
     const d = new Date(v);
     return Number.isNaN(d.getTime()) ? null : d;
   }
