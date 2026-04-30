@@ -1,3 +1,4 @@
+import json
 import logging
 import subprocess
 import uuid
@@ -1018,6 +1019,220 @@ def get_basket_detail(job_id: str, date: str):
         "bars":                 bars_out,
         "symbols":              sym_meta,
     }
+
+
+# ---------------------------------------------------------------------------
+# Per-symbol contribution attribution — BO vs BF
+# ---------------------------------------------------------------------------
+#
+# Decomposes the audit's daily portfolio return into per-symbol
+# contributions, then aggregates by category:
+#   binance_only  — symbols dropped on BloFin (drop_reason='not_on_blofin_at_date')
+#   blofin       — symbols on both Binance and BloFin (the BloFin-tradeable subset)
+#
+# Each symbol's daily contribution to the leveraged portfolio return:
+#   contribution = (symbol_cumulative_pct / N) * leverage
+# where N is the day's basket size. These contributions sum to the
+# day's leveraged return — the same formula the audit uses to build
+# the portfolio matrix.
+#
+# Computation is ~30s for a 14-month audit (440 daily SQL queries on
+# market.futures_1m). Result is cached as JSON in
+# job_dir/attribution.json — subsequent calls return instantly.
+
+import time as _time
+
+ATTRIBUTION_CACHE_NAME = "attribution.json"
+
+
+def _compute_attribution(job_id: str, job: dict) -> dict:
+    """The hot loop. Returns a serializable dict ready for the API."""
+    import pandas as pd
+
+    params = job.get("params") or {}
+    start_hour = int(params.get("deployment_start_hour", 6))
+    leverage = float(params.get("leverage", 4.0))
+    stop_raw_pct = float(params.get("stop_raw_pct", -6.0))
+
+    gate_path = Path(settings.JOBS_DIR) / job_id / "eligibility_gate_report.csv"
+    if not gate_path.exists():
+        raise HTTPException(status_code=404, detail="No gate report for this job")
+
+    # BO classification comes from the gate report's drop_reasons column
+    # ('not_on_blofin_at_date'), not listTime — so no need to load the
+    # BloFin universe here. first_seen_raw is needed for ticker resolution.
+    first_seen_raw = _load_first_seen_raw()
+
+    # Per-symbol roll-ups
+    sym_contrib_total: dict[str, float] = {}
+    sym_count: dict[str, int] = {}
+    sym_is_bo: dict[str, bool] = {}
+
+    per_day = []
+    started = _time.time()
+    with gate_path.open(newline="") as f:
+        reader = _csv.DictReader(f)
+        rows = list(reader)
+
+    for row in rows:
+        date = (row.get("date") or "").strip()
+        if not date:
+            continue
+        eligible = [s for s in (row.get("eligible") or "").split("|") if s]
+        dropped = [s for s in (row.get("dropped") or "").split("|") if s]
+        drop_reasons = [r for r in (row.get("drop_reasons") or "").split("|") if r]
+        binance_only = {sym for sym, reason in zip(dropped, drop_reasons)
+                        if reason == "not_on_blofin_at_date"}
+        blofin_basket = set(eligible)
+        binance_basket = sorted(blofin_basket | binance_only)
+        if not binance_basket:
+            continue
+
+        target_ts = pd.Timestamp(date).normalize()
+        session_start = target_ts + pd.Timedelta(hours=start_hour)
+        t_end = session_start + pd.Timedelta(minutes=_BAR_MINUTES * _N_BARS_DEFAULT)
+        sym_to_ticker = {b: _to_ticker(b, first_seen_raw) for b in binance_basket}
+        sym_prices, _ts_grid = _query_futures_1m_pivot(
+            symbols=list(sym_to_ticker.values()),
+            t_start=session_start,
+            t_end=t_end,
+        )
+        ticker_to_sym = {v: k for k, v in sym_to_ticker.items()}
+        sym_final_pct: dict[str, float] = {}
+        for ticker, prices in sym_prices.items():
+            base = ticker_to_sym.get(ticker)
+            if not base:
+                continue
+            rets = _apply_raw_stop_pct(prices, stop_raw_pct)
+            if rets and rets[-1] is not None:
+                sym_final_pct[base] = float(rets[-1])
+
+        valid = [(s, v) for s, v in sym_final_pct.items() if v is not None]
+        if not valid:
+            continue
+        n = len(valid)
+        bo_contrib = sum(v for s, v in valid if s in binance_only) / n * leverage / 100
+        bf_contrib = sum(v for s, v in valid if s in blofin_basket) / n * leverage / 100
+        daily_ret = bo_contrib + bf_contrib
+
+        for s, v in valid:
+            sym_contrib_total[s] = sym_contrib_total.get(s, 0.0) + v / n * leverage / 100
+            sym_count[s] = sym_count.get(s, 0) + 1
+            sym_is_bo[s] = s in binance_only
+
+        per_day.append({
+            "date": date,
+            "n_binance": n,
+            "n_bo": sum(1 for s, _ in valid if s in binance_only),
+            "n_bf": sum(1 for s, _ in valid if s in blofin_basket),
+            "daily_ret": daily_ret,
+            "bo_contrib": bo_contrib,
+            "bf_contrib": bf_contrib,
+        })
+
+    n_days = len(per_day)
+    total_pp = sum(r["daily_ret"] for r in per_day)
+    bo_pp = sum(r["bo_contrib"] for r in per_day)
+    bf_pp = sum(r["bf_contrib"] for r in per_day)
+
+    # Compounded counterfactual
+    eq_actual = 1.0
+    eq_no_bo = 1.0
+    for r in per_day:
+        eq_actual *= (1 + r["daily_ret"])
+        eq_no_bo *= (1 + r["bf_contrib"])
+
+    profit_actual = eq_actual - 1
+    profit_no_bo = eq_no_bo - 1
+    bo_share_compounded = (
+        (profit_actual - profit_no_bo) / profit_actual
+        if profit_actual > 0 else None
+    )
+
+    # Build symbol leaderboard
+    symbols_ordered = sorted(sym_contrib_total.items(), key=lambda kv: -kv[1])
+    bo_only_total = sum(c for s, c in symbols_ordered if sym_is_bo.get(s, False))
+
+    cum = 0.0
+    bo_leaderboard = []
+    for s, c in symbols_ordered:
+        if not sym_is_bo.get(s, False):
+            continue
+        cum += c
+        bo_leaderboard.append({
+            "base": s,
+            "days": sym_count[s],
+            "contrib_pp": c * 100,
+            "cum_share": (cum / bo_only_total) if bo_only_total else None,
+        })
+
+    bf_leaderboard = []
+    for s, c in symbols_ordered:
+        if sym_is_bo.get(s, False):
+            continue
+        bf_leaderboard.append({
+            "base": s,
+            "days": sym_count[s],
+            "contrib_pp": c * 100,
+        })
+
+    elapsed = _time.time() - started
+
+    return {
+        "job_id": job_id,
+        "computed_at": int(_time.time()),
+        "elapsed_sec": round(elapsed, 2),
+        "n_days": n_days,
+        "leverage": leverage,
+        "stop_raw_pct": stop_raw_pct,
+        "totals": {
+            "total_pp": total_pp * 100,
+            "from_blofin_tradeable_pp": bf_pp * 100,
+            "from_binance_only_pp": bo_pp * 100,
+            "bo_pct_of_total": (bo_pp / total_pp) if total_pp else None,
+        },
+        "compounded": {
+            "actual_equity": eq_actual,
+            "no_bo_equity": eq_no_bo,
+            "actual_profit_pct": profit_actual * 100,
+            "no_bo_profit_pct": profit_no_bo * 100,
+            "bo_share_of_compounded_profit": bo_share_compounded,
+        },
+        "bo_total_pp": bo_only_total * 100,
+        "bo_count": len(bo_leaderboard),
+        "bo_leaderboard": bo_leaderboard,
+        "bf_leaderboard": bf_leaderboard,
+        "per_day": per_day,  # let frontend draw a cumulative-contribution chart
+    }
+
+
+@router.get("/{job_id}/attribution")
+def get_attribution(job_id: str, refresh: bool = False) -> dict:
+    """Per-symbol contribution analysis: BO vs BF.
+
+    First call computes (~30s for a 14-month audit). Result cached at
+    job_dir/attribution.json — subsequent calls return instantly.
+    Pass ?refresh=true to force a recompute.
+    """
+    job = get_job(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    cache_path = Path(settings.JOBS_DIR) / job_id / ATTRIBUTION_CACHE_NAME
+    if cache_path.exists() and not refresh:
+        try:
+            return {**json.loads(cache_path.read_text()), "from_cache": True}
+        except Exception:
+            # Fall through to recompute on parse error
+            pass
+
+    result = _compute_attribution(job_id, job)
+    try:
+        cache_path.write_text(json.dumps(result))
+    except Exception:
+        # Best-effort cache write
+        pass
+    return {**result, "from_cache": False}
 
 
 # ---------------------------------------------------------------------------

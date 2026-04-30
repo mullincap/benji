@@ -17,6 +17,7 @@ import {
 import MetricCard from '../ui/MetricCard';
 import FilterTable from '../ui/FilterTable';
 import BasketDetailModal from './BasketDetailModal';
+import AttributionPanel from './AttributionPanel';
 import { asNum, fmtPercent2, metricColor, normalizeFilterLabel, normalizeFilterLabelCore } from '@/app/lib/format';
 
 interface ResultsViewProps {
@@ -14658,6 +14659,18 @@ export default function ResultsView({ results, jobId, startingCapital, params }:
             </summary>
             <div style={{ marginTop: 8 }}>
               <FilterConfluencePanel filters={mergedFilters} />
+            </div>
+          </details>
+
+          <details
+            open
+            style={{ background: 'var(--bg2)', border: '1px solid var(--line)', borderRadius: 3, padding: '8px 10px' }}
+          >
+            <summary style={{ cursor: 'pointer', fontSize: 9, color: 'var(--t3)', textTransform: 'uppercase', letterSpacing: '0.12em', fontWeight: 700 }}>
+              Attribution — Binance-Only vs BloFin-Tradeable
+            </summary>
+            <div style={{ marginTop: 8 }}>
+              {jobId && <AttributionPanel jobId={jobId} />}
             </div>
           </details>
 
