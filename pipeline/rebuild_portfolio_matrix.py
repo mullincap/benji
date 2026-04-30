@@ -125,6 +125,15 @@ STOP_RAW_PCT       = float(os.environ.get("STOP_RAW_PCT", "-6"))    # per-symbol
 BLOFIN_UNIVERSE_ENABLED = False
 BLOFIN_SNAPSHOT_PATH    = ""    # optional pre-saved {base, list_ms, list_date_utc} CSV
 
+# Binance-exclusive universe restriction — mirror of the BloFin filter,
+# inverted. When BINANCE_EXCLUSIVE_ENABLED is True, each day's basket is
+# restricted to symbols whose BloFin listTime > deploy_date (or that are
+# never listed on BloFin) — i.e. the "Binance-only" subset that is NOT
+# tradeable on BloFin at the time. Used to test whether the strategy's
+# alpha persists when the basket consists only of newly-listed-on-Binance,
+# not-yet-on-BloFin names. Mutually exclusive with BLOFIN_UNIVERSE_ENABLED.
+BINANCE_EXCLUSIVE_ENABLED = False
+
 # Eligibility gate
 MIN_LISTING_AGE_DAYS = int(os.environ.get("MIN_LISTING_AGE", "0"))
 
@@ -499,8 +508,14 @@ def main():
     print(f"First-seen map: {len(first_seen)} symbols")
 
     # ── BloFin universe (pre-mode restriction) ────────────────────────────
+    # The same universe data feeds both BLOFIN_UNIVERSE_ENABLED (keep
+    # listed) and BINANCE_EXCLUSIVE_ENABLED (keep NOT-listed) modes.
     blofin_universe: dict = {}
-    if BLOFIN_UNIVERSE_ENABLED:
+    if BLOFIN_UNIVERSE_ENABLED and BINANCE_EXCLUSIVE_ENABLED:
+        print("⚠ BLOFIN_UNIVERSE_ENABLED and BINANCE_EXCLUSIVE_ENABLED are "
+              "mutually exclusive — they're inverses of the same filter.")
+        raise SystemExit(2)
+    if BLOFIN_UNIVERSE_ENABLED or BINANCE_EXCLUSIVE_ENABLED:
         # Same-dir sibling import; works whether run as a script or via subprocess
         import sys
         from pathlib import Path as _P
@@ -512,7 +527,8 @@ def main():
             print("⚠ BloFin universe came back empty — every day would be filtered to nothing.\n"
                   "  Aborting so the matrix isn't silently zeroed out.")
             raise SystemExit(2)
-        print(f"  BloFin universe: {len(blofin_universe)} bases")
+        mode_label = "binance-exclusive" if BINANCE_EXCLUSIVE_ENABLED else "blofin-listed"
+        print(f"  BloFin universe: {len(blofin_universe)} bases  (mode={mode_label})")
     print()
 
     # Canonical bar grid (same for every day — only time portion matters)
@@ -562,13 +578,21 @@ def main():
         # (or that's never been on BloFin). Applied BEFORE MAX_PORT so
         # the cap is computed against the BloFin-restricted set, not
         # the full universe.
+        #
+        # In BINANCE_EXCLUSIVE mode the check is inverted — keep symbols
+        # NOT listed on BloFin at deploy_date (the BO subset). Same gate
+        # detail rows, opposite reason string for traceability.
         n_blofin_drop = 0
         blofin_dropped_syms: list = []
-        if BLOFIN_UNIVERSE_ENABLED and blofin_universe and not in_warmup:
+        if (BLOFIN_UNIVERSE_ENABLED or BINANCE_EXCLUSIVE_ENABLED) and blofin_universe and not in_warmup:
             from blofin_universe import is_listed_at  # local import to avoid bare-script import issues
+            invert = BINANCE_EXCLUSIVE_ENABLED
+            drop_reason = "on_blofin_at_date" if invert else "not_on_blofin_at_date"
             kept = []
             for s in eligible_bases:
-                if is_listed_at(s, deploy_date, blofin_universe):
+                listed = is_listed_at(s, deploy_date, blofin_universe)
+                # Keep when (invert=False AND listed) OR (invert=True AND NOT listed)
+                if listed != invert:
                     kept.append(s)
                 else:
                     blofin_dropped_syms.append(s)
@@ -580,7 +604,7 @@ def main():
             for d in gate_detail:
                 if d["symbol"] in blofin_dropped_syms:
                     d["eligible"] = False
-                    d["reason"] = "not_on_blofin_at_date"
+                    d["reason"] = drop_reason
 
         # ── Cap to MAX_PORT (applied after eligibility gate + BloFin) ──
         capped_syms = []
@@ -817,6 +841,14 @@ if __name__ == "__main__":
                              "Uses BloFin's instruments endpoint listTime field for "
                              "point-in-time correctness. Output should normally include "
                              "a `_blofin` suffix to distinguish from the vanilla matrix.")
+    parser.add_argument("--binance-exclusive", dest="binance_exclusive",
+                        action="store_true", default=False,
+                        help="Inverse of --blofin-universe. Restrict each day's basket "
+                             "to symbols NOT listed on BloFin at the deploy date — i.e. "
+                             "the Binance-only subset. Tests whether the strategy's "
+                             "alpha persists when restricted to newly-listed-on-Binance, "
+                             "not-yet-on-BloFin names. Mutually exclusive with "
+                             "--blofin-universe.")
     parser.add_argument("--blofin-snapshot", dest="blofin_snapshot",
                         type=str, default=None,
                         help="Optional path to a saved BloFin universe snapshot CSV "
@@ -856,6 +888,8 @@ if __name__ == "__main__":
         DEPLOYMENT_END_MINUTE = _SESSION_END_MINUTES % 60
     if args.blofin_universe:
         BLOFIN_UNIVERSE_ENABLED = True
+    if args.binance_exclusive:
+        BINANCE_EXCLUSIVE_ENABLED = True
     if args.blofin_snapshot:
         BLOFIN_SNAPSHOT_PATH = args.blofin_snapshot
 

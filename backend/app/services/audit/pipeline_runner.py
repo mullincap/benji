@@ -276,6 +276,11 @@ def build_pipeline_env(params: dict) -> dict[str, str]:
         # universe at SQL ranking time): apply_blofin filters at ranking,
         # this env triggers an additional listTime check at eligibility.
         "BLOFIN_UNIVERSE_ENABLED":      _boolenv(params.get("blofin_universe_enabled", False)),
+        # Inverse of BLOFIN_UNIVERSE_ENABLED: keep only the Binance-only
+        # subset (symbols NOT listed on BloFin at deploy date). Mutually
+        # exclusive with the BloFin path; rebuild_portfolio_matrix raises
+        # if both are set.
+        "BINANCE_EXCLUSIVE_ENABLED":    _boolenv(params.get("binance_exclusive_enabled", False)),
         "LEADERBOARD_TOP_N":            str(params.get("leaderboard_top_n", 333)),
         "TRAIN_TEST_SPLIT":             str(params.get("train_test_split", 0.60)),
         "N_TRIALS":                     str(params.get("n_trials", 3)),

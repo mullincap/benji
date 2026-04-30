@@ -20377,9 +20377,21 @@ if __name__ == "__main__":
             args.blofin_universe
             or os.environ.get("BLOFIN_UNIVERSE_ENABLED", "").lower() in ("1", "true", "yes")
         )
+        # Inverse of --blofin-universe: keep only the Binance-only subset
+        # (NOT listed on BloFin at deploy_date). Same env-var convention.
+        _binance_exclusive_on = (
+            os.environ.get("BINANCE_EXCLUSIVE_ENABLED", "").lower() in ("1", "true", "yes")
+        )
+        if _blofin_universe_on and _binance_exclusive_on:
+            print("[CLI] ⚠ BLOFIN_UNIVERSE_ENABLED and BINANCE_EXCLUSIVE_ENABLED "
+                  "are mutually exclusive — aborting before subprocess.")
+            raise SystemExit(2)
         if _blofin_universe_on:
             rebuild_cmd += ["--blofin-universe"]
             print("[CLI] BloFin universe restriction (pre-mode, listTime-aware) enabled")
+        elif _binance_exclusive_on:
+            rebuild_cmd += ["--binance-exclusive"]
+            print("[CLI] Binance-exclusive universe (BO subset, listTime-aware) enabled")
         result = subprocess.run(rebuild_cmd, check=True)
         print(f"[CLI] Matrix built → {args.matrix_out}")
         # Override the global so load_matrix() picks up the local CSV

@@ -187,6 +187,13 @@ class JobRequest(BaseModel):
     # blofin_variants only and leave the underlying flags alone.
     blofin_variants:            str   = "off"
     blofin_universe_enabled:    bool  = False
+    # Inverse of blofin_universe_enabled. When True, rebuild_portfolio_matrix
+    # keeps only the Binance-only subset (symbols NOT listed on BloFin at
+    # the deploy date). Tests whether the strategy's alpha persists when
+    # restricted to newly-listed-on-Binance, not-yet-on-BloFin names.
+    # Mutually exclusive with blofin_universe_enabled and blofin_variants
+    # in {blofin_only, both} — those paths run independently.
+    binance_exclusive_enabled:  bool  = False
 
     # ── ADVANCED — Strategy tuning ────────────────────────────────────────────
     dispersion_threshold:       float = 0.66
