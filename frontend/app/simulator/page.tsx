@@ -1,6 +1,7 @@
 'use client';
 
 import { useState, useEffect, useMemo, useRef } from 'react';
+import { useRouter } from 'next/navigation';
 import Topbar from '../components/Topbar';
 import ParamForm from '../components/LeftPanel/ParamForm';
 import RunningParams from '../components/LeftPanel/RunningParams';
@@ -352,6 +353,7 @@ function PromoteBar({
 }
 
 export default function Home() {
+  const router = useRouter();
   const [appState, setAppState] = useState<'idle' | 'running' | 'results' | 'failed'>('idle');
   const [jobId, setJobId] = useState<string | null>(null);
   const [jobData, setJobData] = useState<Record<string, unknown> | null>(null);
@@ -395,13 +397,37 @@ export default function Home() {
     (async () => {
       try {
         const res = await fetch(`${API_BASE}/api/admin/whoami`, { credentials: 'include' });
-        if (!cancelled) setIsAdmin(res.ok);
+        if (cancelled) return;
+        if (res.ok) {
+          // Some deployments return {authenticated: bool} even with 200;
+          // treat false-authenticated the same as a 401 for redirect purposes.
+          let authed = true;
+          try {
+            const body = await res.json();
+            if (body && typeof body.authenticated === 'boolean') {
+              authed = body.authenticated;
+            }
+          } catch {
+            // body parse failed → assume ok-200 means authed
+          }
+          if (authed) {
+            setIsAdmin(true);
+          } else {
+            // Not authed despite 200 — same redirect as 401
+            router.replace(`/login?next=${encodeURIComponent('/simulator')}`);
+          }
+        } else if (res.status === 401) {
+          // Session expired or never set — bounce to login, return here after.
+          router.replace(`/login?next=${encodeURIComponent('/simulator')}`);
+        } else {
+          setIsAdmin(false);
+        }
       } catch {
         if (!cancelled) setIsAdmin(false);
       }
     })();
     return () => { cancelled = true; };
-  }, []);
+  }, [router]);
 
   useEffect(() => {
     if (!promoteToast) return;
