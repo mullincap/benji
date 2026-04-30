@@ -1,3 +1,5 @@
+import contextlib
+import fcntl
 import json
 import os
 import shutil
@@ -21,6 +23,32 @@ def _atomic_write_text(path: Path, text: str) -> None:
     tmp = path.with_suffix(path.suffix + ".tmp")
     tmp.write_text(text)
     os.replace(tmp, path)
+
+
+@contextlib.contextmanager
+def _job_update_lock(job_id: str):
+    """Cross-process advisory lock for job.json read-modify-write.
+
+    Without this, the create_job_endpoint's `update_job(task_id=...)` call
+    races against the worker's first `update_job(status="running"...)`:
+    both load the file, modify their own dicts, and the late writer
+    overwrites the early one's changes. Result: status pinned at
+    'queued' for the entire run (observed on job 06c7d4a0 on
+    2026-04-30). os.replace is atomic per write but doesn't compose
+    across read-modify-write.
+
+    We lock a sibling .lock file (not job.json itself) because
+    os.replace creates a new inode on each write, which would shed
+    flocks held on the previous inode.
+    """
+    lock_path = _job_dir(job_id) / "job.json.lock"
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(lock_path, "w") as fh:
+        fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
 
 
 # ─── Folders ──────────────────────────────────────────────────────────────────
@@ -123,10 +151,11 @@ def get_job(job_id: str) -> dict[str, Any] | None:
 
 
 def update_job(job_id: str, **fields: Any) -> dict[str, Any]:
-    job = get_job(job_id) or {}
-    job.update(fields)
-    job["updated_at"] = time.time()
-    _atomic_write_text(_job_file(job_id), json.dumps(job, indent=2))
+    with _job_update_lock(job_id):
+        job = get_job(job_id) or {}
+        job.update(fields)
+        job["updated_at"] = time.time()
+        _atomic_write_text(_job_file(job_id), json.dumps(job, indent=2))
     return job
 
 

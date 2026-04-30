@@ -133,17 +133,29 @@ def _snapshot_audit_charts(job_id: str, job_dir: Path) -> int:
             # First run = vanilla / single-mode; second run = blofin variant.
             # Prefix blofin files so they don't collide with vanilla.
             prefix = "blofin_" if idx >= 1 else ""
-            for src in run_dir.iterdir():
+            # rglob walks subdirectories. audit.py writes parameter-sweep
+            # plots into run_dir/parameter_sweeps/, ridge-map / plateau-
+            # detector grids included. Preserve the relative subpath in
+            # the snapshot so the gallery can group by category and so
+            # filenames stay unique across categories.
+            for src in run_dir.rglob("*"):
                 if not src.is_file() or src.suffix.lower() not in _CHART_EXTS:
                     continue
-                dst = out_dir / f"{prefix}{src.name}"
+                rel = src.relative_to(run_dir)
+                # Apply the blofin_ prefix to the filename only, not to
+                # any parent dirs — the prefix disambiguates files of
+                # the same name across passes, and parent dirs already
+                # group by category.
+                rel_dir = rel.parent
+                dst = out_dir / rel_dir / f"{prefix}{rel.name}"
                 try:
+                    dst.parent.mkdir(parents=True, exist_ok=True)
                     shutil.copy2(src, dst)
                     copied += 1
                 except Exception as e:
                     _worker_log.warning(
                         "charts: failed to copy %s for job %s: %s",
-                        src.name, job_id, e,
+                        rel, job_id, e,
                     )
         _worker_log.info(
             "charts: copied %d files from %d run dir(s) into %s for job %s",
