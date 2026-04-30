@@ -16706,35 +16706,6 @@ export default function ResultsView({ results, jobId, startingCapital, params }:
                   {fullReportSections.length === 0 && (
                     <div style={{ fontSize: 10, color: 'var(--t3)' }}>No full report sections detected.</div>
                   )}
-                  {/* Charts gallery — sibling category that fetches per-job
-                      images instead of slicing the audit_output.txt. */}
-                  <details
-                    open
-                    style={{ border: '1px solid var(--line)', borderRadius: 3, padding: '6px 8px', background: 'var(--bg1)' }}
-                  >
-                    <summary
-                      style={{
-                        cursor: 'pointer',
-                        fontSize: 10,
-                        color: 'var(--t1)',
-                        fontWeight: 700,
-                        letterSpacing: '0.08em',
-                        textTransform: 'uppercase',
-                        position: 'sticky',
-                        top: fullReportTocOpen ? 104 : 34,
-                        zIndex: 9,
-                        background: 'var(--bg1)',
-                        padding: '6px 0',
-                        margin: '-6px 0',
-                      }}
-                    >
-                      Charts &amp; Visualizations
-                    </summary>
-                    <div style={{ marginTop: 8, marginLeft: 24, paddingLeft: 10 }}>
-                      <FullReportCharts jobId={jobId} />
-                    </div>
-                  </details>
-
                   {fullReportCategoryGroups.map((cat) => (
                     <details
                       key={`group-${cat.key}`}
@@ -16883,6 +16854,35 @@ export default function ResultsView({ results, jobId, startingCapital, params }:
                       </div>
                     </details>
                   ))}
+
+                  {/* Charts gallery — moved to bottom of Full Report (per-job
+                      images, fetched independently of audit_output.txt). */}
+                  <details
+                    open
+                    style={{ border: '1px solid var(--line)', borderRadius: 3, padding: '6px 8px', background: 'var(--bg1)' }}
+                  >
+                    <summary
+                      style={{
+                        cursor: 'pointer',
+                        fontSize: 10,
+                        color: 'var(--t1)',
+                        fontWeight: 700,
+                        letterSpacing: '0.08em',
+                        textTransform: 'uppercase',
+                        position: 'sticky',
+                        top: fullReportTocOpen ? 104 : 34,
+                        zIndex: 9,
+                        background: 'var(--bg1)',
+                        padding: '6px 0',
+                        margin: '-6px 0',
+                      }}
+                    >
+                      Charts &amp; Visualizations
+                    </summary>
+                    <div style={{ marginTop: 8, marginLeft: 24, paddingLeft: 10 }}>
+                      <FullReportCharts jobId={jobId} />
+                    </div>
+                  </details>
                 </div>
               </>
             )}

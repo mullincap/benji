@@ -313,6 +313,28 @@ def run_pipeline(self, job_id: str, params: dict) -> dict:
     # doesn't disrupt the rest of the result write.
     _snapshot_audit_charts(job_id, job_dir)
 
+    # Pre-compute the BO/BF attribution analysis so the Summary tab's
+    # Attribution panel loads instantly instead of waiting on a ~30-130s
+    # synchronous compute the first time a user opens the audit. Result
+    # is written to job_dir/attribution.json — the GET endpoint reads
+    # cache-first. Best-effort: failure is logged, doesn't disrupt the
+    # rest of the result write.
+    try:
+        from app.api.routes.jobs import _compute_attribution
+        from app.services.job_store import get_job as _get_job
+        _live_job = _get_job(job_id)
+        if _live_job is not None:
+            _attr = _compute_attribution(job_id, _live_job)
+            (job_dir / "attribution.json").write_text(json.dumps(_attr))
+            _worker_log.info(
+                "attribution: precomputed and cached for job %s in %.1fs",
+                job_id, _attr.get("elapsed_sec", 0),
+            )
+    except Exception as e:
+        _worker_log.warning(
+            "attribution: precompute failed for job %s: %s", job_id, e,
+        )
+
     # audit_output.txt is written by the wrapper:
     #   off / blofin_only → directly at this path
     #   both              → concatenated from audit_output_vanilla.txt
