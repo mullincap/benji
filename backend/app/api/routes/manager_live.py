@@ -68,6 +68,7 @@ from ...services.boxplot_cache import (
     trend_color,
 )
 from ...services.correlation_cache import get_coverage_matrix_cached
+from ...services.factor_decomp_cache import get_factor_decomposition_cached
 from ...services.exchanges.binance_market import BinanceMarketClient
 from concurrent.futures import ThreadPoolExecutor
 
@@ -579,6 +580,55 @@ class CoverageMatrixResponse(BaseModel):
     reasons: dict[str, str]  # symbol → 'not_listed' | 'insufficient_history'
 
 
+# ── Factor Decomposition (§9b) ────────────────────────────────────────
+
+
+class FactorVarPct(BaseModel):
+    """Per-position variance attribution (sums to 100% across the three
+    when present, or all-null when the position has no usable history)."""
+
+    btc: float | None
+    alt: float | None
+    idio: float | None
+
+
+class FactorPositionRow(BaseModel):
+    symbol: str
+    symbol_base: str
+    side: Literal["long", "short"]
+    notional_usd: float
+    has_history: bool
+    # β values are in dollar terms — a +1.0 (= +100%) move in the factor
+    # would translate to $β of position PnL on average, holding the
+    # other factor constant. Null when has_history=False.
+    beta_btc: float | None
+    beta_alt: float | None
+    var_pct: FactorVarPct
+
+
+class FactorPortfolio(BaseModel):
+    beta_btc: float
+    beta_alt: float
+    var_btc_pct: float
+    var_alt_pct: float
+    var_idio_pct: float
+    sigma_silo_usd: float
+    sigma_portfolio_usd: float
+    diversification_benefit_pct: float | None
+
+
+class FactorDecompositionResponse(BaseModel):
+    venue: str
+    connection_id: str
+    snapshot_at: str | None
+    positions: list[FactorPositionRow]
+    portfolio: FactorPortfolio | None
+    alt_index_member_count: int
+    alt_index_target_count: int
+    n_days: int
+    reasons: dict[str, str]
+
+
 # ── Compute helpers ───────────────────────────────────────────────────────
 
 def _iso(dt) -> str | None:
@@ -862,6 +912,9 @@ CACHE_TTL_BOXPLOTS_S = 30
 # 60s response cache absorbs frontend polling without masking the
 # hourly recompute window.
 CACHE_TTL_COVERAGE_S = 60
+# /factor-decomposition piggybacks on factor_decomp_cache (also 1H-bar
+# TTL) — same 60s response cache rationale as coverage matrix.
+CACHE_TTL_FACTOR_DECOMP_S = 60
 
 
 @router.get("/account", response_model=AccountSnapshot)
@@ -1353,4 +1406,101 @@ def get_coverage_matrix(
         reasons=result["reasons"],
     )
     _cache_set(cache_key, response.model_dump(), ttl=CACHE_TTL_COVERAGE_S)
+    return response
+
+
+@router.get("/factor-decomposition", response_model=FactorDecompositionResponse)
+def get_factor_decomposition(
+    venue: str | None = Query(None, pattern="^(blofin|binance)$"),
+    connection_id: str | None = None,
+    cur=Depends(get_cursor),
+) -> FactorDecompositionResponse:
+    """Multivariate ridge regression of each open position's 30d daily-PnL
+    series against (BTC factor, ALT factor) plus an aggregated portfolio
+    regression. Drives the §9b Factor Decomposition card.
+
+    Reuses the per-symbol daily-closes cache populated by /coverage-matrix
+    (`daily_closes:*`). Compute result is cached at 1H bar boundary in
+    `factor_decomp:{position_set_hash}:{1h_bar_close_ts}` plus a 60s thin
+    response cache for frontend polling.
+    """
+    venue, connection_id = _resolve_venue_connection(cur, venue, connection_id)
+    cache_key = f"live:factor-decomposition:{venue}:{connection_id}"
+    cached = _cache_get(cache_key)
+    if cached:
+        return FactorDecompositionResponse.model_validate(cached)
+
+    snap = _read_latest_snapshot(cur, venue, connection_id)
+    if not snap:
+        raise HTTPException(404, f"No snapshot for {venue}/{connection_id}")
+
+    open_positions: list[dict] = []
+    for p in (snap["positions"] or []):
+        sym = (p.get("symbol") or "").upper()
+        size = float(p.get("size") or 0)
+        if not sym or size == 0:
+            continue
+        sym_base = parse_symbol_base(sym)
+        side = derive_position_side(p.get("side"), p.get("size") or 0)
+        notional = float(p.get("notional_usd") or 0)
+        open_positions.append({
+            "symbol": sym,
+            "symbol_base": sym_base,
+            "side": side,
+            "notional_usd": notional,
+        })
+    open_positions.sort(key=lambda p: -p["notional_usd"])
+
+    bases = [p["symbol_base"] for p in open_positions]
+    binance_ids = _resolve_binance_ids(cur, bases)
+
+    def resolver(base: str) -> str | None:
+        return binance_ids.get(base)
+
+    client = BinanceMarketClient()
+    result = get_factor_decomposition_cached(
+        open_positions, client=client, binance_id_resolver=resolver,
+    )
+
+    pos_rows = [FactorPositionRow(
+        symbol=r["symbol"],
+        symbol_base=r["symbol_base"],
+        side=r["side"],
+        notional_usd=r["notional_usd"],
+        has_history=r["has_history"],
+        beta_btc=r.get("beta_btc"),
+        beta_alt=r.get("beta_alt"),
+        var_pct=FactorVarPct(
+            btc=r["var_pct"]["btc"],
+            alt=r["var_pct"]["alt"],
+            idio=r["var_pct"]["idio"],
+        ),
+    ) for r in result["positions"]]
+
+    portfolio_dict = result.get("portfolio")
+    portfolio = (
+        FactorPortfolio(
+            beta_btc=portfolio_dict["beta_btc"],
+            beta_alt=portfolio_dict["beta_alt"],
+            var_btc_pct=portfolio_dict["var_btc_pct"],
+            var_alt_pct=portfolio_dict["var_alt_pct"],
+            var_idio_pct=portfolio_dict["var_idio_pct"],
+            sigma_silo_usd=portfolio_dict["sigma_silo_usd"],
+            sigma_portfolio_usd=portfolio_dict["sigma_portfolio_usd"],
+            diversification_benefit_pct=portfolio_dict["diversification_benefit_pct"],
+        ) if portfolio_dict else None
+    )
+
+    response = FactorDecompositionResponse(
+        venue=venue,
+        connection_id=connection_id,
+        snapshot_at=_iso(snap["snapshot_at"]),
+        positions=pos_rows,
+        portfolio=portfolio,
+        alt_index_member_count=result["alt_index_member_count"],
+        alt_index_target_count=result["alt_index_target_count"],
+        n_days=result["n_days"],
+        reasons=result["reasons"],
+    )
+    _cache_set(cache_key, response.model_dump(), ttl=CACHE_TTL_FACTOR_DECOMP_S)
     return response

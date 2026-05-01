@@ -4,20 +4,19 @@
  * frontend/app/manager/(protected)/live/EffectiveNGauge.tsx
  * ============================================================
  * Effective-N gauge (Data Dictionary §9a). Lives at the top of the
- * Factor Decomposition card; the factor-decomposition bar below it
- * lands in step 11.
+ * Factor Decomposition card.
  *
- * Headline number = effective-N. Detail prose by zone:
- *   < 2  : "concentrated, not diversified"
- *   2-4  : "moderately concentrated"
- *   4+   : "well diversified"
+ * Headline number = effective-N (correlation-aware diversification
+ * ratio: see correlation_cache.py for the formula). Detail prose and
+ * headline color share absolute thresholds:
+ *   < 2  : red    "concentrated, not diversified"
+ *   2-4  : amber  "moderately concentrated"
+ *   > 4  : green  "well diversified"
  *
- * Headline color follows zone: red < 2, amber 2-4, green > 4.
- * Track has three equal bands (red / amber / green) with a marker
- * positioned at value/total × 100% (clamped to 0-100). Total = the
- * nominal_count (number of open positions) per the spec — gauge maxes
- * out at "fully diversified" which means independent positions equal
- * to the nominal count.
+ * Track band split is proportional: 0→2 red, 2→4 amber, 4→nominal_count
+ * green. With ≤4 positions the green band collapses to zero — fully-
+ * diversified is unreachable for a book that small, which is honest.
+ * Marker sits at (effective_N / nominal_count) × 100% on the track.
  */
 
 import type { CoverageMatrixResponse } from "./types";
@@ -43,22 +42,22 @@ export default function EffectiveNGauge({ data }: Props) {
     );
   }
 
-  // Zone bands are configured against `total`. Equal thirds:
-  // red 0 to total/3, amber total/3 to 2·total/3, green 2·total/3 to total.
-  const lo = total / 3;
-  const hi = (2 * total) / 3;
+  // Absolute zone thresholds matching the spec: 0→2 red, 2→4 amber,
+  // 4→total green. Color and prose use the same boundaries.
+  const RED_HI = 2;
+  const AMBER_HI = 4;
 
   const color =
-    value < lo
+    value < RED_HI
       ? "var(--red)"
-      : value < hi
+      : value < AMBER_HI
         ? "var(--amber)"
         : "var(--green)";
 
   const detail =
-    value < 2
+    value < RED_HI
       ? `Your ${total} nominal position${total === 1 ? "" : "s"} behave like ${value.toFixed(1)} independent. The book is concentrated, not diversified — most positions carry the same underlying exposure.`
-      : value < 4
+      : value < AMBER_HI
         ? `Your ${total} nominal positions behave like ${value.toFixed(1)} independent. Moderately concentrated — some shared exposure across the book.`
         : `Your ${total} nominal positions behave like ${value.toFixed(1)} independent. The book is well-diversified — most positions are carrying distinct exposure.`;
 
@@ -112,7 +111,7 @@ export default function EffectiveNGauge({ data }: Props) {
               fontFamily: "var(--font-space-mono), Space Mono, monospace",
             }}
           >
-            / {total.toFixed(1)} EFFECTIVE
+            / {total} NOMINAL
           </div>
         </div>
         <div
@@ -146,7 +145,9 @@ export default function EffectiveNGauge({ data }: Props) {
         </div>
       </div>
 
-      {/* Track */}
+      {/* Track — band widths proportional to absolute thresholds.
+          Green band collapses to zero when total ≤ 4 (fully diversified
+          is unreachable for a small book; surface that honestly). */}
       <div
         style={{
           position: "relative",
@@ -157,9 +158,24 @@ export default function EffectiveNGauge({ data }: Props) {
           border: "1px solid var(--line)",
         }}
       >
-        <div style={{ flex: 1, background: "rgba(255, 77, 77, 0.45)" }} />
-        <div style={{ flex: 1, background: "rgba(240, 165, 0, 0.40)" }} />
-        <div style={{ flex: 1, background: "rgba(0, 200, 150, 0.40)" }} />
+        <div
+          style={{
+            flex: Math.min(RED_HI, total),
+            background: "rgba(255, 77, 77, 0.45)",
+          }}
+        />
+        <div
+          style={{
+            flex: Math.max(0, Math.min(AMBER_HI, total) - RED_HI),
+            background: "rgba(240, 165, 0, 0.40)",
+          }}
+        />
+        <div
+          style={{
+            flex: Math.max(0, total - AMBER_HI),
+            background: "rgba(0, 200, 150, 0.40)",
+          }}
+        />
         <div
           style={{
             position: "absolute",
@@ -175,7 +191,6 @@ export default function EffectiveNGauge({ data }: Props) {
       <div
         style={{
           display: "flex",
-          justifyContent: "space-between",
           fontSize: 9,
           color: "var(--t3)",
           letterSpacing: "0.1em",
@@ -183,10 +198,35 @@ export default function EffectiveNGauge({ data }: Props) {
           fontFamily: "var(--font-space-mono), Space Mono, monospace",
         }}
       >
-        <span>0</span>
-        <span style={{ color: "var(--red)" }}>{lo.toFixed(1)} · ALARM</span>
-        <span style={{ color: "var(--amber)" }}>{hi.toFixed(1)} · HEALTHY</span>
-        <span style={{ color: "var(--green)" }}>{total.toFixed(1)} · FULLY DIVERSE</span>
+        <span style={{ flex: Math.min(RED_HI, total), color: "var(--red)" }}>
+          0 · CONCENTRATED
+        </span>
+        {total > RED_HI && (
+          <span
+            style={{
+              flex: Math.max(0, Math.min(AMBER_HI, total) - RED_HI),
+              color: "var(--amber)",
+              textAlign: total > AMBER_HI ? "left" : "right",
+              paddingLeft: 4,
+            }}
+          >
+            {RED_HI} · MIXED
+          </span>
+        )}
+        {total > AMBER_HI && (
+          <span
+            style={{
+              flex: Math.max(0, total - AMBER_HI),
+              color: "var(--green)",
+              paddingLeft: 4,
+            }}
+          >
+            {AMBER_HI} · DIVERSIFIED
+          </span>
+        )}
+        <span style={{ color: "var(--t3)", marginLeft: "auto", paddingLeft: 4 }}>
+          {total}
+        </span>
       </div>
     </div>
   );

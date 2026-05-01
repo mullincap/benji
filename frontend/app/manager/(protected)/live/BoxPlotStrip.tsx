@@ -29,6 +29,11 @@
 
 import type { BoxPlotCell, BoxDotClass, TrendDirection } from "./types";
 
+// SVG viewBox is the inner box-plot canvas only — the cell's header/sub/foot
+// rows live in HTML around it. Whiskers are intentionally compressed (Y_TOP /
+// Y_BOTTOM occupy ~78% of the view) so the box (p25→p75) and median line read
+// loud at narrow widths; the SVG itself stretches via aspect-ratio on its
+// container, not a fixed pixel height.
 const VIEW = { w: 100, h: 130 } as const;
 const Y_TOP = 15;
 const Y_BOTTOM = 115;
@@ -47,13 +52,7 @@ interface Props {
 export default function BoxPlotStrip({ cells, onCellClick }: Props) {
   if (!cells) {
     return (
-      <div
-        style={{
-          display: "grid",
-          gridTemplateColumns: "repeat(auto-fit, minmax(140px, 1fr))",
-          gap: 8,
-        }}
-      >
+      <div style={GRID_STYLE}>
         {Array.from({ length: 6 }).map((_, i) => (
           <CellShell key={i} />
         ))}
@@ -81,19 +80,22 @@ export default function BoxPlotStrip({ cells, onCellClick }: Props) {
   }
 
   return (
-    <div
-      style={{
-        display: "grid",
-        gridTemplateColumns: "repeat(auto-fit, minmax(140px, 1fr))",
-        gap: 8,
-      }}
-    >
+    <div style={GRID_STYLE}>
       {cells.map((c) => (
         <Cell key={c.symbol} cell={c} onClick={onCellClick} />
       ))}
     </div>
   );
 }
+
+// Columns cap at 280px so cells never balloon past the design ceiling on a
+// 4-position book; below ~160px the layout collapses, so that's the floor.
+const GRID_STYLE: React.CSSProperties = {
+  display: "grid",
+  gridTemplateColumns: "repeat(auto-fit, minmax(160px, 280px))",
+  gap: 8,
+  justifyContent: "start",
+};
 
 function CellShell({ children }: { children?: React.ReactNode }) {
   return (
@@ -107,7 +109,8 @@ function CellShell({ children }: { children?: React.ReactNode }) {
         flexDirection: "column",
         gap: 4,
         minWidth: 0,
-        height: 232,
+        width: "100%",
+        aspectRatio: "1 / 1.4",
       }}
     >
       {children}
@@ -134,7 +137,8 @@ function Cell({ cell, onClick }: { cell: BoxPlotCell; onClick?: (s: string) => v
         flexDirection: "column",
         gap: 4,
         minWidth: 0,
-        height: 232,
+        width: "100%",
+        aspectRatio: "1 / 1.4",
         cursor: "pointer",
         textAlign: "left",
         fontFamily: "var(--font-space-mono), Space Mono, monospace",
@@ -292,7 +296,7 @@ function BoxPlotSvg({ cell }: { cell: BoxPlotCell }) {
     <svg
       viewBox={`0 0 ${VIEW.w} ${VIEW.h}`}
       preserveAspectRatio="none"
-      style={{ width: "100%", height: 130, display: "block" }}
+      style={{ width: "100%", height: "100%", display: "block" }}
     >
       {/* High / low labels */}
       <text

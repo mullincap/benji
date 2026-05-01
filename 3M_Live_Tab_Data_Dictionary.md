@@ -176,18 +176,34 @@ Refresh: 1H bar close (T5). Caches keyed by `(symbol_set, position_sizes_hash)`.
 
 ### 9a · Effective-N Gauge
 
-Headline number = inverse Herfindahl on variance contributions: `1 / Σ(w_i^2)` where `w_i = σ_i × |position_i| / σ_portfolio`. Out of nominal position count.
+> **Spec correction (2026-04-30):** the original draft of this section
+> defined `effective_N = 1 / Σ(w_i^2)` — an inverse-Herfindahl on the
+> σ-weighted notional weights. That form is **correlation-blind**:
+> N perfectly-correlated equal positions yield `effective_N = N` under
+> it, which is the opposite of what the gauge needs to communicate.
+> The corrected formula below is the **diversification ratio squared**
+> (also called the "effective number of independent bets"), which
+> reduces to `N` only when positions are uncorrelated and equal-σ, and
+> collapses to `1` when positions are perfectly collinear — matching
+> the gauge's stated reference cases. The implementation in
+> `backend/app/services/correlation_cache.py` has used this form since
+> step 10; this note brings the dictionary in line.
+
+Headline number = correlation-aware diversification ratio squared: how many independent silos the book behaves like. Denominator on the gauge is the **nominal position count** (the count of open positions).
 
 ```
-weights w_i = (|positionAmt_i| × σ_i) / σ_portfolio
-σ_i        = stdev of position-level daily PnL series (30d)
-σ_portfolio = sqrt(w' × Σ × w) where Σ is the position covariance matrix (30d)
-effective_N = 1 / Σ(w_i^2)
+σ_i         = stdev of position-level daily $-PnL series (30d, dir-signed)
+σ_silo      = Σ σ_i                          # standalone risk if all independent
+σ_portfolio = sqrt(σ' × Σ_corr × σ)          # actual portfolio risk
+            = sqrt( Σ_ij σ_i × σ_j × ρ_ij )  # equivalent expansion
+effective_N = (σ_silo / σ_portfolio)^2
 ```
 
-For all-equal, all-uncorrelated positions of size N, `effective_N = N`. For perfectly-correlated positions, `effective_N = 1`.
+For N perfectly-uncorrelated, equal-σ positions, `effective_N = N`. For perfectly-correlated positions, `effective_N = 1`. Sign of ρ matters — short positions get `dir_sign = −1` baked into the $-PnL series so a long-vs-short pair against the same underlying surfaces as ρ near `−1` (a hedge), pushing `effective_N` above the long-only ceiling.
 
-Detail prose (rule-based): `<2`: "concentrated, not diversified"; `2–4`: "moderately concentrated"; `>4`: "well diversified". Zone bands red 0–2, amber 2–4, green 4–6.
+Detail prose (rule-based, absolute thresholds): `<2`: "concentrated, not diversified"; `2–4`: "moderately concentrated"; `>4`: "well diversified". Zone bands red 0→2, amber 2→4, green 4→nominal_count. With ≤4 positions the green band collapses (fully-diversified is unreachable for a small book — that's honest).
+
+Diversification benefit (surfaced inline next to the headline): `(1 − σ_portfolio / σ_silo) × 100%`. 0% means the book carries the same risk as N silos; 100% means the cross-correlations have completely cancelled out the silo risk (only achievable with deliberate short hedges).
 
 ### 9b · Factor Decomposition
 

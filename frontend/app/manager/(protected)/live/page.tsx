@@ -43,10 +43,12 @@ import MAAlignmentHeatmap from "./MAAlignmentHeatmap";
 import BoxPlotStrip from "./BoxPlotStrip";
 import CoverageMatrix from "./CoverageMatrix";
 import EffectiveNGauge from "./EffectiveNGauge";
+import FactorDecomposition from "./FactorDecomposition";
 import type {
   AccountSnapshot,
   BoxPlotsResponse,
   CoverageMatrixResponse,
+  FactorDecompositionResponse,
   LivePosition,
   MaAlignmentResponse,
   PositionsResponse,
@@ -1236,25 +1238,6 @@ function ChatPanel({ collapsed, onToggle }: { collapsed: boolean; onToggle: () =
 
 // ─── Page ─────────────────────────────────────────────────────────────────
 
-function Placeholder({ height = 80, label }: { height?: number; label?: string }) {
-  return (
-    <div
-      style={{
-        height,
-        display: "flex",
-        alignItems: "center",
-        justifyContent: "center",
-        color: "var(--t3)",
-        fontSize: 10,
-        letterSpacing: "0.06em",
-        fontFamily: "var(--font-space-mono), Space Mono, monospace",
-      }}
-    >
-      {label ?? "Loading…"}
-    </div>
-  );
-}
-
 export default function LivePage() {
   const account = useLivePoll<AccountSnapshot>(`${API_BASE}/api/manager/live/account`, 2000);
   const risk = useLivePoll<RiskSnapshot>(`${API_BASE}/api/manager/live/risk`, 5000);
@@ -1277,6 +1260,12 @@ export default function LivePage() {
   // shift meaningfully within the hour.
   const coverage = useLivePoll<CoverageMatrixResponse>(
     `${API_BASE}/api/manager/live/coverage-matrix`,
+    300000,
+  );
+  // Factor decomposition shares the 1H bar-close cadence — same poll
+  // interval as the coverage matrix.
+  const factor = useLivePoll<FactorDecompositionResponse>(
+    `${API_BASE}/api/manager/live/factor-decomposition`,
     300000,
   );
 
@@ -1446,7 +1435,7 @@ export default function LivePage() {
           <Collapsible id="live:factor-decomp" title="Factor Decomposition · 30D Rolling">
             <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
               <EffectiveNGauge data={coverage.data} />
-              <Placeholder height={140} label="Factor decomposition bar renders in step 11" />
+              <FactorDecomposition data={factor.data} />
             </div>
           </Collapsible>
         </div>

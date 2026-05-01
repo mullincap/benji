@@ -1,0 +1,53 @@
+# config/alt_index.yml
+# =====================================================================
+# Equal-weighted alt-coin reference index for the Live tab's Factor
+# Decomposition (Data Dictionary §9b).
+#
+# Each open position's daily PnL series is regressed against:
+#   1. BTC factor       — daily return of BTCUSDT
+#   2. ALT factor       — equal-weighted daily return of the symbols listed
+#                         here on Binance USDM Futures
+# Residual (idiosyncratic) is what the regression can't explain.
+#
+# Selection criteria (snapshot 2026-04-30):
+#   * Top alts by 24h Binance USDM futures volume, with a strong
+#     preference for liquidity stability over rotational meme spikes.
+#   * Excluded: BTC and ETH (they are factors of their own — BTC is
+#     the BTC factor, ETH-correlated alt moves get absorbed into BTC%
+#     for the v1 two-factor model).
+#   * Excluded: stablecoin perps (USDC etc.) and BTC-derivatives
+#     (WBTC, etc.) — same factor exposure as BTC, would corrupt ALT.
+#   * No 1000X-prefix wrappers — the Live tab uses the un-wrapped
+#     binance_id from market.symbols where possible. (1000PEPE etc.
+#     still resolve here through that registry.)
+#
+# Maintenance: rebalance quarterly. Removing a delisted symbol is
+# non-breaking (alt index averages over the available subset). Adding
+# new symbols is non-breaking. Order doesn't matter.
+#
+# If a symbol in this list lacks 30d of daily kline history at compute
+# time, it is silently dropped from that day's average — the index is
+# whatever subset has data, not a fixed-N average.
+# ----------------------------------------------------------------------
+
+symbols:
+  - SOLUSDT
+  - BNBUSDT
+  - XRPUSDT
+  - DOGEUSDT
+  - ADAUSDT
+  - TRXUSDT
+  - AVAXUSDT
+  - LINKUSDT
+  - DOTUSDT
+  - LTCUSDT
+  - BCHUSDT
+  - NEARUSDT
+  - ATOMUSDT
+  - APTUSDT
+  - SUIUSDT
+  - INJUSDT
+  - TIAUSDT
+  - ARBUSDT
+  - OPUSDT
+  - SEIUSDT

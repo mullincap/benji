@@ -72,7 +72,10 @@ export default function MAAlignmentHeatmap({ data }: Props) {
   }
 
   const tfs = data.timeframes;
-  const cols = `80px 36px ${tfs.map(() => "1fr").join(" ")} 70px`;
+  // TF columns cap at 110px so cells stay readable instead of ballooning into
+  // wide rectangles on a wide viewport with few positions. Floor 56px keeps
+  // them legible at the narrow end.
+  const cols = `80px 36px ${tfs.map(() => "minmax(56px, 110px)").join(" ")} 70px`;
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>

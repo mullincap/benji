@@ -277,3 +277,47 @@ export interface CoverageMatrixResponse {
   nominal_count: number;
   reasons: Record<string, string>;
 }
+
+// ─── /api/manager/live/factor-decomposition (Data Dictionary §9b) ──────
+
+export interface FactorVarPct {
+  btc: number | null;
+  alt: number | null;
+  idio: number | null;
+}
+
+export interface FactorPositionRow {
+  symbol: string;
+  symbol_base: string;
+  side: Side;
+  notional_usd: number;
+  has_history: boolean;
+  /** $-exposure to a +1.0 (=+100%) move in the factor, holding the
+   *  other constant. Null when has_history=false. */
+  beta_btc: number | null;
+  beta_alt: number | null;
+  var_pct: FactorVarPct;
+}
+
+export interface FactorPortfolio {
+  beta_btc: number;
+  beta_alt: number;
+  var_btc_pct: number;
+  var_alt_pct: number;
+  var_idio_pct: number;
+  sigma_silo_usd: number;
+  sigma_portfolio_usd: number;
+  diversification_benefit_pct: number | null;
+}
+
+export interface FactorDecompositionResponse {
+  venue: Venue;
+  connection_id: string;
+  snapshot_at: string | null;
+  positions: FactorPositionRow[];
+  portfolio: FactorPortfolio | null;
+  alt_index_member_count: number;
+  alt_index_target_count: number;
+  n_days: number;
+  reasons: Record<string, string>;
+}
