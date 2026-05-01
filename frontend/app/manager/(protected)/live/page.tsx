@@ -39,9 +39,11 @@ import { useLivePoll } from "../../../components/useLivePoll";
 import Treemap from "./Treemap";
 import Waterfall from "./Waterfall";
 import ExposureMap from "./ExposureMap";
+import MAAlignmentHeatmap from "./MAAlignmentHeatmap";
 import type {
   AccountSnapshot,
   LivePosition,
+  MaAlignmentResponse,
   PositionsResponse,
   RiskSnapshot,
   Side,
@@ -1252,6 +1254,12 @@ export default function LivePage() {
   const account = useLivePoll<AccountSnapshot>(`${API_BASE}/api/manager/live/account`, 2000);
   const risk = useLivePoll<RiskSnapshot>(`${API_BASE}/api/manager/live/risk`, 5000);
   const positions = useLivePoll<PositionsResponse>(`${API_BASE}/api/manager/live/positions`, 2000);
+  // MA heatmap polls slower — underlying EMA values only update on bar
+  // close per timeframe (5m at fastest).
+  const maAlignment = useLivePoll<MaAlignmentResponse>(
+    `${API_BASE}/api/manager/live/ma-alignment`,
+    60000,
+  );
 
   const [chatCollapsed, setChatCollapsed] = useState(false);
 
@@ -1426,7 +1434,7 @@ export default function LivePage() {
         </Collapsible>
 
         <Collapsible id="live:ma-heatmap" title="MA Alignment · Distance from EMA">
-          <Placeholder height={250} label="EMA-distance heatmap renders in step 8" />
+          <MAAlignmentHeatmap data={maAlignment.data} />
         </Collapsible>
 
         <Collapsible

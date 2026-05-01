@@ -164,3 +164,42 @@ export interface PositionsResponse {
     short: number;
   };
 }
+
+// ─── /api/manager/live/ma-alignment (Data Dictionary §11) ──────────────
+
+export type MaAlignmentTier =
+  | "aligned-strong"
+  | "aligned-mid"
+  | "aligned-soft"
+  | "neutral"
+  | "against-soft"
+  | "against-mid"
+  | "against-strong";
+
+export interface MaCell {
+  distance_pct: number | null;
+  ema_value: number | null;
+  tier: MaAlignmentTier;
+  /** null on success; otherwise 'not_listed' / 'insufficient_history' /
+   *  'fetch_error' / 'no_mark' — UI renders the cell as a neutral '—'. */
+  reason: string | null;
+}
+
+export interface MaRow {
+  symbol: string;
+  symbol_base: string;
+  side: Side;
+  binance_symbol: string | null;
+  mark_price: number | null;
+  cells: Record<string, MaCell>;
+  confluence_aligned: number;
+  confluence_total: number;
+}
+
+export interface MaAlignmentResponse {
+  venue: Venue;
+  connection_id: string;
+  snapshot_at: string | null;
+  timeframes: string[];
+  rows: MaRow[];
+}

@@ -57,6 +57,13 @@ from .admin import require_admin
 from .allocator import (
     fetch_blofin_tpsl_orders,
 )
+from ...services.ema_cache import (
+    TF_ORDER,
+    alignment_tier,
+    compute_and_cache_ema20,
+)
+from ...services.exchanges.binance_market import BinanceMarketClient
+from concurrent.futures import ThreadPoolExecutor
 
 log = logging.getLogger(__name__)
 
@@ -435,6 +442,47 @@ class PositionsResponse(BaseModel):
     )
 
 
+# ── MA Alignment Heatmap (Data Dictionary §11) ─────────────────────────
+
+MaAlignmentTier = Literal[
+    "aligned-strong", "aligned-mid", "aligned-soft",
+    "neutral",
+    "against-soft", "against-mid", "against-strong",
+]
+
+
+class MaCell(BaseModel):
+    """One (symbol, timeframe) cell. `distance_pct` is null when the
+    underlying kline data isn't available (insufficient history,
+    fetch failure, or the symbol isn't listed on Binance USDM); the
+    UI renders a neutral '—' in those cells."""
+    distance_pct: float | None
+    ema_value: float | None
+    tier: MaAlignmentTier
+    reason: str | None  # null on success; otherwise 'not_listed' /
+                       # 'insufficient_history' / 'fetch_error'
+
+
+class MaRow(BaseModel):
+    """One open position's row of the heatmap."""
+    symbol: str
+    symbol_base: str
+    side: Literal["long", "short"]
+    binance_symbol: str | None        # resolved via market.symbols.binance_id
+    mark_price: float | None
+    cells: dict[str, MaCell]          # keyed by tf (5m/15m/30m/1h/4h/8h/1d)
+    confluence_aligned: int           # # of tfs where alignment matches direction
+    confluence_total: int             # # of tfs with usable data
+
+
+class MaAlignmentResponse(BaseModel):
+    venue: str
+    connection_id: str
+    snapshot_at: str | None
+    timeframes: list[str]             # column order = TF_ORDER
+    rows: list[MaRow]
+
+
 # ── Compute helpers ───────────────────────────────────────────────────────
 
 def _iso(dt) -> str | None:
@@ -705,6 +753,11 @@ def _build_risk_response(
 CACHE_TTL_ACCOUNT_S = 2
 CACHE_TTL_POSITIONS_S = 2
 CACHE_TTL_RISK_S = 5
+# /ma-alignment piggybacks on the EMA cache (which already has TF×2
+# TTLs); a thin 30s response cache absorbs frontend polling without
+# masking bar-close updates beyond the next minute. Frontend polls at
+# 60s anyway, so this cache is mostly a thundering-herd guard.
+CACHE_TTL_MA_ALIGNMENT_S = 30
 
 
 @router.get("/account", response_model=AccountSnapshot)
@@ -825,4 +878,159 @@ def get_positions(
         },
     )
     _cache_set(cache_key, response.model_dump(), ttl=CACHE_TTL_POSITIONS_S)
+    return response
+
+
+# ── MA Alignment Heatmap endpoint ─────────────────────────────────────
+
+def _resolve_binance_ids(cur, symbol_bases: list[str]) -> dict[str, str | None]:
+    """Look up market.symbols.binance_id for each base. Returns {base:
+    binance_id_or_None}. The 1000-prefix tickers (1000PEPE etc.) are
+    why we go through the symbol registry instead of naive
+    `base + 'USDT'`."""
+    if not symbol_bases:
+        return {}
+    cur.execute("""
+        SELECT base, binance_id
+          FROM market.symbols
+         WHERE base = ANY(%s::text[])
+    """, (list(set(symbol_bases)),))
+    rows = cur.fetchall()
+    out: dict[str, str | None] = {b: None for b in symbol_bases}
+    for r in rows:
+        out[r["base"]] = r["binance_id"]
+    return out
+
+
+@router.get("/ma-alignment", response_model=MaAlignmentResponse)
+def get_ma_alignment(
+    venue: str | None = Query(None, pattern="^(blofin|binance)$"),
+    connection_id: str | None = None,
+    cur=Depends(get_cursor),
+) -> MaAlignmentResponse:
+    """Per-position EMA20 distance heatmap across the seven canonical
+    timeframes. Underlying EMA values come from a per-(symbol, tf,
+    bar_close_ts) Redis cache populated on demand from Binance USDM
+    klines (see services.ema_cache). Mark prices are sourced from the
+    BloFin snapshot — the same mark the rest of the Live tab reads.
+
+    Per-position fetches across timeframes are parallelized via a
+    thread pool so a cold-cache page load completes in roughly one
+    Binance-round-trip's worth of latency rather than 49×.
+    """
+    venue, connection_id = _resolve_venue_connection(cur, venue, connection_id)
+    cache_key = f"live:ma-alignment:{venue}:{connection_id}"
+    cached = _cache_get(cache_key)
+    if cached:
+        return MaAlignmentResponse.model_validate(cached)
+
+    snap = _read_latest_snapshot(cur, venue, connection_id)
+    if not snap:
+        raise HTTPException(404, f"No snapshot for {venue}/{connection_id}")
+
+    # Open positions only.
+    open_positions: list[dict] = []
+    for p in (snap["positions"] or []):
+        sym = (p.get("symbol") or "").upper()
+        if not sym:
+            continue
+        size = float(p.get("size") or 0)
+        if size == 0:
+            continue
+        open_positions.append(p)
+
+    # Resolve Binance ids per base symbol.
+    bases = [parse_symbol_base(p.get("symbol") or "") for p in open_positions]
+    binance_ids = _resolve_binance_ids(cur, bases)
+
+    # Build the (binance_symbol, tf) work list. Skip cells whose
+    # binance_symbol is None — those return synthetic 'not_listed'
+    # cells without an HTTP call.
+    client = BinanceMarketClient()
+
+    def fetch_one(binance_symbol: str | None, tf: str) -> tuple[str, dict]:
+        return tf, compute_and_cache_ema20(
+            binance_symbol=binance_symbol, tf=tf, client=client,
+        )
+
+    rows: list[MaRow] = []
+    # ThreadPoolExecutor lets the per-(position, tf) Binance fetches
+    # run in parallel. With ~7 positions × 7 TFs = 49 fetches and 16
+    # workers, a fully cold cache primes in ~3-6 round-trips × ~150ms.
+    with ThreadPoolExecutor(max_workers=16) as ex:
+        # Submit all (position, tf) tuples up front so all fetches run
+        # in parallel rather than serializing per-row.
+        futures: list[tuple[dict, str, "object"]] = []
+        for p in open_positions:
+            sym_full = (p.get("symbol") or "").upper()
+            sym_base = parse_symbol_base(sym_full)
+            binance_id = binance_ids.get(sym_base)
+            for tf in TF_ORDER:
+                fut = ex.submit(fetch_one, binance_id, tf)
+                futures.append((p, tf, fut))
+
+        # Group results by position.
+        per_pos: dict[str, dict[str, dict]] = {}
+        for p, tf, fut in futures:
+            sym_full = (p.get("symbol") or "").upper()
+            per_pos.setdefault(sym_full, {})[tf] = fut.result()[1]
+
+    for p in open_positions:
+        sym_full = (p.get("symbol") or "").upper()
+        sym_base = parse_symbol_base(sym_full)
+        binance_id = binance_ids.get(sym_base)
+        side = derive_position_side(p.get("side"), p.get("size") or 0)
+        mark = p.get("mark_price")
+        mark_f = float(mark) if mark else None
+
+        cells: dict[str, MaCell] = {}
+        confluence_aligned = 0
+        confluence_total = 0
+        for tf in TF_ORDER:
+            ema_result = per_pos.get(sym_full, {}).get(tf, {
+                "ema_value": None, "reason": "fetch_error",
+            })
+            ema_val = ema_result.get("ema_value")
+            reason = ema_result.get("reason")
+
+            if ema_val is None or mark_f is None or mark_f <= 0:
+                cells[tf] = MaCell(
+                    distance_pct=None,
+                    ema_value=None,
+                    tier="neutral",
+                    reason=reason or "no_mark",
+                )
+                continue
+
+            dist = (mark_f - float(ema_val)) / mark_f * 100.0
+            tier = alignment_tier(dist, side)
+            cells[tf] = MaCell(
+                distance_pct=round(dist, 4),
+                ema_value=float(ema_val),
+                tier=tier,
+                reason=None,
+            )
+            confluence_total += 1
+            if tier.startswith("aligned-"):
+                confluence_aligned += 1
+
+        rows.append(MaRow(
+            symbol=sym_full,
+            symbol_base=sym_base,
+            side=side,
+            binance_symbol=binance_id,
+            mark_price=mark_f,
+            cells=cells,
+            confluence_aligned=confluence_aligned,
+            confluence_total=confluence_total,
+        ))
+
+    response = MaAlignmentResponse(
+        venue=venue,
+        connection_id=connection_id,
+        snapshot_at=_iso(snap["snapshot_at"]),
+        timeframes=list(TF_ORDER),
+        rows=rows,
+    )
+    _cache_set(cache_key, response.model_dump(), ttl=CACHE_TTL_MA_ALIGNMENT_S)
     return response
