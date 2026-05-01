@@ -231,8 +231,10 @@ Trend arrow + σ: linear regression slope on the 288-point series, normalized as
 
 ```
 Fit linear regression: price_t = α + β × t over the 288 bars
-σ_typical = stdev of bar-to-bar returns over the window
-slope_σ = β × bars_per_window / σ_typical
+σ_typical = stdev of bar-to-bar absolute moves over the window
+slope_σ = β × √N / σ_typical
+       (= "trend's total move in units of expected √N random-walk
+           drift over N bars" — drift-to-noise, not raw drift)
 
 Display:
   > +1.5σ : ↗ strong up
@@ -243,6 +245,16 @@ Display:
 
 Color: aligned with position = green; against = red; flat = amber.
 ```
+
+The intent is drift-vs-noise, not raw drift. An earlier draft used `× N`
+in the numerator; that scales linearly with the window — even a trivial
+daily drift saturates the "strong up" bin because the trend term grows N
+while the per-bar σ stays constant. Dividing by `σ_typical × √N` (i.e.
+the expected dispersion of an N-step random walk) produces the canonical
+finance trend-strength signal where ±1.5σ is a meaningful "direction
+emerging from noise" threshold. Cross-check: the mockup's displayed σ
+values (BTC +2.1σ, MEGA +1.8σ, AIXBT −2.6σ) are only consistent with the
+√N normalization. Implemented in `backend/app/services/boxplot_cache.py`.
 
 Empty/insufficient: <50 bars of history → INSUFFICIENT DATA placeholder. Tier: T4 (5m).
 
