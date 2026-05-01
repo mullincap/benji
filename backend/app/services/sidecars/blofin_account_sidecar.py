@@ -433,26 +433,71 @@ class BlofinAccountSidecar:
         self.sm.feed(Event.REST_SEED_DONE)
 
     async def _send_subscribes(self) -> None:
+        """Fire all subscribe frames in order, then drain incoming
+        frames until we've collected an ack for each channel.
+
+        BloFin's positions channel pushes its initial snapshot BEFORE
+        the subscribe ack arrives — verified empirically against the
+        production endpoint. So we cannot do "send + recv-the-ack"
+        inline per channel; we'd treat the snapshot push as a failure.
+        Instead: send all subscribes, then loop reading frames and
+        dispatching anything that isn't an ack to the normal push
+        handler. That way Redis populates as fast as possible — by
+        the time the last ack arrives the dashboard already has live
+        position data.
+        """
         try:
             for channel in SUBSCRIBE_CHANNELS:
                 await self.ws.send(build_subscribe_frame(channel))
-                # Read the ack inline — keeps the state machine in
-                # SUBSCRIBING phase for 4 frames, then transitions to
-                # CONNECTED on the 4th ack.
+            acks_remaining = len(SUBSCRIBE_CHANNELS)
+            deadline = time.monotonic() + 10.0  # all 4 must ack within 10s
+            while acks_remaining > 0:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    log.warning(
+                        "subscribe ack timeout, %d outstanding",
+                        acks_remaining,
+                    )
+                    self.sm.feed(Event.SUBSCRIBE_FAILED)
+                    return
                 try:
-                    resp = await asyncio.wait_for(self.ws.recv(), timeout=5.0)
+                    resp = await asyncio.wait_for(
+                        self.ws.recv(), timeout=remaining,
+                    )
                 except asyncio.TimeoutError:
-                    log.warning("subscribe ack timeout for %s", channel)
+                    log.warning(
+                        "subscribe ack timeout, %d outstanding",
+                        acks_remaining,
+                    )
                     self.sm.feed(Event.SUBSCRIBE_FAILED)
                     return
                 classified = classify_message(resp)
                 if classified.kind == "subscribe_success":
                     self.sm.feed(Event.SUBSCRIBE_ACK)
-                else:
-                    log.warning("subscribe %s failed: kind=%s msg=%s",
-                                channel, classified.kind, classified.msg)
+                    acks_remaining -= 1
+                elif classified.kind == "push":
+                    # Initial snapshot for positions/account often
+                    # arrives before its ack. Dispatch to Redis so the
+                    # dashboard sees fresh data immediately.
+                    await self._dispatch_message(resp)
+                    self._stats["messages_received"] += 1
+                elif classified.kind == "pong":
+                    continue
+                elif classified.kind in ("subscribe_failure", "error", "login_failure"):
+                    log.warning(
+                        "subscribe failed: kind=%s code=%s msg=%s",
+                        classified.kind, classified.code, classified.msg,
+                    )
                     self.sm.feed(Event.SUBSCRIBE_FAILED)
                     return
+                # Unknown frames: log and keep looping. Can happen on a
+                # protocol drift; we don't want to abort the connection
+                # for a frame we don't recognize.
+                else:
+                    log.debug(
+                        "unrecognized frame during subscribe: kind=%s raw=%s",
+                        classified.kind, classified.raw[:200],
+                    )
             self._stats["connected_at"] = time.time()
             log.info("all channels subscribed; entering steady state")
         except Exception as e:
