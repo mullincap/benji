@@ -18,6 +18,13 @@ HTTP round-trip to BloFin's tpsl-pending endpoint) is cached separately
 with 5s TTL and shared between /risk and /positions so opening the
 page doesn't trigger duplicate fetches.
 
+**Pure read, no side effects.** These endpoints serve from
+exchange_snapshots (kept fresh by the every-5-min sync_exchange_snapshots
+cron) plus an on-demand BloFin TPSL fetch. They do NOT call
+refresh_snapshots — the live "tick 2s" promise belongs to the WebSocket
+sidecar (later step), not these REST endpoints. The frontend can poll
+freely without burning BloFin API budget or writing to the DB.
+
 BloFin null-field derivation (used_margin, unrealized_pnl) and source
 attribution (manual vs strategy) live in
 `app.services.manager_live_state` so /api/manager/positions and these
@@ -49,7 +56,6 @@ from ...services.manager_live_state import (
 from .admin import require_admin
 from .allocator import (
     fetch_blofin_tpsl_orders,
-    refresh_snapshots,
 )
 
 log = logging.getLogger(__name__)
@@ -421,11 +427,10 @@ def _enrich_positions(
         entry = p.get("entry_price")
         mark = p.get("mark_price")
         upl = float(p.get("unrealized_pnl") or 0)
-        upl_pct = (
-            upl / (float(entry) * size_abs) * 100.0
-            if entry and size_abs and float(entry) > 0
-            else 0.0
-        )
+        # Pct = UPL / notional (notional already accounts for BloFin's
+        # contract_value scaling; entry_price × size is wrong for
+        # contract-denominated venues).
+        upl_pct = (upl / notional * 100.0) if notional > 0 else 0.0
 
         # SL/TP lookup: BloFin TPSL response uses the dash form.
         if sym_base and sym_full.endswith("USDT"):
@@ -558,9 +563,11 @@ def _build_account_response(
 
 def _build_risk_response(
     snap: dict, *, venue: str, connection_id: str,
-    enriched: list[LivePosition], tpsl_by_inst: dict[str, dict],
+    enriched: list[LivePosition],
 ) -> RiskSnapshot:
-    eq = float(snap["total_equity_usd"] or 0)
+    # SL/TP for the nearest_stop check is already attached to each
+    # LivePosition by _enrich_positions, so we don't need a separate
+    # tpsl_by_inst arg here.
     total_notional = sum(p.notional_usd for p in enriched)
 
     # Margin level: BloFin balance endpoint doesn't reliably expose
@@ -658,7 +665,6 @@ def get_account(
     if cached:
         return AccountSnapshot.model_validate(cached)
 
-    refresh_snapshots(cur)
     snap = _read_latest_snapshot(cur, venue, connection_id)
     if not snap:
         raise HTTPException(404, f"No snapshot for {venue}/{connection_id}")
@@ -693,7 +699,6 @@ def get_risk(
     if cached:
         return RiskSnapshot.model_validate(cached)
 
-    refresh_snapshots(cur)
     snap = _read_latest_snapshot(cur, venue, connection_id)
     if not snap:
         raise HTTPException(404, f"No snapshot for {venue}/{connection_id}")
@@ -709,7 +714,7 @@ def get_risk(
     )
     response = _build_risk_response(
         snap, venue=venue, connection_id=connection_id,
-        enriched=enriched, tpsl_by_inst=tpsl,
+        enriched=enriched,
     )
     _cache_set(cache_key, response.model_dump(), ttl=CACHE_TTL_RISK_S)
     return response
@@ -727,7 +732,6 @@ def get_positions(
     if cached:
         return PositionsResponse.model_validate(cached)
 
-    refresh_snapshots(cur)
     snap = _read_latest_snapshot(cur, venue, connection_id)
     if not snap:
         raise HTTPException(404, f"No snapshot for {venue}/{connection_id}")
