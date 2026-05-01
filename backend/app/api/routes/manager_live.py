@@ -67,6 +67,7 @@ from ...services.boxplot_cache import (
     mark_dot_class,
     trend_color,
 )
+from ...services.correlation_cache import get_coverage_matrix_cached
 from ...services.exchanges.binance_market import BinanceMarketClient
 from concurrent.futures import ThreadPoolExecutor
 
@@ -539,6 +540,45 @@ class BoxPlotsResponse(BaseModel):
     cells: list[BoxPlotCell]
 
 
+# ── Coverage Matrix + Effective-N (§8 + §9a) ──────────────────────────
+
+# Cell tier names mirror the mockup CSS classes (cm-strong-con etc.)
+# and the `diag` / `insufficient` sentinels.
+CovTier = Literal[
+    "strong-con", "mid-con", "soft-con",
+    "neutral",
+    "soft-hedge", "mid-hedge", "strong-hedge",
+    "diag", "insufficient",
+]
+
+
+class CoverageRow(BaseModel):
+    symbol: str
+    symbol_base: str
+    side: Literal["long", "short"]
+    notional_usd: float
+    binance_symbol: str | None
+    has_history: bool
+    sigma_daily: float | None  # daily $ stdev of this position's PnL series
+
+
+class CoverageMatrixResponse(BaseModel):
+    venue: str
+    connection_id: str
+    snapshot_at: str | None
+    rows: list[CoverageRow]
+    # NxN matrix; cell value is the Pearson correlation (or null when
+    # one side has insufficient history). Diagonal is 1.0.
+    matrix: list[list[float | None]]
+    # NxN tier names parallel to `matrix` so the frontend can color
+    # without re-binning.
+    tiers: list[list[CovTier]]
+    effective_n: float | None
+    diversification_benefit_pct: float | None
+    nominal_count: int
+    reasons: dict[str, str]  # symbol → 'not_listed' | 'insufficient_history'
+
+
 # ── Compute helpers ───────────────────────────────────────────────────────
 
 def _iso(dt) -> str | None:
@@ -818,6 +858,10 @@ CACHE_TTL_MA_ALIGNMENT_S = 30
 # duplicate frontend polls without masking the underlying 5m bar-close
 # rotation in boxplot_cache.
 CACHE_TTL_BOXPLOTS_S = 30
+# /coverage-matrix piggybacks on the correlation_cache (1H-bar TTL).
+# 60s response cache absorbs frontend polling without masking the
+# hourly recompute window.
+CACHE_TTL_COVERAGE_S = 60
 
 
 @router.get("/account", response_model=AccountSnapshot)
@@ -1228,3 +1272,85 @@ def _opt_float(v) -> float | None:
         return float(v)
     except (TypeError, ValueError):
         return None
+
+
+@router.get("/coverage-matrix", response_model=CoverageMatrixResponse)
+def get_coverage_matrix(
+    venue: str | None = Query(None, pattern="^(blofin|binance)$"),
+    connection_id: str | None = None,
+    cur=Depends(get_cursor),
+) -> CoverageMatrixResponse:
+    """7×7 (or N×N) pairwise position-PnL correlation matrix + effective-N.
+
+    Reads open positions from the latest snapshot, resolves binance_id
+    per base symbol via market.symbols, and pulls 30d daily-close
+    series for each (cached per-symbol per-day in `daily_closes:*`).
+    Pairwise Pearson on dollar-PnL series (notional × return × dir_sign)
+    gives the matrix; effective-N comes from the diversification-ratio
+    formula (Σσ)² / (Σ_ij σᵢσⱼρᵢⱼ) — see correlation_cache.py header
+    for why this deviates from §9a Note B's literal Herfindahl form.
+    """
+    venue, connection_id = _resolve_venue_connection(cur, venue, connection_id)
+    cache_key = f"live:coverage-matrix:{venue}:{connection_id}"
+    cached = _cache_get(cache_key)
+    if cached:
+        return CoverageMatrixResponse.model_validate(cached)
+
+    snap = _read_latest_snapshot(cur, venue, connection_id)
+    if not snap:
+        raise HTTPException(404, f"No snapshot for {venue}/{connection_id}")
+
+    open_positions: list[dict] = []
+    for p in (snap["positions"] or []):
+        sym = (p.get("symbol") or "").upper()
+        size = float(p.get("size") or 0)
+        if not sym or size == 0:
+            continue
+        sym_base = parse_symbol_base(sym)
+        side = derive_position_side(p.get("side"), p.get("size") or 0)
+        notional = float(p.get("notional_usd") or 0)
+        # Default sort by notional desc so matrix rows track the
+        # positions table / treemap order.
+        open_positions.append({
+            "symbol": sym,
+            "symbol_base": sym_base,
+            "side": side,
+            "notional_usd": notional,
+        })
+    open_positions.sort(key=lambda p: -p["notional_usd"])
+
+    bases = [p["symbol_base"] for p in open_positions]
+    binance_ids = _resolve_binance_ids(cur, bases)
+
+    def resolver(base: str) -> str | None:
+        return binance_ids.get(base)
+
+    client = BinanceMarketClient()
+    result = get_coverage_matrix_cached(
+        open_positions, client=client, binance_id_resolver=resolver,
+    )
+
+    rows = [CoverageRow(
+        symbol=r["symbol"],
+        symbol_base=r["symbol_base"],
+        side=r["side"],
+        notional_usd=r["notional_usd"],
+        binance_symbol=r.get("binance_symbol"),
+        has_history=r["has_history"],
+        sigma_daily=r.get("sigma_daily"),
+    ) for r in result["rows"]]
+
+    response = CoverageMatrixResponse(
+        venue=venue,
+        connection_id=connection_id,
+        snapshot_at=_iso(snap["snapshot_at"]),
+        rows=rows,
+        matrix=result["matrix"],
+        tiers=result["tiers"],
+        effective_n=result["effective_n"],
+        diversification_benefit_pct=result["diversification_benefit_pct"],
+        nominal_count=result["nominal_count"],
+        reasons=result["reasons"],
+    )
+    _cache_set(cache_key, response.model_dump(), ttl=CACHE_TTL_COVERAGE_S)
+    return response

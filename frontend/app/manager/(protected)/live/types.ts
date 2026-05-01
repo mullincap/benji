@@ -246,3 +246,34 @@ export interface BoxPlotsResponse {
   snapshot_at: string | null;
   cells: BoxPlotCell[];
 }
+
+// ─── /api/manager/live/coverage-matrix (Data Dictionary §8 + §9a) ──────
+
+export type CovTier =
+  | "strong-con" | "mid-con" | "soft-con"
+  | "neutral"
+  | "soft-hedge" | "mid-hedge" | "strong-hedge"
+  | "diag" | "insufficient";
+
+export interface CoverageRow {
+  symbol: string;
+  symbol_base: string;
+  side: Side;
+  notional_usd: number;
+  binance_symbol: string | null;
+  has_history: boolean;
+  sigma_daily: number | null;
+}
+
+export interface CoverageMatrixResponse {
+  venue: Venue;
+  connection_id: string;
+  snapshot_at: string | null;
+  rows: CoverageRow[];
+  matrix: (number | null)[][];
+  tiers: CovTier[][];
+  effective_n: number | null;
+  diversification_benefit_pct: number | null;
+  nominal_count: number;
+  reasons: Record<string, string>;
+}

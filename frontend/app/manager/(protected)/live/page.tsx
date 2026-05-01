@@ -41,9 +41,12 @@ import Waterfall from "./Waterfall";
 import ExposureMap from "./ExposureMap";
 import MAAlignmentHeatmap from "./MAAlignmentHeatmap";
 import BoxPlotStrip from "./BoxPlotStrip";
+import CoverageMatrix from "./CoverageMatrix";
+import EffectiveNGauge from "./EffectiveNGauge";
 import type {
   AccountSnapshot,
   BoxPlotsResponse,
+  CoverageMatrixResponse,
   LivePosition,
   MaAlignmentResponse,
   PositionsResponse,
@@ -1269,6 +1272,13 @@ export default function LivePage() {
     `${API_BASE}/api/manager/live/boxplots`,
     60000,
   );
+  // Coverage matrix + effective-N: 1H bar-close trigger on the
+  // backend; frontend polls slow (5 min) since correlations don't
+  // shift meaningfully within the hour.
+  const coverage = useLivePoll<CoverageMatrixResponse>(
+    `${API_BASE}/api/manager/live/coverage-matrix`,
+    300000,
+  );
 
   const [chatCollapsed, setChatCollapsed] = useState(false);
 
@@ -1431,10 +1441,13 @@ export default function LivePage() {
 
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
           <Collapsible id="live:coverage-matrix" title="Coverage Matrix · 30D Rolling">
-            <Placeholder height={260} label="Pairwise correlation matrix renders in step 10" />
+            <CoverageMatrix data={coverage.data} />
           </Collapsible>
           <Collapsible id="live:factor-decomp" title="Factor Decomposition · 30D Rolling">
-            <Placeholder height={260} label="Effective-N + factor bar render in step 11" />
+            <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+              <EffectiveNGauge data={coverage.data} />
+              <Placeholder height={140} label="Factor decomposition bar renders in step 11" />
+            </div>
           </Collapsible>
         </div>
 
