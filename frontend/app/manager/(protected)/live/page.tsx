@@ -51,11 +51,13 @@ import type {
   FactorDecompositionResponse,
   LivePosition,
   MaAlignmentResponse,
+  MaVariant,
   PositionsResponse,
   RiskSnapshot,
   Side,
   Source,
 } from "./types";
+import { DEFAULT_MA_VARIANT, MA_VARIANT_OPTIONS } from "./types";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE || "";
 
@@ -1283,10 +1285,27 @@ export default function LivePage() {
   const account = useLivePoll<AccountSnapshot>(`${API_BASE}/api/manager/live/account`, 1000);
   const risk = useLivePoll<RiskSnapshot>(`${API_BASE}/api/manager/live/risk`, 5000);
   const positions = useLivePoll<PositionsResponse>(`${API_BASE}/api/manager/live/positions`, 1000);
-  // MA heatmap polls slower — underlying EMA values only update on bar
-  // close per timeframe (5m at fastest).
+  // MA heatmap polls slower — underlying MA values only update on bar
+  // close per timeframe (5m at fastest). User-selectable variant
+  // (default sma20) is persisted in localStorage and passed to the
+  // endpoint as the ma_variant query param; toggling re-keys the
+  // polling URL, which the hook handles as a new resource.
+  const [maVariant, setMaVariantState] = useState<MaVariant>(DEFAULT_MA_VARIANT);
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const stored = window.localStorage.getItem("live:ma-variant");
+    if (stored && MA_VARIANT_OPTIONS.some((o) => o.id === stored)) {
+      setMaVariantState(stored as MaVariant);
+    }
+  }, []);
+  const setMaVariant = useCallback((v: MaVariant) => {
+    setMaVariantState(v);
+    if (typeof window !== "undefined") {
+      window.localStorage.setItem("live:ma-variant", v);
+    }
+  }, []);
   const maAlignment = useLivePoll<MaAlignmentResponse>(
-    `${API_BASE}/api/manager/live/ma-alignment`,
+    `${API_BASE}/api/manager/live/ma-alignment?ma_variant=${maVariant}`,
     60000,
   );
   // Box plot strip: same 5m bar-close cadence on the underlying
@@ -1504,7 +1523,11 @@ export default function LivePage() {
         </Collapsible>
 
         <Collapsible id="live:ma-heatmap" title="MA Alignment · Distance from EMA">
-          <MAAlignmentHeatmap data={maAlignment.data} />
+          <MAAlignmentHeatmap
+            data={maAlignment.data}
+            variant={maVariant}
+            onVariantChange={setMaVariant}
+          />
         </Collapsible>
 
         <Collapsible

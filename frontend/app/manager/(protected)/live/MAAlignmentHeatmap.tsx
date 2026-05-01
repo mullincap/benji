@@ -21,7 +21,14 @@
  */
 
 import { useEffect, useRef, useState } from "react";
-import type { MaAlignmentResponse, MaCell, MaAlignmentTier, Side } from "./types";
+import type {
+  MaAlignmentResponse,
+  MaCell,
+  MaAlignmentTier,
+  MaVariant,
+  Side,
+} from "./types";
+import { MA_VARIANT_OPTIONS } from "./types";
 
 // Project tokens used inline. Same colors as the mockup's CSS classes.
 const TIER_BG: Record<MaAlignmentTier, string> = {
@@ -46,9 +53,11 @@ const TIER_COLOR: Record<MaAlignmentTier, string> = {
 
 interface Props {
   data: MaAlignmentResponse | null;
+  variant: MaVariant;
+  onVariantChange: (v: MaVariant) => void;
 }
 
-export default function MAAlignmentHeatmap({ data }: Props) {
+export default function MAAlignmentHeatmap({ data, variant, onVariantChange }: Props) {
   if (!data) {
     return <Skeleton timeframes={DEFAULT_TFS} rowCount={6} />;
   }
@@ -84,7 +93,18 @@ export default function MAAlignmentHeatmap({ data }: Props) {
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-      <Legend />
+      <div
+        style={{
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "space-between",
+          gap: 12,
+          flexWrap: "wrap",
+        }}
+      >
+        <Legend />
+        <VariantToggle variant={variant} onChange={onVariantChange} />
+      </div>
       <div
         style={{
           display: "grid",
@@ -156,6 +176,51 @@ function Legend() {
   );
 }
 
+function VariantToggle({
+  variant, onChange,
+}: { variant: MaVariant; onChange: (v: MaVariant) => void }) {
+  return (
+    <div
+      role="tablist"
+      style={{
+        display: "inline-flex",
+        border: "1px solid var(--line)",
+        borderRadius: 3,
+        overflow: "hidden",
+        fontSize: 10,
+        fontFamily: "var(--font-space-mono), Space Mono, monospace",
+      }}
+    >
+      {MA_VARIANT_OPTIONS.map((opt) => {
+        const active = variant === opt.id;
+        return (
+          <button
+            key={opt.id}
+            type="button"
+            role="tab"
+            aria-selected={active}
+            onClick={() => onChange(opt.id)}
+            style={{
+              background: active ? "var(--green-mid)" : "var(--bg2)",
+              color: active ? "var(--green)" : "var(--t1)",
+              fontWeight: active ? 700 : 400,
+              padding: "5px 10px",
+              border: "none",
+              cursor: "pointer",
+              letterSpacing: "0.1em",
+              fontFamily: "inherit",
+              fontSize: "inherit",
+            }}
+          >
+            {opt.label}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+
 function Header() {
   return (
     <div
@@ -196,7 +261,7 @@ function Row({ row, tfs }: { row: MaAlignmentResponse["rows"][number]; tfs: stri
       <SideTag side={row.side} />
       {tfs.map((tf) => {
         const cell = row.cells[tf] ?? {
-          distance_pct: null, ema_value: null, tier: "neutral", reason: "missing",
+          distance_pct: null, ma_value: null, tier: "neutral", reason: "missing",
         } as MaCell;
         return <Cell key={tf} cell={cell} symbol={row.symbol_base} tf={tf} />;
       })}
@@ -249,13 +314,13 @@ function SideTag({ side }: { side: Side }) {
 }
 
 function Cell({ cell, symbol, tf }: { cell: MaCell; symbol: string; tf: string }) {
-  const isNull = cell.distance_pct === null || cell.ema_value === null;
+  const isNull = cell.distance_pct === null || cell.ma_value === null;
   const tier = cell.tier;
   const bg = TIER_BG[tier];
   const color = TIER_COLOR[tier];
   const tooltip = isNull
     ? `${symbol} · ${tf} · ${cell.reason ?? "no data"}`
-    : `${symbol} · ${tf} · EMA ${formatEma(cell.ema_value!)} · distance ${formatPct(cell.distance_pct!)}`;
+    : `${symbol} · ${tf} · MA ${formatMa(cell.ma_value!)} · distance ${formatPct(cell.distance_pct!)}`;
 
   // Bar-close pulse: when this cell's distance_pct changes, briefly outline
   // the cell with a green border so the operator sees that the bar just
@@ -349,7 +414,7 @@ function formatPct(v: number): string {
   return `${sign}${v.toFixed(1)}%`;
 }
 
-function formatEma(v: number): string {
+function formatMa(v: number): string {
   if (v >= 1000) return `$${v.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
   if (v >= 1) return `$${v.toFixed(4)}`;
   return `$${v.toFixed(6)}`;

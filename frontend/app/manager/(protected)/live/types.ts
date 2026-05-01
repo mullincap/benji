@@ -188,9 +188,21 @@ export type MaAlignmentTier =
   | "against-mid"
   | "against-strong";
 
+/** Variant selector for the MA Alignment heatmap. The endpoint returns
+ *  a 400 if any other value is sent, so this list MUST stay in sync
+ *  with backend `services/ema_cache.MA_VARIANTS`. */
+export type MaVariant = "sma20" | "sma60" | "ema20";
+
+export const MA_VARIANT_OPTIONS: { id: MaVariant; label: string }[] = [
+  { id: "sma20", label: "SMA20" },
+  { id: "sma60", label: "SMA60" },
+];
+
+export const DEFAULT_MA_VARIANT: MaVariant = "sma20";
+
 export interface MaCell {
   distance_pct: number | null;
-  ema_value: number | null;
+  ma_value: number | null;
   tier: MaAlignmentTier;
   /** null on success; otherwise 'not_listed' / 'insufficient_history' /
    *  'fetch_error' / 'no_mark' — UI renders the cell as a neutral '—'. */
@@ -214,6 +226,9 @@ export interface MaAlignmentResponse {
   snapshot_at: string | null;
   timeframes: string[];
   rows: MaRow[];
+  /** Echoes the variant the response was computed for; matches the
+   *  `ma_variant` query param the request sent. */
+  ma_variant: MaVariant;
 }
 
 // ─── /api/manager/live/boxplots (Data Dictionary §10) ──────────────────

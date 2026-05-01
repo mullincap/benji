@@ -59,9 +59,11 @@ from .allocator import (
     fetch_blofin_tpsl_orders,
 )
 from ...services.ema_cache import (
+    DEFAULT_VARIANT,
+    MA_VARIANTS,
     TF_ORDER,
     alignment_tier,
-    compute_and_cache_ema20,
+    compute_and_cache_ma,
 )
 from ...services.boxplot_cache import (
     compute_and_cache_boxplot,
@@ -618,7 +620,7 @@ class MaCell(BaseModel):
     fetch failure, or the symbol isn't listed on Binance USDM); the
     UI renders a neutral '—' in those cells."""
     distance_pct: float | None
-    ema_value: float | None
+    ma_value: float | None
     tier: MaAlignmentTier
     reason: str | None  # null on success; otherwise 'not_listed' /
                        # 'insufficient_history' / 'fetch_error'
@@ -642,6 +644,7 @@ class MaAlignmentResponse(BaseModel):
     snapshot_at: str | None
     timeframes: list[str]             # column order = TF_ORDER
     rows: list[MaRow]
+    ma_variant: str                   # echoes the variant the response was computed for
 
 
 # ── Box Plot Strip (Data Dictionary §10) ───────────────────────────────
@@ -1223,20 +1226,39 @@ def _resolve_binance_ids(cur, symbol_bases: list[str]) -> dict[str, str | None]:
 def get_ma_alignment(
     venue: str | None = Query(None, pattern="^(blofin|binance)$"),
     connection_id: str | None = None,
+    ma_variant: str = Query(
+        DEFAULT_VARIANT,
+        description=(
+            "Moving-average variant for the heatmap. One of: "
+            + ", ".join(sorted(MA_VARIANTS.keys()))
+        ),
+    ),
     cur=Depends(get_cursor),
 ) -> MaAlignmentResponse:
-    """Per-position EMA20 distance heatmap across the seven canonical
-    timeframes. Underlying EMA values come from a per-(symbol, tf,
-    bar_close_ts) Redis cache populated on demand from Binance USDM
-    klines (see services.ema_cache). Mark prices are sourced from the
-    BloFin snapshot — the same mark the rest of the Live tab reads.
+    """Per-position MA distance heatmap across the seven canonical
+    timeframes. Variant (sma20, sma60, ema20) is selected per-request
+    via the `ma_variant` query parameter; the toggle in the frontend
+    panel maps to this. Underlying values come from a per-(symbol, tf,
+    variant, bar_close_ts) Redis cache populated on demand from
+    Binance USDM klines (see services.ema_cache). Mark prices are
+    sourced from the BloFin snapshot — the same mark the rest of the
+    Live tab reads.
 
     Per-position fetches across timeframes are parallelized via a
     thread pool so a cold-cache page load completes in roughly one
     Binance-round-trip's worth of latency rather than 49×.
     """
+    if ma_variant not in MA_VARIANTS:
+        raise HTTPException(
+            400,
+            f"Unknown ma_variant {ma_variant!r}; valid values: "
+            + ", ".join(sorted(MA_VARIANTS.keys())),
+        )
+
     venue, connection_id = _resolve_venue_connection(cur, venue, connection_id)
-    cache_key = f"live:ma-alignment:{venue}:{connection_id}"
+    # Cache key includes variant so toggling between SMA20 and SMA60
+    # doesn't serve a stale prior-variant response.
+    cache_key = f"live:ma-alignment:{venue}:{connection_id}:{ma_variant}"
     cached = _cache_get(cache_key)
     if cached:
         return MaAlignmentResponse.model_validate(cached)
@@ -1266,8 +1288,9 @@ def get_ma_alignment(
     client = BinanceMarketClient()
 
     def fetch_one(binance_symbol: str | None, tf: str) -> tuple[str, dict]:
-        return tf, compute_and_cache_ema20(
-            binance_symbol=binance_symbol, tf=tf, client=client,
+        return tf, compute_and_cache_ma(
+            binance_symbol=binance_symbol, tf=tf, variant=ma_variant,
+            client=client,
         )
 
     rows: list[MaRow] = []
@@ -1304,26 +1327,26 @@ def get_ma_alignment(
         confluence_aligned = 0
         confluence_total = 0
         for tf in TF_ORDER:
-            ema_result = per_pos.get(sym_full, {}).get(tf, {
-                "ema_value": None, "reason": "fetch_error",
+            ma_result = per_pos.get(sym_full, {}).get(tf, {
+                "ma_value": None, "reason": "fetch_error",
             })
-            ema_val = ema_result.get("ema_value")
-            reason = ema_result.get("reason")
+            ma_val = ma_result.get("ma_value")
+            reason = ma_result.get("reason")
 
-            if ema_val is None or mark_f is None or mark_f <= 0:
+            if ma_val is None or mark_f is None or mark_f <= 0:
                 cells[tf] = MaCell(
                     distance_pct=None,
-                    ema_value=None,
+                    ma_value=None,
                     tier="neutral",
                     reason=reason or "no_mark",
                 )
                 continue
 
-            dist = (mark_f - float(ema_val)) / mark_f * 100.0
+            dist = (mark_f - float(ma_val)) / mark_f * 100.0
             tier = alignment_tier(dist, side)
             cells[tf] = MaCell(
                 distance_pct=round(dist, 4),
-                ema_value=float(ema_val),
+                ma_value=float(ma_val),
                 tier=tier,
                 reason=None,
             )
@@ -1348,6 +1371,7 @@ def get_ma_alignment(
         snapshot_at=_iso(snap["snapshot_at"]),
         timeframes=list(TF_ORDER),
         rows=rows,
+        ma_variant=ma_variant,
     )
     _cache_set(cache_key, response.model_dump(), ttl=CACHE_TTL_MA_ALIGNMENT_S)
     return response
