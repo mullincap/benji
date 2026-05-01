@@ -230,6 +230,33 @@ def _get_connection_creds(cur, connection_id: str) -> tuple[str, str, str] | Non
     return api_key, api_secret, passphrase
 
 
+def _read_position_anchors_today(cur, venue: str, connection_id: str) -> dict[str, float]:
+    """Today's per-position UPL anchors, indexed by position_id (= symbol
+    in BloFin net mode). Returns {} if no anchors written for today.
+
+    Drives waterfall today_pnl computation:
+      today_pnl_per_position = current_unrealized_pnl − anchor_unrealized_pnl
+
+    Picks the EARLIEST snapshot per position for today (the 00:00 UTC
+    anchor) — the writer normally writes one row per position per day,
+    but if a future intraday snapshotter ships, the earliest still wins
+    as the day-anchor.
+    """
+    cur.execute("""
+        SELECT DISTINCT ON (position_id)
+               position_id, unrealized_pnl_usd
+          FROM user_mgmt.position_snapshots
+         WHERE venue = %s AND connection_id = %s::uuid
+           AND snapshot_at::date = (NOW() AT TIME ZONE 'UTC')::date
+         ORDER BY position_id, snapshot_at ASC
+    """, (venue, connection_id))
+    out: dict[str, float] = {}
+    for row in cur.fetchall():
+        if row["unrealized_pnl_usd"] is not None:
+            out[row["position_id"]] = float(row["unrealized_pnl_usd"])
+    return out
+
+
 def _get_tpsl_orders(cur, venue: str, connection_id: str) -> dict[str, dict]:
     """Cached TPSL fetch shared by /risk and /positions. 5s TTL. Returns
     empty dict on auth failure or non-BloFin venues (Binance fetch is
@@ -388,6 +415,13 @@ class LivePosition(BaseModel):
     tp_distance_pct: float | None
     risk_reward: float | None         # |TP − entry| / |SL − entry|
 
+    # Today's PnL contribution per position (drives waterfall §6).
+    # Computed as `unrealized_pnl_usd − today_anchor_unrealized_pnl_usd`.
+    # null when no anchor row exists for today; UI shows an "anchor
+    # missing" badge on the bar in that case.
+    today_pnl_usd: float | None
+    today_anchor_missing: bool
+
 
 class PositionsResponse(BaseModel):
     venue: str
@@ -411,11 +445,17 @@ def _enrich_positions(
     snap_positions: list[dict],
     *, venue: str, connection_id: str, connection_label: str | None,
     strat_map: dict[str, str], tpsl_by_inst: dict[str, dict],
+    position_anchors: dict[str, float] | None = None,
 ) -> list[LivePosition]:
     """Transform raw snapshot positions into LivePosition rows. Pulls
     SL/TP from the TPSL map keyed on raw instId form (BloFin's "BTC-USDT"
     with the dash) — snapshot positions have the dash stripped, so we
-    re-insert it for the lookup."""
+    re-insert it for the lookup.
+
+    `position_anchors` is {position_id → today's anchor UPL} from
+    `position_snapshots`. When None or missing for a position,
+    today_pnl_usd is None and today_anchor_missing=True."""
+    anchors = position_anchors or {}
     out: list[LivePosition] = []
     for p in (snap_positions or []):
         sym_full = (p.get("symbol") or "").upper()
@@ -455,6 +495,18 @@ def _enrich_positions(
         )
 
         strat_name = strat_map.get(sym_base)
+
+        # Today's PnL contribution: current upl − today's anchor upl.
+        # Anchor key = sym_full (matches position_snapshots.position_id
+        # which the writer sets to the snapshot's symbol form).
+        anchor_upl = anchors.get(sym_full)
+        if anchor_upl is None:
+            today_pnl: float | None = None
+            anchor_missing = True
+        else:
+            today_pnl = upl - anchor_upl
+            anchor_missing = False
+
         out.append(LivePosition(
             venue=venue,
             connection_id=connection_id,
@@ -477,6 +529,8 @@ def _enrich_positions(
             tp_price=tp_price,
             tp_distance_pct=tp_dist,
             risk_reward=rr,
+            today_pnl_usd=today_pnl,
+            today_anchor_missing=anchor_missing,
         ))
     return out
 
@@ -741,11 +795,17 @@ def get_positions(
     strat_map = build_strategy_symbol_map(cur, [connection_id])
     conn_strat = strat_map.get(connection_id, {})
     tpsl = _get_tpsl_orders(cur, venue, connection_id)
+    # Today's per-position UPL anchors (drives the waterfall today_pnl_usd
+    # field). Cheap: one SQL read against position_snapshots filtered to
+    # today's UTC date. Cached implicitly by the endpoint's 2s response
+    # cache.
+    pos_anchors = _read_position_anchors_today(cur, venue, connection_id)
     enriched = _enrich_positions(
         snap["positions"] or [],
         venue=venue, connection_id=connection_id,
         connection_label=snap.get("label"),
         strat_map=conn_strat, tpsl_by_inst=tpsl,
+        position_anchors=pos_anchors,
     )
     # Default sort: absolute notional descending — most-impactful row first.
     enriched.sort(key=lambda p: -p.notional_usd)

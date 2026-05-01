@@ -76,6 +76,18 @@ html {
   border-radius: 3px;
 }
 
+/* Row-pulse — applied transiently to a positions-table row when its
+ * matching treemap tile is clicked. 1.5s green flash that fades back
+ * to the row's normal background. Caller adds the .row-pulse class
+ * via a data attribute and removes it after 1500ms. */
+@keyframes row-pulse {
+  0%   { background-color: var(--green-mid, rgba(0, 200, 150, 0.40)); }
+  100% { background-color: transparent; }
+}
+.row-pulse {
+  animation: row-pulse 1.5s ease-out;
+}
+
 ::-webkit-scrollbar {
   width: 3px;
 }

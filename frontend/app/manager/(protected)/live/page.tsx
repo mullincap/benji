@@ -3,14 +3,15 @@
 /**
  * Manager → Live tab.
  *
- * Step 6 wires three sections to the live BloFin connection:
+ * Sections wired against the live BloFin connection (T0/T2 data only;
+ * heavier vizes — coverage matrix, factor decomp, box plots, MA heatmap
+ * — land in steps 8+):
  *   * Account Snapshot KPI strip (§3) ← /api/manager/live/account
  *   * Risk Signals row (§4)            ← /api/manager/live/risk
+ *   * Position Map / Treemap (§5)      ← /api/manager/live/positions
+ *   * PnL Attribution Waterfall (§6)   ← /api/manager/live/positions
+ *   * Exposure Long vs Short (§7)      ← /api/manager/live/positions + /account
  *   * Open Positions Table (§12)       ← /api/manager/live/positions
- *
- * The other section placeholders (treemap, waterfall, exposure,
- * coverage matrix, factor decomp, box plots, MA heatmap) still render
- * skeletons — those land in step 7+.
  *
  * Polling cadence per Data Dictionary §1: 2s on /account + /positions,
  * 5s on /risk. Drops to 60s when document.hidden.
@@ -18,6 +19,10 @@
  * Per-section error degradation: a failed endpoint shows a "STALE Ns"
  * tag in the section header and "—" in affected fields, but other
  * sections continue rendering. The page never blanks.
+ *
+ * Cross-viz interaction: clicking a treemap tile scrolls the matching
+ * row in the Open Positions Table into view and pulses its background
+ * (row-pulse keyframe in globals.css, 1.5s).
  */
 
 import {
@@ -31,6 +36,9 @@ import {
 import Collapsible from "../../../components/Collapsible";
 import Skeleton from "../../../components/Skeleton";
 import { useLivePoll } from "../../../components/useLivePoll";
+import Treemap from "./Treemap";
+import Waterfall from "./Waterfall";
+import ExposureMap from "./ExposureMap";
 import type {
   AccountSnapshot,
   LivePosition,
@@ -814,11 +822,13 @@ function PositionRow({
   expanded,
   onToggle,
   showExpanded,
+  pulse,
 }: {
   pos: LivePosition;
   expanded: boolean;
   onToggle: () => void;
   showExpanded: boolean;
+  pulse?: boolean;
 }) {
   const upl = pos.unrealized_pnl_usd;
   const uplPct = pos.unrealized_pnl_pct;
@@ -827,7 +837,9 @@ function PositionRow({
   return (
     <>
       <tr
+        data-pulse-symbol={pos.symbol}
         onClick={onToggle}
+        className={pulse ? "row-pulse" : undefined}
         style={{
           cursor: "pointer",
           background: expanded ? "var(--bg1)" : "transparent",
@@ -916,7 +928,13 @@ function fmtAge(seconds: number): string {
   return `${mins}m`;
 }
 
-function OpenPositionsTable({ data }: { data: PositionsResponse | null }) {
+function OpenPositionsTable({
+  data,
+  pulseSymbol,
+}: {
+  data: PositionsResponse | null;
+  pulseSymbol: string | null;
+}) {
   const [filter, setFilter] = useState<FilterKey>("all");
   const [expandedSymbol, setExpandedSymbol] = useState<string | null>(null);
 
@@ -998,6 +1016,7 @@ function OpenPositionsTable({ data }: { data: PositionsResponse | null }) {
                     setExpandedSymbol((v) => (v === p.symbol ? null : p.symbol))
                   }
                   showExpanded
+                  pulse={pulseSymbol === p.symbol}
                 />
               ))
             )}
@@ -1223,6 +1242,25 @@ export default function LivePage() {
 
   const [chatCollapsed, setChatCollapsed] = useState(false);
 
+  // Cross-viz interaction: clicking a treemap tile scrolls to + pulses
+  // the matching positions-table row. State auto-clears after 1.5s
+  // (matches the row-pulse animation duration in globals.css).
+  const [pulseSymbol, setPulseSymbol] = useState<string | null>(null);
+  const handleTileClick = useCallback((symbol: string) => {
+    setPulseSymbol(symbol);
+    if (typeof window !== "undefined") {
+      window.requestAnimationFrame(() => {
+        const row = document.querySelector(
+          `[data-pulse-symbol="${CSS.escape(symbol)}"]`,
+        );
+        if (row instanceof HTMLElement) {
+          row.scrollIntoView({ behavior: "smooth", block: "center" });
+        }
+      });
+    }
+    setTimeout(() => setPulseSymbol((cur) => (cur === symbol ? null : cur)), 1600);
+  }, []);
+
   // Manual REFRESH ↻ — fires all three out-of-band fetches at once.
   const [manualRefreshing, setManualRefreshing] = useState(false);
   const onRefresh = useCallback(async () => {
@@ -1343,15 +1381,21 @@ export default function LivePage() {
           title="Position Map · Notional × PnL"
           summary={positions.data ? <>{positions.data.counts.total} POSITIONS</> : undefined}
         >
-          <Placeholder height={240} label="Treemap renders in step 7" />
+          <Treemap
+            positions={positions.data?.positions ?? []}
+            onTileClick={handleTileClick}
+          />
         </Collapsible>
 
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
           <Collapsible id="live:waterfall" title="PnL Attribution · Today">
-            <Placeholder height={200} label="Waterfall renders in step 7" />
+            <Waterfall positions={positions.data?.positions ?? []} />
           </Collapsible>
           <Collapsible id="live:exposure" title="Exposure · Long vs Short">
-            <Placeholder height={200} label="Exposure bar renders in step 7" />
+            <ExposureMap
+              positions={positions.data?.positions ?? []}
+              account={account.data}
+            />
           </Collapsible>
         </div>
 
@@ -1382,7 +1426,7 @@ export default function LivePage() {
           }
           summary={positionsSummary}
         >
-          <OpenPositionsTable data={positions.data} />
+          <OpenPositionsTable data={positions.data} pulseSymbol={pulseSymbol} />
         </Collapsible>
       </main>
 

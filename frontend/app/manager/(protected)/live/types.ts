@@ -142,6 +142,12 @@ export interface LivePosition {
   tp_price: number | null;
   tp_distance_pct: number | null;
   risk_reward: number | null;
+
+  /** Today's PnL contribution: current upl − today's anchor upl.
+   *  null when no position_snapshots anchor exists for today (UI shows
+   *  an "anchor missing" badge on the waterfall bar). */
+  today_pnl_usd: number | null;
+  today_anchor_missing: boolean;
 }
 
 export interface PositionsResponse {

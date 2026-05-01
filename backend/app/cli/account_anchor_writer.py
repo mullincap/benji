@@ -159,10 +159,59 @@ def write_anchor_for_connection(
         snap["used_margin_usd"], snap["unrealized_pnl"],
         len(positions), json.dumps(raw_payload, default=str),
     ))
+
+    # Per-position anchor rows in user_mgmt.position_snapshots — one per
+    # open position at this anchor moment. Drives the Live tab waterfall:
+    # today_pnl = current_unrealized_pnl − this_anchor.unrealized_pnl_usd.
+    #
+    # Position identifier: BloFin's snapshot-stored symbol form
+    # ("BTCUSDT", dash already stripped). One position per symbol in net
+    # mode; sufficient as a stable id for v1. When hedge mode or
+    # multiple-position-per-symbol cases arise, switch to a synthesized
+    # `{symbol}|{side}|{margin_mode}` key.
+    #
+    # snapshot_at is set to anchor_date at midnight UTC so the row is a
+    # true "00:00 anchor" regardless of when the cron actually fires
+    # (typically 00:00:00–00:01:00 with jitter). Idempotent on
+    # (venue, connection_id, position_id, snapshot_at).
+    anchor_ts = datetime.datetime.combine(
+        anchor_date, datetime.time(0, 0, 0, tzinfo=datetime.timezone.utc),
+    )
+    pos_rows_written = 0
+    for p in positions:
+        sym_full = (p.get("symbol") or "").upper()
+        if not sym_full:
+            continue
+        size = float(p.get("size") or 0)
+        if size == 0:
+            continue
+        mark = float(p.get("mark_price") or 0)
+        notional = float(p.get("notional_usd") or 0)
+        upl = float(p.get("unrealized_pnl") or 0)
+        upl_pct = (upl / notional * 100.0) if notional > 0 else 0.0
+        cur.execute("""
+            INSERT INTO user_mgmt.position_snapshots
+                (venue, connection_id, position_id, snapshot_at,
+                 mark_price, size, notional_usd, unrealized_pnl_usd,
+                 unrealized_pct, funding_paid_usd)
+            VALUES (%s, %s::uuid, %s, %s, %s, %s, %s, %s, %s, %s)
+            ON CONFLICT (venue, connection_id, position_id, snapshot_at) DO UPDATE SET
+                mark_price         = EXCLUDED.mark_price,
+                size               = EXCLUDED.size,
+                notional_usd       = EXCLUDED.notional_usd,
+                unrealized_pnl_usd = EXCLUDED.unrealized_pnl_usd,
+                unrealized_pct     = EXCLUDED.unrealized_pct,
+                funding_paid_usd   = EXCLUDED.funding_paid_usd
+        """, (
+            exchange, connection_id, sym_full, anchor_ts,
+            mark, abs(size), notional, upl, upl_pct, None,
+        ))
+        pos_rows_written += 1
+
     conn.commit()
     return (
         f"wrote anchor: equity={snap['total_equity_usd']}, "
-        f"positions={len(positions)}"
+        f"positions={len(positions)}, position_anchors={pos_rows_written}"
         + ("  [SYNTHESIZED]" if synthesized else "")
     )
 
