@@ -88,7 +88,7 @@ def fetch_open_blofin_symbols() -> list[dict]:
     is wrong for 1000x-prefix tickers (PEPE/SHIB/FLOKI/BONK).
 
     Returns a list of dicts with: base, blofin_inst_id, binance_id,
-    coin_id. binance_id is None when no Binance listing is mapped in our
+    coingecko_id. binance_id is None when no Binance listing is mapped in our
     symbol registry.
     """
     with get_worker_conn() as conn:
@@ -119,11 +119,11 @@ def fetch_open_blofin_symbols() -> list[dict]:
             if not bases:
                 return []
             cur.execute("""
-                SELECT base, coin_id, binance_id
+                SELECT base, coingecko_id, binance_id
                   FROM market.symbols
                  WHERE base = ANY(%s)
             """, (bases,))
-            registry = {r[0]: {"coin_id": r[1], "binance_id": r[2]} for r in cur.fetchall()}
+            registry = {r[0]: {"coingecko_id": r[1], "binance_id": r[2]} for r in cur.fetchall()}
 
     out = []
     for p in positions:
@@ -136,7 +136,7 @@ def fetch_open_blofin_symbols() -> list[dict]:
             "side": p.get("side"),
             "size": p.get("size"),
             "binance_id": reg.get("binance_id"),
-            "coin_id": reg.get("coin_id"),
+            "coingecko_id": reg.get("coingecko_id"),
         })
     return out
 
