@@ -1230,6 +1230,15 @@ def positions(
                     strategy_by_conn.setdefault(cid, {})[sym.upper()] = strat_name
 
     # 4. Aggregate totals + flatten positions with strategy/manual tag.
+    #
+    # Per-connection upstream null-handling:
+    #   * BloFin's balance endpoint sometimes returns frozenBal=null and
+    #     upl=null even when positions are open. Fall back to position-
+    #     level fields:
+    #       used_margin  ← (equity − available) when frozenBal is empty
+    #       unrealized   ← sum of position upl when balance.upl is empty
+    #   * BloFin net-mode accounts return positionSide="net" — derive
+    #     long/short from sign of size instead of using the literal field.
     positions_out: list[dict] = []
     connections_out: list[dict] = []
     total_equity = 0.0
@@ -1243,8 +1252,19 @@ def positions(
         cid = str(r["connection_id"])
         eq = float(r["total_equity_usd"] or 0)
         av = float(r["available_usd"] or 0)
-        um = float(r["used_margin_usd"] or 0)
-        un = float(r["unrealized_pnl"] or 0)
+        um_raw = float(r["used_margin_usd"] or 0)
+        un_raw = float(r["unrealized_pnl"] or 0)
+
+        # Sum position-level upl as a fallback when balance.upl is empty.
+        pos_upl_sum = sum(
+            float(p.get("unrealized_pnl") or 0) for p in (r["positions"] or [])
+        )
+        un = un_raw if un_raw != 0 else pos_upl_sum
+        # Used margin: prefer reported, fall back to (equity − available).
+        # BloFin's frozenBal is the available-equity reservation, so this is
+        # an upper-bound estimate that matches what the % view already shows.
+        um = um_raw if um_raw > 0 else max(eq - av, 0.0)
+
         total_equity += eq
         total_available += av
         total_used_margin += um
@@ -1275,14 +1295,24 @@ def positions(
             strat_name = strat_syms.get(sym_base)
             notional = float(p.get("notional_usd") or 0)
             sum_notionals += notional
+
+            # Net-mode BloFin accounts report positionSide="net". Derive
+            # direction from size sign so the UI can render LONG/SHORT.
+            raw_side = (p.get("side") or "").lower()
+            size = p.get("size") or 0
+            if raw_side in ("net", ""):
+                side = "long" if size >= 0 else "short"
+            else:
+                side = raw_side
+
             positions_out.append({
                 "connection_id": cid,
                 "exchange": r["exchange"],
                 "connection_label": r["label"],
                 "symbol": sym_full,
                 "symbol_base": sym_base,
-                "side": p.get("side"),
-                "size": p.get("size"),
+                "side": side,
+                "size": abs(size),
                 "entry_price": p.get("entry_price"),
                 "mark_price": p.get("mark_price"),
                 "unrealized_pnl": p.get("unrealized_pnl"),
