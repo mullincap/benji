@@ -66,9 +66,13 @@ interface Props {
 }
 
 type EnrichedPosition = LivePosition & {
-  beta_btc: number | null;
-  btc_eq_usd: number;          // |β_BTC × notional|; 0 when β unknown
-  btc_eq_signed_usd: number;   // β_BTC × notional (preserves sign)
+  // Unitless BTC sensitivity ratio: $-β-from-API / notional. This is
+  // what the user sees in the β column ("2.13×"). The dollar β from
+  // the API already represents BTC-equivalent dollar exposure
+  // directly — no further multiplication needed for the BTC-eq view.
+  beta_btc_unitless: number | null;
+  btc_eq_usd: number;          // |API β_BTC|; 0 when β unknown
+  btc_eq_signed_usd: number;   // API β_BTC (signed); is the BTC-eq itself
   has_factor: boolean;         // true when factor row resolved with history
 };
 
@@ -101,14 +105,20 @@ function enrichPositions(
   }
   return positions.map((p) => {
     const fr = factorMap.get(p.symbol);
-    const beta = fr?.beta_btc ?? null;
-    const has_factor = fr?.has_history === true && beta !== null;
-    const signed = has_factor && beta !== null ? beta * p.notional_usd : 0;
+    const betaDollars = fr?.beta_btc ?? null;  // API: $-PnL per +100% BTC ret
+    const has_factor = fr?.has_history === true && betaDollars !== null;
+    // BTC-equivalent dollar exposure IS the API's β (already in $).
+    // The unitless ratio for the β column is β_dollars / notional.
+    const signedBtcEq = has_factor && betaDollars !== null ? betaDollars : 0;
+    const unitless =
+      has_factor && betaDollars !== null && p.notional_usd > 0
+        ? betaDollars / p.notional_usd
+        : null;
     return {
       ...p,
-      beta_btc: beta,
-      btc_eq_signed_usd: signed,
-      btc_eq_usd: Math.abs(signed),
+      beta_btc_unitless: unitless,
+      btc_eq_signed_usd: signedBtcEq,
+      btc_eq_usd: Math.abs(signedBtcEq),
       has_factor,
     };
   });
@@ -486,7 +496,7 @@ export default function ExposureMap({ positions, account, factor }: Props) {
               <span style={{ color: "var(--t1)", textAlign: "right" }}>
                 ${p.notional_usd.toLocaleString(undefined, { maximumFractionDigits: 0 })}
               </span>
-              <BetaCell beta={p.beta_btc} hasFactor={p.has_factor} />
+              <BetaCell beta={p.beta_btc_unitless} hasFactor={p.has_factor} />
               <BtcEqCell
                 signed={p.btc_eq_signed_usd}
                 hasFactor={p.has_factor}
@@ -582,14 +592,14 @@ function Segment({
   view: View;
 }) {
   const negativeBeta =
-    view === "btc-eq" && pos.has_factor && (pos.beta_btc ?? 0) < 0;
+    view === "btc-eq" && pos.has_factor && (pos.beta_btc_unitless ?? 0) < 0;
   const nearZeroBeta =
     view === "btc-eq" && pos.has_factor &&
-    Math.abs(pos.beta_btc ?? 0) < ZERO_BETA_FLOOR;
+    Math.abs(pos.beta_btc_unitless ?? 0) < ZERO_BETA_FLOOR;
 
   const tooltip =
-    view === "btc-eq" && pos.has_factor && pos.beta_btc !== null
-      ? `${pos.symbol_base} · β=${pos.beta_btc.toFixed(2)} · ` +
+    view === "btc-eq" && pos.has_factor && pos.beta_btc_unitless !== null
+      ? `${pos.symbol_base} · β=${pos.beta_btc_unitless.toFixed(2)}× · ` +
         `BTC-eq $${pos.btc_eq_usd.toLocaleString(undefined, { maximumFractionDigits: 0 })}` +
         (negativeBeta ? " · negative β (counter-correlated to BTC)" : "")
       : `${pos.symbol_base} · $${pos.notional_usd.toLocaleString(undefined, { maximumFractionDigits: 0 })}` +
