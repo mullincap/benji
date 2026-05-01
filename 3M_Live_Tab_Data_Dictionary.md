@@ -207,33 +207,59 @@ Diversification benefit (surfaced inline next to the headline): `(1 − σ_portf
 
 ### 9b · Factor Decomposition
 
-Bar segments = factor variance contributions, normalized to 100%. v1 factors: BTC, alt-coin index, idiosyncratic (residual). Diversification benefit = `1 − (σ_portfolio / Σ(w_i × σ_i)) × 100`.
+> **Spec correction · Note C (2026-05-01):** the original draft used the
+> raw equal-weighted alt index return as `factor_ALT`. On 30d daily
+> windows, BTC and the raw alt index are typically ~0.85+ correlated
+> (deployment 2026-05-01 measured 0.97 on the live 29d window) — too
+> collinear for a 2-factor regression to cleanly separate on n≈29 obs
+> even with ridge. Symptoms: portfolio variance attribution stays
+> stable (the formula is rotation-invariant), but per-position β's
+> split arbitrarily across the collinear pair, producing
+> economically nonsensical reads like β_BTC < 0 on a meme-coin long.
+>
+> Fix: `factor_ALT` is now the **BTC-orthogonal residual** of the
+> raw alt-index returns. Build the raw equal-weighted return series,
+> OLS-regress it on BTC over the same window, use the residuals.
+> BTC and ALT factors are then uncorrelated by construction. β_BTC
+> absorbs all BTC-correlated variance (including the BTC-correlated
+> component of alt moves); β_ALT picks up only genuinely alt-specific
+> moves above and beyond BTC. Portfolio-level numbers (variance
+> attribution percentages, σ_portfolio, diversification benefit) are
+> invariant to this rotation, but BTC% jumps from "near zero by
+> cancellation" to "honest BTC factor share," and per-position β
+> values become economically interpretable.
+>
+> Implementation: `backend/app/services/factor_decomp_cache.py`,
+> `_orthogonalize()` helper plumbed in `compute_factor_decomposition`
+> right after the BTC and raw-alt return series are built.
+
+Bar segments = factor variance contributions, normalized to 100%. v1 factors: BTC, BTC-orthogonal alt residual, idiosyncratic (residual). Diversification benefit = `1 − (σ_portfolio / Σ σ_i) × 100`.
 
 ```
-Run a multivariate regression of each position's daily PnL series against:
+Build factors (this order matters — orthogonalization is the load-bearing step):
+  raw_alt_t  = mean over alt_index.yml members of daily ret on day t
   factor_BTC = daily return of BTCUSDT
-  factor_ALT = daily return of an alt-index proxy (recommend: equal-
-               weighted of top-20 alt USDM perpetuals on Binance, ex-BTC,
-               ex-ETH, ex-stables)
-  residual = idiosyncratic
+  factor_ALT = residuals of OLS(raw_alt ~ factor_BTC)   ← BTC-orthogonal
 
-Per position:
-  pnl_i = β_BTC × ret_BTC + β_ALT × ret_ALT + ε_i
+Per position (ridge λ=0.01, applied to standardized features):
+  pnl_i = α + β_BTC × factor_BTC + β_ALT × factor_ALT + ε_i
 
-Variance attribution:
-  var_BTC_i = β_BTC^2 × var(BTC)
-  var_ALT_i = β_ALT^2 × var(ALT)
-  var_IDIO_i = var(ε_i)
+Variance attribution (orthogonal factors → no cross-term to allocate):
+  var_BTC_i  = β_BTC^2  × Var(factor_BTC)
+  var_ALT_i  = β_ALT^2  × Var(factor_ALT)        # smaller than Var(raw_alt)
+  var_IDIO_i = Var(ε_i)
+  pct_x = var_x / (var_BTC + var_ALT + var_IDIO) × 100
 
-Portfolio-level: weight by w_i^2 and aggregate. Normalize the three to sum to 100%.
+Portfolio-level: regress portfolio_pnl_t = Σ pnl_i_t on the same factors;
+the coefficients become aggregated dollar exposures (β_BTC = Σ β_BTC_i etc).
 
 Diversification benefit:
-  σ_silo = Σ(w_i × σ_i)         # sum of standalone risks
-  σ_portfolio = sqrt(w' Σ w)    # actual portfolio risk
-  benefit = 1 − σ_portfolio / σ_silo
+  σ_silo      = Σ σ_i              # sum of standalone $-PnL stdevs
+  σ_portfolio = stdev(portfolio_pnl_t)  # actual portfolio risk
+  benefit     = (1 − σ_portfolio / σ_silo) × 100
 ```
 
-Caveats: alt-index proxy needs maintenance (recommend fixed list of 20 symbols, rebalance quarterly); regression should be ridge-regularized (small λ) to handle BTC/ALT collinearity; positions with <14 days of history show em-dash + INSUFFICIENT HISTORY warning.
+Caveats: alt-index pool needs quarterly rebalance review (config/alt_index.yml — drop delisted members, add liquid newcomers); positions with <14 days of history show em-dash + INSUFFICIENT HISTORY warning. Per-position β's are the noisier output (n=29 daily obs is thin); portfolio-level percentages are the trustworthy headline.
 
 ---
 

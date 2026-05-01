@@ -8,11 +8,26 @@ tab's Factor Decomposition card (Data Dictionary §9b).
 Math:
   pnl_i_t = α_i + β_i_BTC × ret_BTC_t + β_i_ALT × ret_ALT_t + ε_i_t
 
-  ALT factor = equal-weighted mean of daily returns over the alt index
-  (config/alt_index.yml — typically 20 large-cap alts, ex-BTC, ex-ETH,
-  ex-stables). On any given day, only alts with cached history at that
-  bar contribute, so the index is whatever subset has data — not a
-  fixed-N pool.
+  ALT factor = **BTC-orthogonal residual** of the equal-weighted alt
+  index. Construction: build the raw equal-weighted return series over
+  the alt index (config/alt_index.yml — 20 large-cap alts, ex-BTC,
+  ex-ETH, ex-stables), then OLS-regress it on BTC returns over the
+  same window and use the residuals as the factor. This forces BTC
+  factor and ALT factor to be uncorrelated by construction, so the
+  per-position β's are economically interpretable: β_BTC absorbs all
+  BTC-correlated variance (including the BTC-correlated component of
+  alt moves), and β_ALT picks up only genuinely alt-specific residual
+  moves. Without this orthogonalization, BTC and the raw alt index
+  run ~0.85+ correlated on 30d crypto data — multicollinear enough
+  that ridge can't cleanly separate them on 29 daily obs, producing
+  unstable per-position β's (e.g. a meme-coin long with negative
+  β_BTC, which is economically nonsense). Variance attribution at the
+  portfolio level is invariant to this rotation; per-position β's
+  become trustworthy.
+
+  On any given day, only alts with cached history at that bar
+  contribute to the raw index, so the underlying pool is whatever
+  subset has data — not a fixed-N pool.
 
 Aggregation (portfolio level, the bar that gets rendered):
   portfolio_pnl_t = Σ pnl_i_t
@@ -199,6 +214,35 @@ def _variance(xs: list[float]) -> float:
     return sum((v - m) ** 2 for v in xs) / n
 
 
+def _orthogonalize(target: list[float], predictor: list[float]) -> list[float]:
+    """Return residuals from an OLS regression of `target` on `predictor`
+    plus an intercept. The output series is uncorrelated with `predictor`
+    by construction (sample correlation = 0 within rounding) and has
+    mean zero.
+
+    Used to convert the raw alt-index return series into a BTC-orthogonal
+    "alt-residual" factor. See module header for why — short version:
+    BTC and the raw alt index are ~0.85+ correlated on 30d windows;
+    without this step, the 2-factor regression of position PnL is
+    multicollinear and individual β's pick up arbitrary opposite signs
+    (e.g. a meme-coin long with β_BTC < 0). After orthogonalization
+    BTC absorbs all BTC-correlated variance and ALT picks up only what
+    BTC can't explain.
+    """
+    n = len(target)
+    if n < 3 or n != len(predictor):
+        return list(target)
+    mt = sum(target) / n
+    mp = sum(predictor) / n
+    var_p = sum((v - mp) ** 2 for v in predictor) / n
+    if var_p <= 0:
+        return [v - mt for v in target]
+    cov_tp = sum((target[i] - mt) * (predictor[i] - mp) for i in range(n)) / n
+    beta = cov_tp / var_p
+    intercept = mt - beta * mp
+    return [target[i] - intercept - beta * predictor[i] for i in range(n)]
+
+
 def _returns(closes: list[float]) -> list[float]:
     """Daily returns from a closes series; len(returns) = len(closes) − 1."""
     out: list[float] = []
@@ -339,6 +383,12 @@ def compute_factor_decomposition(
     common_factor_n = min(len(btc_returns), len(alt_returns))
     btc_returns = btc_returns[-common_factor_n:]
     alt_returns = alt_returns[-common_factor_n:]
+
+    # Orthogonalize the alt factor against BTC. Position-PnL regressions
+    # downstream now use (BTC, ALT_residual), where ALT_residual is alt
+    # variance net of BTC. See module header for the multicollinearity
+    # rationale.
+    alt_returns = _orthogonalize(alt_returns, btc_returns)
 
     # ── Per-position regressions ──────────────────────────────────
     pos_rows: list[dict[str, Any]] = []
