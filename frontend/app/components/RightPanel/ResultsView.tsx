@@ -12947,9 +12947,15 @@ export default function ResultsView({ results, jobId, startingCapital, params }:
   const defaultSelectedFilter = (() => {
     if (mergedFilters.length === 0) return null;
     const candidates = mergedFilters.filter((r) => !r.not_run);
-    const ranked = [...(candidates.length > 0 ? candidates : mergedFilters)].sort(
-      (a, b) => (asNum(b.sharpe) ?? Number.NEGATIVE_INFINITY) - (asNum(a.sharpe) ?? Number.NEGATIVE_INFINITY),
-    );
+    // Best filter = least-negative max drawdown. max_dd is stored as a
+    // negative number (e.g. -23.5), so highest value wins. Sharpe is the
+    // tiebreaker so ties break toward higher risk-adjusted return.
+    const ranked = [...(candidates.length > 0 ? candidates : mergedFilters)].sort((a, b) => {
+      const ma = asNum(a.max_dd) ?? Number.NEGATIVE_INFINITY;
+      const mb = asNum(b.max_dd) ?? Number.NEGATIVE_INFINITY;
+      if (ma !== mb) return mb - ma;
+      return (asNum(b.sharpe) ?? Number.NEGATIVE_INFINITY) - (asNum(a.sharpe) ?? Number.NEGATIVE_INFINITY);
+    });
     return String(ranked[0]?.filter ?? mergedFilters[0]?.filter ?? '');
   })();
 

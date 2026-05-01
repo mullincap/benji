@@ -442,18 +442,21 @@ def parse_metrics(audit_output_path: Path) -> dict:
         })
     if filter_rows:
         metrics["filter_comparison"] = filter_rows
-        # Prefer explicit winner marker from RUN SUMMARY (◄).
-        best_marked = next((r for r in filter_rows if r.get("is_run_summary_best")), None)
-        # Fallback to highest grade_score, then Sharpe.
-        best_fallback = max(
+        # Best filter = least-negative max drawdown (max_dd values are
+        # stored negative, so highest is closest to 0). Sharpe breaks
+        # ties so equal-DD rows resolve toward higher risk-adjusted
+        # return. Audit's RUN SUMMARY ◄ marker is intentionally ignored
+        # here — the frontend default-filter selection uses the same
+        # max-DD criterion (ResultsView.tsx defaultSelectedFilter), so
+        # backend's `best_filter` matches what the UI auto-selects.
+        best = max(
             filter_rows,
             key=lambda r: (
-                r["grade_score"] is not None,
-                r["grade_score"] if r["grade_score"] is not None else float("-inf"),
+                r["max_dd"] is not None,
+                r["max_dd"] if r["max_dd"] is not None else float("-inf"),
                 r["sharpe"] if r["sharpe"] is not None else float("-inf"),
             ),
         )
-        best = best_marked or best_fallback
         metrics["best_filter"] = best["filter"]
         if best.get("cagr") is not None:
             metrics["cagr"] = best["cagr"]
