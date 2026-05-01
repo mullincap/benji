@@ -74,6 +74,30 @@ services:
         condition: service_healthy
     command: celery -A app.workers.pipeline_worker.celery_app worker --loglevel=info --concurrency=2
 
+  # BloFin private WebSocket sidecar — pushes account/positions/orders
+  # state from BloFin's WS stream into Redis on every event. Replaces
+  # the 5-min sync_exchange_snapshots cron's staleness ceiling for the
+  # Live tab; the cron remains as the safety-net fallback when the
+  # sidecar is down or disabled.
+  #
+  # Default OFF: LIVE_SIDECAR_ENABLED in .env.production controls the
+  # gate. When false the entrypoint logs "disabled by config" and
+  # exits 0; container restart-policy stays unless-stopped but the
+  # process is a no-op. Flip the env var and `docker compose restart`
+  # the service to enable.
+  blofin-sidecar:
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+    restart: unless-stopped
+    env_file: .env.production
+    environment:
+      - REDIS_URL=redis://redis:6379/0
+    depends_on:
+      redis:
+        condition: service_healthy
+    command: python -m app.cli.blofin_sidecar
+
   # Beat scheduler — separate process so the existing celery worker
   # container doesn't need to restart when the schedule changes, and so
   # `--no-deps celery` rebuilds during the trading window don't kill the

@@ -37,6 +37,7 @@ from __future__ import annotations
 import json
 import logging
 import statistics
+import time
 from typing import Any, Literal
 
 import redis as redis_lib
@@ -186,7 +187,23 @@ def _resolve_venue_connection(
 def _read_latest_snapshot(cur, venue: str, connection_id: str) -> dict | None:
     """Most recent fetch_ok=TRUE snapshot for this connection. None if
     no successful snapshot exists (e.g. fresh connection, all reads
-    failing)."""
+    failing).
+
+    With the BloFin WebSocket sidecar running, the freshest data lives
+    in Redis (writes-on-push, near-real-time). When sidecar is healthy
+    we synthesize a snapshot row from Redis; when stale or absent we
+    fall back to this DB-cached query (5-min cron staleness ceiling).
+
+    The dict returned by this function carries two extra markers used
+    by callers to populate the response's `stale_source` /
+    `sidecar_stale` fields:
+        snap['_stale_source']   ∈ {None, 'rest_fallback'}
+        snap['_sidecar_stale']  ∈ {True, False}
+    """
+    redis_snap = _try_read_redis_snapshot(venue, connection_id)
+    if redis_snap is not None:
+        return redis_snap
+
     cur.execute("""
         SELECT ec.connection_id, ec.exchange AS venue, ec.label,
                es.snapshot_at, es.total_equity_usd, es.available_usd,
@@ -199,7 +216,126 @@ def _read_latest_snapshot(cur, venue: str, connection_id: str) -> dict | None:
          ORDER BY es.snapshot_at DESC
          LIMIT 1
     """, (connection_id, venue))
-    return cur.fetchone()
+    row = cur.fetchone()
+    if row is None:
+        return None
+    out = dict(row)
+    # DB read: by definition not fresh from sidecar.
+    out["_stale_source"] = "rest_fallback"
+    out["_sidecar_stale"] = True
+    return out
+
+
+# ── Redis-first read (sidecar fast path) ────────────────────────────
+
+
+# Heartbeat staleness threshold — keeps in sync with the sidecar's
+# heartbeat key TTL (30s). If the heartbeat is older than this we don't
+# trust the Redis data and force the DB fallback.
+_SIDECAR_HEARTBEAT_STALE_S = 30
+
+
+def _try_read_redis_snapshot(venue: str, connection_id: str) -> dict | None:
+    """Synthesize a snapshot row from Redis keys written by the sidecar.
+
+    Returns a dict in the same shape as the DB-read row when:
+      * venue == 'blofin' (v1 sidecar scope)
+      * account snapshot key exists
+      * positions list key exists
+      * heartbeat key exists AND is younger than _SIDECAR_HEARTBEAT_STALE_S
+
+    Returns None on any miss — caller falls through to the DB query.
+    Redis errors are logged and treated as misses so a Redis hiccup
+    never breaks the read path; the DB fallback always works.
+    """
+    if venue != "blofin":
+        return None
+    try:
+        r = _get_redis()
+        account_raw = r.get(f"account:blofin:{connection_id}:snapshot")
+        positions_raw = r.get(f"positions:blofin:{connection_id}:list")
+        heartbeat_raw = r.get(f"sidecar:blofin:{connection_id}:heartbeat")
+    except redis_lib.RedisError as e:
+        log.warning("Redis read failed in snapshot path: %s", e)
+        return None
+    if not account_raw or not positions_raw or not heartbeat_raw:
+        return None
+    try:
+        heartbeat_ts = int(heartbeat_raw)
+    except (TypeError, ValueError):
+        return None
+    age_s = int(time.time()) - heartbeat_ts
+    if age_s > _SIDECAR_HEARTBEAT_STALE_S:
+        # Sidecar isn't writing recently — let the caller fall back to
+        # the DB row. Endpoints will mark sidecar_stale=true on that
+        # response too because the DB path sets _sidecar_stale=True.
+        return None
+    try:
+        account = json.loads(account_raw)
+        positions = json.loads(positions_raw)
+    except json.JSONDecodeError as e:
+        log.warning("Redis snapshot JSON parse failed: %s", e)
+        return None
+
+    # Look up the connection label since Redis doesn't store it. This
+    # is a tiny indexed query and the sidecar happy-path skips the rest
+    # of the DB work, so net DB load drops dramatically vs the cron path.
+    label = _get_connection_label(connection_id)
+
+    return {
+        "connection_id": connection_id,
+        "venue": "blofin",
+        "label": label,
+        "snapshot_at": _heartbeat_to_datetime(heartbeat_ts),
+        "total_equity_usd": account.get("total_equity_usd"),
+        "available_usd": account.get("available_usd"),
+        "used_margin_usd": account.get("used_margin_usd"),
+        "unrealized_pnl": account.get("unrealized_pnl"),
+        "positions": positions,
+        "_stale_source": None,
+        "_sidecar_stale": False,
+    }
+
+
+def _heartbeat_to_datetime(unix_s: int):
+    """Convert sidecar heartbeat (epoch seconds) to a tz-aware UTC
+    datetime, matching the type of exchange_snapshots.snapshot_at."""
+    import datetime as _dt
+    return _dt.datetime.fromtimestamp(unix_s, tz=_dt.timezone.utc)
+
+
+_LABEL_CACHE: dict[str, tuple[str | None, float]] = {}
+
+
+def _get_connection_label(connection_id: str) -> str | None:
+    """Per-process cache of connection labels. Labels are user-edited
+    rarely; a 60s TTL avoids hammering the DB on every hot-path read."""
+    cached = _LABEL_CACHE.get(connection_id)
+    now = time.time()
+    if cached and (now - cached[1]) < 60:
+        return cached[0]
+    # No DB cursor passed in here; use a one-shot connection. This
+    # only fires on Redis-hit cache miss — at most once per minute per
+    # process, negligible.
+    try:
+        from ...db import get_worker_conn
+        conn = get_worker_conn()
+        try:
+            cur = conn.cursor()
+            cur.execute(
+                "SELECT label FROM user_mgmt.exchange_connections "
+                "WHERE connection_id = %s::uuid",
+                (connection_id,),
+            )
+            row = cur.fetchone()
+            label = row[0] if row else None
+        finally:
+            conn.close()
+    except Exception as e:
+        log.warning("label lookup failed for %s: %s", connection_id, e)
+        label = cached[0] if cached else None
+    _LABEL_CACHE[connection_id] = (label, now)
+    return label
 
 
 def _read_today_anchor(cur, venue: str, connection_id: str) -> dict | None:
@@ -351,6 +487,16 @@ class AccountSnapshot(BaseModel):
     strategy_count: int
     manual_count: int
 
+    # Sidecar freshness (BloFin WebSocket sidecar — see services/sidecars/).
+    # `stale_source` is None when this response was synthesized from a
+    # fresh Redis sidecar push; "rest_fallback" when the read fell
+    # through to the 5-min cron-backed exchange_snapshots row.
+    # `sidecar_stale` is True when the sidecar heartbeat is older than
+    # 30s (sidecar dead or restarting); the frontend renders an amber
+    # badge in either case.
+    stale_source: Literal["rest_fallback"] | None = None
+    sidecar_stale: bool = False
+
 
 class MarginLevel(BaseModel):
     ratio: float | None              # equity / maint_margin if computable
@@ -394,6 +540,10 @@ class RiskSnapshot(BaseModel):
     largest_position: LargestPosition | None
     nearest_stop: NearestStop
     concentration: UnhedgedConcentration | None
+
+    # Sidecar freshness — same semantics as AccountSnapshot.
+    stale_source: Literal["rest_fallback"] | None = None
+    sidecar_stale: bool = False
 
 
 class LivePosition(BaseModel):
@@ -447,6 +597,10 @@ class PositionsResponse(BaseModel):
         default_factory=dict,
         description="Counts per filter chip: total, strategy, manual, long, short",
     )
+
+    # Sidecar freshness — same semantics as AccountSnapshot.
+    stale_source: Literal["rest_fallback"] | None = None
+    sidecar_stale: bool = False
 
 
 # ── MA Alignment Heatmap (Data Dictionary §11) ─────────────────────────
@@ -806,6 +960,8 @@ def _build_account_response(
         max_leverage=round(max_lev, 2),
         strategy_count=sum(1 for p in enriched if p.source == "strategy"),
         manual_count=sum(1 for p in enriched if p.source == "manual"),
+        stale_source=snap.get("_stale_source"),
+        sidecar_stale=bool(snap.get("_sidecar_stale", False)),
     )
 
 
@@ -891,6 +1047,8 @@ def _build_risk_response(
         largest_position=largest_position,
         nearest_stop=nearest_stop,
         concentration=concentration,
+        stale_source=snap.get("_stale_source"),
+        sidecar_stale=bool(snap.get("_sidecar_stale", False)),
     )
 
 
@@ -1033,6 +1191,8 @@ def get_positions(
             "long": sum(1 for p in enriched if p.side == "long"),
             "short": sum(1 for p in enriched if p.side == "short"),
         },
+        stale_source=snap.get("_stale_source"),
+        sidecar_stale=bool(snap.get("_sidecar_stale", False)),
     )
     _cache_set(cache_key, response.model_dump(), ttl=CACHE_TTL_POSITIONS_S)
     return response

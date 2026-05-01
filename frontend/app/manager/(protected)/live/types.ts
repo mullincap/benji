@@ -20,7 +20,19 @@ export type ConcentrationDirection = "long" | "short" | "balanced";
 
 // ─── /api/manager/live/account ──────────────────────────────────────────
 
-export interface AccountSnapshot {
+/** Sidecar freshness flags shared across the three live-cadence
+ *  endpoints (/account, /risk, /positions). `stale_source` is null
+ *  when the response was synthesized from a fresh BloFin WebSocket
+ *  sidecar push; "rest_fallback" when the read fell through to the
+ *  5-min cron-backed exchange_snapshots row. `sidecar_stale` is true
+ *  when the sidecar heartbeat is older than 30s — usually means the
+ *  sidecar is restarting or dead. */
+export interface SidecarFreshness {
+  stale_source: "rest_fallback" | null;
+  sidecar_stale: boolean;
+}
+
+export interface AccountSnapshot extends SidecarFreshness {
   venue: Venue;
   connection_id: string;
   connection_label: string | null;
@@ -101,7 +113,7 @@ export interface UnhedgedConcentration {
   no_protective_stops: string[];
 }
 
-export interface RiskSnapshot {
+export interface RiskSnapshot extends SidecarFreshness {
   venue: Venue;
   connection_id: string;
   snapshot_at: string | null;
@@ -150,7 +162,7 @@ export interface LivePosition {
   today_anchor_missing: boolean;
 }
 
-export interface PositionsResponse {
+export interface PositionsResponse extends SidecarFreshness {
   venue: Venue;
   connection_id: string;
   connection_label: string | null;

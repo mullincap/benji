@@ -21,6 +21,15 @@ class Settings(BaseSettings):
     # Redis
     REDIS_URL: str = "redis://localhost:6379/0"
 
+    # Live tab BloFin WebSocket sidecar — default OFF until soak verified.
+    # When false, the sidecar entrypoint exits cleanly with a "disabled by
+    # config" log line; the existing 5-min sync_exchange_snapshots cron
+    # remains the data source for /api/manager/live/* endpoints. When
+    # true, the sidecar holds a wss://openapi.blofin.com/ws/private
+    # connection per active connection_id and writes fresh state to Redis
+    # on every push; endpoints prefer Redis over the cron-cached DB.
+    LIVE_SIDECAR_ENABLED: bool = False
+
     # Node binary (for report generation)
     NODE_BIN: str = "node"
 

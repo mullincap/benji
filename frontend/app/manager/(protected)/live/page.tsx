@@ -152,9 +152,14 @@ interface HeaderProps {
   lastUpdatedAt: Date | null;
   refreshing: boolean;
   onRefresh: () => void;
+  staleSource: "rest_fallback" | null;
+  sidecarStale: boolean;
 }
 
-function PageHeader({ venue, positionsCount, lastUpdatedAt, refreshing, onRefresh }: HeaderProps) {
+function PageHeader({
+  venue, positionsCount, lastUpdatedAt, refreshing, onRefresh,
+  staleSource, sidecarStale,
+}: HeaderProps) {
   const [, setTick] = useState(0);
   useEffect(() => {
     const id = setInterval(() => setTick((t) => t + 1), 1000);
@@ -200,7 +205,7 @@ function PageHeader({ venue, positionsCount, lastUpdatedAt, refreshing, onRefres
             fontFamily: "var(--font-space-mono), Space Mono, monospace",
           }}
         >
-          <LiveTag />
+          <LiveTag staleSource={staleSource} sidecarStale={sidecarStale} />
           <span>VENUE · {venue.toUpperCase()}</span>
           <span>{positionsCount === null ? "— OPEN POSITIONS" : `${positionsCount} OPEN POSITIONS`}</span>
           <span>{updatedLabel}</span>
@@ -220,15 +225,43 @@ function PageHeader({ venue, positionsCount, lastUpdatedAt, refreshing, onRefres
   );
 }
 
-function LiveTag() {
+interface LiveTagProps {
+  staleSource: "rest_fallback" | null;
+  sidecarStale: boolean;
+}
+
+function LiveTag({ staleSource, sidecarStale }: LiveTagProps) {
+  // Three visual states:
+  //   * Healthy (sidecar pushing fresh data) → green dot, "LIVE · TICK 1s"
+  //   * Sidecar heartbeat stale, still reading from Redis (rare gap) →
+  //     amber dot, "SIDECAR STALE"
+  //   * Fully fallen back to the 5-min DB cron → amber dot,
+  //     "VIA REST FALLBACK"
+  // The UI never renders a red state; staleness is informational, not
+  // a failure — endpoints continue to work either way.
+  const degraded = staleSource === "rest_fallback" || sidecarStale;
+  const accent = degraded ? "var(--amber)" : "var(--green)";
+  const label =
+    staleSource === "rest_fallback"
+      ? "VIA REST FALLBACK"
+      : sidecarStale
+        ? "SIDECAR STALE"
+        : "LIVE · TICK 1s";
   return (
     <span
+      title={
+        staleSource === "rest_fallback"
+          ? "BloFin WebSocket sidecar is down or disabled — reading from the 5-min cron-cached DB row. Numbers may lag up to 5 minutes."
+          : sidecarStale
+            ? "Sidecar heartbeat is older than 30s — reconnecting. Reading whatever Redis last had."
+            : "BloFin WebSocket sidecar is healthy; data is near-real-time."
+      }
       style={{
         display: "inline-flex",
         alignItems: "center",
         gap: 6,
-        color: "var(--green)",
-        border: "1px solid var(--green)",
+        color: accent,
+        border: `1px solid ${accent}`,
         padding: "3px 8px",
         borderRadius: 3,
         fontSize: 10,
@@ -241,12 +274,14 @@ function LiveTag() {
           width: 6,
           height: 6,
           borderRadius: "50%",
-          background: "var(--green)",
-          boxShadow: "0 0 6px rgba(0, 200, 150, 0.45)",
+          background: accent,
+          boxShadow: degraded
+            ? "0 0 6px rgba(240, 165, 0, 0.45)"
+            : "0 0 6px rgba(0, 200, 150, 0.45)",
           animation: "pulse-dot 1.6s ease-in-out infinite",
         }}
       />
-      LIVE · TICK 2s
+      {label}
     </span>
   );
 }
@@ -1239,9 +1274,15 @@ function ChatPanel({ collapsed, onToggle }: { collapsed: boolean; onToggle: () =
 // ─── Page ─────────────────────────────────────────────────────────────────
 
 export default function LivePage() {
-  const account = useLivePoll<AccountSnapshot>(`${API_BASE}/api/manager/live/account`, 2000);
+  // Polling cadence dropped from 2s → 1s for the sidecar-fed endpoints:
+  // sidecar pushes BloFin state into Redis on every WS message, so the
+  // server-side data is near-real-time and the polling-cadence floor is
+  // dictated only by how snappy we want the UI to feel. Risk stays at
+  // 5s — its derived metrics (margin level, concentration share) don't
+  // shift fast enough for sub-second polling to add value.
+  const account = useLivePoll<AccountSnapshot>(`${API_BASE}/api/manager/live/account`, 1000);
   const risk = useLivePoll<RiskSnapshot>(`${API_BASE}/api/manager/live/risk`, 5000);
-  const positions = useLivePoll<PositionsResponse>(`${API_BASE}/api/manager/live/positions`, 2000);
+  const positions = useLivePoll<PositionsResponse>(`${API_BASE}/api/manager/live/positions`, 1000);
   // MA heatmap polls slower — underlying EMA values only update on bar
   // close per timeframe (5m at fastest).
   const maAlignment = useLivePoll<MaAlignmentResponse>(
@@ -1387,6 +1428,23 @@ export default function LivePage() {
           lastUpdatedAt={lastUpdatedAt}
           refreshing={manualRefreshing}
           onRefresh={onRefresh}
+          staleSource={
+            account.data?.stale_source ??
+            positions.data?.stale_source ??
+            risk.data?.stale_source ??
+            null
+          }
+          sidecarStale={
+            // Aggregate across the three sidecar-fed endpoints — if any
+            // shows stale, surface stale. They poll at the same cadence
+            // and read from the same Redis state, so divergence between
+            // them would itself be a signal worth surfacing.
+            Boolean(
+              account.data?.sidecar_stale ||
+              positions.data?.sidecar_stale ||
+              risk.data?.sidecar_stale,
+            )
+          }
         />
 
         <Collapsible
