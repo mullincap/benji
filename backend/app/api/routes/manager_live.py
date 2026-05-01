@@ -671,12 +671,14 @@ def get_account(
 
     strat_map = build_strategy_symbol_map(cur, [connection_id])
     conn_strat = strat_map.get(connection_id, {})
-    tpsl = _get_tpsl_orders(cur, venue, connection_id)
+    # /account doesn't surface SL/TP — skip the TPSL fetch entirely so the
+    # uncached path is dominated by the DB read (~10ms) rather than a
+    # BloFin HTTP round-trip (~400ms).
     enriched = _enrich_positions(
         snap["positions"] or [],
         venue=venue, connection_id=connection_id,
         connection_label=snap.get("label"),
-        strat_map=conn_strat, tpsl_by_inst=tpsl,
+        strat_map=conn_strat, tpsl_by_inst={},
     )
     today_anchor = _read_today_anchor(cur, venue, connection_id)
     response = _build_account_response(
