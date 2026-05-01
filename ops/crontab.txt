@@ -35,14 +35,6 @@ PATH=/usr/local/sbin:/usr/local/bin:/sbin:/bin:/usr/sbin:/usr/bin
 # ── Manager daily briefing — 00:30 UTC ────────────────────────────────────────
 30 0 * * * . /mnt/quant-data/credentials/secrets.env && curl -s -X POST https://mullincap.com/api/manager/briefing -H "X-Internal-Token: $INTERNAL_API_TOKEN" -H "Content-Type: application/json" >> /mnt/quant-data/logs/manager/briefing.log 2>&1
 
-# ── Manager account daily anchors — 00:00 UTC ────────────────────────────────
-# Captures one row per (venue, connection_id, anchor_date) into
-# user_mgmt.account_daily_anchors. Drives the Manager Live tab's "today's
-# PnL" math: today_pnl = current_equity − latest_anchor.total_equity_usd.
-# Idempotent — re-running on the same date overwrites cleanly via ON CONFLICT.
-# Exits 0 if any connection succeeds; 1 only on total outage (cron-mailer page).
-0 0 * * * cd /root/benji && docker compose -f /root/benji/docker-compose.yml exec -T celery python -m app.cli.account_anchor_writer >> /mnt/quant-data/logs/manager/account_anchor.log 2>&1
-
 # ── Refresh per-symbol / per-day caggs — 01:17 + 01:18 UTC ───────────────────
 # 30-day window to safeguard against silent materialization gaps (the built-in
 # hourly policy only refreshes the last 7 days). Added 2026-04-17 after an
@@ -53,8 +45,8 @@ PATH=/usr/local/sbin:/usr/local/bin:/sbin:/bin:/usr/sbin:/usr/bin
 # ── Exchange snapshot sync — every 5 minutes ────────────────────────────────
 */5 * * * * cd /root/benji && docker compose run --rm -T backend python -m app.cli.sync_exchange_snapshots >> /mnt/quant-data/logs/exchange/sync.log 2>&1
 
-# ── Trader spawner (user allocations) — 06:05 UTC ────────────────────────────
-5 6 * * * cd /root/benji && docker compose -f /root/benji/docker-compose.yml exec -T backend python -m app.cli.spawn_traders >> /mnt/quant-data/logs/trader/spawn.log 2>&1
+# ── Trader spawner (user allocations) — 06:35 UTC (was 06:05; moved 2026-04-30 to eliminate 30-min pre-conviction sleep window) ──────────────────────────
+35 6 * * * cd /root/benji && docker compose -f /root/benji/docker-compose.yml exec -T backend python -m app.cli.spawn_traders >> /mnt/quant-data/logs/trader/spawn.log 2>&1
 
 # Nightly strategy metrics refresh — 01:30 UTC, targets celery (correct BASE_DATA_DIR)
 30 1 * * * cd /root/benji && docker compose -f /root/benji/docker-compose.yml exec -T celery python -m app.cli.refresh_strategy_metrics >> /mnt/quant-data/logs/trader/refresh_metrics.log 2>&1
@@ -64,7 +56,7 @@ PATH=/usr/local/sbin:/usr/local/bin:/sbin:/bin:/usr/sbin:/usr/bin
 # Detects trader subprocesses that have gone silent mid-session and
 # respawns them with two-tick confirmation + backoff + corrupted-state
 # guards. See trader_supervisor.py.
-*/5 * * * * cd /root/benji && docker compose -f /root/benji/docker-compose.yml exec -T backend python -m app.cli.spawn_traders --resume-stuck >> /mnt/quant-data/logs/trader/supervisor.log 2>&1
+*/2 * * * * cd /root/benji && docker compose -f /root/benji/docker-compose.yml exec -T backend python -m app.cli.spawn_traders --resume-stuck >> /mnt/quant-data/logs/trader/supervisor.log 2>&1
 
 # ── Allocation returns backfill — 00:10 UTC (safety net for writer misses) ──
 10 0 * * * /root/benji/backend/scripts/nightly_backfill_allocation_returns.sh
@@ -74,45 +66,9 @@ PATH=/usr/local/sbin:/usr/local/bin:/sbin:/bin:/usr/sbin:/usr/bin
 # selection. Script sleeps 30s at start; the closed-bar filter in
 # _fetch_symbol_snapshot drops any in-progress trailing bar so klines[-1]
 # is always the latest CLOSED bar. Trade deployment at 06:35 unchanged.
-0 6 * * * . /mnt/quant-data/credentials/secrets.env && /root/benji/pipeline/.venv/bin/python /root/benji/daily_signal_v2.py >> /mnt/quant-data/logs/signal/cron.log 2>&1
-
-# ── Pre-flight signal sanity — 05:30 UTC (30 min before signal cron) ─────────
-# Walks every is_published=TRUE strategy_version and exercises audit_filters
-# with that strategy's stored config (Tail Guardrail + Dispersion when used).
-# Catches: import-chain failures (the v2→v3 cutover bug class), mcap data
-# staleness (dispersion fail-open), threshold misconfig, missing universe,
-# audit-import side effects. Exit 1 = alert-worthy; cron-mailer pickup
-# triggers an operator page. Read-only — never writes anywhere outside its
-# own log file. See pipeline/precheck_signal.py.
-30 5 * * * . /mnt/quant-data/credentials/secrets.env && mkdir -p /mnt/quant-data/logs/precheck && /root/benji/pipeline/.venv/bin/python /root/benji/pipeline/precheck_signal.py --phase pre >> /mnt/quant-data/logs/precheck/cron.log 2>&1
-
-# ── Post-cron signal verify — 06:02 UTC (2 min after signal cron) ────────────
-# Confirms daily_signal_v3 actually ran with the expected per-strategy params:
-#   1. cron log has today's run with no tracebacks
-#   2. [per-strategy disp] log lines (when present) show n + strict_dyn matching
-#      each strategy's stored config (lock-in actually took effect)
-#   3. user_mgmt.daily_signals has a row for every published+active strategy_version
-#   4. live_deploys_signal.csv has today's row
-# Exit 1 = alert-worthy; cron-mailer pickup triggers an operator page.
-2 6 * * * . /mnt/quant-data/credentials/secrets.env && mkdir -p /mnt/quant-data/logs/precheck && /root/benji/pipeline/.venv/bin/python /root/benji/pipeline/precheck_signal.py --phase post >> /mnt/quant-data/logs/precheck/cron.log 2>&1
-
-# ── Audit gate verifier — 06:01 UTC ──────────────────────────────────────────
-# Re-computes today's (sit_flat, filter_name) decision per published+active
-# strategy version using pipeline.audit_filters (single source of truth,
-# shared with daily_signal_v2) and diffs against the user_mgmt.daily_signals
-# row that the live path wrote at ~06:00:30. On agreement: marks
-# audit_status='verified'. On disagreement: marks audit_status='mismatch',
-# logs [GATE_MISMATCH] for cron-mailer pickup. Trader (after follow-up
-# commit) gates entry on audit_status='verified'.
-#
-# Timing: closed-bar filter inside _fetch_symbol_snapshot drops in-progress
-# bars, so 06:01 is safe (the 06:00 1m bar's open_time + 60s = 06:01:00 ==
-# now is treated as closed). The 06:00 cron's 65s sleep is belt-and-
-# suspenders for clock skew; the verifier relies on the closed-bar filter
-# alone. Typical runtime 30-60s, worst observed ~120s; window to trader
-# spawn at 06:05 is 4 minutes. [INTRADAY_AUDIT_RUNTIME] log line emitted
-# every run — universe growth from ~400 → 600 perps would tighten this.
-1 6 * * * . /mnt/quant-data/credentials/secrets.env && /root/benji/pipeline/.venv/bin/python /root/benji/pipeline/intraday_audit.py >> /mnt/quant-data/logs/signal/intraday_audit.log 2>&1
+# DISABLED 2026-04-28 cutover — v2 archived to archive/daily_signal_v2_archived_2026-04-28.py
+# 0 6 * * * . /mnt/quant-data/credentials/secrets.env && /root/benji/pipeline/.venv/bin/python /root/benji/daily_signal_v2.py
+0 6 * * * . /mnt/quant-data/credentials/secrets.env && /root/benji/pipeline/.venv/bin/python /root/benji/daily_signal_v3.py >> /mnt/quant-data/logs/signal/cron.log 2>&1
 
 # ── Signal shadow diff — 06:15 UTC (v1 vs v2 vs canonical basket diff) ───────
 15 6 * * * . /mnt/quant-data/credentials/secrets.env && /root/benji/pipeline/.venv/bin/python /root/benji/shadow_diff.py >> /mnt/quant-data/logs/signal/shadow_diff.log 2>&1
@@ -127,3 +83,24 @@ PATH=/usr/local/sbin:/usr/local/bin:/sbin:/bin:/usr/sbin:/usr/bin
 # day's leaderboards are visible (00:15) and before indexer at 01:00 so any
 # downstream symbol-registry references see fresh exchange ids.
 45 0 * * * cd /root/benji && docker compose -f /root/benji/docker-compose.yml exec -T backend python -m app.cli.refresh_symbol_registry >> /mnt/quant-data/logs/indexer/refresh_symbol_registry.log 2>&1
+# Clamp re-apply for ALTS MAX 2026-04-26 session — overrides OLD trader threshold-clamp
+# Auto-generate preview portfolios for sit-flat allocations — every 5 min during trading hours
+*/5 * * * * cd /root/benji && docker compose -f /root/benji/docker-compose.yml exec -T backend python -m app.cli.generate_no_entry_previews >> /var/log/no_entry_previews.log 2>&1
+
+# ── Pre-flight signal sanity — 05:30 UTC (precheck_signal.py --phase pre) ────
+# Walks every is_published=TRUE strategy_version + exercises audit_filters
+# with that strategy's stored config. Catches import-chain failures, mcap
+# staleness, threshold misconfig BEFORE the 06:00 signal cron fires.
+30 5 * * * . /mnt/quant-data/credentials/secrets.env && mkdir -p /mnt/quant-data/logs/precheck && /root/benji/pipeline/.venv/bin/python /root/benji/pipeline/precheck_signal.py --phase pre >> /mnt/quant-data/logs/precheck/cron.log 2>&1
+
+# ── Post-cron signal verify — 06:02 UTC (precheck_signal.py --phase post) ────
+# Confirms daily_signal_v3 actually ran: today's log entries, no tracebacks,
+# [per-strategy disp] params match stored config, daily_signals row written
+# per strategy, live_deploys_signal.csv has today's row.
+2 6 * * * . /mnt/quant-data/credentials/secrets.env && mkdir -p /mnt/quant-data/logs/precheck && /root/benji/pipeline/.venv/bin/python /root/benji/pipeline/precheck_signal.py --phase post >> /mnt/quant-data/logs/precheck/cron.log 2>&1
+
+# ── Manager account daily anchors — 00:00 UTC ────────────────────────────────
+# Captures one row per (venue, connection_id, anchor_date) into
+# user_mgmt.account_daily_anchors. Drives the Manager Live tab today-PnL math.
+# Idempotent — re-running on the same date overwrites cleanly via ON CONFLICT.
+0 0 * * * cd /root/benji && docker compose -f /root/benji/docker-compose.yml exec -T celery python -m app.cli.account_anchor_writer >> /mnt/quant-data/logs/manager/account_anchor.log 2>&1
