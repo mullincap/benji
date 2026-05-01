@@ -52,6 +52,16 @@ class BinanceNetworkError(BinanceError):
     """Transport-level failure: timeout, DNS, connection refused, etc."""
 
 
+class BinanceRateLimitError(BinanceError):
+    """Weight ceiling reached or 418/429 response from Binance.
+
+    Raised both pre-flight (when an outgoing call would exceed the
+    weight ceiling per the most recent X-MBX-USED-WEIGHT-1M header) and
+    in-flight (HTTP 418 Banned / 429 Too Many Requests). Distinct from
+    BinanceNetworkError because the network worked — the API said no.
+    """
+
+
 # ─── Client ───────────────────────────────────────────────────────────────────
 
 class BinanceClient:

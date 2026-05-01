@@ -35,6 +35,8 @@ from urllib.parse import urlencode
 import requests
 
 from ..db import get_worker_conn
+from ..services.exchanges.binance_market import BinanceMarketClient
+from ..services.exchanges.binance import BinanceError
 
 FAPI = "https://fapi.binance.com"
 TIMEOUT = 10
@@ -163,6 +165,41 @@ def main() -> int:
     blocked = [r for r in results if r["status"] not in ("PASS",)]
     final_weight = next((int(r["weight"]) for r in reversed(results) if r.get("weight")), None)
 
+    # ── 1b. Client smoke test ────────────────────────────────────────────
+    # Hit a representative subset of endpoints through BinanceMarketClient
+    # to verify the wrapper parses responses correctly, the weight tracker
+    # updates from response headers, and the exception hierarchy works.
+    # Cost: 3 weight (klines + premiumIndex + exchangeInfo, single symbol).
+    print("\nClient smoke test (BinanceMarketClient):\n")
+    client_failures: list[str] = []
+    client = BinanceMarketClient()
+    try:
+        candles = client.klines("BTCUSDT", "1m", limit=1)
+        assert isinstance(candles, list) and len(candles) == 1 and len(candles[0]) >= 6, \
+            f"klines: unexpected shape {candles!r}"
+        print(f"  ✓ klines(BTCUSDT, 1m, 1)            → 1 candle, used_weight={client.used_weight}")
+    except (BinanceError, AssertionError) as e:
+        client_failures.append(f"klines: {e}")
+        print(f"  ✗ klines: {e}")
+
+    try:
+        prem = client.premium_index("BTCUSDT")
+        assert isinstance(prem, dict) and "lastFundingRate" in prem, \
+            f"premium_index: missing lastFundingRate in {prem!r}"
+        print(f"  ✓ premium_index(BTCUSDT)             → fundingRate={prem.get('lastFundingRate')}, used_weight={client.used_weight}")
+    except (BinanceError, AssertionError) as e:
+        client_failures.append(f"premium_index: {e}")
+        print(f"  ✗ premium_index: {e}")
+
+    try:
+        info = client.exchange_info()
+        assert isinstance(info, dict) and isinstance(info.get("symbols"), list), \
+            f"exchange_info: missing symbols list in {type(info).__name__}"
+        print(f"  ✓ exchange_info()                    → {len(info['symbols'])} symbols, used_weight={client.used_weight}")
+    except (BinanceError, AssertionError) as e:
+        client_failures.append(f"exchange_info: {e}")
+        print(f"  ✗ exchange_info: {e}")
+
     # ── 2. Symbol-universe check ──────────────────────────────────────────
     exchange_info_body = next((r["body"] for r in results if r["label"] == "exchangeInfo" and r["body"]), None)
     binance_listed: dict[str, str] = {}
@@ -218,9 +255,13 @@ def main() -> int:
     if coverage_gap:
         for g in coverage_gap:
             print(f"  - {g['base']}: {g['issue']}")
+    print(f"CLIENT SMOKE   : {3 - len(client_failures)} / 3 methods OK")
+    if client_failures:
+        for f in client_failures:
+            print(f"  - {f}")
     print("-" * 78)
 
-    return 0 if (not blocked and not coverage_gap) else 1
+    return 0 if (not blocked and not coverage_gap and not client_failures) else 1
 
 
 if __name__ == "__main__":
