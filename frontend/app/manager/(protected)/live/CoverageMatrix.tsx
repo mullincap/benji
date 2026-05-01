@@ -72,7 +72,14 @@ export default function CoverageMatrix({ data }: Props) {
     );
   }
 
-  const labelCol = "60px";
+  // Row-label column auto-sizes to the longest ticker so 10-char names like
+  // JELLYJELLY don't clip to "LLYJELLY". Space Mono 700 at 10px renders at
+  // ~7px/char; +14px absorbs left/right padding plus a couple px breathing
+  // room. Floor at 60px so a short-ticker book (e.g. all 3-4 char bases)
+  // still has a visually balanced label column.
+  const longestLabel = Math.max(0, ...data.rows.map((r) => r.symbol_base.length));
+  const labelColPx = Math.max(60, longestLabel * 7 + 14);
+  const labelCol = `${labelColPx}px`;
   const dataCol = "minmax(46px, 1fr)";
   const cols = `${labelCol} ${Array(n).fill(dataCol).join(" ")}`;
 

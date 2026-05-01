@@ -88,6 +88,17 @@ html {
   animation: row-pulse 1.5s ease-out;
 }
 
+/* Bar-close cell pulse — applied to MA Alignment cells when the cell's
+ * distance_pct changes (i.e. the underlying bar closed and EMA20
+ * recomputed). 800ms green-border flash, fades to transparent. Used as
+ * an `animation:` value on a transient overlay span keyed by a
+ * pulse-counter ref so each new bar close re-triggers the animation. */
+@keyframes live-cell-pulse {
+  0%   { opacity: 1; }
+  60%  { opacity: 1; }
+  100% { opacity: 0; }
+}
+
 ::-webkit-scrollbar {
   width: 3px;
 }

@@ -20,6 +20,7 @@
  * listed from a transient fetch hiccup.
  */
 
+import { useEffect, useRef, useState } from "react";
 import type { MaAlignmentResponse, MaCell, MaAlignmentTier, Side } from "./types";
 
 // Project tokens used inline. Same colors as the mockup's CSS classes.
@@ -256,6 +257,21 @@ function Cell({ cell, symbol, tf }: { cell: MaCell; symbol: string; tf: string }
     ? `${symbol} · ${tf} · ${cell.reason ?? "no data"}`
     : `${symbol} · ${tf} · EMA ${formatEma(cell.ema_value!)} · distance ${formatPct(cell.distance_pct!)}`;
 
+  // Bar-close pulse: when this cell's distance_pct changes, briefly outline
+  // the cell with a green border so the operator sees that the bar just
+  // closed and the value updated. The pulse lives 800ms (300ms in, 500ms
+  // fade) — short enough to feel like a pulse, long enough to register at
+  // a glance during the 60s polling cadence. First render is suppressed by
+  // tracking previous via a ref so the whole grid doesn't pulse on mount.
+  const prev = useRef<number | null>(null);
+  const [pulseKey, setPulseKey] = useState(0);
+  useEffect(() => {
+    if (prev.current !== null && prev.current !== cell.distance_pct) {
+      setPulseKey((k) => k + 1);
+    }
+    prev.current = cell.distance_pct;
+  }, [cell.distance_pct]);
+
   return (
     <div
       title={tooltip}
@@ -272,8 +288,23 @@ function Cell({ cell, symbol, tf }: { cell: MaCell; symbol: string; tf: string }
         fontFamily: "var(--font-space-mono), Space Mono, monospace",
         cursor: "default",
         transition: "background 220ms ease",
+        position: "relative",
       }}
     >
+      {pulseKey > 0 && (
+        <span
+          key={pulseKey}
+          aria-hidden
+          style={{
+            position: "absolute",
+            inset: 0,
+            border: "1.5px solid var(--green)",
+            borderRadius: 1,
+            pointerEvents: "none",
+            animation: "live-cell-pulse 800ms ease-out forwards",
+          }}
+        />
+      )}
       {isNull ? (
         <span style={{ color: "var(--t3)" }}>—</span>
       ) : (

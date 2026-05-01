@@ -74,6 +74,25 @@ services:
         condition: service_healthy
     command: celery -A app.workers.pipeline_worker.celery_app worker --loglevel=info --concurrency=2
 
+  # Beat scheduler — separate process so the existing celery worker
+  # container doesn't need to restart when the schedule changes, and so
+  # `--no-deps celery` rebuilds during the trading window don't kill the
+  # scheduler. Sends task messages to the same Redis broker; tasks
+  # execute on the celery worker. Currently only fires the EMA cache
+  # warmer (see app/workers/pipeline_worker.py beat_schedule).
+  celery-beat:
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+    restart: unless-stopped
+    env_file: .env.production
+    environment:
+      - REDIS_URL=redis://redis:6379/0
+    depends_on:
+      redis:
+        condition: service_healthy
+    command: celery -A app.workers.pipeline_worker.celery_app beat --loglevel=info --schedule=/tmp/celerybeat-schedule
+
   frontend:
     build:
       context: .

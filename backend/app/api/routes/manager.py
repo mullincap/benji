@@ -32,6 +32,13 @@ from pydantic import BaseModel
 from ...db import get_cursor
 from ...core.config import settings, load_secrets
 from ...services.trading.trader_config import TraderConfig
+from ...services.manager_live_state import (
+    build_strategy_symbol_map,
+    derive_position_side,
+    derive_unrealized_pnl,
+    derive_used_margin,
+    parse_symbol_base,
+)
 from .admin import require_admin
 from .allocator import refresh_snapshots
 
@@ -1172,73 +1179,16 @@ def positions(
     """, ex_args)
     snap_rows = cur.fetchall()
 
-    # 3. Build the strategy-symbol map per connection from the latest signal
-    #    batch of each active allocation.
-    strategy_by_conn: dict[str, dict[str, str]] = {}  # cid -> {SYMBOL_BASE: strategy_name}
-    if snap_rows:
-        conn_ids = [r["connection_id"] for r in snap_rows]
-        cur.execute("""
-            SELECT a.connection_id, a.strategy_version_id,
-                   s.display_name AS strategy_display_name, s.name AS strategy_name
-            FROM user_mgmt.allocations a
-            JOIN audit.strategy_versions sv ON sv.strategy_version_id = a.strategy_version_id
-            JOIN audit.strategies s ON s.strategy_id = sv.strategy_id
-            WHERE a.connection_id = ANY(%s::uuid[])
-              AND a.status = 'active'
-        """, (conn_ids,))
-        alloc_rows = cur.fetchall()
-
-        if alloc_rows:
-            version_ids = list({a["strategy_version_id"] for a in alloc_rows})
-            cur.execute("""
-                SELECT DISTINCT ON (ds.strategy_version_id)
-                    ds.strategy_version_id, ds.signal_batch_id
-                FROM user_mgmt.daily_signals ds
-                WHERE ds.strategy_version_id = ANY(%s::uuid[])
-                ORDER BY ds.strategy_version_id, ds.signal_date DESC
-            """, (version_ids,))
-            sig_rows = cur.fetchall()
-            version_to_batch = {
-                str(r["strategy_version_id"]): str(r["signal_batch_id"])
-                for r in sig_rows
-            }
-
-            sym_by_batch: dict[str, list[str]] = {}
-            batch_ids = [r["signal_batch_id"] for r in sig_rows]
-            if batch_ids:
-                # is_selected=TRUE filters out alternates the writer recorded
-                # for audit but didn't actually deploy. A position on a non-
-                # selected symbol is genuinely manual.
-                cur.execute("""
-                    SELECT dsi.signal_batch_id, sym.base AS symbol
-                    FROM user_mgmt.daily_signal_items dsi
-                    JOIN market.symbols sym ON sym.symbol_id = dsi.symbol_id
-                    WHERE dsi.signal_batch_id = ANY(%s::uuid[])
-                      AND dsi.is_selected = TRUE
-                """, (batch_ids,))
-                for row in cur.fetchall():
-                    sym_by_batch.setdefault(str(row["signal_batch_id"]), []).append(row["symbol"])
-
-            for a in alloc_rows:
-                cid = str(a["connection_id"])
-                vid = str(a["strategy_version_id"])
-                bid = version_to_batch.get(vid)
-                if not bid:
-                    continue
-                strat_name = a["strategy_display_name"] or a["strategy_name"]
-                for sym in sym_by_batch.get(bid, []):
-                    strategy_by_conn.setdefault(cid, {})[sym.upper()] = strat_name
+    # 3. Build the strategy-symbol map per connection. Shared with
+    #    /api/manager/live/* endpoints via manager_live_state — keeps
+    #    source attribution consistent across the two read paths.
+    conn_ids = [r["connection_id"] for r in snap_rows]
+    strategy_by_conn = build_strategy_symbol_map(cur, conn_ids)
 
     # 4. Aggregate totals + flatten positions with strategy/manual tag.
-    #
-    # Per-connection upstream null-handling:
-    #   * BloFin's balance endpoint sometimes returns frozenBal=null and
-    #     upl=null even when positions are open. Fall back to position-
-    #     level fields:
-    #       used_margin  ← (equity − available) when frozenBal is empty
-    #       unrealized   ← sum of position upl when balance.upl is empty
-    #   * BloFin net-mode accounts return positionSide="net" — derive
-    #     long/short from sign of size instead of using the literal field.
+    #    Null-field derivation (BloFin frozenBal=null / upl=null) and
+    #    net-mode side derivation are done via shared helpers — see
+    #    manager_live_state.py for the canonical rules.
     positions_out: list[dict] = []
     connections_out: list[dict] = []
     total_equity = 0.0
@@ -1255,15 +1205,12 @@ def positions(
         um_raw = float(r["used_margin_usd"] or 0)
         un_raw = float(r["unrealized_pnl"] or 0)
 
-        # Sum position-level upl as a fallback when balance.upl is empty.
-        pos_upl_sum = sum(
-            float(p.get("unrealized_pnl") or 0) for p in (r["positions"] or [])
+        un = derive_unrealized_pnl(
+            raw_unrealized_pnl=un_raw, positions=r["positions"] or [],
         )
-        un = un_raw if un_raw != 0 else pos_upl_sum
-        # Used margin: prefer reported, fall back to (equity − available).
-        # BloFin's frozenBal is the available-equity reservation, so this is
-        # an upper-bound estimate that matches what the % view already shows.
-        um = um_raw if um_raw > 0 else max(eq - av, 0.0)
+        um = derive_used_margin(
+            total_equity=eq, available=av, raw_used_margin=um_raw,
+        )
 
         total_equity += eq
         total_available += av
@@ -1289,21 +1236,13 @@ def positions(
         strat_syms = strategy_by_conn.get(cid, {})
         for p in (r["positions"] or []):
             sym_full = (p.get("symbol") or "").upper()
-            # Strip USDT suffix to get the base. Matches both BloFin
-            # ("BTCUSDT" — already dash-stripped at write time) and Binance.
-            sym_base = sym_full[:-4] if sym_full.endswith("USDT") else sym_full
+            sym_base = parse_symbol_base(sym_full)
             strat_name = strat_syms.get(sym_base)
             notional = float(p.get("notional_usd") or 0)
             sum_notionals += notional
 
-            # Net-mode BloFin accounts report positionSide="net". Derive
-            # direction from size sign so the UI can render LONG/SHORT.
-            raw_side = (p.get("side") or "").lower()
             size = p.get("size") or 0
-            if raw_side in ("net", ""):
-                side = "long" if size >= 0 else "short"
-            else:
-                side = raw_side
+            side = derive_position_side(p.get("side"), size)
 
             positions_out.append({
                 "connection_id": cid,

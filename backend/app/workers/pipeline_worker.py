@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Optional
 
 from celery import Celery
+from celery.schedules import crontab
 
 from app.core.config import settings
 from app.db import get_worker_conn
@@ -34,7 +35,29 @@ celery_app.conf.update(
     result_serializer="json",
     accept_content=["json"],
     task_track_started=True,
+    timezone="UTC",
 )
+
+# Beat schedule — pre-warm the EMA20 cache for every active-position
+# symbol on each timeframe's bar-close boundary. Without this the Live
+# tab's first MA Alignment render after a bar close adds ~1.15s of
+# Binance round-trip latency; with it, the first request hits a hot
+# cache and returns in tens of ms. See ema_warmer.warm_ema_cache.
+#
+# Each entry fires AT the bar boundary (00m for 5m bars, 00m+15m+30m+45m
+# for 15m, etc.). The cache key in compute_and_cache_ema20 already
+# includes latest_closed_bar_open_ms, so any minor drift between the
+# beat tick and the actual bar close is harmless — the warmer always
+# writes the right key.
+celery_app.conf.beat_schedule = {
+    "ema-warm-5m":  {"task": "ema_warmer.warm_ema_cache", "args": ("5m",),  "schedule": crontab(minute="*/5")},
+    "ema-warm-15m": {"task": "ema_warmer.warm_ema_cache", "args": ("15m",), "schedule": crontab(minute="*/15")},
+    "ema-warm-30m": {"task": "ema_warmer.warm_ema_cache", "args": ("30m",), "schedule": crontab(minute="*/30")},
+    "ema-warm-1h":  {"task": "ema_warmer.warm_ema_cache", "args": ("1h",),  "schedule": crontab(minute=0)},
+    "ema-warm-4h":  {"task": "ema_warmer.warm_ema_cache", "args": ("4h",),  "schedule": crontab(minute=0, hour="*/4")},
+    "ema-warm-8h":  {"task": "ema_warmer.warm_ema_cache", "args": ("8h",),  "schedule": crontab(minute=0, hour="*/8")},
+    "ema-warm-1d":  {"task": "ema_warmer.warm_ema_cache", "args": ("1d",),  "schedule": crontab(minute=0, hour=0)},
+}
 
 
 def _is_cancelled(job_id: str) -> bool:
@@ -475,3 +498,4 @@ def _persist_audit_job_row(job_id: str, params: dict, metrics: dict) -> None:
 # the file so it runs after `celery_app` is fully constructed.
 import app.workers.indexer_backfill_worker  # noqa: E402,F401
 import app.workers.run_jobs_worker  # noqa: E402,F401
+import app.workers.ema_warmer  # noqa: E402,F401
