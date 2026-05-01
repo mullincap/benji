@@ -1424,6 +1424,7 @@ export default function LivePage() {
             <ExposureMap
               positions={positions.data?.positions ?? []}
               account={account.data}
+              factor={factor.data}
             />
           </Collapsible>
         </div>
