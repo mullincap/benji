@@ -198,7 +198,7 @@ export const MA_VARIANT_OPTIONS: { id: MaVariant; label: string }[] = [
   { id: "sma60", label: "SMA60" },
 ];
 
-export const DEFAULT_MA_VARIANT: MaVariant = "sma20";
+export const DEFAULT_MA_VARIANT: MaVariant = "sma60";
 
 export interface MaCell {
   distance_pct: number | null;

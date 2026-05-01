@@ -72,7 +72,7 @@ MA_VARIANTS: dict[str, tuple[str, int]] = {
     "ema20": ("ema", 20),
 }
 
-DEFAULT_VARIANT: MAVariant = "sma20"
+DEFAULT_VARIANT: MAVariant = "sma60"
 
 # Variant set the celery beat warmer pre-computes on each bar close.
 # Listing both SMA variants here means a panel toggle is always served
