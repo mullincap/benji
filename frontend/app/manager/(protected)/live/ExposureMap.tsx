@@ -3,19 +3,28 @@
 /**
  * frontend/app/manager/(protected)/live/ExposureMap.tsx
  * ========================================================
- * Exposure · Long vs Short · LIVE (Data Dictionary §7).
+ * Exposure Composition · Live (Data Dictionary §7, adapted for the
+ * long-only book this account actually trades).
  *
- * Single horizontal divergent bar centered on zero. Right side =
- * longs, left side = shorts. Sub-segments per position, ordered by
- * notional desc within each side.
+ * The original §7 long-vs-short divergent bar wastes half the bar zone
+ * when the book is single-sided. This component instead renders a
+ * single full-width bar segmented by position, sized proportionally to
+ * each position's share of total notional. Stat strip switches from
+ * LONG/SHORT/NET to TOTAL/NOTIONAL/LEVERAGE-RATIO.
  *
- * Bar scale: per-side max-anchored. The larger side fills 50% of the
- * bar; the smaller side scales by ratio. Each sub-segment width =
- * `notional_i / max_side × 50%` of total bar.
+ * Defensive: if a short position appears (manual hedge or strategy
+ * extension), it renders in a separate "HEDGES" callout below the
+ * main bar — the long-only composition view stays intact.
  *
- * Below the bar:
- *   * Three-stat strip: LONG / SHORT / NET totals + position counts.
- *   * Two-column position breakdown grouped by side.
+ * Label clipping: top 3 positions by notional get visible ticker
+ * labels in their segment; smaller segments stay unlabeled so the bar
+ * doesn't read as overflowing text. The full ticker is available on
+ * hover via the title attribute and in the breakdown list below.
+ *
+ * Future (post step 11 once factor decomposition lands per-position
+ * BTC betas): replace notional-weighting with beta-weighted exposure
+ * so the bar reflects effective BTC-equivalent risk rather than raw
+ * dollar notional. Tracking item logged.
  */
 
 import type { LivePosition, AccountSnapshot } from "./types";
@@ -25,30 +34,24 @@ interface Props {
   account: AccountSnapshot | null;
 }
 
+const LABEL_VISIBLE_COUNT = 3;
+
 export default function ExposureMap({ positions, account }: Props) {
-  const longs = positions.filter((p) => p.side === "long");
-  const shorts = positions.filter((p) => p.side === "short");
-  longs.sort((a, b) => b.notional_usd - a.notional_usd);
-  shorts.sort((a, b) => b.notional_usd - a.notional_usd);
+  const longs = [...positions]
+    .filter((p) => p.side === "long")
+    .sort((a, b) => b.notional_usd - a.notional_usd);
+  const shorts = [...positions]
+    .filter((p) => p.side === "short")
+    .sort((a, b) => b.notional_usd - a.notional_usd);
 
-  const longTotal = longs.reduce((acc, p) => acc + p.notional_usd, 0);
-  const shortTotal = shorts.reduce((acc, p) => acc + p.notional_usd, 0);
-  const totalNotional = longTotal + shortTotal;
-  const net = longTotal - shortTotal;
+  const totalLong = longs.reduce((acc, p) => acc + p.notional_usd, 0);
+  const totalShort = shorts.reduce((acc, p) => acc + p.notional_usd, 0);
+  const totalNotional = totalLong + totalShort;
   const equity = account?.total_equity_usd ?? 0;
-  const netMultEquity = equity > 0 ? Math.abs(net) / equity : 0;
+  const leverageRatio = equity > 0 ? totalNotional / equity : 0;
 
-  const maxSide = Math.max(longTotal, shortTotal);
-
-  // Each segment width = notional_i / maxSide × 50% of total bar.
-  const longSegments = longs.map((p) => ({
-    pos: p,
-    widthPct: maxSide > 0 ? (p.notional_usd / maxSide) * 50 : 0,
-  }));
-  const shortSegments = shorts.map((p) => ({
-    pos: p,
-    widthPct: maxSide > 0 ? (p.notional_usd / maxSide) * 50 : 0,
-  }));
+  // Top-N visible labels (by notional desc); top-3 within longs.
+  const labelVisible = new Set(longs.slice(0, LABEL_VISIBLE_COUNT).map((p) => p.symbol));
 
   if (positions.length === 0) {
     return (
@@ -71,48 +74,8 @@ export default function ExposureMap({ positions, account }: Props) {
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
-      {/* Header meta */}
-      <div
-        style={{
-          display: "flex",
-          justifyContent: "flex-end",
-          fontSize: 10,
-          color: "var(--t3)",
-          letterSpacing: "0.06em",
-          fontFamily: "var(--font-space-mono), Space Mono, monospace",
-          fontVariantNumeric: "tabular-nums",
-        }}
-      >
-        NET{" "}
-        <span
-          style={{
-            fontWeight: 700,
-            color: net > 0 ? "var(--green)" : net < 0 ? "var(--red)" : "var(--t1)",
-            marginLeft: 4,
-          }}
-        >
-          {net > 0 ? "+" : net < 0 ? "−" : ""}${Math.abs(net).toLocaleString(undefined, { maximumFractionDigits: 0 })}
-          {" "}
-          {net > 0 ? "LONG" : net < 0 ? "SHORT" : "FLAT"}
-        </span>
-        <span style={{ marginLeft: 8 }}>· {netMultEquity.toFixed(2)}× equity</span>
-      </div>
-
-      {/* Bar */}
-      <div style={{ position: "relative", paddingTop: 18 }}>
-        <div
-          style={{
-            position: "absolute",
-            left: "50%",
-            top: 0,
-            transform: "translateX(-50%)",
-            fontSize: 9,
-            color: "var(--t3)",
-            letterSpacing: "0.1em",
-          }}
-        >
-          0
-        </div>
+      {/* Main bar — long composition */}
+      <div>
         <div
           style={{
             position: "relative",
@@ -124,42 +87,33 @@ export default function ExposureMap({ positions, account }: Props) {
             overflow: "hidden",
           }}
         >
-          <div
-            style={{
-              flex: 1,
-              display: "flex",
-              justifyContent: "flex-end",
-              height: "100%",
-            }}
-          >
-            {shortSegments.map(({ pos, widthPct }) => (
-              <Segment key={pos.symbol} pos={pos} widthPct={widthPct} side="short" />
-            ))}
-          </div>
-          {/* Center line */}
-          <div
-            style={{
-              position: "absolute",
-              left: "50%",
-              top: -4,
-              bottom: -4,
-              width: 1,
-              background: "var(--t1)",
-              zIndex: 2,
-            }}
-          />
-          <div
-            style={{
-              flex: 1,
-              display: "flex",
-              justifyContent: "flex-start",
-              height: "100%",
-            }}
-          >
-            {longSegments.map(({ pos, widthPct }) => (
-              <Segment key={pos.symbol} pos={pos} widthPct={widthPct} side="long" />
-            ))}
-          </div>
+          {longs.length === 0 ? (
+            <div
+              style={{
+                flex: 1,
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                color: "var(--t3)",
+                fontSize: 10,
+                letterSpacing: "0.08em",
+              }}
+            >
+              long book empty
+            </div>
+          ) : (
+            longs.map((p) => {
+              const widthPct = totalLong > 0 ? (p.notional_usd / totalLong) * 100 : 0;
+              return (
+                <Segment
+                  key={p.symbol}
+                  pos={p}
+                  widthPct={widthPct}
+                  showLabel={labelVisible.has(p.symbol)}
+                />
+              );
+            })
+          )}
         </div>
         <div
           style={{
@@ -173,13 +127,61 @@ export default function ExposureMap({ positions, account }: Props) {
             fontVariantNumeric: "tabular-nums",
           }}
         >
-          <span style={{ color: "var(--red)" }}>SHORT ${shortTotal.toLocaleString(undefined, { maximumFractionDigits: 0 })}</span>
-          <span />
-          <span style={{ color: "var(--green)" }}>LONG ${longTotal.toLocaleString(undefined, { maximumFractionDigits: 0 })}</span>
+          <span>0</span>
+          <span style={{ color: "var(--green)" }}>
+            ${totalLong.toLocaleString(undefined, { maximumFractionDigits: 0 })} LONG
+          </span>
         </div>
       </div>
 
-      {/* Stat strip */}
+      {/* Defensive HEDGES callout — only renders when shorts exist */}
+      {shorts.length > 0 && (
+        <div
+          style={{
+            background: "var(--bg2)",
+            border: "1px solid var(--red)",
+            borderLeft: "2px solid var(--red)",
+            borderRadius: 3,
+            padding: "8px 12px",
+            fontFamily: "var(--font-space-mono), Space Mono, monospace",
+          }}
+        >
+          <div
+            style={{
+              fontSize: 9,
+              fontWeight: 700,
+              letterSpacing: "0.14em",
+              color: "var(--red)",
+              marginBottom: 6,
+            }}
+          >
+            HEDGES · ${totalShort.toLocaleString(undefined, { maximumFractionDigits: 0 })}
+          </div>
+          <div
+            style={{
+              display: "flex",
+              flexWrap: "wrap",
+              gap: "4px 14px",
+              fontSize: 10,
+              color: "var(--t1)",
+              fontVariantNumeric: "tabular-nums",
+            }}
+          >
+            {shorts.map((p) => (
+              <span key={p.symbol}>
+                <span style={{ color: "var(--t0)", fontWeight: 700 }}>{p.symbol_base}</span>
+                {" "}
+                <span style={{ color: "var(--t3)" }}>
+                  ${p.notional_usd.toLocaleString(undefined, { maximumFractionDigits: 0 })}
+                  {p.leverage ? ` · ${p.leverage.toFixed(1)}×` : ""}
+                </span>
+              </span>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Stat strip — long-only composition cuts (was LONG/SHORT/NET) */}
       <div
         style={{
           display: "grid",
@@ -192,78 +194,112 @@ export default function ExposureMap({ positions, account }: Props) {
         }}
       >
         <Stat
-          label="LONG"
-          value={`$${longTotal.toLocaleString(undefined, { maximumFractionDigits: 0 })}`}
-          valueColor="var(--green)"
+          label="Total Exposure"
+          value={`${positions.length} position${positions.length === 1 ? "" : "s"}`}
+          valueColor="var(--t0)"
           sub={
-            totalNotional > 0
-              ? `${((longTotal / totalNotional) * 100).toFixed(1)}% · ${longs.length} position${longs.length === 1 ? "" : "s"}`
+            shorts.length > 0
+              ? `${longs.length} long · ${shorts.length} short`
+              : `${longs.length} long`
+          }
+        />
+        <Stat
+          label="Notional"
+          value={`$${totalNotional.toLocaleString(undefined, { maximumFractionDigits: 0 })}`}
+          valueColor="var(--t0)"
+          sub={
+            longs.length > 0
+              ? `largest ${longs[0].symbol_base} ${((longs[0].notional_usd / totalNotional) * 100).toFixed(0)}%`
               : ""
           }
         />
         <Stat
-          label="SHORT"
-          value={`$${shortTotal.toLocaleString(undefined, { maximumFractionDigits: 0 })}`}
-          valueColor="var(--red)"
-          sub={
-            totalNotional > 0
-              ? `${((shortTotal / totalNotional) * 100).toFixed(1)}% · ${shorts.length} position${shorts.length === 1 ? "" : "s"}`
-              : ""
+          label="Leverage Ratio"
+          value={`${leverageRatio.toFixed(2)}× equity`}
+          valueColor={
+            leverageRatio < 1.5
+              ? "var(--green)"
+              : leverageRatio < 3
+                ? "var(--amber)"
+                : "var(--red)"
           }
-        />
-        <Stat
-          label="NET"
-          value={`${net > 0 ? "+" : net < 0 ? "−" : ""}$${Math.abs(net).toLocaleString(undefined, { maximumFractionDigits: 0 })}`}
-          valueColor={net > 0 ? "var(--green)" : net < 0 ? "var(--red)" : "var(--t1)"}
-          sub={
-            net > 0
-              ? "unhedged crypto beta"
-              : net < 0
-                ? "net short"
-                : "balanced"
-          }
+          sub={`equity $${equity.toLocaleString(undefined, { maximumFractionDigits: 0 })}`}
         />
       </div>
 
-      {/* Two-column position breakdown */}
+      {/* Single-column position breakdown */}
       <div
         style={{
-          display: "grid",
-          gridTemplateColumns: "1fr 1fr",
-          gap: 1,
-          background: "var(--line)",
+          background: "var(--bg2)",
           border: "1px solid var(--line)",
           borderRadius: 3,
-          overflow: "hidden",
+          padding: "10px 12px",
         }}
       >
-        <Column
-          headLabel="LONGS"
-          headTotal={`$${longTotal.toLocaleString(undefined, { maximumFractionDigits: 0 })}`}
-          headColor="var(--green)"
-          positions={longs}
-        />
-        <Column
-          headLabel="SHORTS"
-          headTotal={`$${shortTotal.toLocaleString(undefined, { maximumFractionDigits: 0 })}`}
-          headColor="var(--red)"
-          positions={shorts}
-        />
+        <div
+          style={{
+            fontSize: 9,
+            letterSpacing: "0.16em",
+            color: "var(--t3)",
+            display: "flex",
+            justifyContent: "space-between",
+            marginBottom: 8,
+            fontFamily: "var(--font-space-mono), Space Mono, monospace",
+          }}
+        >
+          <span>POSITIONS · LONG</span>
+          <span style={{ color: "var(--green)", fontWeight: 700 }}>
+            ${totalLong.toLocaleString(undefined, { maximumFractionDigits: 0 })} TOTAL
+          </span>
+        </div>
+        {longs.length === 0 ? (
+          <div style={{ fontSize: 10, color: "var(--t3)" }}>none</div>
+        ) : (
+          longs.map((p, i) => (
+            <div
+              key={p.symbol}
+              style={{
+                display: "grid",
+                gridTemplateColumns: "100px 1fr 100px 80px",
+                fontSize: 11,
+                padding: "4px 0",
+                borderBottom: i === longs.length - 1 ? "none" : "1px dashed var(--line)",
+                fontVariantNumeric: "tabular-nums",
+                fontFamily: "var(--font-space-mono), Space Mono, monospace",
+                gap: 12,
+                alignItems: "center",
+              }}
+            >
+              <span style={{ color: "var(--t0)", fontWeight: 700 }}>{p.symbol_base}</span>
+              <span style={{ color: "var(--t3)", fontSize: 10 }}>
+                {p.source === "strategy" ? (p.strategy_name ?? "STRATEGY") : "MANUAL"}
+              </span>
+              <span style={{ color: "var(--t1)", textAlign: "right" }}>
+                ${p.notional_usd.toLocaleString(undefined, { maximumFractionDigits: 0 })}
+              </span>
+              <span style={{ color: "var(--t2)", textAlign: "right" }}>
+                {p.leverage ? `${p.leverage.toFixed(1)}×` : "—"}
+              </span>
+            </div>
+          ))
+        )}
       </div>
     </div>
   );
 }
 
 function Segment({
-  pos, widthPct, side,
+  pos, widthPct, showLabel,
 }: {
   pos: LivePosition;
   widthPct: number;
-  side: "long" | "short";
+  showLabel: boolean;
 }) {
   return (
     <div
-      title={`${pos.symbol_base} · $${pos.notional_usd.toFixed(0)}`}
+      title={`${pos.symbol_base} · $${pos.notional_usd.toLocaleString(undefined, { maximumFractionDigits: 0 })}${
+        pos.leverage ? ` · ${pos.leverage.toFixed(1)}×` : ""
+      }`}
       style={{
         height: "100%",
         width: `${widthPct}%`,
@@ -272,11 +308,8 @@ function Segment({
         justifyContent: "center",
         fontSize: 10,
         fontWeight: 700,
-        color: side === "long" ? "var(--green)" : "var(--red)",
-        background:
-          side === "long"
-            ? "rgba(0, 200, 150, 0.32)"
-            : "rgba(255, 77, 77, 0.32)",
+        color: "var(--green)",
+        background: "rgba(0, 200, 150, 0.32)",
         borderRight: "1px solid rgba(8, 8, 9, 0.4)",
         overflow: "hidden",
         whiteSpace: "nowrap",
@@ -284,7 +317,7 @@ function Segment({
         fontFamily: "var(--font-space-mono), Space Mono, monospace",
       }}
     >
-      {pos.symbol_base}
+      {showLabel ? pos.symbol_base : ""}
     </div>
   );
 }
@@ -305,6 +338,7 @@ function Stat({
           letterSpacing: "0.14em",
           color: "var(--t3)",
           marginBottom: 4,
+          textTransform: "uppercase",
           fontFamily: "var(--font-space-mono), Space Mono, monospace",
         }}
       >
@@ -332,59 +366,6 @@ function Stat({
       >
         {sub}
       </div>
-    </div>
-  );
-}
-
-function Column({
-  headLabel, headTotal, headColor, positions,
-}: {
-  headLabel: string;
-  headTotal: string;
-  headColor: string;
-  positions: LivePosition[];
-}) {
-  return (
-    <div style={{ background: "var(--bg2)", padding: "10px 12px" }}>
-      <div
-        style={{
-          fontSize: 9,
-          letterSpacing: "0.16em",
-          color: "var(--t3)",
-          display: "flex",
-          justifyContent: "space-between",
-          marginBottom: 8,
-          fontFamily: "var(--font-space-mono), Space Mono, monospace",
-        }}
-      >
-        <span>{headLabel}</span>
-        <span style={{ color: headColor, fontWeight: 700 }}>{headTotal}</span>
-      </div>
-      {positions.length === 0 ? (
-        <div style={{ fontSize: 10, color: "var(--t3)" }}>none</div>
-      ) : (
-        positions.map((p) => (
-          <div
-            key={p.symbol}
-            style={{
-              display: "flex",
-              justifyContent: "space-between",
-              fontSize: 11,
-              padding: "4px 0",
-              borderBottom: "1px dashed var(--line)",
-              fontVariantNumeric: "tabular-nums",
-              fontFamily: "var(--font-space-mono), Space Mono, monospace",
-            }}
-          >
-            <span style={{ color: "var(--t0)", fontWeight: 700 }}>{p.symbol_base}</span>
-            <span style={{ color: "var(--t3)" }}>
-              ${p.notional_usd.toLocaleString(undefined, { maximumFractionDigits: 0 })}
-              {" · "}
-              {p.leverage ? `${p.leverage.toFixed(1)}×` : "—"}
-            </span>
-          </div>
-        ))
-      )}
     </div>
   );
 }

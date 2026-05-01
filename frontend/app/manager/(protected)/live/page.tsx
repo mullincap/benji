@@ -522,7 +522,11 @@ interface RiskCellProps {
 
 function RiskCell({ label, value, detail, valueColor }: RiskCellProps) {
   return (
-    <div style={{ background: "var(--bg2)", padding: "12px 16px" }}>
+    // minWidth:0 lets a 1fr grid cell shrink below intrinsic content width;
+    // overflow:hidden + overflowWrap on the inner texts keeps long
+    // concatenated symbol lists inside the cell instead of bleeding into
+    // the next section.
+    <div style={{ background: "var(--bg2)", padding: "12px 16px", minWidth: 0, overflow: "hidden" }}>
       <div
         style={{
           fontSize: 9,
@@ -542,6 +546,8 @@ function RiskCell({ label, value, detail, valueColor }: RiskCellProps) {
           color: valueColor ?? "var(--t0)",
           fontFamily: "var(--font-space-mono), Space Mono, monospace",
           fontVariantNumeric: "tabular-nums",
+          overflowWrap: "break-word",
+          wordBreak: "break-word",
         }}
       >
         {value}
@@ -554,6 +560,8 @@ function RiskCell({ label, value, detail, valueColor }: RiskCellProps) {
             color: "var(--t3)",
             fontFamily: "var(--font-space-mono), Space Mono, monospace",
             fontVariantNumeric: "tabular-nums",
+            overflowWrap: "break-word",
+            wordBreak: "break-word",
           }}
         >
           {detail}
@@ -587,13 +595,18 @@ function RiskSignalsRow({ risk }: { risk: RiskSnapshot | null }) {
     ? `SL ${fmtPrice(ns.sl_price)} · mark ${fmtPrice(ns.mark_price)}`
     : "no SL set on any position";
 
-  // Concentration
+  // Concentration. Show the top 3 symbols inline; surface a "+N more"
+  // badge for the rest so the cell doesn't overflow when 6+ positions
+  // share the concentrated direction. Full list lives in the no-stops
+  // detail line and the positions table.
   const c = risk.concentration;
+  const cTopSymbols = c ? c.constituent_symbols.slice(0, 3) : [];
+  const cExtra = c ? c.constituent_symbols.length - cTopSymbols.length : 0;
   const cValue = c
-    ? `${c.pct_of_book.toFixed(1)}% on ${c.constituent_symbols.slice(0, 4).join(" + ")}${c.constituent_symbols.length > 4 ? "…" : ""} ${c.direction}s`
+    ? `${c.pct_of_book.toFixed(1)}% on ${cTopSymbols.join(" + ")}${cExtra > 0 ? ` +${cExtra}` : ""} ${c.direction}s`
     : "—";
   const cDetail = c && c.no_protective_stops.length > 0
-    ? <span style={{ color: "var(--red)" }}>no protective stops on {c.no_protective_stops.join(", ")}</span>
+    ? <span style={{ color: "var(--red)" }}>no protective stops on {c.no_protective_stops.slice(0, 3).join(", ")}{c.no_protective_stops.length > 3 ? ` +${c.no_protective_stops.length - 3}` : ""}</span>
     : (c ? "all positions hedged or stopped" : "");
 
   return (
@@ -1391,7 +1404,7 @@ export default function LivePage() {
           <Collapsible id="live:waterfall" title="PnL Attribution · Today">
             <Waterfall positions={positions.data?.positions ?? []} />
           </Collapsible>
-          <Collapsible id="live:exposure" title="Exposure · Long vs Short">
+          <Collapsible id="live:exposure" title="Exposure Composition · Live">
             <ExposureMap
               positions={positions.data?.positions ?? []}
               account={account.data}
