@@ -33,6 +33,50 @@ Target users: crypto fund managers and allocators.
 - Visual direction: Premium dark — dark mode first, financial data aesthetic
 - UX model: Single page, three states (idle / running / results)
 
+## Manager Live tab — venue + storage conventions
+
+The Manager Live tab (`/manager/live`) follows a deliberate **account-data
+vs. market-data venue split** that future sessions must preserve:
+
+- **Account data → BloFin.** Equity, positions, PnL, orders, fills,
+  funding history. Reuse the existing trader-blofin code paths
+  (`backend/app/cli/trader_blofin.py`, `pipeline/allocator/blofin_*`).
+  Do NOT route account reads through Binance — the Binance API key in
+  this project is permission-restricted to public market-data endpoints
+  (verified via `python -m app.cli.binance_perm_audit`).
+
+- **Market data → Binance USDM Futures (public endpoints only).**
+  Klines, premium index, OI, OI history, top-trader L/S ratio, ticker
+  24h, exchangeInfo. No signed Binance calls in v1.
+
+- **Multi-venue from day one.** Every Live-tab table is keyed on
+  `(venue, connection_id, …)` with `venue IN ('blofin','binance')`. In
+  v1 every row has `venue='blofin'`. When Binance trading lands later
+  it adds rows under `venue='binance'` — no schema migration needed.
+
+### Three new tables (migrations 019/020/021)
+- `user_mgmt.account_daily_anchors` — 00:00 UTC equity anchor per
+  (venue, connection_id, anchor_date). Drives "today's PnL" math
+  on the KPI strip. Distinct from `exchange_snapshots` (5-min cadence,
+  intraday) — guarantees one row per UTC day.
+- `user_mgmt.position_history` — lifecycle row per position
+  (open → close), with entry context, source attribution
+  (manual vs strategy via active session lookup), MFE/MAE peaks,
+  and a free-form `metadata` JSONB for tags / manual notes. Augments,
+  does not replace, `exchange_snapshots.positions`.
+- `user_mgmt.position_snapshots` — TimescaleDB hypertable, 1-minute
+  cadence per open position, 7-day chunks, compressed after 30 days.
+  Drives waterfall window-anchored PnL deltas (today / 7D / 30D /
+  since-open) and feeds MFE/MAE maintenance for `position_history`.
+
+### Live-data infrastructure
+- **Sidecar WebSocket process per venue** maintains the BloFin user-
+  data + market-data streams and writes to Redis with TTLs aligned to
+  the data dictionary's refresh tiers (T0 2s, T1 event-driven, T2 60s,
+  T3 5m, T4 bar-close, T5 hourly). FastAPI reads from Redis only —
+  no WS state inside the request/response path. No standalone WS
+  gateway service in v1.
+
 ## Design system (LOCKED — do not deviate)
 
 ### Font
