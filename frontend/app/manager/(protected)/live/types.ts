@@ -203,3 +203,46 @@ export interface MaAlignmentResponse {
   timeframes: string[];
   rows: MaRow[];
 }
+
+// ─── /api/manager/live/boxplots (Data Dictionary §10) ──────────────────
+
+export type BoxDotClass = "good" | "bad" | "neu";
+export type TrendDirection =
+  | "strong-up" | "up" | "flat" | "down" | "strong-down";
+
+export interface BoxPlotCell {
+  symbol: string;
+  symbol_base: string;
+  side: Side;
+  binance_symbol: string | null;
+
+  // Distribution (null when reason != null)
+  p5: number | null;
+  p25: number | null;
+  p50: number | null;
+  p75: number | null;
+  p95: number | null;
+  win_min: number | null;
+  win_max: number | null;
+
+  // Live overlay
+  mark_price: number | null;
+  entry_price: number | null;
+  mark_dot: BoxDotClass;
+
+  // Trend
+  slope_sigma: number | null;
+  trend_direction: TrendDirection | null;
+  trend_color: BoxDotClass;
+
+  // Diagnostics
+  last_close_ts: number | null;
+  reason: string | null;
+}
+
+export interface BoxPlotsResponse {
+  venue: Venue;
+  connection_id: string;
+  snapshot_at: string | null;
+  cells: BoxPlotCell[];
+}

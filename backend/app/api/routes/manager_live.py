@@ -62,6 +62,11 @@ from ...services.ema_cache import (
     alignment_tier,
     compute_and_cache_ema20,
 )
+from ...services.boxplot_cache import (
+    compute_and_cache_boxplot,
+    mark_dot_class,
+    trend_color,
+)
 from ...services.exchanges.binance_market import BinanceMarketClient
 from concurrent.futures import ThreadPoolExecutor
 
@@ -483,6 +488,57 @@ class MaAlignmentResponse(BaseModel):
     rows: list[MaRow]
 
 
+# ── Box Plot Strip (Data Dictionary §10) ───────────────────────────────
+
+# Mark-dot color classes per §10:
+#   'good' = aligned with position direction
+#   'bad'  = strongly counter-aligned
+#   'neu'  = in the box's neutral mid-zone
+BoxDotClass = Literal["good", "bad", "neu"]
+TrendDirection = Literal["strong-up", "up", "flat", "down", "strong-down"]
+
+
+class BoxPlotCell(BaseModel):
+    """One position's 24h × 5m distribution, including the live mark dot
+    + entry triangle the SVG renders. `reason` non-null means we can't
+    render the box plot for this position — frontend shows
+    'INSUFFICIENT DATA' instead."""
+    symbol: str
+    symbol_base: str
+    side: Literal["long", "short"]
+    binance_symbol: str | None
+
+    # Distribution (null when reason != null)
+    p5: float | None
+    p25: float | None
+    p50: float | None
+    p75: float | None
+    p95: float | None
+    win_min: float | None  # named 'min' in cache; renamed for JSON clarity
+    win_max: float | None
+
+    # Live overlay
+    mark_price: float | None
+    entry_price: float | None
+    mark_dot: BoxDotClass
+
+    # Trend
+    slope_sigma: float | None
+    trend_direction: TrendDirection | None
+    trend_color: BoxDotClass
+
+    # Diagnostics
+    last_close_ts: int | None
+    reason: str | None
+
+
+class BoxPlotsResponse(BaseModel):
+    venue: str
+    connection_id: str
+    snapshot_at: str | None
+    cells: list[BoxPlotCell]
+
+
 # ── Compute helpers ───────────────────────────────────────────────────────
 
 def _iso(dt) -> str | None:
@@ -758,6 +814,10 @@ CACHE_TTL_RISK_S = 5
 # masking bar-close updates beyond the next minute. Frontend polls at
 # 60s anyway, so this cache is mostly a thundering-herd guard.
 CACHE_TTL_MA_ALIGNMENT_S = 30
+# /boxplots — same logic as /ma-alignment: thin response cache absorbs
+# duplicate frontend polls without masking the underlying 5m bar-close
+# rotation in boxplot_cache.
+CACHE_TTL_BOXPLOTS_S = 30
 
 
 @router.get("/account", response_model=AccountSnapshot)
@@ -1034,3 +1094,137 @@ def get_ma_alignment(
     )
     _cache_set(cache_key, response.model_dump(), ttl=CACHE_TTL_MA_ALIGNMENT_S)
     return response
+
+
+@router.get("/boxplots", response_model=BoxPlotsResponse)
+def get_boxplots(
+    venue: str | None = Query(None, pattern="^(blofin|binance)$"),
+    connection_id: str | None = None,
+    cur=Depends(get_cursor),
+) -> BoxPlotsResponse:
+    """24h × 5m close-price distribution per open position. Drives the
+    box plot strip (Data Dictionary §10).
+
+    Like /ma-alignment, fetches are parallelized across positions —
+    one Binance klines round-trip per symbol on a cold cache. Mark
+    price + entry price come from the BloFin snapshot; box / whisker
+    / median come from the Binance kline distribution.
+    """
+    venue, connection_id = _resolve_venue_connection(cur, venue, connection_id)
+    cache_key = f"live:boxplots:{venue}:{connection_id}"
+    cached = _cache_get(cache_key)
+    if cached:
+        return BoxPlotsResponse.model_validate(cached)
+
+    snap = _read_latest_snapshot(cur, venue, connection_id)
+    if not snap:
+        raise HTTPException(404, f"No snapshot for {venue}/{connection_id}")
+
+    open_positions: list[dict] = []
+    for p in (snap["positions"] or []):
+        sym = (p.get("symbol") or "").upper()
+        size = float(p.get("size") or 0)
+        if not sym or size == 0:
+            continue
+        open_positions.append(p)
+
+    bases = [parse_symbol_base(p.get("symbol") or "") for p in open_positions]
+    binance_ids = _resolve_binance_ids(cur, bases)
+    client = BinanceMarketClient()
+
+    # Parallel fetch: one box plot computation per symbol.
+    def fetch_one(p: dict) -> tuple[str, dict]:
+        base = parse_symbol_base(p.get("symbol") or "")
+        bid = binance_ids.get(base)
+        return p.get("symbol") or "", compute_and_cache_boxplot(
+            binance_symbol=bid, client=client,
+        )
+
+    results: dict[str, dict] = {}
+    with ThreadPoolExecutor(max_workers=8) as ex:
+        for sym, dist in ex.map(fetch_one, open_positions):
+            results[sym] = dist
+
+    cells: list[BoxPlotCell] = []
+    for p in open_positions:
+        sym_full = (p.get("symbol") or "").upper()
+        sym_base = parse_symbol_base(sym_full)
+        side = derive_position_side(p.get("side"), p.get("size") or 0)
+        binance_id = binance_ids.get(sym_base)
+        mark = float(p["mark_price"]) if p.get("mark_price") else None
+        entry = float(p["entry_price"]) if p.get("entry_price") else None
+        dist = results.get(sym_full, {})
+
+        # Mark dot + trend color require both a mark and a valid
+        # distribution. Fall back to 'neu' otherwise so the frontend
+        # has a stable enum to render against.
+        if (
+            mark is not None
+            and dist.get("p25") is not None
+            and dist.get("p50") is not None
+            and dist.get("p75") is not None
+        ):
+            mark_dot = mark_dot_class(
+                mark=mark,
+                p25=float(dist["p25"]),
+                p50=float(dist["p50"]),
+                p75=float(dist["p75"]),
+                side=side,
+            )
+        else:
+            mark_dot = "neu"
+
+        trend = dist.get("trend")
+        tc = trend_color(trend, side) if trend else "neu"
+
+        cells.append(BoxPlotCell(
+            symbol=sym_full,
+            symbol_base=sym_base,
+            side=side,
+            binance_symbol=binance_id,
+            p5=_opt_float(dist.get("p5")),
+            p25=_opt_float(dist.get("p25")),
+            p50=_opt_float(dist.get("p50")),
+            p75=_opt_float(dist.get("p75")),
+            p95=_opt_float(dist.get("p95")),
+            win_min=_opt_float(dist.get("min")),
+            win_max=_opt_float(dist.get("max")),
+            mark_price=mark,
+            entry_price=entry,
+            mark_dot=mark_dot,
+            slope_sigma=_opt_float(dist.get("slope_sigma")),
+            trend_direction=trend,
+            trend_color=tc,
+            last_close_ts=dist.get("last_close_ts"),
+            reason=dist.get("reason"),
+        ))
+
+    # Default sort: notional desc, same as /positions, so the box plot
+    # strip's column order matches the rest of the page.
+    cells.sort(
+        key=lambda c: -(
+            float(next(
+                (p.get("notional_usd") or 0)
+                for p in open_positions
+                if (p.get("symbol") or "").upper() == c.symbol
+            ))
+        ),
+    )
+
+    response = BoxPlotsResponse(
+        venue=venue,
+        connection_id=connection_id,
+        snapshot_at=_iso(snap["snapshot_at"]),
+        cells=cells,
+    )
+    _cache_set(cache_key, response.model_dump(), ttl=CACHE_TTL_BOXPLOTS_S)
+    return response
+
+
+def _opt_float(v) -> float | None:
+    if v is None:
+        return None
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return None

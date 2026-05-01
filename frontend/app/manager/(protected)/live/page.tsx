@@ -40,8 +40,10 @@ import Treemap from "./Treemap";
 import Waterfall from "./Waterfall";
 import ExposureMap from "./ExposureMap";
 import MAAlignmentHeatmap from "./MAAlignmentHeatmap";
+import BoxPlotStrip from "./BoxPlotStrip";
 import type {
   AccountSnapshot,
+  BoxPlotsResponse,
   LivePosition,
   MaAlignmentResponse,
   PositionsResponse,
@@ -1260,6 +1262,13 @@ export default function LivePage() {
     `${API_BASE}/api/manager/live/ma-alignment`,
     60000,
   );
+  // Box plot strip: same 5m bar-close cadence on the underlying
+  // distribution; mark dot moves on every fresh /positions tick but
+  // the box itself only rotates on bar close. 60s polling is enough.
+  const boxplots = useLivePoll<BoxPlotsResponse>(
+    `${API_BASE}/api/manager/live/boxplots`,
+    60000,
+  );
 
   const [chatCollapsed, setChatCollapsed] = useState(false);
 
@@ -1430,7 +1439,7 @@ export default function LivePage() {
         </div>
 
         <Collapsible id="live:box-plots" title="Trailing Distribution · 24H Window">
-          <Placeholder height={170} label="Per-position box plots render in step 9" />
+          <BoxPlotStrip cells={boxplots.data?.cells ?? null} onCellClick={handleTileClick} />
         </Collapsible>
 
         <Collapsible id="live:ma-heatmap" title="MA Alignment · Distance from EMA">
