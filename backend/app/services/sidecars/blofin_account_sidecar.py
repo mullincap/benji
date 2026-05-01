@@ -639,8 +639,18 @@ async def amain() -> int:
     if not settings.LIVE_SIDECAR_ENABLED:
         log.info(
             "blofin sidecar disabled by config (LIVE_SIDECAR_ENABLED=false); "
-            "exiting cleanly."
+            "process will idle until SIGTERM. Flip the env var and "
+            "`docker compose restart blofin-sidecar` to enable."
         )
+        # Idle instead of exiting — exiting cleanly with restart-policy
+        # unless-stopped causes Docker to respawn the container in a
+        # tight loop and spam logs. Idle here so the container shows
+        # as healthy "running" and the log-disabled line appears once.
+        stop = asyncio.Event()
+        loop = asyncio.get_running_loop()
+        for sig in (signal.SIGTERM, signal.SIGINT):
+            loop.add_signal_handler(sig, stop.set)
+        await stop.wait()
         return EXIT_OK
 
     conn = await asyncio.to_thread(_load_active_blofin_connection)
