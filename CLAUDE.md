@@ -76,6 +76,53 @@ vs. market-data venue split** that future sessions must preserve:
   T3 5m, T4 bar-close, T5 hourly). FastAPI reads from Redis only —
   no WS state inside the request/response path. No standalone WS
   gateway service in v1.
+- **Implementation:** `backend/app/services/sidecars/blofin_account_sidecar.py`,
+  gated by `LIVE_SIDECAR_ENABLED` (default OFF). Endpoints prefer
+  Redis when sidecar heartbeat is fresh; fall back to the 5-min
+  `sync_exchange_snapshots` cron-cached row otherwise. Response
+  carries `stale_source` + `sidecar_stale` flags for the UI badge.
+
+### BloFin WebSocket gotchas (verified 2026-05-01 against the prod
+endpoint `wss://openapi.blofin.com/ws/private`; pinned by tests in
+`tests/test_blofin_sidecar_state.py`)
+
+The four BloFin-specific protocol details that diverge from OKX-family
+expectations and would cost a day of debugging if guessed:
+
+1. **Auth signature is `base64(hex_digest_string)`, NOT
+   `base64(raw_bytes)`.** HMAC-SHA256 the message, hex-stringify the
+   digest, then base64-encode those hex chars. OKX uses raw bytes →
+   base64 directly; using OKX style here silently rejects every login.
+
+2. **Login message includes a `nonce` field** (in both the args object
+   and the signed string), where `nonce == timestamp`. Signed string
+   is `path + method + timestamp + nonce + body` with `path=
+   "/users/self/verify"`, `method="GET"`, `body=""`. OKX has no nonce.
+
+3. **Heartbeat is application-level `"ping"` / `"pong"` text frames**
+   at 15s, NOT WebSocket protocol-level Ping/Pong opcodes. Send the
+   literal four-character string `"ping"`; server replies with the
+   literal `"pong"` string. Use `ping_interval=None` on the
+   `websockets` client so the protocol-level keepalive doesn't fight
+   the application-level one.
+
+4. **`orders` and `orders-algo` channels do NOT push initial state**
+   on subscribe — only on subsequent order events. REST-seed open
+   orders + TPSL orders BEFORE subscribing or the dashboard shows
+   empty SL/TP cells until the first user-triggered order event.
+   The `account` and `positions` channels DO push initial state.
+
+5. **`positions` channel pushes initial snapshot BEFORE the subscribe
+   ack arrives.** This was the soak-step finding (not in the docs).
+   Don't read the subscribe ack inline per channel — fire all
+   subscribes, then drain incoming frames in a loop dispatching
+   pushes while collecting acks. Treating an early snapshot frame as
+   a subscribe failure causes a backoff loop on every connect.
+
+If a Binance sidecar is built later (currently market-data only via
+public REST), Binance's gotcha list will be different — having
+BloFin's documented makes the next venue's research a comparison
+exercise rather than another from-scratch investigation.
 
 ## Design system (LOCKED — do not deviate)
 

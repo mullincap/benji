@@ -432,21 +432,22 @@ The mockup uses positions in BTC, SOL, AIXBT, BIO, CGPT, MEGA. Before transition
 
 The chat advertises the following context "chips" — these need to actually be loaded into the prompt context for the PM responses to be honest:
 
-| Chip | Backing data |
-|------|--------------|
-| `OPEN POSITIONS` | live snapshot from §3–§4 above |
-| `90D ACCOUNT HISTORY` | daily equity curve, daily PnL, position turnover from `account_snapshots` table |
-| `LIVE FUNDING` | current funding rates for all open-position symbols |
-| `OI · L/S SKEW` | current OI and L/S ratios for all open-position symbols |
-| `24H LIQUIDATIONS` | only if §15b is implemented; otherwise drop chip |
-| `TA · 1m–1d` | EMA distances at all timeframes (§11), regression slopes (§10) |
-| `STRATEGY METADATA` | active strategy session info, recent session results, full strategy ledger access |
+| Chip | Backing data | Freshness |
+|------|--------------|-----------|
+| `OPEN POSITIONS` | live snapshot from §3–§4 above | sub-second when sidecar enabled (BloFin WebSocket pushes account/positions/orders into Redis on every event); 5-minute fallback via `sync_exchange_snapshots` cron when sidecar OFF or stale. Chat layer should read the response's `stale_source` / `sidecar_stale` flags and qualify its statements accordingly when degraded. |
+| `90D ACCOUNT HISTORY` | daily equity curve, daily PnL, position turnover from `account_snapshots` table | daily — written by 00:00 UTC anchor cron |
+| `LIVE FUNDING` | current funding rates for all open-position symbols | T2 — 60s pull from Binance USDM `/fapi/v1/premiumIndex` |
+| `OI · L/S SKEW` | current OI and L/S ratios for all open-position symbols | T3 — 5m pull |
+| `24H LIQUIDATIONS` | only if §15b is implemented; otherwise drop chip | n/a v1 |
+| `TA · 1m–1d` | EMA distances at all timeframes (§11), regression slopes (§10) | T4 — bar-close, pre-warmed via `ema_warmer` celery beat task |
+| `STRATEGY METADATA` | active strategy session info, recent session results, full strategy ledger access | DB read, sub-second |
 
 **Each chat turn should:**
-1. Fetch fresh T0 data (positions, equity, marks).
+1. Fetch fresh T0 data (positions, equity, marks) — from Redis when sidecar is healthy, from `exchange_snapshots` otherwise.
 2. Use cached T2/T3/T4/T5 data unless stale.
 3. Be served the structured snapshot as a context block, not pre-summarized.
 4. Be allowed to call out to the same endpoints if the user asks something the snapshot doesn't cover.
+5. Surface any `stale_source='rest_fallback'` / `sidecar_stale=true` flag in the response so the PM voice can say "I'm reading 5-min-stale data, the sidecar appears to be down" rather than implying live read.
 
 **Out of v1 scope but flagged:** the chat should be able to *act* — suggest "want me to set a stop on BTC?" and execute on confirmation. Not part of v1 build but data shape should support it.
 
