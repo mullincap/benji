@@ -1129,6 +1129,196 @@ def portfolio_series(
     }
 
 
+# ── Live account state ──────────────────────────────────────────────────────
+#
+# "What is the account doing right now?" — independent of any session
+# boundary. Refreshes exchange snapshots, then returns the latest balance
+# + open positions per active connection, with each position tagged as
+# 'strategy' (symbol is in today's signal basket for an allocation on that
+# connection) or 'manual' (everything else, including off-strategy holds).
+#
+# Strategy classification is symbol-base only for v1 — side mismatches
+# (e.g. manual short while strategy is long the same coin) still tag as
+# 'strategy'. Refine later if it shows up in practice.
+
+@router.get("/positions")
+def positions(
+    exchange: str = Query("both", pattern="^(blofin|binance|both)$"),
+    cur=Depends(get_cursor),
+) -> dict[str, Any]:
+    # 1. Refresh first — same pattern as Overview. Admin scope (no user_id).
+    refresh_snapshots(cur)
+
+    # 2. Latest snapshot per active connection, optionally filtered by exchange.
+    if exchange == "both":
+        ex_filter = ""
+        ex_args: tuple = ()
+    else:
+        ex_filter = "AND ec.exchange = %s"
+        ex_args = (exchange,)
+
+    cur.execute(f"""
+        SELECT DISTINCT ON (ec.connection_id)
+            ec.connection_id, ec.exchange, ec.label,
+            es.snapshot_at, es.total_equity_usd, es.available_usd,
+            es.used_margin_usd, es.unrealized_pnl, es.positions,
+            es.fetch_ok, es.error_msg
+        FROM user_mgmt.exchange_connections ec
+        LEFT JOIN user_mgmt.exchange_snapshots es
+            ON es.connection_id = ec.connection_id
+            AND es.fetch_ok = TRUE
+        WHERE ec.status = 'active' {ex_filter}
+        ORDER BY ec.connection_id, es.snapshot_at DESC NULLS LAST
+    """, ex_args)
+    snap_rows = cur.fetchall()
+
+    # 3. Build the strategy-symbol map per connection from the latest signal
+    #    batch of each active allocation.
+    strategy_by_conn: dict[str, dict[str, str]] = {}  # cid -> {SYMBOL_BASE: strategy_name}
+    if snap_rows:
+        conn_ids = [r["connection_id"] for r in snap_rows]
+        cur.execute("""
+            SELECT a.connection_id, a.strategy_version_id,
+                   s.display_name AS strategy_display_name, s.name AS strategy_name
+            FROM user_mgmt.allocations a
+            JOIN audit.strategy_versions sv ON sv.strategy_version_id = a.strategy_version_id
+            JOIN audit.strategies s ON s.strategy_id = sv.strategy_id
+            WHERE a.connection_id = ANY(%s::uuid[])
+              AND a.status = 'active'
+        """, (conn_ids,))
+        alloc_rows = cur.fetchall()
+
+        if alloc_rows:
+            version_ids = list({a["strategy_version_id"] for a in alloc_rows})
+            cur.execute("""
+                SELECT DISTINCT ON (ds.strategy_version_id)
+                    ds.strategy_version_id, ds.signal_batch_id
+                FROM user_mgmt.daily_signals ds
+                WHERE ds.strategy_version_id = ANY(%s::uuid[])
+                ORDER BY ds.strategy_version_id, ds.signal_date DESC
+            """, (version_ids,))
+            sig_rows = cur.fetchall()
+            version_to_batch = {
+                str(r["strategy_version_id"]): str(r["signal_batch_id"])
+                for r in sig_rows
+            }
+
+            sym_by_batch: dict[str, list[str]] = {}
+            batch_ids = [r["signal_batch_id"] for r in sig_rows]
+            if batch_ids:
+                # is_selected=TRUE filters out alternates the writer recorded
+                # for audit but didn't actually deploy. A position on a non-
+                # selected symbol is genuinely manual.
+                cur.execute("""
+                    SELECT dsi.signal_batch_id, sym.base AS symbol
+                    FROM user_mgmt.daily_signal_items dsi
+                    JOIN market.symbols sym ON sym.symbol_id = dsi.symbol_id
+                    WHERE dsi.signal_batch_id = ANY(%s::uuid[])
+                      AND dsi.is_selected = TRUE
+                """, (batch_ids,))
+                for row in cur.fetchall():
+                    sym_by_batch.setdefault(str(row["signal_batch_id"]), []).append(row["symbol"])
+
+            for a in alloc_rows:
+                cid = str(a["connection_id"])
+                vid = str(a["strategy_version_id"])
+                bid = version_to_batch.get(vid)
+                if not bid:
+                    continue
+                strat_name = a["strategy_display_name"] or a["strategy_name"]
+                for sym in sym_by_batch.get(bid, []):
+                    strategy_by_conn.setdefault(cid, {})[sym.upper()] = strat_name
+
+    # 4. Aggregate totals + flatten positions with strategy/manual tag.
+    positions_out: list[dict] = []
+    connections_out: list[dict] = []
+    total_equity = 0.0
+    total_available = 0.0
+    total_used_margin = 0.0
+    total_unrealized = 0.0
+    sum_notionals = 0.0
+    latest_snap_at: datetime.datetime | None = None
+
+    for r in snap_rows:
+        cid = str(r["connection_id"])
+        eq = float(r["total_equity_usd"] or 0)
+        av = float(r["available_usd"] or 0)
+        um = float(r["used_margin_usd"] or 0)
+        un = float(r["unrealized_pnl"] or 0)
+        total_equity += eq
+        total_available += av
+        total_used_margin += um
+        total_unrealized += un
+
+        if r["snapshot_at"] and (latest_snap_at is None or r["snapshot_at"] > latest_snap_at):
+            latest_snap_at = r["snapshot_at"]
+
+        connections_out.append({
+            "connection_id": cid,
+            "exchange": r["exchange"],
+            "label": r["label"],
+            "snapshot_at": _iso(r["snapshot_at"]),
+            "total_equity_usd": eq,
+            "available_usd": av,
+            "used_margin_usd": um,
+            "unrealized_pnl": un,
+            "fetch_ok": bool(r["fetch_ok"]),
+            "error_msg": r["error_msg"],
+        })
+
+        strat_syms = strategy_by_conn.get(cid, {})
+        for p in (r["positions"] or []):
+            sym_full = (p.get("symbol") or "").upper()
+            # Strip USDT suffix to get the base. Matches both BloFin
+            # ("BTCUSDT" — already dash-stripped at write time) and Binance.
+            sym_base = sym_full[:-4] if sym_full.endswith("USDT") else sym_full
+            strat_name = strat_syms.get(sym_base)
+            notional = float(p.get("notional_usd") or 0)
+            sum_notionals += notional
+            positions_out.append({
+                "connection_id": cid,
+                "exchange": r["exchange"],
+                "connection_label": r["label"],
+                "symbol": sym_full,
+                "symbol_base": sym_base,
+                "side": p.get("side"),
+                "size": p.get("size"),
+                "entry_price": p.get("entry_price"),
+                "mark_price": p.get("mark_price"),
+                "unrealized_pnl": p.get("unrealized_pnl"),
+                "notional_usd": notional,
+                "leverage": p.get("leverage"),
+                "margin_mode": p.get("margin_mode"),
+                "source": "strategy" if strat_name else "manual",
+                "strategy_name": strat_name,
+            })
+
+    margin_used_pct = (
+        ((total_equity - total_available) / total_equity * 100.0)
+        if total_equity > 0 else 0.0
+    )
+    unrealized_pct = (
+        (total_unrealized / total_equity * 100.0) if total_equity > 0 else 0.0
+    )
+
+    return {
+        "exchange_filter": exchange,
+        "as_of": _iso(latest_snap_at),
+        "totals": {
+            "total_equity_usd": round(total_equity, 2),
+            "available_usd": round(total_available, 2),
+            "used_margin_usd": round(total_used_margin, 2),
+            "unrealized_pnl": round(total_unrealized, 2),
+            "unrealized_pct": round(unrealized_pct, 4),
+            "sum_notionals_usd": round(sum_notionals, 2),
+            "margin_used_pct": round(margin_used_pct, 2),
+            "open_positions": len(positions_out),
+        },
+        "positions": positions_out,
+        "connections": connections_out,
+    }
+
+
 @router.get("/conversations")
 def list_conversations(cur=Depends(get_cursor)) -> dict[str, Any]:
     cur.execute("""

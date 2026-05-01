@@ -209,6 +209,12 @@ function ManagerSidebar({
       />
 
       <NavItem
+        label="Live"
+        href="/manager/live"
+        active={pathname === "/manager/live"}
+      />
+
+      <NavItem
         label="Portfolios"
         href="/manager/portfolios"
         // Highlight on both the list view and any drilled-in detail page
