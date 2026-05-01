@@ -20,7 +20,9 @@ import { ReactNode, useEffect, useState } from "react";
 
 interface CollapsibleProps {
   id: string;
-  title: string;
+  /** Section label (string for plain titles; ReactNode lets callers
+   *  splice in a stale tag or other inline status indicator). */
+  title: ReactNode;
   summary?: ReactNode;
   defaultOpen?: boolean;
   children: ReactNode;
