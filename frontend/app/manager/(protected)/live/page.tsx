@@ -455,45 +455,9 @@ function ChatPanel({ collapsed, onToggle }: { collapsed: boolean; onToggle: () =
             ships in a separate task.
           </div>
 
-          {/* Suggested prompts */}
-          <div style={{ borderTop: "1px solid var(--line)", padding: "10px 12px 0" }}>
-            <div
-              style={{
-                fontSize: 9,
-                letterSpacing: "0.16em",
-                color: "var(--t3)",
-                marginBottom: 8,
-                fontFamily: "var(--font-space-mono), Space Mono, monospace",
-              }}
-            >
-              SUGGESTED
-            </div>
-            <div style={{ display: "flex", flexWrap: "wrap", gap: 4 }}>
-              {[
-                "Where is my biggest tail risk right now?",
-                "What's pushing the portfolio today?",
-                "Show me the BTC/SOL drawdown overlap",
-              ].map((q) => (
-                <span
-                  key={q}
-                  style={{
-                    fontSize: 10,
-                    color: "var(--t2)",
-                    background: "var(--bg2)",
-                    border: "1px solid var(--line)",
-                    padding: "5px 9px",
-                    borderRadius: 3,
-                    cursor: "default",
-                    fontFamily: "var(--font-space-mono), Space Mono, monospace",
-                  }}
-                >
-                  {q}
-                </span>
-              ))}
-            </div>
-          </div>
-
-          {/* Input — disabled in v1 */}
+          {/* Input — disabled in v1. No SUGGESTED prompts strip per
+              design decision: chat panel goes straight from conversation
+              thread to input. */}
           <div style={{ borderTop: "1px solid var(--line)", padding: "10px 12px 14px" }}>
             <div
               style={{
