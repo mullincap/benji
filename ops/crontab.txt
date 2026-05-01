@@ -1,3 +1,29 @@
+# =============================================================================
+# ops/crontab.txt — canonical host crontab for the prod box.
+# =============================================================================
+#
+# Procedure for cron-touching tasks (mandatory):
+#   1. Back up the current host crontab before any modification:
+#        ssh mcap 'crontab -l > /root/crontab_backup_$(date -u +%Y%m%d_%H%M%S).bak'
+#   2. Diff the .bak against this repo file BEFORE writing to either.
+#      Surface any drift outside the current task's scope before
+#      reconciling — do not propagate unexplained host state to the
+#      repo as if it were canonical.
+#   3. Make the host modification (crontab editor or scripted apply).
+#   4. Diff the new host crontab against the .bak to confirm only the
+#      intended changes landed.
+#   5. Update this repo file to match the new host state and commit
+#      with a message that documents (a) what the .bak represented,
+#      (b) what the diff showed, (c) what was added/removed in this
+#      task's scope.
+#
+# Reconciled 2026-05-01 (post-hoc): /root/crontab_backup_20260501_044439.bak
+# captured prod-pre-session state; diff against current host showed only
+# the account_anchor_writer entry added during this session — no outside
+# drift. Going forward this file is canonical; the procedure above is
+# enforced for every change, not verified after the fact.
+# =============================================================================
+
 SHELL=/bin/bash
 PATH=/usr/local/sbin:/usr/local/bin:/sbin:/bin:/usr/sbin:/usr/bin
 
