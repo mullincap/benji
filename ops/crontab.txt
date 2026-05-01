@@ -35,6 +35,14 @@ PATH=/usr/local/sbin:/usr/local/bin:/sbin:/bin:/usr/sbin:/usr/bin
 # ── Manager daily briefing — 00:30 UTC ────────────────────────────────────────
 30 0 * * * . /mnt/quant-data/credentials/secrets.env && curl -s -X POST https://mullincap.com/api/manager/briefing -H "X-Internal-Token: $INTERNAL_API_TOKEN" -H "Content-Type: application/json" >> /mnt/quant-data/logs/manager/briefing.log 2>&1
 
+# ── Manager account daily anchors — 00:00 UTC ────────────────────────────────
+# Captures one row per (venue, connection_id, anchor_date) into
+# user_mgmt.account_daily_anchors. Drives the Manager Live tab's "today's
+# PnL" math: today_pnl = current_equity − latest_anchor.total_equity_usd.
+# Idempotent — re-running on the same date overwrites cleanly via ON CONFLICT.
+# Exits 0 if any connection succeeds; 1 only on total outage (cron-mailer page).
+0 0 * * * cd /root/benji && docker compose -f /root/benji/docker-compose.yml exec -T celery python -m app.cli.account_anchor_writer >> /mnt/quant-data/logs/manager/account_anchor.log 2>&1
+
 # ── Refresh per-symbol / per-day caggs — 01:17 + 01:18 UTC ───────────────────
 # 30-day window to safeguard against silent materialization gaps (the built-in
 # hourly policy only refreshes the last 7 days). Added 2026-04-17 after an

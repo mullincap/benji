@@ -195,6 +195,15 @@ class BinanceMarketClient:
         # The header reading is from a Binance rolling 60s window, but if
         # it's older than 60s, treat as stale and reset (next call will
         # refresh it from the response).
+        #
+        # Known corner case: spawn → heavy call (used_weight=2200) → 65s
+        # idle → heavy call. Both calls hit the same Binance minute bucket
+        # (the rolling window slides continuously), but the second skips
+        # the guard because used_weight_age_s > 60. The wrapper accepts
+        # this — Binance will return the true running total in the next
+        # response, and a second pre-flight refusal would just push the
+        # caller into back-off without need. Low-probability scenario for
+        # the Live tab's steady ~18/min load.
         if self.used_weight_age_s < 60:
             est = WEIGHT_ESTIMATE.get(path, 1)
             if self._used_weight + est > WEIGHT_CEILING - WEIGHT_HEADROOM:
@@ -226,7 +235,24 @@ class BinanceMarketClient:
         wt = resp.headers.get("X-MBX-USED-WEIGHT-1M") or resp.headers.get("X-MBX-USED-WEIGHT")
         if wt:
             try:
-                self._used_weight = int(wt)
+                new_weight = int(wt)
+                # Estimate-vs-actual divergence sentinel: if the per-call
+                # delta diverges from our static estimate by >2× in either
+                # direction, log a warning. Catches cases where Binance
+                # silently changes endpoint weights without updating the
+                # docs (we'd rather notice from a log line than from a
+                # surprise 418 ban).
+                est = WEIGHT_ESTIMATE.get(path, 1)
+                actual_delta = new_weight - self._used_weight
+                if est > 0 and actual_delta > 0:
+                    ratio = actual_delta / est
+                    if ratio > 2 or ratio < 0.5:
+                        log.warning(
+                            "binance_market: weight estimate diverged for %s: "
+                            "actual=%d, est=%d, ratio=%.2fx",
+                            path, actual_delta, est, ratio,
+                        )
+                self._used_weight = new_weight
                 self._used_weight_at = time.time()
             except ValueError:
                 pass
