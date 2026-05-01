@@ -72,10 +72,14 @@ export default function MAAlignmentHeatmap({ data }: Props) {
   }
 
   const tfs = data.timeframes;
-  // TF columns cap at 110px so cells stay readable instead of ballooning into
-  // wide rectangles on a wide viewport with few positions. Floor 56px keeps
-  // them legible at the narrow end.
-  const cols = `80px 36px ${tfs.map(() => "minmax(56px, 110px)").join(" ")} 70px`;
+  // TF columns flex with available width via 1fr; floor 56px keeps the
+  // numbers legible at the narrow end. Container maxWidth caps total span
+  // so on a wide viewport with few timeframes the TF cells don't balloon
+  // into oversized rectangles. On tight layouts (chat panel open) the
+  // maxWidth is far above the actual width, so 1fr still fills.
+  const cols = `80px 36px ${tfs.map(() => "minmax(56px, 1fr)").join(" ")} 70px`;
+  const MAX_TF_WIDTH = 140;
+  const containerMaxWidth = 80 + 36 + 70 + tfs.length * MAX_TF_WIDTH + (tfs.length + 2) * 1;
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
@@ -89,6 +93,7 @@ export default function MAAlignmentHeatmap({ data }: Props) {
           border: "1px solid var(--line)",
           borderRadius: 2,
           overflow: "hidden",
+          maxWidth: containerMaxWidth,
         }}
       >
         {/* Header row */}
@@ -320,7 +325,8 @@ function formatEma(v: number): string {
 }
 
 function Skeleton({ timeframes, rowCount }: { timeframes: string[]; rowCount: number }) {
-  const cols = `80px 36px ${timeframes.map(() => "1fr").join(" ")} 70px`;
+  const cols = `80px 36px ${timeframes.map(() => "minmax(56px, 1fr)").join(" ")} 70px`;
+  const maxWidth = 80 + 36 + 70 + timeframes.length * 140 + (timeframes.length + 2) * 1;
   return (
     <div
       style={{
@@ -331,6 +337,7 @@ function Skeleton({ timeframes, rowCount }: { timeframes: string[]; rowCount: nu
         border: "1px solid var(--line)",
         borderRadius: 2,
         overflow: "hidden",
+        maxWidth,
       }}
     >
       <Header />

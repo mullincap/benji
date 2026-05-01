@@ -52,7 +52,7 @@ interface Props {
 export default function BoxPlotStrip({ cells, onCellClick }: Props) {
   if (!cells) {
     return (
-      <div style={GRID_STYLE}>
+      <div style={gridStyle(6)}>
         {Array.from({ length: 6 }).map((_, i) => (
           <CellShell key={i} />
         ))}
@@ -80,7 +80,7 @@ export default function BoxPlotStrip({ cells, onCellClick }: Props) {
   }
 
   return (
-    <div style={GRID_STYLE}>
+    <div style={gridStyle(cells.length)}>
       {cells.map((c) => (
         <Cell key={c.symbol} cell={c} onClick={onCellClick} />
       ))}
@@ -88,14 +88,24 @@ export default function BoxPlotStrip({ cells, onCellClick }: Props) {
   );
 }
 
-// Columns cap at 280px so cells never balloon past the design ceiling on a
-// 4-position book; below ~160px the layout collapses, so that's the floor.
-const GRID_STYLE: React.CSSProperties = {
-  display: "grid",
-  gridTemplateColumns: "repeat(auto-fit, minmax(160px, 280px))",
-  gap: 8,
-  justifyContent: "start",
-};
+// Cells fill available width via 1fr (auto-fit + 1fr). The container
+// maxWidth caps total span at MAX_CELL_WIDTH × N so a low-count book on a
+// wide viewport doesn't balloon individual cells (with aspect-ratio 1:1.4
+// a 600px-wide cell would be 840px tall — visually wrong). On a tight
+// layout (e.g. with the chat panel open) the maxWidth is far above the
+// available width, so it has no effect and 1fr still fills.
+const GRID_GAP = 8;
+const MIN_CELL_WIDTH = 200;
+const MAX_CELL_WIDTH = 360;
+
+function gridStyle(count: number): React.CSSProperties {
+  return {
+    display: "grid",
+    gridTemplateColumns: `repeat(auto-fit, minmax(${MIN_CELL_WIDTH}px, 1fr))`,
+    gap: GRID_GAP,
+    maxWidth: count * MAX_CELL_WIDTH + (count - 1) * GRID_GAP,
+  };
+}
 
 function CellShell({ children }: { children?: React.ReactNode }) {
   return (
