@@ -13,6 +13,7 @@ from app.api.routes.admin import router as admin_router
 from app.api.routes.auth import router as auth_router
 from app.api.routes.allocator import router as allocator_router
 from app.api.routes.manager import router as manager_router
+from app.api.routes.manager_live import router as manager_live_router
 from app.api.routes.simulator import router as simulator_router
 from app.api.routes.waitlist import router as waitlist_router
 from app.core.config import settings
@@ -50,6 +51,7 @@ app.include_router(compiler_router)
 app.include_router(indexer_router)
 app.include_router(allocator_router)
 app.include_router(manager_router)
+app.include_router(manager_live_router)
 app.include_router(simulator_router)
 app.include_router(waitlist_router)
 

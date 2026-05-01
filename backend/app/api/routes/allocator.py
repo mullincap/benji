@@ -484,6 +484,62 @@ def _fetch_live_binance(*, api_key: str, api_secret: str) -> dict:
     }
 
 
+def fetch_blofin_tpsl_orders(
+    *, api_key: str, api_secret: str, passphrase: str,
+) -> dict[str, dict]:
+    """Fetch active TP/SL algo orders from BloFin, indexed by instId.
+
+    Returns: {"BTC-USDT": {"sl_price": float|None, "tp_price": float|None,
+                            "side": str|None, "tpsl_id": str|None}, ...}
+
+    Used by the Manager Live tab's §4 Risk Signals (Nearest Stop) and
+    §12 Positions Table (SL · DIST / TP · DIST columns). Public helper —
+    importable from any route or worker that needs SL/TP context for a
+    BloFin connection.
+
+    Endpoint: GET /api/v1/trade/orders-tpsl-pending. Returns one row per
+    pending TPSL algo order. We collapse to one entry per instId by
+    keeping the first row that has a non-null SL trigger price (TP is
+    populated alongside if both set). When multiple algo orders exist
+    for the same instId (rare; happens when the user manually layers
+    levels), this picks deterministically by API order — refine later if
+    that turns out to matter.
+    """
+    resp = _blofin_get(
+        "/api/v1/trade/orders-tpsl-pending",
+        api_key=api_key, api_secret=api_secret, passphrase=passphrase,
+    )
+    by_inst: dict[str, dict] = {}
+    for o in (resp.get("data") or []):
+        inst = o.get("instId")
+        if not inst:
+            continue
+        if inst in by_inst:
+            continue  # keep first
+        # BloFin field names per docs (GET tpsl-orders-pending):
+        #   slTriggerPrice, tpTriggerPrice, side, positionSide, tpslId
+        try:
+            sl_price = float(o["slTriggerPrice"]) if o.get("slTriggerPrice") else None
+        except (TypeError, ValueError):
+            sl_price = None
+        try:
+            tp_price = float(o["tpTriggerPrice"]) if o.get("tpTriggerPrice") else None
+        except (TypeError, ValueError):
+            tp_price = None
+        # Skip rows with neither — they aren't useful and would confuse
+        # the "nearest stop" calculation.
+        if sl_price is None and tp_price is None:
+            continue
+        by_inst[inst] = {
+            "sl_price": sl_price,
+            "tp_price": tp_price,
+            "side": (o.get("side") or "").lower() or None,
+            "position_side": (o.get("positionSide") or "").lower() or None,
+            "tpsl_id": o.get("tpslId"),
+        }
+    return by_inst
+
+
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
 def _decimal_or_none(val: Any) -> float | None:
