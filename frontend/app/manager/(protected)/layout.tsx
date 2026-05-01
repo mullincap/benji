@@ -209,9 +209,9 @@ function ManagerSidebar({
       />
 
       <NavItem
-        label="Live"
-        href="/manager/live"
-        active={pathname === "/manager/live"}
+        label="Positions"
+        href="/manager/positions"
+        active={pathname === "/manager/positions"}
       />
 
       <NavItem

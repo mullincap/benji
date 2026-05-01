@@ -1,7 +1,7 @@
 "use client";
 
 /**
- * Manager → Live tab.
+ * Manager → Positions tab.
  *
  * Answers "what is the account doing right now?" — independent of any
  * strategy session. Aggregates open positions across the user's exchanges
@@ -244,7 +244,7 @@ function SourceChip({ source, strategyName }: { source: "strategy" | "manual"; s
 
 const REFRESH_MS = 30_000;
 
-export default function LivePage() {
+export default function PositionsPage() {
   const [exchange, setExchange] = useState<ExchangeFilter>("both");
   const [data, setData] = useState<PositionsResponse | null>(null);
   const [loading, setLoading] = useState(true);
@@ -301,6 +301,18 @@ export default function LivePage() {
     return (b.notional_usd || 0) - (a.notional_usd || 0);
   });
 
+  // Margin = capital actually deployed (notional / leverage). Average is
+  // computed only over positions with valid leverage so a single missing-
+  // lev row doesn't pull the mean to zero.
+  const marginByIdx = sortedPositions.map((p) =>
+    p.leverage && p.leverage > 0 ? p.notional_usd / p.leverage : null
+  );
+  const validMargins = marginByIdx.filter((m): m is number => m !== null && m > 0);
+  const avgMargin =
+    validMargins.length > 0
+      ? validMargins.reduce((a, b) => a + b, 0) / validMargins.length
+      : 0;
+
   const showExchangeCol = exchange === "both";
 
   return (
@@ -317,7 +329,7 @@ export default function LivePage() {
               textTransform: "uppercase",
             }}
           >
-            Live Account State
+            Positions
           </span>
           <span style={{ fontSize: 9, color: "var(--t3)" }}>
             {/* tick is read so eslint keeps the dependency; the value drives relTime via Date.now() */}
@@ -488,6 +500,7 @@ export default function LivePage() {
                   "Source",
                   "Size",
                   "Notional",
+                  "Margin",
                   "Entry",
                   "Mark",
                   "Unrealized",
@@ -519,6 +532,8 @@ export default function LivePage() {
                   p.entry_price && p.size && p.notional_usd
                     ? (upl / (p.entry_price * p.size)) * 100
                     : 0;
+                const margin = marginByIdx[i];
+                const avgRatio = margin && avgMargin > 0 ? margin / avgMargin : null;
                 return (
                   <tr key={`${p.connection_id}-${p.symbol}-${i}`}>
                     {showExchangeCol && (
@@ -546,6 +561,20 @@ export default function LivePage() {
                       {p.size?.toLocaleString(undefined, { maximumFractionDigits: 6 }) ?? "—"}
                     </td>
                     <td style={tdStyle}>{fmtUsd(p.notional_usd)}</td>
+                    <td style={tdStyle}>
+                      {margin !== null ? (
+                        <>
+                          {fmtUsd(margin)}
+                          {avgRatio !== null && (
+                            <span style={{ color: "var(--t3)", marginLeft: 6 }}>
+                              {avgRatio.toFixed(2)}× avg
+                            </span>
+                          )}
+                        </>
+                      ) : (
+                        "—"
+                      )}
+                    </td>
                     <td style={tdStyle}>
                       {p.entry_price
                         ? `$${p.entry_price.toLocaleString(undefined, { maximumFractionDigits: 6 })}`
