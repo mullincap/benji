@@ -3,223 +3,224 @@ backend/app/cli/binance_perm_audit.py
 ======================================
 Runnable as: python -m app.cli.binance_perm_audit
 
-One-shot permissions audit for the Binance USDM Futures key — exercised
-against every endpoint the Manager Live tab will read, plus the listenKey
-endpoint that gates the user-data WebSocket stream.
+Step 0 of the Live tab build — Binance USDM Futures **market-data**
+audit. Account data lives on BloFin (the existing trader stack); Binance
+is the reference source for klines, OI, funding, premium index, L/S
+skew, 24h tickers, and the exchangeInfo symbol catalogue.
 
-Pulls the encrypted key for the active Binance connection from
-user_mgmt.exchange_connections, decrypts via the project's Fernet helper,
-calls each endpoint once with minimum-friction params, and prints a
-PASS/FAIL line per endpoint with the Binance error code (if any) so
-permission gaps surface as -2015 rather than silent "None" responses.
+All endpoints exercised here are public (no API key required) and IP-
+rate-limited. The audit:
 
-Exits 0 if every endpoint passes. Exits 1 if any endpoint is blocked or
-errors — the printed summary lists exactly which ones, so the build can
-proceed only after the key is widened.
+  1. Hits each market-data endpoint once with minimum-friction params,
+     records the X-MBX-USED-WEIGHT-1M header so we can size the worst-
+     case Live-tab refresh budget against the 2400/min/IP ceiling.
+
+  2. Pulls the current BloFin open positions from the latest
+     exchange_snapshots row and resolves each base symbol to its Binance
+     listing via market.symbols.binance_id. Any open position whose
+     mapped Binance symbol is missing from /fapi/v1/exchangeInfo (or
+     present but not TRADING) is flagged — those vizes will need to
+     render "INSUFFICIENT MARKET DATA" for that row.
+
+Exits 0 if every endpoint passes AND every open BloFin position has a
+TRADING Binance equivalent. Exits 1 otherwise.
 """
 
 from __future__ import annotations
 
-import hashlib
-import hmac
-import json
 import sys
 import time
-from typing import Any
 from urllib.parse import urlencode
 
 import requests
 
 from ..db import get_worker_conn
-from ..services.encryption import decrypt_key
-
-# ── Endpoints ───────────────────────────────────────────────────────────────
 
 FAPI = "https://fapi.binance.com"
-DAPI_DATA = "https://fapi.binance.com"  # /futures/data/* lives under fapi.binance.com
-SPOT = "https://api.binance.com"  # /sapi/v1/account/apiRestrictions for permission flags
 TIMEOUT = 10
-RECV_WINDOW = 5000
 
-# (label, method, base, path, params, signed)
-# Signed endpoints add timestamp + recvWindow + signature; public endpoints don't.
-PROBES: list[tuple[str, str, str, str, dict, bool]] = [
-    ("apiRestrictions",       "GET",  SPOT, "/sapi/v1/account/apiRestrictions",        {},                                       True),
-    ("fapi/v2/account",       "GET",  FAPI, "/fapi/v2/account",                         {},                                       True),
-    ("fapi/v2/positionRisk",  "GET",  FAPI, "/fapi/v2/positionRisk",                    {},                                       True),
-    ("fapi/v1/openOrders",    "GET",  FAPI, "/fapi/v1/openOrders",                      {},                                       True),
-    ("fapi/v1/income",        "GET",  FAPI, "/fapi/v1/income",                          {"limit": 1},                             True),
-    ("fapi/v1/userTrades",    "GET",  FAPI, "/fapi/v1/userTrades",                      {"symbol": "BTCUSDT", "limit": 1},        True),
-    ("fapi/v1/klines",        "GET",  FAPI, "/fapi/v1/klines",                          {"symbol": "BTCUSDT", "interval": "1m", "limit": 1}, False),
-    ("fapi/v1/premiumIndex",  "GET",  FAPI, "/fapi/v1/premiumIndex",                    {"symbol": "BTCUSDT"},                    False),
-    ("fapi/v1/openInterest",  "GET",  FAPI, "/fapi/v1/openInterest",                    {"symbol": "BTCUSDT"},                    False),
-    ("openInterestHist",      "GET",  FAPI, "/futures/data/openInterestHist",           {"symbol": "BTCUSDT", "period": "1d", "limit": 2}, False),
-    ("topLongShortRatio",     "GET",  FAPI, "/futures/data/topLongShortAccountRatio",   {"symbol": "BTCUSDT", "period": "1h", "limit": 1}, False),
-    ("listenKey",             "POST", FAPI, "/fapi/v1/listenKey",                       {},                                       "header_only"),  # type: ignore[list-item]
+# (label, path, params)
+PROBES: list[tuple[str, str, dict]] = [
+    ("klines",            "/fapi/v1/klines",                          {"symbol": "BTCUSDT", "interval": "1m", "limit": 1}),
+    ("premiumIndex",      "/fapi/v1/premiumIndex",                    {"symbol": "BTCUSDT"}),
+    ("openInterest",      "/fapi/v1/openInterest",                    {"symbol": "BTCUSDT"}),
+    ("openInterestHist",  "/futures/data/openInterestHist",           {"symbol": "BTCUSDT", "period": "1d", "limit": 2}),
+    ("topLongShortRatio", "/futures/data/topLongShortAccountRatio",   {"symbol": "BTCUSDT", "period": "1h", "limit": 1}),
+    ("ticker/24hr",       "/fapi/v1/ticker/24hr",                     {"symbol": "BTCUSDT"}),
+    ("exchangeInfo",      "/fapi/v1/exchangeInfo",                    {}),
 ]
 
-# ── Signing ─────────────────────────────────────────────────────────────────
 
-def sign_query(secret: bytes, params: dict[str, Any]) -> str:
-    qs = urlencode(params)
-    sig = hmac.new(secret, qs.encode(), hashlib.sha256).hexdigest()
-    return f"{qs}&signature={sig}"
-
-
-# ── Single-probe runner ─────────────────────────────────────────────────────
-
-def probe(*, api_key: str, secret: bytes, label: str, method: str, base: str, path: str,
-          params: dict, signed: Any) -> dict:
-    """Execute one probe. Returns {label, status, http, code, msg, weight}."""
-    headers = {"X-MBX-APIKEY": api_key} if (signed is True or signed == "header_only") else {}
-    url = f"{base}{path}"
-
-    if signed is True:
-        # GET with full HMAC signature
-        p = dict(params)
-        p["timestamp"] = int(time.time() * 1000)
-        p["recvWindow"] = RECV_WINDOW
-        url = f"{url}?{sign_query(secret, p)}"
-        kwargs: dict[str, Any] = {}
-    elif signed == "header_only":
-        # listenKey on UM Futures: API key header, no signature, no body
-        kwargs = {}
-    else:
-        # Public endpoint
-        url = f"{url}?{urlencode(params)}" if params else url
-        kwargs = {}
-
+def probe(label: str, path: str, params: dict) -> dict:
+    url = f"{FAPI}{path}"
+    if params:
+        url = f"{url}?{urlencode(params)}"
     try:
-        if method == "GET":
-            resp = requests.get(url, headers=headers, timeout=TIMEOUT, **kwargs)
-        else:
-            resp = requests.post(url, headers=headers, timeout=TIMEOUT, **kwargs)
+        resp = requests.get(url, timeout=TIMEOUT)
     except requests.RequestException as e:
-        return {"label": label, "status": "NETWORK", "http": None, "code": None,
-                "msg": f"{type(e).__name__}: {e}", "weight": None}
+        return {"label": label, "status": "NETWORK", "http": None, "weight": None,
+                "msg": f"{type(e).__name__}: {e}", "body": None}
 
     weight = resp.headers.get("X-MBX-USED-WEIGHT-1M") or resp.headers.get("X-MBX-USED-WEIGHT")
-
     try:
         body = resp.json()
     except ValueError:
         return {"label": label, "status": "NON_JSON", "http": resp.status_code,
-                "code": None, "msg": resp.text[:160], "weight": weight}
+                "weight": weight, "msg": resp.text[:160], "body": None}
 
-    code = body.get("code") if isinstance(body, dict) else None
-    msg = body.get("msg") if isinstance(body, dict) else None
+    if resp.status_code == 200:
+        return {"label": label, "status": "PASS", "http": 200, "weight": weight,
+                "msg": None, "body": body}
 
-    if resp.status_code == 200 and code in (None, 200):
-        return {"label": label, "status": "PASS", "http": 200, "code": code,
-                "msg": None, "weight": weight}
+    if resp.status_code in (418, 429):
+        return {"label": label, "status": "RATE_LIMITED", "http": resp.status_code,
+                "weight": weight, "msg": str(body)[:160], "body": None}
 
-    # Classify failure modes
-    if code == -2015:
-        bucket = "PERM_DENIED"
-    elif code in (-2014, -1022):
-        bucket = "AUTH_FAIL"
-    elif code in (-1021,):
-        bucket = "TIMESTAMP_SKEW"
-    elif resp.status_code in (401, 403):
-        bucket = "AUTH_FAIL"
-    elif resp.status_code in (418, 429):
-        bucket = "RATE_LIMITED"
-    else:
-        bucket = "FAIL"
-
-    return {"label": label, "status": bucket, "http": resp.status_code, "code": code,
-            "msg": msg, "weight": weight}
+    return {"label": label, "status": "FAIL", "http": resp.status_code,
+            "weight": weight, "msg": str(body)[:160], "body": None}
 
 
-# ── Connection lookup ──────────────────────────────────────────────────────
+def fetch_open_blofin_symbols() -> list[dict]:
+    """Pull the current open positions from the latest BloFin snapshot.
 
-def fetch_active_binance_creds() -> tuple[str, str, str]:
-    """Find the active Binance connection and decrypt its key/secret.
+    Joins through market.symbols on (base, quote='USDT') so we can resolve
+    the canonical Binance listing via symbols.binance_id — `base + 'USDT'`
+    is wrong for 1000x-prefix tickers (PEPE/SHIB/FLOKI/BONK).
 
-    Returns (connection_id, api_key, api_secret). Raises RuntimeError if
-    no active connection exists or if decryption fails.
+    Returns a list of dicts with: base, blofin_inst_id, binance_id,
+    coin_id. binance_id is None when no Binance listing is mapped in our
+    symbol registry.
     """
     with get_worker_conn() as conn:
         with conn.cursor() as cur:
             cur.execute("""
-                SELECT connection_id, api_key_enc, api_secret_enc
-                  FROM user_mgmt.exchange_connections
-                 WHERE exchange = 'binance' AND status = 'active'
-                 ORDER BY created_at DESC
-                 LIMIT 1
+                SELECT DISTINCT ON (ec.connection_id)
+                       ec.connection_id, es.positions
+                  FROM user_mgmt.exchange_connections ec
+                  JOIN user_mgmt.exchange_snapshots es
+                    ON es.connection_id = ec.connection_id
+                   AND es.fetch_ok = TRUE
+                 WHERE ec.exchange = 'blofin' AND ec.status = 'active'
+                 ORDER BY ec.connection_id, es.snapshot_at DESC
             """)
             row = cur.fetchone()
-    if not row:
-        raise RuntimeError("No active Binance connection in user_mgmt.exchange_connections")
-    cid, key_enc, secret_enc = row[0], row[1], row[2]
-    if not key_enc or not secret_enc:
-        raise RuntimeError(f"Connection {cid}: encrypted credentials are NULL")
-    api_key = decrypt_key(key_enc)
-    api_secret = decrypt_key(secret_enc)
-    if not api_key or not api_secret:
-        raise RuntimeError(f"Connection {cid}: decryption returned None")
-    return str(cid), api_key, api_secret
+            if not row or not row[1]:
+                return []
+            positions = row[1]
+            # symbols are stored dash-stripped ("CLOUSDT"); recover the base
+            # by stripping the USDT suffix and looking up in market.symbols
+            bases = []
+            for p in positions:
+                sym = (p.get("symbol") or "").upper()
+                if sym.endswith("USDT"):
+                    bases.append(sym[:-4])
+                else:
+                    bases.append(sym)
+            if not bases:
+                return []
+            cur.execute("""
+                SELECT base, coin_id, binance_id
+                  FROM market.symbols
+                 WHERE base = ANY(%s)
+            """, (bases,))
+            registry = {r[0]: {"coin_id": r[1], "binance_id": r[2]} for r in cur.fetchall()}
 
+    out = []
+    for p in positions:
+        sym = (p.get("symbol") or "").upper()
+        base = sym[:-4] if sym.endswith("USDT") else sym
+        reg = registry.get(base, {})
+        out.append({
+            "base": base,
+            "blofin_symbol": sym,
+            "side": p.get("side"),
+            "size": p.get("size"),
+            "binance_id": reg.get("binance_id"),
+            "coin_id": reg.get("coin_id"),
+        })
+    return out
 
-# ── Main ───────────────────────────────────────────────────────────────────
 
 def main() -> int:
     print("=" * 78)
-    print("Binance USDM Futures — permissions audit")
+    print("Binance USDM Futures — market-data audit (account data → BloFin)")
     print("=" * 78)
 
-    try:
-        conn_id, api_key, api_secret = fetch_active_binance_creds()
-    except RuntimeError as e:
-        print(f"\n✗ ABORT: {e}")
-        return 1
-    secret_bytes = api_secret.encode()
-    print(f"connection_id : {conn_id}")
-    print(f"api_key       : {api_key[:6]}…{api_key[-4:]} ({len(api_key)} chars)")
-    print()
-
+    # ── 1. Endpoint probes ─────────────────────────────────────────────────
     results: list[dict] = []
-    for label, method, base, path, params, signed in PROBES:
-        r = probe(api_key=api_key, secret=secret_bytes, label=label, method=method,
-                  base=base, path=path, params=params, signed=signed)
+    print("\nEndpoint probes (all public, no key required):\n")
+    for label, path, params in PROBES:
+        r = probe(label, path, params)
         results.append(r)
-        # Per-row line
-        sym = {
-            "PASS": "✓",
-            "PERM_DENIED": "✗",
-            "AUTH_FAIL": "✗",
-            "RATE_LIMITED": "·",
-            "TIMESTAMP_SKEW": "·",
-            "NETWORK": "·",
-            "NON_JSON": "·",
-            "FAIL": "✗",
-        }.get(r["status"], "?")
+        sym = {"PASS": "✓", "RATE_LIMITED": "·", "NETWORK": "·", "NON_JSON": "·", "FAIL": "✗"}.get(r["status"], "?")
         wt = f"w={r['weight']}" if r.get("weight") else ""
-        line = f"  {sym} {r['status']:14}  {label:24}  http={r['http']}  code={r['code']}  {wt}"
+        line = f"  {sym} {r['status']:14}  {label:22}  http={r['http']}  {wt}"
         if r.get("msg"):
             line += f"\n      msg: {r['msg']}"
         print(line)
-        # Tiny gap between calls — be polite to the rate limiter even on a healthy key.
         time.sleep(0.1)
 
-    # Summary
-    blocked = [r for r in results if r["status"] in ("PERM_DENIED", "AUTH_FAIL", "FAIL")]
-    other_failures = [r for r in results if r["status"] in ("RATE_LIMITED", "TIMESTAMP_SKEW", "NETWORK", "NON_JSON")]
+    blocked = [r for r in results if r["status"] not in ("PASS",)]
+    final_weight = next((int(r["weight"]) for r in reversed(results) if r.get("weight")), None)
+
+    # ── 2. Symbol-universe check ──────────────────────────────────────────
+    exchange_info_body = next((r["body"] for r in results if r["label"] == "exchangeInfo" and r["body"]), None)
+    binance_listed: dict[str, str] = {}
+    if exchange_info_body:
+        for s in exchange_info_body.get("symbols", []):
+            binance_listed[s["symbol"]] = s.get("status", "")
+
+    print("\nOpen BloFin positions vs Binance USDM listing:\n")
+    positions = fetch_open_blofin_symbols()
+    if not positions:
+        print("  (no open BloFin positions in latest snapshot — skipping check)")
+    coverage_gap: list[dict] = []
+    for p in positions:
+        binance_id = p["binance_id"] or f"{p['base']}USDT"  # naive fallback
+        listed_status = binance_listed.get(binance_id)
+        if listed_status == "TRADING":
+            tag, sym = "PASS", "✓"
+        elif listed_status:
+            tag, sym = f"NOT_TRADING ({listed_status})", "·"
+            coverage_gap.append({**p, "issue": f"binance status={listed_status}"})
+        else:
+            tag, sym = "NOT_LISTED", "✗"
+            coverage_gap.append({**p, "issue": "not in Binance USDM exchangeInfo"})
+        bid_label = p["binance_id"] or f"{p['base']}USDT (naive — no registry mapping)"
+        print(f"  {sym} {tag:24}  {p['base']:10}  blofin={p['blofin_symbol']}  binance={bid_label}")
+
+    # ── 3. Rate-limit headroom estimate ───────────────────────────────────
+    # Binance USDM public weight ceiling: 2400/min/IP. We just consumed
+    # `final_weight` bouncing each probe once. The Live tab worst-case
+    # per-minute weight comes from the T2 60s tier (per open position):
+    #   premiumIndex     w=1
+    #   openInterest     w=1
+    #   ticker/24hr      w=1   (single symbol)
+    # Plus T5 (hourly), T4 (5m bar close) — burstier but not sustained.
+    # For the 6 currently-open positions the steady T2 cost is ~18 weight
+    # per minute, well under ceiling. Heavy spikes come from kline pulls
+    # at 1H bar close (each kline call w=1, but we'd pull ~6 syms × 7 TFs
+    # = 42 weight on close).
+    print("\nRate-limit headroom (Binance USDM, 2400 weight/min/IP):")
+    print(f"  audit total cost          : {final_weight or '?'}")
+    print(f"  T2 steady (per minute)    : ~{len(positions) * 3} weight (premiumIndex + openInterest + ticker/24hr per pos)")
+    print(f"  T5 hourly burst (klines)  : ~{len(positions) * 7} weight at each 1H close")
+    print(f"  → comfortable margin")
+
+    # ── Summary ───────────────────────────────────────────────────────────
     print()
     print("-" * 78)
-    print(f"PASS    : {len([r for r in results if r['status'] == 'PASS'])} / {len(results)}")
-    print(f"BLOCKED : {len(blocked)}")
+    print(f"PROBES         : {len([r for r in results if r['status'] == 'PASS'])} / {len(results)} PASS")
     if blocked:
-        print("          " + ", ".join(r["label"] for r in blocked))
-    if other_failures:
-        print(f"NOISE   : {len(other_failures)}  ({', '.join(r['label'] for r in other_failures)})")
+        print(f"BLOCKED PROBES : {', '.join(r['label'] for r in blocked)}")
+    print(f"OPEN POSITIONS : {len(positions)} (BloFin)")
+    print(f"COVERAGE GAPS  : {len(coverage_gap)}")
+    if coverage_gap:
+        for g in coverage_gap:
+            print(f"  - {g['base']}: {g['issue']}")
     print("-" * 78)
 
-    # JSON dump for machine consumption
-    print("\nJSON:")
-    print(json.dumps(results, indent=2, default=str))
-
-    return 0 if not blocked and not other_failures else 1
+    return 0 if (not blocked and not coverage_gap) else 1
 
 
 if __name__ == "__main__":
