@@ -199,13 +199,26 @@ def _fetch_portfolio_context(cur) -> dict[str, Any]:
     # baseline downstream all aggregate across perf_by_alloc — if we filtered
     # to active-only here, pausing an allocation would silently shorten the
     # 30D curve and move the DD peak.
+    #
+    # Anchor filter: when the connection has principal_anchor_at set, drop
+    # rows whose date falls before the anchor. The KPI panel (TODAY, WTD,
+    # MTD, MAX DD, equity curve) all read from perf_by_alloc downstream;
+    # filtering at the source makes every consumer honor the anchor by
+    # construction. Connections without an anchor pass through unchanged.
     if historical_alloc_ids:
         cur.execute("""
-            SELECT allocation_id, date, equity_usd, daily_return, drawdown
-            FROM user_mgmt.performance_daily
-            WHERE allocation_id = ANY(%s::uuid[])
-              AND date >= CURRENT_DATE - INTERVAL '30 days'
-            ORDER BY allocation_id, date
+            SELECT pd.allocation_id, pd.date, pd.equity_usd,
+                   pd.daily_return, pd.drawdown
+              FROM user_mgmt.performance_daily pd
+              JOIN user_mgmt.allocations a
+                ON a.allocation_id = pd.allocation_id
+              JOIN user_mgmt.exchange_connections ec
+                ON ec.connection_id = a.connection_id
+             WHERE pd.allocation_id = ANY(%s::uuid[])
+               AND pd.date >= CURRENT_DATE - INTERVAL '30 days'
+               AND (ec.principal_anchor_at IS NULL
+                    OR pd.date >= ec.principal_anchor_at::date)
+             ORDER BY pd.allocation_id, pd.date
         """, (historical_alloc_ids,))
         for row in cur.fetchall():
             aid = str(row["allocation_id"])
@@ -236,9 +249,13 @@ def _fetch_portfolio_context(cur) -> dict[str, Any]:
                 es.total_equity_usd
             FROM user_mgmt.exchange_snapshots es
             JOIN user_mgmt.allocations a ON a.connection_id = es.connection_id
+            JOIN user_mgmt.exchange_connections ec
+              ON ec.connection_id = a.connection_id
             WHERE a.allocation_id = ANY(%s::uuid[])
               AND es.fetch_ok = TRUE
               AND es.snapshot_at >= NOW() - INTERVAL '30 days'
+              AND (ec.principal_anchor_at IS NULL
+                   OR es.snapshot_at >= ec.principal_anchor_at)
             ORDER BY a.allocation_id, date_trunc('day', es.snapshot_at), es.snapshot_at DESC
         """, (historical_alloc_ids,))
         snap_by_alloc: dict[str, list[tuple]] = {}
@@ -284,6 +301,10 @@ def _fetch_portfolio_context(cur) -> dict[str, Any]:
         for p in plist
     )
     if perf_by_alloc and not _has_today_row and historical_alloc_ids:
+        # Anchor filter: only fill today_return when today is on/after
+        # the connection's principal_anchor_at. Pre-anchor today shows
+        # 0% so the KPI panel reads fresh on the day a new anchor is
+        # set in the future.
         cur.execute("""
             WITH today_first AS (
               SELECT DISTINCT ON (connection_id)
@@ -306,8 +327,12 @@ def _fetch_portfolio_context(cur) -> dict[str, Any]:
               FROM user_mgmt.allocations a
               JOIN today_first tf ON tf.connection_id = a.connection_id
               JOIN latest      l  ON l.connection_id  = a.connection_id
+              JOIN user_mgmt.exchange_connections ec
+                ON ec.connection_id = a.connection_id
              WHERE a.allocation_id = ANY(%s::uuid[])
-        """, (today, today, historical_alloc_ids))
+               AND (ec.principal_anchor_at IS NULL
+                    OR %s::date >= ec.principal_anchor_at::date)
+        """, (today, today, historical_alloc_ids, today))
         for r in cur.fetchall():
             aid = r["aid"]
             first_eq = float(r["first_eq"] or 0)
@@ -365,25 +390,46 @@ def _fetch_portfolio_context(cur) -> dict[str, Any]:
     wtd_pct = (wtd_dollar / total_aum_f * 100) if total_aum_f > 0 else 0.0
     mtd_pct = (mtd_dollar / total_aum_f * 100) if total_aum_f > 0 else 0.0
 
-    # Lifetime account-wide max drawdown — realised trading drawdown only.
+    # Account-wide max drawdown since the principal anchor.
     #
-    # Scope fix (2026-04-24 late): the previous 5-min bucketed series was
-    # picking up two distortions:
-    #   1. Transient unrealized MTM mid-session (e.g. 2026-04-23 intraday
-    #      dipped to $3,775.85 but closed at $4,022.81 — a session that
-    #      ultimately gained +17% was being labelled a -15.9% drawdown).
-    #   2. Operator capital movements (e.g. 2026-04-20 Binance→BloFin
-    #      $1,022 transfer settling across exchanges in different 5-min
-    #      buckets creates a phantom trough).
+    # Honors `exchange_connections.principal_anchor_at`: when the
+    # operator pins a new anchor (Allocator UI's "Edit anchor"), the
+    # metric resets — only daily-close equity ≥ the LATEST anchor date
+    # across the contributing connections counts. With both connections
+    # anchored to the same future date (the "fresh start" pattern), the
+    # post-anchor window is empty and max_dd reads 0% until the first
+    # post-anchor daily close lands.
     #
-    # Corrected metric: daily-close equity summed across connections, with
-    # cumulative capital events netted out. Matches Allocator's per-alloc
-    # drawdown semantics and the industry-standard "portfolio drawdown" a
-    # user expects to see on a KPI card.
+    # MAX (rather than MIN) across connection anchors: the latest reset
+    # wins for the account-wide read. If you reset only one connection,
+    # the other's pre-anchor history would create a step-up on the
+    # newly-anchored connection's first day — by tying the start to the
+    # later anchor we avoid that phantom drawdown.
+    #
+    # Capital-events netting (cum_event below) is unchanged in shape;
+    # MIN(day) inside the subquery is now the first post-anchor day, so
+    # pre-anchor capital events naturally drop from the netting too.
+    #
+    # Earlier scope fix (2026-04-24): the previous 5-min bucketed series
+    # picked up transient intraday MTM and cross-exchange transfer
+    # phantoms. Daily-close + capital-event netting cured those; the
+    # anchor filter is the further refinement that lets the operator
+    # explicitly start fresh.
     connection_uuids = historical_connection_uuids
     max_dd = 0.0
     max_dd_usd = 0.0
     if connection_uuids:
+        cur.execute("""
+            SELECT MAX(principal_anchor_at)::date AS anchor_start_date
+              FROM user_mgmt.exchange_connections
+             WHERE connection_id = ANY(%s::uuid[])
+               AND principal_anchor_at IS NOT NULL
+        """, (connection_uuids,))
+        anchor_row = cur.fetchone()
+        anchor_start_date = (
+            anchor_row["anchor_start_date"] if anchor_row else None
+        )
+
         cur.execute("""
             WITH daily_last AS (
               SELECT DISTINCT ON (es.connection_id,
@@ -395,6 +441,10 @@ def _fetch_portfolio_context(cur) -> dict[str, Any]:
                WHERE es.connection_id = ANY(%s::uuid[])
                  AND es.fetch_ok = TRUE
                  AND es.total_equity_usd IS NOT NULL
+                 AND (
+                   %s::date IS NULL
+                   OR (es.snapshot_at AT TIME ZONE 'UTC')::date >= %s::date
+                 )
               ORDER BY es.connection_id,
                        (es.snapshot_at AT TIME ZONE 'UTC')::date,
                        es.snapshot_at DESC
@@ -408,8 +458,10 @@ def _fetch_portfolio_context(cur) -> dict[str, Any]:
             -- stream (not a join on day) so same-day events always line up
             -- with the same-day snapshot, and event-only days (no snapshot)
             -- still contribute to cum_event for all subsequent snapshot
-            -- days. Anchoring cum_event at the first snapshot day keeps the
-            -- adjusted series peak-consistent.
+            -- days. Anchoring cum_event at the first snapshot day keeps
+            -- the adjusted series peak-consistent. With the anchor filter
+            -- in place, MIN(day) IS the first post-anchor day, so
+            -- pre-anchor capital events drop out automatically.
             SELECT dt.day,
                    dt.raw_eq,
                    COALESCE((
@@ -426,7 +478,8 @@ def _fetch_portfolio_context(cur) -> dict[str, Any]:
                    ), 0) AS cum_event
               FROM daily_total dt
              ORDER BY dt.day
-        """, (connection_uuids, connection_uuids))
+        """, (connection_uuids, anchor_start_date, anchor_start_date,
+              connection_uuids))
         # Adjusted series: raw_eq - cumulative capital events since first day
         # (anchor = first day in range, since cum_event at that row includes
         # any same-day event — subtracting holds adjusted(first) = raw(first)
@@ -449,6 +502,17 @@ def _fetch_portfolio_context(cur) -> dict[str, Any]:
     # Historical metric — iterate all perf rows (including paused/closed
     # allocations' history), not just alloc_list. Pausing an allocation
     # must not silently shorten or reshape the 30D curve.
+    #
+    # perf_by_alloc is already anchor-filtered upstream, so only post-
+    # anchor dates contribute. For a fresh account where the post-anchor
+    # window is shorter than EQUITY_BACKFILL_DAYS, we prepend flat-line
+    # entries at the principal-baseline so the chart reads cleanly
+    # rather than rendering a near-empty curve. The flat-line value:
+    #   * If we have any post-anchor data: extend the earliest known
+    #     equity backwards (the curve flattens out before the data
+    #     starts). Visually consistent with the actual series.
+    #   * Otherwise: sum(principal_baseline_usd) across active
+    #     connections — the equity at the moment the anchor was set.
     equity_by_date: dict[str, float] = {}
     for perf_list in perf_by_alloc.values():
         for p in perf_list:
@@ -458,6 +522,32 @@ def _fetch_portfolio_context(cur) -> dict[str, Any]:
         {"date": d, "equity_usd": v}
         for d, v in sorted(equity_by_date.items())
     ]
+
+    EQUITY_BACKFILL_DAYS = 7
+    needed = EQUITY_BACKFILL_DAYS - len(portfolio_equity)
+    if needed > 0:
+        if portfolio_equity:
+            baseline_value = portfolio_equity[0]["equity_usd"]
+            end_date = datetime.date.fromisoformat(portfolio_equity[0]["date"])
+        else:
+            cur.execute("""
+                SELECT COALESCE(SUM(principal_baseline_usd), 0)::float AS s
+                  FROM user_mgmt.exchange_connections
+                 WHERE status = 'active'
+            """)
+            baseline_value = float(cur.fetchone()["s"] or 0)
+            # No post-anchor data yet (anchor is in the future or was set
+            # today before any snapshot landed). Anchor today's date as
+            # the right edge of the backfilled window.
+            end_date = today + datetime.timedelta(days=1)
+        backfill = [
+            {
+                "date": (end_date - datetime.timedelta(days=i)).isoformat(),
+                "equity_usd": baseline_value,
+            }
+            for i in range(needed, 0, -1)
+        ]
+        portfolio_equity = backfill + portfolio_equity
 
     # ── Daily signals (latest per strategy version) ──────────────────────
     signals = []
