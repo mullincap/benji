@@ -748,6 +748,10 @@ def _fetch_portfolio_context(cur) -> dict[str, Any]:
         # (00:00–05:59 UTC after 23:55 session close) would anchor us to
         # "today" with no buckets that land on the 06:00–23:45 frontend grid.
         #
+        # Anchor filter: only consider snapshots ≥ the connection's
+        # principal_anchor_at, so a fresh anchor doesn't render a stale
+        # pre-anchor session as "the latest".
+        #
         # 7-day lookback bounds the hypertable scan; LIMIT 1 makes the planner
         # walk the snapshot_at index backward and stop on first match, so the
         # extract(hour) filter is paid per-row only until a hit.
@@ -755,11 +759,15 @@ def _fetch_portfolio_context(cur) -> dict[str, Any]:
             SELECT date_trunc('day', es.snapshot_at)::date AS day
             FROM user_mgmt.exchange_snapshots es
             JOIN user_mgmt.allocations a ON a.connection_id = es.connection_id
+            JOIN user_mgmt.exchange_connections ec
+              ON ec.connection_id = a.connection_id
             WHERE a.allocation_id = ANY(%s::uuid[])
               AND es.fetch_ok = TRUE
               AND es.total_equity_usd IS NOT NULL
               AND es.snapshot_at >= NOW() - INTERVAL '7 days'
               AND extract(hour from es.snapshot_at) >= 6
+              AND (ec.principal_anchor_at IS NULL
+                   OR es.snapshot_at >= ec.principal_anchor_at)
             ORDER BY es.snapshot_at DESC
             LIMIT 1
         """, (all_alloc_ids,))
@@ -770,7 +778,8 @@ def _fetch_portfolio_context(cur) -> dict[str, Any]:
             # per-connection, so two allocations on the same connection (e.g.
             # blofin ALTS MAIN + ALTS MAX) would otherwise double-count the
             # same snapshot equity. Restrict to connections that have at least
-            # one active allocation in scope.
+            # one active allocation in scope. Anchor filter mirrors the
+            # day-picker query above.
             cur.execute("""
                 SELECT DISTINCT ON (es.connection_id, bucket)
                     date_trunc('hour', es.snapshot_at) +
@@ -779,6 +788,8 @@ def _fetch_portfolio_context(cur) -> dict[str, Any]:
                     es.connection_id,
                     es.total_equity_usd AS equity_usd
                 FROM user_mgmt.exchange_snapshots es
+                JOIN user_mgmt.exchange_connections ec
+                  ON ec.connection_id = es.connection_id
                 WHERE es.connection_id IN (
                         SELECT DISTINCT a.connection_id
                           FROM user_mgmt.allocations a
@@ -786,6 +797,8 @@ def _fetch_portfolio_context(cur) -> dict[str, Any]:
                       )
                   AND es.fetch_ok = TRUE
                   AND date_trunc('day', es.snapshot_at)::date = %s::date
+                  AND (ec.principal_anchor_at IS NULL
+                       OR es.snapshot_at >= ec.principal_anchor_at)
                 ORDER BY es.connection_id, bucket, es.snapshot_at DESC
             """, (all_alloc_ids, intraday_date))
 
@@ -799,6 +812,35 @@ def _fetch_portfolio_context(cur) -> dict[str, Any]:
                 {"time": b.isoformat(), "equity_usd": v}
                 for b, v in sorted(bucketed.items())
             ]
+
+        # Fresh-account backfill: no post-anchor session yet → synthesize
+        # a flat 06:00→23:45 grid (15-min buckets) at the principal
+        # baseline so the chart shows a clean horizontal line rather
+        # than empty. Anchored to today's UTC date.
+        if not intraday_equity:
+            cur.execute("""
+                SELECT COALESCE(SUM(principal_baseline_usd), 0)::float AS s
+                  FROM user_mgmt.exchange_connections ec
+                  JOIN user_mgmt.allocations a
+                    ON a.connection_id = ec.connection_id
+                 WHERE ec.status = 'active'
+                   AND a.allocation_id = ANY(%s::uuid[])
+            """, (all_alloc_ids,))
+            baseline_value = float(cur.fetchone()["s"] or 0)
+            if baseline_value > 0:
+                intraday_date = today.isoformat()
+                day_start = datetime.datetime.combine(
+                    today, datetime.time(6, 0),
+                    tzinfo=datetime.timezone.utc,
+                )
+                # 15-min buckets from 06:00 to 23:45 inclusive (72 points).
+                intraday_equity = [
+                    {
+                        "time": (day_start + datetime.timedelta(minutes=15 * i)).isoformat(),
+                        "equity_usd": baseline_value,
+                    }
+                    for i in range(72)
+                ]
 
     # USD P&L is the actual dollar profit over the window. Given the period
     # % `p` and the current live equity `E`, the implied period-start equity
@@ -1084,14 +1126,20 @@ def portfolio_series(
     # ── 1D: intraday from exchange_snapshots (per-bucket sum across
     # all of the user's active connections) ─────────────────────────────
     if range_up == "1D":
+        # Anchor filter: drop snapshots taken before this connection's
+        # principal_anchor_at. Unanchored connections pass through.
         cur.execute("""
-            SELECT snapshot_at, connection_id, total_equity_usd
-            FROM user_mgmt.exchange_snapshots
-            WHERE connection_id = ANY(%s::uuid[])
-              AND snapshot_at >= NOW() - INTERVAL '24 hours'
-              AND fetch_ok = TRUE
-              AND total_equity_usd IS NOT NULL
-            ORDER BY snapshot_at
+            SELECT s.snapshot_at, s.connection_id, s.total_equity_usd
+            FROM user_mgmt.exchange_snapshots s
+            JOIN user_mgmt.exchange_connections ec
+              ON ec.connection_id = s.connection_id
+            WHERE s.connection_id = ANY(%s::uuid[])
+              AND s.snapshot_at >= NOW() - INTERVAL '24 hours'
+              AND s.fetch_ok = TRUE
+              AND s.total_equity_usd IS NOT NULL
+              AND (ec.principal_anchor_at IS NULL
+                   OR s.snapshot_at >= ec.principal_anchor_at)
+            ORDER BY s.snapshot_at
         """, (connection_ids,))
         # Bucket to 5-min and sum across connections per bucket. A
         # connection may miss a bucket (fetch failure, etc.) — in that
@@ -1124,6 +1172,30 @@ def portfolio_series(
                     ).isoformat(),
                     "equity_usd": round(sum(last_known.values()), 2),
                 })
+
+        # Fresh-account backfill: empty post-anchor window → flat
+        # 5-min-bucketed line at principal baseline over the past 24h.
+        if not portfolio_points:
+            cur.execute("""
+                SELECT COALESCE(SUM(principal_baseline_usd), 0)::float AS s
+                  FROM user_mgmt.exchange_connections
+                 WHERE status = 'active'
+                   AND connection_id = ANY(%s::uuid[])
+            """, (connection_ids,))
+            baseline_value = float(cur.fetchone()["s"] or 0)
+            if baseline_value > 0:
+                now_dt = datetime.datetime.now(datetime.timezone.utc)
+                end_t = int(now_dt.timestamp())
+                start_t = end_t - 24 * 3600
+                t = (start_t // 300) * 300
+                while t <= end_t:
+                    portfolio_points.append({
+                        "date": datetime.datetime.fromtimestamp(
+                            t, tz=datetime.timezone.utc,
+                        ).isoformat(),
+                        "equity_usd": baseline_value,
+                    })
+                    t += 300
 
         first_date = portfolio_points[0]["date"][:10] if portfolio_points else None
         return {
@@ -1158,9 +1230,13 @@ def portfolio_series(
                ) AS bucket,
                s.total_equity_usd AS equity
         FROM user_mgmt.exchange_snapshots s
+        JOIN user_mgmt.exchange_connections ec
+          ON ec.connection_id = s.connection_id
         WHERE s.connection_id = ANY(%(cids)s::uuid[])
           AND s.fetch_ok = TRUE
           AND s.total_equity_usd IS NOT NULL
+          AND (ec.principal_anchor_at IS NULL
+               OR s.snapshot_at >= ec.principal_anchor_at)
     """
     if lookback:
         base_select += " AND s.snapshot_at >= NOW() - %(lookback)s::interval"
@@ -1187,6 +1263,39 @@ def portfolio_series(
         {"date": r["ts"].isoformat(), "equity_usd": float(r["equity_usd"] or 0)}
         for r in rows
     ]
+
+    # Fresh-account backfill: when the post-anchor window is empty,
+    # synthesize a flat-line series at the principal-baseline so the
+    # chart reads as a horizontal line rather than blank. Lookback range
+    # mirrors the requested range (1W=7d, 1M=30d). Bucket cadence
+    # matches `bucket_s` so the synthetic series renders identically to
+    # actual data.
+    if not portfolio_points:
+        cur.execute("""
+            SELECT COALESCE(SUM(principal_baseline_usd), 0)::float AS s
+              FROM user_mgmt.exchange_connections
+             WHERE status = 'active'
+               AND connection_id = ANY(%s::uuid[])
+        """, (connection_ids,))
+        baseline_value = float(cur.fetchone()["s"] or 0)
+        if baseline_value > 0:
+            now_dt = datetime.datetime.now(datetime.timezone.utc)
+            lookback_seconds = {
+                "1W":  7  * 86400,
+                "1M":  30 * 86400,
+                "ALL": 7  * 86400,  # ALL with no history → fall back to 7d
+            }[range_up]
+            start_t = int((now_dt.timestamp() - lookback_seconds) // bucket_s) * bucket_s
+            end_t = int(now_dt.timestamp())
+            t = start_t
+            while t <= end_t:
+                portfolio_points.append({
+                    "date": datetime.datetime.fromtimestamp(
+                        t, tz=datetime.timezone.utc,
+                    ).isoformat(),
+                    "equity_usd": baseline_value,
+                })
+                t += bucket_s
 
     # real_days = distinct UTC calendar days represented in the bucket series.
     distinct_days = sorted({p["date"][:10] for p in portfolio_points})
