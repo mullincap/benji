@@ -1273,12 +1273,15 @@ def portfolio_series(
     # matches `bucket_s` so the synthetic series renders identically to
     # actual data.
     if not portfolio_points:
+        # Sum across ALL active connections so the flat-line value
+        # matches the headline AUM tile, which itself reflects total
+        # live equity across all linked exchanges (including any not
+        # tied to an active allocation).
         cur.execute("""
             SELECT COALESCE(SUM(principal_baseline_usd), 0)::float AS s
               FROM user_mgmt.exchange_connections
              WHERE status = 'active'
-               AND connection_id = ANY(%s::uuid[])
-        """, (connection_ids,))
+        """)
         baseline_value = float(cur.fetchone()["s"] or 0)
         if baseline_value > 0:
             now_dt = datetime.datetime.now(datetime.timezone.utc)
