@@ -817,15 +817,14 @@ def _fetch_portfolio_context(cur) -> dict[str, Any]:
         # a flat 06:00→23:45 grid (15-min buckets) at the principal
         # baseline so the chart shows a clean horizontal line rather
         # than empty. Anchored to today's UTC date.
+        # Sum across ALL active connections (not just allocation-tied)
+        # so the flat-line value matches the headline AUM tile.
         if not intraday_equity:
             cur.execute("""
                 SELECT COALESCE(SUM(principal_baseline_usd), 0)::float AS s
-                  FROM user_mgmt.exchange_connections ec
-                  JOIN user_mgmt.allocations a
-                    ON a.connection_id = ec.connection_id
-                 WHERE ec.status = 'active'
-                   AND a.allocation_id = ANY(%s::uuid[])
-            """, (all_alloc_ids,))
+                  FROM user_mgmt.exchange_connections
+                 WHERE status = 'active'
+            """)
             baseline_value = float(cur.fetchone()["s"] or 0)
             if baseline_value > 0:
                 intraday_date = today.isoformat()
@@ -1176,12 +1175,15 @@ def portfolio_series(
         # Fresh-account backfill: empty post-anchor window → flat
         # 5-min-bucketed line at principal baseline over the past 24h.
         if not portfolio_points:
+            # Sum across ALL active connections (not just the allocation-
+            # scoped ones) so the flat-line value matches the headline
+            # AUM tile, which itself reflects total live equity across
+            # all linked exchanges.
             cur.execute("""
                 SELECT COALESCE(SUM(principal_baseline_usd), 0)::float AS s
                   FROM user_mgmt.exchange_connections
                  WHERE status = 'active'
-                   AND connection_id = ANY(%s::uuid[])
-            """, (connection_ids,))
+            """)
             baseline_value = float(cur.fetchone()["s"] or 0)
             if baseline_value > 0:
                 now_dt = datetime.datetime.now(datetime.timezone.utc)
