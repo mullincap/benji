@@ -34,6 +34,8 @@ import argparse
 import hashlib
 import sys
 
+from psycopg2.extras import RealDictCursor
+
 from ..db import get_conn
 from ..services.encryption import decrypt_key
 
@@ -56,7 +58,11 @@ def main() -> int:
 
     conn = get_conn()
     try:
-        with conn.cursor() as cur:
+        # RealDictCursor → row["column_name"] access. The default psycopg2
+        # cursor returns tuples, which would force positional indexing
+        # throughout the dedupe logic. get_conn() doesn't pre-configure
+        # the factory; we set it on the cursor here.
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
             # Stage 1 — backfill api_key_hash for any row that doesn't
             # have one yet. This includes both single-key rows AND
             # pre-existing duplicates; the dedupe pass below filters
