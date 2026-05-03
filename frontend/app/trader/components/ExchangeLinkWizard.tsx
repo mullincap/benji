@@ -57,6 +57,21 @@ const VERIFY_STEP_LOG_LINES = [
   "> Checking permissions...",
 ];
 
+// Display-cased names for the success step. Backend stores slugs lowercased
+// ("blofin", "binance") which read as scrappy on the celebration screen.
+const EXCHANGE_DISPLAY: Record<string, string> = {
+  blofin: "BloFin",
+  binance: "Binance",
+};
+
+// Truncate a UUID-shaped connection id for the receipt: first 8 + last 4
+// with an ellipsis in the middle. Same shape Stripe / GitHub use for
+// short-form ids in confirmation surfaces.
+function truncateConnectionId(id: string): string {
+  if (id.length <= 14) return id;
+  return id.slice(0, 8) + "…" + id.slice(-4);
+}
+
 // ─── Step bar ────────────────────────────────────────────────────────────────
 
 function StepBar({ current }: { current: number }) {
@@ -291,7 +306,6 @@ export function ExchangeLinkWizard({
 
   // Step 1 form state
   const [exchange, setExchange] = useState<"" | ExchangeSlug>(initialExchange ?? "");
-  const [label, setLabel] = useState("");
   const [apiKey, setApiKey] = useState("");
   const [secretKey, setSecretKey] = useState("");
   const [passphrase, setPassphrase] = useState("");
@@ -336,7 +350,6 @@ export function ExchangeLinkWizard({
     try {
       const result = await allocatorApi.storeExchangeKeys({
         exchange,
-        label: label.trim() || undefined,
         api_key: apiKey.trim(),
         api_secret: secretKey.trim(),
         passphrase: requiresPassphrase ? passphrase.trim() : undefined,
@@ -369,24 +382,36 @@ export function ExchangeLinkWizard({
 
       {step === 1 && (
         <div>
-          {/* Exchange dropdown */}
-          <div style={{ marginBottom: 10 }}>
-            <div style={fieldLabelStyle}>Exchange</div>
-            <select
-              value={exchange}
-              onChange={e => setExchange(e.target.value as "" | ExchangeSlug)}
-              style={{ ...inputStyle, appearance: "none", paddingRight: 28, cursor: "pointer" }}
-            >
-              <option value="">— Select —</option>
-              {SUPPORTED_EXCHANGES.map(slug => (
-                <option key={slug} value={slug}>{slug}</option>
-              ))}
-            </select>
-            {step1Errors.exchange && <div style={inlineErrorStyle}>{step1Errors.exchange}</div>}
-          </div>
+          {/* Exchange dropdown — only shown when the caller didn't pre-select.
+              Get-started always pre-selects via initialExchange (the user
+              already clicked BloFin / Binance on the hero). Settings's
+              "+ LINK A NEW EXCHANGE" path passes null, so the dropdown
+              shows there for fresh selection. */}
+          {!initialExchange && (
+            <div style={{ marginBottom: 10 }}>
+              <div style={fieldLabelStyle}>Exchange</div>
+              <select
+                value={exchange}
+                onChange={e => setExchange(e.target.value as "" | ExchangeSlug)}
+                style={{ ...inputStyle, appearance: "none", paddingRight: 28, cursor: "pointer" }}
+              >
+                <option value="">— Select —</option>
+                {SUPPORTED_EXCHANGES.map(slug => (
+                  <option key={slug} value={slug}>{slug}</option>
+                ))}
+              </select>
+              {step1Errors.exchange && <div style={inlineErrorStyle}>{step1Errors.exchange}</div>}
+            </div>
+          )}
 
-          {/* Exchange-specific guidance */}
-          {exchange === "binance" && (
+          {/* Exchange-specific API-key creation guidance — only shown when
+              the caller didn't pre-select. With a pre-selection the user
+              has already passed through a surface (e.g. the get-started
+              hero's trust bullets) that established the permission story;
+              repeating it inside Step 1 was redundant. The guidance still
+              appears in settings's fresh-select path because that surface
+              has no upstream context. */}
+          {!initialExchange && exchange === "binance" && (
             <div style={{
               fontSize: 10, color: "var(--t2)", lineHeight: 1.6,
               background: "var(--bg2)", border: "1px solid var(--line)",
@@ -400,7 +425,7 @@ export function ExchangeLinkWizard({
               <div>&middot; Do not enable <span style={{ color: "var(--t1)" }}>Withdrawals</span></div>
             </div>
           )}
-          {exchange === "blofin" && (
+          {!initialExchange && exchange === "blofin" && (
             <div style={{
               fontSize: 10, color: "var(--t2)", lineHeight: 1.6,
               background: "var(--bg2)", border: "1px solid var(--line)",
@@ -413,20 +438,6 @@ export function ExchangeLinkWizard({
               <div>&middot; Do not enable <span style={{ color: "var(--t1)" }}>Transfer</span> or <span style={{ color: "var(--t1)" }}>Withdraw</span></div>
             </div>
           )}
-
-          {/* Label */}
-          <div style={{ marginBottom: 10 }}>
-            <div style={fieldLabelStyle}>Label (optional)</div>
-            <input
-              type="text"
-              placeholder="e.g. Main account"
-              value={label}
-              onChange={e => setLabel(e.target.value)}
-              style={inputStyle}
-              onFocus={e => (e.target.style.borderColor = "var(--green)")}
-              onBlur={e => (e.target.style.borderColor = "var(--line)")}
-            />
-          </div>
 
           {/* API key */}
           <div style={{ marginBottom: 10 }}>
@@ -588,26 +599,100 @@ export function ExchangeLinkWizard({
         </div>
       )}
 
-      {step === 4 && verify.kind === "ok" && (
-        <div style={{ padding: "16px 0" }}>
-          <div style={{ textAlign: "center", marginBottom: 14 }}>
-            <div style={{ fontSize: 48, marginBottom: 10, color: "var(--green)" }}>{"✓"}</div>
-            <div style={{ fontSize: 12, fontWeight: 700, color: "var(--t0)", marginBottom: 6 }}>
-              {verify.result.exchange} connected
+      {step === 4 && verify.kind === "ok" && (() => {
+        const exchangeName = EXCHANGE_DISPLAY[verify.result.exchange] ?? verify.result.exchange;
+        const detailRows: { label: string; value: string; mono?: boolean; tone?: "green" }[] = [
+          { label: "Connection ID", value: truncateConnectionId(verify.result.connection_id), mono: true },
+          { label: "Permissions",   value: verify.result.exchange === "blofin" ? "Read · Trade" : "Read · Spot · Margin" },
+          { label: "Withdrawals",   value: "Disabled", tone: "green" },
+          { label: "Encryption",    value: "Fernet · at-rest" },
+        ];
+        return (
+          <div style={{ padding: "8px 0 4px" }}>
+            {/* Hero check inside a green ring — celebration moment, sized to
+                feel distinct from the small step-bar checks above it. */}
+            <div style={{ display: "flex", justifyContent: "center", marginBottom: 22 }}>
+              <div style={{
+                width: 76, height: 76, borderRadius: "50%",
+                background: "var(--green-dim)",
+                border: "2px solid var(--green)",
+                display: "flex", alignItems: "center", justifyContent: "center",
+                boxShadow: "0 0 0 6px rgba(0, 200, 150, 0.05)",
+              }}>
+                <svg width="36" height="36" viewBox="0 0 36 36" fill="none">
+                  <path d="M9 18 L15.5 24.5 L27 12" stroke="var(--green)" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" />
+                </svg>
+              </div>
             </div>
-            <div style={{ fontSize: 10, color: "var(--t2)" }}>Trading enabled. Withdrawals disabled.</div>
+
+            {/* Heading */}
+            <div style={{ textAlign: "center", marginBottom: 22 }}>
+              <div style={{ fontSize: 18, fontWeight: 700, color: "var(--t0)", marginBottom: 5, letterSpacing: "-0.01em" }}>
+                {exchangeName} connected
+              </div>
+              <div style={{ fontSize: 9, color: "var(--t3)", letterSpacing: "0.12em", textTransform: "uppercase", fontWeight: 700 }}>
+                Verified · just now
+              </div>
+            </div>
+
+            {/* Receipt — concrete confirmation of what landed. Reads as
+                financial-grade evidence, not just "we did the thing". */}
+            <div style={{
+              background: "var(--bg0)",
+              border: "1px solid var(--line)",
+              borderRadius: 3,
+              padding: "0 16px",
+              marginBottom: 22,
+            }}>
+              {detailRows.map((row, i) => (
+                <div key={row.label} style={{
+                  display: "flex", alignItems: "center", justifyContent: "space-between",
+                  padding: "11px 0",
+                  borderBottom: i < detailRows.length - 1 ? "1px solid var(--line)" : "none",
+                }}>
+                  <span style={{
+                    fontSize: 9, color: "var(--t3)",
+                    letterSpacing: "0.12em", textTransform: "uppercase", fontWeight: 700,
+                  }}>
+                    {row.label}
+                  </span>
+                  <span style={{
+                    fontSize: 11,
+                    color: row.tone === "green" ? "var(--green)" : "var(--t1)",
+                    fontFamily: row.mono
+                      ? "var(--font-space-mono), Space Mono, monospace"
+                      : undefined,
+                    letterSpacing: row.mono ? "0.04em" : undefined,
+                  }}>
+                    {row.value}
+                  </span>
+                </div>
+              ))}
+            </div>
+
+            {/* Forward momentum line — answers the "now what?" question that
+                a celebration screen otherwise leaves dangling. */}
+            <div style={{
+              textAlign: "center",
+              fontSize: 10, color: "var(--t2)",
+              marginBottom: 20,
+              letterSpacing: "0.04em",
+            }}>
+              Next: pick a strategy to deploy your capital.
+            </div>
+
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+              <button onClick={() => setStep(3)}
+                onMouseEnter={e => { e.currentTarget.style.color = "var(--t0)"; }}
+                onMouseLeave={e => { e.currentTarget.style.color = "var(--t2)"; }}
+                style={textBtnStyle}>{"←"} Back</button>
+              <button onClick={() => onSuccess(verify.result.connection_id)} style={primaryBtnStyle}>
+                DONE
+              </button>
+            </div>
           </div>
-          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-            <button onClick={() => setStep(3)}
-              onMouseEnter={e => { e.currentTarget.style.color = "var(--t0)"; }}
-              onMouseLeave={e => { e.currentTarget.style.color = "var(--t2)"; }}
-              style={textBtnStyle}>{"←"} Back</button>
-            <button onClick={() => onSuccess(verify.result.connection_id)} style={primaryBtnStyle}>
-              DONE
-            </button>
-          </div>
-        </div>
-      )}
+        );
+      })()}
     </div>
   );
 }
