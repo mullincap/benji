@@ -10,7 +10,10 @@
  *     → "Pick a strategy" (allocator-purple)
  *
  *   has_exchange + selected_strategy + !active_allocation
- *     → "Deploy capital" (allocator-purple, interpolates name/version/sharpe)
+ *     → "Finish setup" (allocator-purple, interpolates strategy name/version)
+ *     Frames the state as "you've added it to your traders, the wizard
+ *     just isn't done yet" — which is what SYNC CAPITAL leaves behind
+ *     when the user opens the wizard and navigates away mid-flow.
  *
  *   has_active_allocation
  *     → "You're live" (green, permanent dismiss)
@@ -28,8 +31,8 @@
  * Dismiss persistence:
  *   - Purple banners (pick / deploy) → sessionStorage, keyed per
  *     banner kind. Dismissing "Pick a strategy" does NOT carry over
- *     to "Deploy capital" (different key); the next banner shows
- *     fresh after the user picks a strategy.
+ *     to "Finish setup" (different key); the next banner shows
+ *     fresh after the user adds a strategy via SYNC CAPITAL.
  *   - Green banner (live) → localStorage, namespaced by user_id from
  *     useAuth(). Survives sign-out and sign-back-in for the SAME
  *     user (one-time "you made it" celebration), but a different
@@ -146,7 +149,7 @@ export default function OnboardingNudge() {
   if (dismissed.has(kind)) return null;
 
   if (kind === "pick")   return <PickStrategyBanner   onDismiss={() => dismiss("pick")}   />;
-  if (kind === "deploy") return <DeployCapitalBanner  onDismiss={() => dismiss("deploy")} state={state} />;
+  if (kind === "deploy") return <FinishSetupBanner    onDismiss={() => dismiss("deploy")} state={state} />;
   return                       <YoureLiveBanner      onDismiss={() => dismiss("live")}   state={state} />;
 }
 
@@ -171,15 +174,13 @@ function PickStrategyBanner({ onDismiss }: { onDismiss: () => void }) {
   );
 }
 
-function DeployCapitalBanner({ state, onDismiss }: { state: OnboardingState; onDismiss: () => void }) {
+function FinishSetupBanner({ state, onDismiss }: { state: OnboardingState; onDismiss: () => void }) {
   const router = useRouter();
   const name = state.selected_strategy_name ?? "Strategy";
   const version = state.selected_strategy_version ?? "";
-  const sharpe = state.selected_strategy_sharpe;
-  const sharpeText = sharpe != null ? ` · Sharpe ${sharpe.toFixed(2)}` : "";
   const versionText = version ? ` ${version}` : "";
 
-  function gotoDeploy() {
+  function gotoFinishSetup() {
     if (state.selected_strategy_id) {
       router.push(`/trader/strategies/${state.selected_strategy_id}`);
     } else {
@@ -187,15 +188,18 @@ function DeployCapitalBanner({ state, onDismiss }: { state: OnboardingState; onD
     }
   }
 
+  // Copy frames the state accurately: the strategy is already in the user's
+  // Traders sidebar (SYNC CAPITAL added it), the wizard just hasn't been
+  // completed yet. "Finish setup" is what's actually left to do, not a
+  // brand-new "deploy capital" decision.
   return (
     <BannerShell tone="allocator">
       <BannerText>
-        <Accent tone="green">✓ {name}{versionText} selected{sharpeText}.</Accent>{" "}
-        <Accent tone="allocator">Next: deploy capital to start trading.</Accent>{" "}
-        Pause or close any time.
+        <Accent tone="green">✓ {name}{versionText} added to your traders.</Accent>{" "}
+        <Accent tone="allocator">Finish setup to start trading.</Accent>
       </BannerText>
       <BannerActions>
-        <PrimaryButton onClick={gotoDeploy}>Deploy capital →</PrimaryButton>
+        <PrimaryButton onClick={gotoFinishSetup}>Finish setup →</PrimaryButton>
         <GhostButton onClick={onDismiss}>Dismiss</GhostButton>
       </BannerActions>
     </BannerShell>
