@@ -3,6 +3,7 @@
 import { useState, useEffect } from "react";
 import { useRouter } from "next/navigation";
 import { useTrader, Position, Exchange, StrategyInstance, StrategyType, fmt, GHOST_CURVE, RISK_COLOR, RISK_DIM } from "../../context";
+import { useOnboardingState } from "../../_lib/onboarding";
 import EquityCurveSvg from "../../equity-curve";
 import PerformanceChart from "../../performance-chart";
 import { allocatorApi } from "../../api";
@@ -237,7 +238,15 @@ function DashboardContent({ equity, weeklyPnl, allTimePnl, sharpe, allocated, ac
 export default function OverviewPage() {
   const router = useRouter();
   const { instances, exchanges, loading, error } = useTrader();
+  const { state: onboardingState } = useOnboardingState();
   const empty = instances.length === 0;
+  // True when the user has flagged a strategy via SYNC CAPITAL but
+  // hasn't completed the wizard yet. The OnboardingNudge banner is
+  // already pointing them at "Finish setup" — the dashboard's
+  // "Select a Strategy" empty-state CTA would contradict that
+  // (telling them to do something they already started). Suppress
+  // the strategy-CTA + the "SETUP TAKES…" text when this is true.
+  const suppressStrategyCta = !!onboardingState?.has_selected_strategy;
   const exchangeBalance = exchanges.reduce((s, e) => s + e.balance, 0);
   const totalAllocatedRaw = instances.reduce((s, i) => s + (i.allocation ?? 0), 0);
   const totalAvailable = exchangeBalance > 0 ? exchangeBalance : totalAllocatedRaw;
@@ -353,7 +362,7 @@ export default function OverviewPage() {
             )}
           </div>
 
-          {empty && (
+          {empty && !suppressStrategyCta && (
             <div style={{
               position: "absolute", inset: 0,
               display: "flex", flexDirection: "column",
@@ -375,6 +384,26 @@ export default function OverviewPage() {
               >
                 SELECT A STRATEGY
               </button>
+            </div>
+          )}
+          {empty && suppressStrategyCta && (
+            // Quieter empty state when the user has already flagged a
+            // strategy via SYNC CAPITAL — the OnboardingNudge "Finish
+            // setup" banner above is already telling them what to do.
+            // We just acknowledge that no live data is here yet, no
+            // CTA to compete with the banner.
+            <div style={{
+              position: "absolute", inset: 0,
+              display: "flex", alignItems: "center", justifyContent: "center",
+              borderRadius: 5,
+              pointerEvents: "none",
+            }}>
+              <div style={{
+                fontSize: 9, color: "var(--t3)",
+                textTransform: "uppercase", letterSpacing: "0.12em",
+              }}>
+                Your dashboard will populate once setup is complete
+              </div>
             </div>
           )}
         </div>
