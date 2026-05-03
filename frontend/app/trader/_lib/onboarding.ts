@@ -37,6 +37,11 @@ export type OnboardingState = {
   selected_strategy_version: string | null;
   selected_strategy_sharpe: number | null;
   has_active_allocation: boolean;
+  // active_allocation_strategy_name is the strategy on the user's most
+  // recent active allocation — populated only when has_active_allocation
+  // is true. Distinct from selected_strategy_name (which is cleared at
+  // allocation-create time); the live banner reads this field instead.
+  active_allocation_strategy_name: string | null;
 };
 
 export const SKIP_FLAG_KEY = "onboarding_skipped";

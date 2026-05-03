@@ -157,12 +157,15 @@ export default function OnboardingNudge() {
 
 function PickStrategyBanner({ onDismiss }: { onDismiss: () => void }) {
   const router = useRouter();
+  // Trimmed copy: the prior third sentence ("Audited tear sheets show
+  // Sharpe, drawdown, walk-forward stability.") was marketing filler —
+  // the user is past the pitch and the View catalog CTA describes what
+  // they'll find on the next page. Directive without verbose.
   return (
     <BannerShell tone="allocator">
       <BannerText>
         <Accent tone="green">✓ Exchange connected.</Accent>{" "}
-        <Accent tone="allocator">Next: pick a strategy from the catalog.</Accent>{" "}
-        Audited tear sheets show Sharpe, drawdown, walk-forward stability.
+        <Accent tone="allocator">Pick a strategy to deploy your capital.</Accent>
       </BannerText>
       <BannerActions>
         <PrimaryButton onClick={() => router.push("/trader/strategies")}>
@@ -213,14 +216,19 @@ function FinishSetupBanner({ state, onDismiss }: { state: OnboardingState; onDis
 }
 
 function YoureLiveBanner({ state, onDismiss }: { state: OnboardingState; onDismiss: () => void }) {
-  const name = state.selected_strategy_name ?? "Your strategy";
-  const version = state.selected_strategy_version ?? "";
-  const versionText = version ? ` ${version}` : "";
+  // Reads active_allocation_strategy_name (NOT selected_strategy_name —
+  // the latter is cleared the moment an allocation is created, so by
+  // the time this banner shows it's already null). Falls back to a
+  // strategy-less variant when null/missing for any reason.
+  const name = state.active_allocation_strategy_name;
   return (
     <BannerShell tone="green">
       <BannerText>
         <Accent tone="green">✓ You&apos;re live.</Accent>{" "}
-        First allocation deploying · {name}{versionText} · alerts on.
+        {name
+          ? <>First allocation deploying for {name}. Track your performance live below.</>
+          : <>First allocation deploying. Track your performance live below.</>
+        }
       </BannerText>
       <BannerActions>
         <GhostButton onClick={onDismiss}>Got it</GhostButton>
