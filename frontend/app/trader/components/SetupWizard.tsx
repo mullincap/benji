@@ -81,8 +81,18 @@ interface SetupWizardProps {
   onCancel: () => void;
 }
 
+// Pick a sensible starting allocation given an available balance.
+// Returns a whole-dollar amount, capped at availableBalance, with a
+// minimum of $1 so the slider isn't initialized to 0 on a non-empty
+// account. 25% of available is conservative enough for a first-time
+// allocator without making them pull the slider hard right.
+function suggestedAllocation(availableBalance: number): number {
+  if (availableBalance <= 0) return 0;
+  return Math.max(1, Math.min(availableBalance, Math.round(availableBalance * 0.25)));
+}
+
 export default function SetupWizard({ strategyName, onActivate, onCancel }: SetupWizardProps) {
-  const { exchanges, instances, addExchange } = useTrader();
+  const { exchanges, instances, addExchange, refresh } = useTrader();
 
   const otherAllocated = instances.reduce((s, i) => s + (i.allocation ?? 0), 0);
   const totalBalance = exchanges.reduce((s, e) => s + e.balance, 0);
@@ -107,8 +117,46 @@ export default function SetupWizard({ strategyName, onActivate, onCancel }: Setu
   const [verifyLog, setVerifyLog] = useState<string[]>([]);
   const logRef = useRef<HTMLDivElement>(null);
 
-  // Configure
-  const [allocation, setAllocation] = useState("25000");
+  // Configure — initial allocation derived from the user's actual
+  // available balance (no more $25k placeholder that misleads users
+  // with empty accounts into thinking they can allocate that amount).
+  const [allocation, setAllocation] = useState(() => String(suggestedAllocation(availableBalance)));
+
+  // If availableBalance flips from 0 → positive (e.g. user clicks
+  // "Refresh balance" on the empty-balance panel after transferring
+  // in funds), populate the allocation with a sensible default so
+  // the slider doesn't show $0 on a now-funded account. Guarded by
+  // a ref so the effect only fires on the actual transition, not
+  // on every renders that touch availableBalance.
+  const prevAvailRef = useRef(availableBalance);
+  useEffect(() => {
+    if (prevAvailRef.current === 0 && availableBalance > 0) {
+      setAllocation(String(suggestedAllocation(availableBalance)));
+    }
+    prevAvailRef.current = availableBalance;
+  }, [availableBalance]);
+
+  // "Refresh balance" wiring for the empty-balance panel on Step 3.
+  // Calls the same snapshot-refresh endpoint the verify step uses,
+  // then refresh()es the trader context so exchanges[].balance
+  // updates in place. The empty-balance panel re-evaluates on the
+  // next render — if balance is now > 0, the slider takes over and
+  // the panel disappears.
+  const [refreshingBalance, setRefreshingBalance] = useState(false);
+  async function handleRefreshBalance() {
+    if (refreshingBalance) return;
+    setRefreshingBalance(true);
+    try {
+      await allocatorApi.refreshSnapshots();
+      await refresh();
+    } catch {
+      // Non-fatal — the user can click again, or close the wizard
+      // and re-open it. Surfacing a hard error here would obscure
+      // the (much more common) "still empty" outcome.
+    } finally {
+      setRefreshingBalance(false);
+    }
+  }
 
   useEffect(() => { if (logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight; }, [verifyLog]);
 
@@ -291,7 +339,7 @@ export default function SetupWizard({ strategyName, onActivate, onCancel }: Setu
   function handleActivate() {
     if (!selectedExchangeId || !selectedExchangeName) return;
     const celebration = fireCelebration(strategyName, selectedExchangeName);
-    onActivate(selectedExchangeId, selectedExchangeName, parseInt(allocation) || 25000);
+    onActivate(selectedExchangeId, selectedExchangeName, parseInt(allocation) || 0);
     // Store fadeOut for the redirect handler in the parent
     (window as any).__celebrationFadeOut = celebration.fadeOut;
   }
@@ -603,7 +651,84 @@ export default function SetupWizard({ strategyName, onActivate, onCancel }: Setu
       {/* Step 3: Allocate */}
       {step === 3 && (
         <div>
-          <AllocationPicker value={allocation} onChange={setAllocation} otherAllocated={otherAllocated} />
+          {availableBalance > 0 ? (
+            <AllocationPicker value={allocation} onChange={setAllocation} otherAllocated={otherAllocated} />
+          ) : (
+            // Empty-balance guidance panel. Replaces the slider entirely
+            // when there's nothing to allocate — a slider with $0 max
+            // is meaningless. Single unified copy (no spot vs futures
+            // distinction) because extending the snapshot pipeline to
+            // also fetch BloFin spot balance is a multi-day refactor;
+            // filed as a polish follow-up. The Open BloFin Account link
+            // points to BloFin's main account page where users can both
+            // deposit AND transfer between wallets, so the panel covers
+            // both "no funds anywhere" and "funds in spot, not futures".
+            <div style={{
+              background: "var(--bg2)",
+              border: "1px solid var(--line)",
+              borderLeft: "3px solid var(--allocator)",
+              borderRadius: 3,
+              padding: "18px 20px",
+              marginBottom: 14,
+            }}>
+              <div style={{
+                fontSize: 9, fontWeight: 700, letterSpacing: "0.12em",
+                textTransform: "uppercase", color: "var(--allocator)",
+                marginBottom: 8,
+              }}>
+                No available balance
+              </div>
+              <div style={{ fontSize: 13, color: "var(--t0)", fontWeight: 700, marginBottom: 6, lineHeight: 1.4 }}>
+                Your BloFin futures wallet is empty.
+              </div>
+              <div style={{ fontSize: 11, color: "var(--t1)", lineHeight: 1.6, marginBottom: 14 }}>
+                To allocate to {strategyName}, either deposit USDT to BloFin
+                or transfer existing USDT from your spot wallet into your
+                futures wallet. Once funds are visible, click{" "}
+                <span style={{ color: "var(--allocator)", fontWeight: 700 }}>Refresh balance</span>.
+              </div>
+              <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+                <a
+                  href="https://blofin.com/account"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  style={{
+                    display: "inline-flex", alignItems: "center", gap: 6,
+                    padding: "8px 14px",
+                    background: "var(--allocator)",
+                    color: "#0d0518",
+                    border: "1px solid var(--allocator)",
+                    borderRadius: 2,
+                    fontSize: 9, fontWeight: 700,
+                    letterSpacing: "0.14em", textTransform: "uppercase",
+                    textDecoration: "none",
+                    whiteSpace: "nowrap",
+                  }}
+                >
+                  Open BloFin account →
+                </a>
+                <button
+                  onClick={handleRefreshBalance}
+                  disabled={refreshingBalance}
+                  style={{
+                    display: "inline-flex", alignItems: "center", gap: 6,
+                    padding: "8px 14px",
+                    background: "transparent",
+                    color: "var(--t1)",
+                    border: "1px solid var(--border-bright)",
+                    borderRadius: 2,
+                    fontSize: 9, fontWeight: 700,
+                    letterSpacing: "0.14em", textTransform: "uppercase",
+                    cursor: refreshingBalance ? "default" : "pointer",
+                    opacity: refreshingBalance ? 0.5 : 1,
+                    whiteSpace: "nowrap",
+                  }}
+                >
+                  {refreshingBalance ? "Refreshing…" : "Refresh balance"}
+                </button>
+              </div>
+            </div>
+          )}
 
           <div style={{ display: "flex", justifyContent: "space-between", borderTop: "0.5px solid var(--line)", paddingTop: 14 }}>
             <button onClick={() => setStep(linkedExchange ? 1 : 2)} style={{ padding: "10px 16px", background: "transparent", color: "var(--t2)", border: "1px solid var(--line)", borderRadius: 3, fontSize: 9, fontWeight: 700, letterSpacing: "0.12em", textTransform: "uppercase", cursor: "pointer" }}>&larr; BACK</button>
