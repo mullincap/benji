@@ -1492,6 +1492,63 @@ def store_exchange_keys(
         # Non-fatal — the connection is valid; balance will fill on next sync.
         log.warning("Initial snapshot fetch failed for %s: %s", connection_id, e)
 
+    # ── Step 8: auto-anchor for PnL math ─────────────────────────────────
+    # Without an explicit principal_anchor_at + principal_baseline_usd on
+    # the connection row, Manager Overview's PnL math defaults to "all
+    # current equity is unrealized PnL" — Bal: $X, Prin: $0, PnL: +$X.
+    # Wrong on the first day after a new link.
+    #
+    # Fix: snapshot just landed in Step 7. Read its total_equity_usd and
+    # write it as the baseline at NOW(). Manager's PnL becomes
+    # current_equity − principal_baseline − Σ(post-anchor capital_events)
+    # which on day 1 is current − current − 0 = $0 (correct).
+    #
+    # Wrapped so any failure is non-fatal — the connection is already
+    # valid and visible; the user can manually set an anchor via the
+    # existing EDIT ANCHOR / RESET DEFAULT flows in /trader/settings if
+    # this auto-step fails. Forward-only — existing connections are
+    # untouched (no backfill).
+    try:
+        cur.execute(
+            """
+            SELECT total_equity_usd::float AS equity
+              FROM user_mgmt.exchange_snapshots
+             WHERE connection_id = %s::uuid
+               AND fetch_ok = TRUE
+               AND total_equity_usd IS NOT NULL
+             ORDER BY snapshot_at DESC
+             LIMIT 1
+            """,
+            (connection_id,),
+        )
+        snap = cur.fetchone()
+        if snap is not None:
+            baseline = float(snap["equity"])
+            cur.execute(
+                """
+                UPDATE user_mgmt.exchange_connections
+                   SET principal_anchor_at = NOW(),
+                       principal_baseline_usd = %s,
+                       updated_at = NOW()
+                 WHERE connection_id = %s::uuid
+                """,
+                (baseline, connection_id),
+            )
+            cur.connection.commit()
+            log.info(
+                "Auto-anchored connection %s at baseline=%s",
+                connection_id, baseline,
+            )
+        else:
+            # Snapshot didn't land (Step 7 logged its own warning); skip
+            # the anchor and let the user set one manually later.
+            log.warning(
+                "Skipped auto-anchor for %s — no snapshot row available",
+                connection_id,
+            )
+    except Exception as e:
+        log.warning("Auto-anchor failed for %s: %s", connection_id, e)
+
     return {
         "connection_id": connection_id,
         "exchange": exchange,
