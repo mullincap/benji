@@ -181,8 +181,14 @@ function FinishSetupBanner({ state, onDismiss }: { state: OnboardingState; onDis
   const versionText = version ? ` ${version}` : "";
 
   function gotoFinishSetup() {
-    if (state.selected_strategy_id) {
-      router.push(`/trader/strategies/${state.selected_strategy_id}`);
+    // Strategy detail pages are routed by slug
+    // (/trader/strategies/<slug>, where <slug> = audit.strategies.name).
+    // The selected_strategy_id is a UUID and would 404 if used as the
+    // URL path. Fall back to the catalog if slug is null/missing
+    // (legacy data, race between mutation + state read) so the user is
+    // never stuck — better catalog landing than a 404.
+    if (state.selected_strategy_slug) {
+      router.push(`/trader/strategies/${state.selected_strategy_slug}`);
     } else {
       router.push("/trader/strategies");
     }

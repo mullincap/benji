@@ -76,15 +76,24 @@ def get_onboarding_state(
     )
     has_active_allocation = bool(cur.fetchone()["has_active_allocation"])
 
-    # selected_strategy + denormalized name + sharpe extracted from
+    # selected_strategy + denormalized slug/name + sharpe extracted from
     # current_metrics jsonb. NULL-safe so a user with no selection just
     # gets nulls back.
+    #
+    # `audit.strategies.name` doubles as both the catalog slug (e.g.
+    # "alts_main") and the human-readable name shown in the banner copy.
+    # We project it once and surface it under two API field names so the
+    # frontend can use the URL-routing path explicitly:
+    #   - selected_strategy_slug → /trader/strategies/<slug> deep links
+    #   - selected_strategy_name → banner copy text
+    # If a future schema split introduces a separate display_name field,
+    # the slug consumer is already on its dedicated key and won't drift.
     cur.execute(
         """
         SELECT
             u.selected_strategy_id,
             sv.version_label,
-            s.name AS strategy_name,
+            s.name AS strategy_slug,
             (sv.current_metrics->>'sharpe')::numeric AS sharpe
         FROM user_mgmt.users u
         LEFT JOIN audit.strategy_versions sv
@@ -98,12 +107,14 @@ def get_onboarding_state(
     sel = cur.fetchone()
     selected_strategy_id = str(sel["selected_strategy_id"]) if sel and sel["selected_strategy_id"] else None
     has_selected_strategy = selected_strategy_id is not None
+    strategy_slug = sel["strategy_slug"] if sel else None
 
     return {
         "has_exchange": has_exchange,
         "has_selected_strategy": has_selected_strategy,
         "selected_strategy_id": selected_strategy_id,
-        "selected_strategy_name": sel["strategy_name"] if sel else None,
+        "selected_strategy_slug": strategy_slug,
+        "selected_strategy_name": strategy_slug,
         "selected_strategy_version": sel["version_label"] if sel else None,
         "selected_strategy_sharpe": float(sel["sharpe"]) if sel and sel["sharpe"] is not None else None,
         "has_active_allocation": has_active_allocation,
