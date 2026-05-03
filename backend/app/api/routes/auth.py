@@ -444,3 +444,19 @@ def _now_utc():
     """Lazy import: keeps the top-level import surface terse."""
     from datetime import datetime, timezone
     return datetime.now(timezone.utc)
+
+
+# ─── First-run / welcome ───────────────────────────────────────────────────
+
+@router.post("/welcome/complete")
+def welcome_complete(
+    user_id: str = Depends(get_current_user),
+    cur=Depends(get_cursor),
+) -> dict[str, Any]:
+    """Clear the first_login flag. Called when the user clicks 'Enter platform'
+    on /auth/welcome. Idempotent — repeated calls just keep first_login=false."""
+    cur.execute(
+        "UPDATE user_mgmt.users SET first_login = FALSE WHERE user_id = %s::uuid",
+        (user_id,),
+    )
+    return {"ok": True}
