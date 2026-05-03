@@ -38,12 +38,16 @@ import {
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE || "";
 
+// Trader leads (the platform's primary persona today), Allocator second
+// (next most common), then alphabetical for the rest. The first entry
+// is the form's default role on initial render.
 const ROLE_OPTIONS = [
-  "Fund Manager",
+  "Trader",
   "Allocator",
-  "Quant / Researcher",
   "Analyst",
+  "Fund Manager",
   "Other",
+  "Quant / Researcher",
 ] as const;
 
 type InviteDetail = {
@@ -71,7 +75,8 @@ export default function AcceptInvitePage() {
   const [firstName, setFirstName] = useState("");
   const [lastName, setLastName] = useState("");
   const [firm, setFirm] = useState("");
-  const [role, setRole] = useState<string>(ROLE_OPTIONS[1]); // Allocator default
+  const [role, setRole] = useState<string>(ROLE_OPTIONS[0]); // Trader default
+  const [showPassword, setShowPassword] = useState(false);
   const [password, setPassword] = useState("");
   const [agreedToTerms, setAgreedToTerms] = useState(false);
 
@@ -123,13 +128,16 @@ export default function AcceptInvitePage() {
   }, [retryAfter]);
 
   const passwordResult = scorePassword(password);
+  // firm intentionally omitted — it's an optional field. backend accepts
+  // null/empty (Pydantic schema is `firm: str | None = None`, the
+  // user_mgmt.users.firm column has been nullable since the schema was
+  // first laid down).
   const canSubmit =
     state.kind === "ready" &&
     !submitting &&
     retryAfter === 0 &&
     firstName.trim() &&
     lastName.trim() &&
-    firm.trim() &&
     role &&
     passwordResult.meetsMinimum &&
     agreedToTerms;
@@ -151,7 +159,8 @@ export default function AcceptInvitePage() {
           body: JSON.stringify({
             first_name: firstName.trim(),
             last_name: lastName.trim(),
-            firm: firm.trim(),
+            // firm is optional; whitespace-only counts as "no firm" too.
+            firm: firm.trim() || null,
             role,
             password,
           }),
@@ -386,14 +395,13 @@ export default function AcceptInvitePage() {
         </div>
 
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
-          <Field label="Firm" htmlFor="invite-firm">
+          <Field label="Firm (optional)" htmlFor="invite-firm">
             <Input
               id="invite-firm"
               value={firm}
               onChange={(e) => setFirm(e.target.value)}
               autoComplete="organization"
               placeholder="Colonial Capital LLC"
-              required
             />
           </Field>
           <Field label="Role" htmlFor="invite-role">
@@ -415,19 +423,64 @@ export default function AcceptInvitePage() {
           }
           helperKind={fieldError?.field === "password" ? "error" : "default"}
         >
-          <Input
-            id="invite-password"
-            type="password"
-            value={password}
-            onChange={(e) => {
-              setPassword(e.target.value);
-              if (fieldError?.field === "password") setFieldError(null);
-            }}
-            autoComplete="new-password"
-            placeholder="••••••••••••"
-            required
-            invalid={fieldError?.field === "password"}
-          />
+          <div style={{ position: "relative" }}>
+            <Input
+              id="invite-password"
+              type={showPassword ? "text" : "password"}
+              value={password}
+              onChange={(e) => {
+                setPassword(e.target.value);
+                if (fieldError?.field === "password") setFieldError(null);
+              }}
+              autoComplete="new-password"
+              placeholder="••••••••••••"
+              required
+              invalid={fieldError?.field === "password"}
+              style={{ paddingRight: 44 }}
+            />
+            <button
+              type="button"
+              onClick={() => setShowPassword(v => !v)}
+              aria-label={showPassword ? "Hide password" : "Show password"}
+              aria-pressed={showPassword}
+              style={{
+                position: "absolute",
+                right: 6,
+                top: "50%",
+                transform: "translateY(-50%)",
+                width: 32,
+                height: 32,
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                background: "transparent",
+                border: "none",
+                color: "var(--t3)",
+                cursor: "pointer",
+                padding: 0,
+                borderRadius: 2,
+                transition: "color 0.12s ease",
+              }}
+              onMouseEnter={e => { e.currentTarget.style.color = "var(--t1)"; }}
+              onMouseLeave={e => { e.currentTarget.style.color = "var(--t3)"; }}
+            >
+              {showPassword ? (
+                /* Eye-off (password visible — click to hide) */
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M9.88 9.88a3 3 0 0 0 4.24 4.24" />
+                  <path d="M10.73 5.08A10.43 10.43 0 0 1 12 5c7 0 11 7 11 7a13.16 13.16 0 0 1-1.67 2.68" />
+                  <path d="M6.61 6.61A13.526 13.526 0 0 0 1 12s4 7 11 7a9.74 9.74 0 0 0 5.39-1.61" />
+                  <line x1="2" y1="2" x2="22" y2="22" />
+                </svg>
+              ) : (
+                /* Eye (password hidden — click to show) */
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7-11-7-11-7Z" />
+                  <circle cx="12" cy="12" r="3" />
+                </svg>
+              )}
+            </button>
+          </div>
           {password.length > 0 && (
             <PasswordStrengthMeter
               password={password}
