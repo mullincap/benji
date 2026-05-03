@@ -6,7 +6,13 @@ import { AuthProvider } from "./lib/auth";
 import TempPasswordBanner from "./components/TempPasswordBanner";
 
 export const metadata: Metadata = {
-  title: "3M - Institutional Returns",
+  // template applies to every child route that exports `title: "..."` —
+  // resolves to "3M — {Page Name}" in the browser tab. Routes that don't
+  // set a title (or the marketing landing /) fall through to `default`.
+  title: {
+    default: "3M",
+    template: "3M — %s",
+  },
   description: "Quantitative risk audit engine for crypto fund managers and allocators",
 };
 

@@ -1,7 +1,8 @@
 import { LegalShell, LegalSection } from '../components/LegalShell';
 
 export const metadata = {
-  title: 'Privacy Policy — 3M',
+  // Bare title — root layout's template formats this as "3M — Privacy Policy".
+  title: 'Privacy Policy',
   description: 'How Mullin Capital collects, uses, and protects your information.',
 };
 
