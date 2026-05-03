@@ -196,7 +196,7 @@ function UnlinkedMode({ instanceId }: { instanceId: string }) {
           <MetricCard label="YTD RETURN" value={cat ? `+${fmt(cat.ytd, 1)}%` : "\u2014"} color="var(--green)" />
           <MetricCard label="SHARPE" value={cat ? fmt(cat.sharpe, 2) : "\u2014"} />
           <MetricCard label="MAX DD" value={cat ? `-${fmt(cat.maxDd, 1)}%` : "\u2014"} color="var(--red)" />
-          <MetricCard label="WIN RATE" value={cat ? `${fmt(cat.winRate, 0)}%` : "\u2014"} />
+          <MetricCard label="WIN RATE" value={cat && cat.winRate != null ? `${fmt(cat.winRate, 0)}%` : "\u2014"} />
         </div>
 
         {/* Setup panel */}

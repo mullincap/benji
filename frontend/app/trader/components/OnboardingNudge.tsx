@@ -59,7 +59,17 @@ type BannerKind = "pick" | "deploy" | "live";
 
 const SESSION_DISMISS_PREFIX = "onboarding_nudge_dismissed:";
 const PERMANENT_DISMISS_PREFIX = "onboarding_nudge_dismissed:live:";
-const NUDGE_PATH = "/trader/overview";
+
+// Pages where the onboarding banner persists. /trader/overview is the
+// primary surface; /trader/strategies (catalog) and /trader/strategies/[slug]
+// (detail) are secondary — a fresh user clicking "View catalog" needs the
+// continuity signal that they're still mid-onboarding. Settings, traders,
+// admin, etc. stay banner-free.
+function isNudgePath(pathname: string): boolean {
+  if (pathname === "/trader/overview") return true;
+  if (pathname.startsWith("/trader/strategies")) return true;
+  return false;
+}
 
 function deriveKind(state: OnboardingState): BannerKind | null {
   if (!state.has_exchange) return null;          // get-started page handles this case
@@ -131,17 +141,17 @@ export default function OnboardingNudge() {
     });
   }, [userId]);
 
-  // Refetch when the user returns to /trader/overview from another
-  // protected route (e.g. /trader/strategies after picking a strategy).
-  // Mutation sites in commits 5/6 will also call refetch() directly,
-  // but this covers the layout-stays-mounted-across-nav case.
+  // Refetch when the user navigates between nudge-eligible pages
+  // (e.g. /trader/overview ↔ /trader/strategies/* after picking a
+  // strategy). Layout stays mounted across these transitions; mutation
+  // sites also call refetch() directly. Belt-and-suspenders.
   useEffect(() => {
-    if (pathname === NUDGE_PATH) {
+    if (isNudgePath(pathname)) {
       refetch();
     }
   }, [pathname, refetch]);
 
-  if (pathname !== NUDGE_PATH) return null;
+  if (!isNudgePath(pathname)) return null;
   if (status !== "ready" || !state) return null;
 
   const kind = deriveKind(state);
