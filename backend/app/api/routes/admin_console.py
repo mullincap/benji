@@ -783,15 +783,31 @@ def issue_invitation(
     token_hash = _hash_invite_token(token)
     expires_at = _now_utc() + timedelta(days=body.expires_in_days)
 
+    # Persist body.firm + body.role as non-binding suggestions on the
+    # invitation row. Acceptance form prefills from these but the
+    # invitee can override either field (the persisted user record
+    # uses the values from the accept POST, not from these columns).
+    # Whitespace-only firm collapses to NULL — same normalization the
+    # acceptance form uses on the user_mgmt.users.firm column.
+    suggested_firm = body.firm.strip() if body.firm and body.firm.strip() else None
+    suggested_role = body.role.strip() if body.role and body.role.strip() else None
+
     cur.execute(
         """
         INSERT INTO user_mgmt.invitations
             (token_hash, invited_email, inviter_user_id,
-             inviter_name, inviter_firm, expires_at)
-        VALUES (%s, %s, %s::uuid, %s, %s, %s)
+             inviter_name, inviter_firm,
+             suggested_firm, suggested_role,
+             expires_at)
+        VALUES (%s, %s, %s::uuid, %s, %s, %s, %s, %s)
         RETURNING invitation_id
         """,
-        (token_hash, invited_email, admin_id, inviter_name, inviter_firm, expires_at),
+        (
+            token_hash, invited_email, admin_id,
+            inviter_name, inviter_firm,
+            suggested_firm, suggested_role,
+            expires_at,
+        ),
     )
     invitation_id = str(cur.fetchone()["invitation_id"])
 

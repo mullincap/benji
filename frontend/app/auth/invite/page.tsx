@@ -55,6 +55,13 @@ type InviteDetail = {
   inviter_firm: string;
   invited_email: string;
   expires_at: string;
+  // Non-binding hints from the admin's "New Invitation" form. Used to
+  // prefill Firm + Role on first render. Invitee can override either
+  // field — the persisted user record uses what they actually submit,
+  // not these. NULL on invitations issued before migration 025 OR via
+  // the CLI tool (which doesn't capture them).
+  suggested_firm: string | null;
+  suggested_role: string | null;
 };
 
 type LoadState =
@@ -106,6 +113,20 @@ export default function AcceptInvitePage() {
         if (res.status === 200) {
           const data = (await res.json()) as InviteDetail;
           setState({ kind: "ready", invite: data });
+          // Prefill Firm + Role from the admin's New Invitation hints
+          // (migration 025). Both stay editable — invitee can override.
+          // Null/missing firm: leave blank (firm is optional). Null or
+          // unknown role: fall back to the existing default (Trader).
+          // Defensive against suggested_role values that aren't in the
+          // current ROLE_OPTIONS — happens if the role list changes
+          // after an invitation is issued; pick the default instead of
+          // landing on an unselectable dropdown value.
+          if (data.suggested_firm) {
+            setFirm(data.suggested_firm);
+          }
+          if (data.suggested_role && (ROLE_OPTIONS as readonly string[]).includes(data.suggested_role)) {
+            setRole(data.suggested_role);
+          }
         } else if (res.status === 404) {
           setState({ kind: "invalid_or_expired" });
         } else {
