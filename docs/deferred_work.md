@@ -4,6 +4,22 @@ Items surfaced during normal work that aren't in scope for the current track but
 
 ---
 
+## Phase 1b polish: onboarding gate not pathname-reactive (within-group nav)
+
+**Surfaced:** 2026-05-03 during PR #25 review (the hotfix scoping PR #24's onboarding gate to `/trader/overview` only).
+
+**Context:** the (protected) trader layout's onboarding gate runs in a `useEffect` with `[router]` deps — it fires once on layout mount, not on every pathname change. This was fine for PR #24's broad rule (any (protected) entry triggered it), and remains correct for PR #25's tightened rule (only `/trader/overview` triggers it on mount).
+
+**Edge case:** a user without an exchange who lands on `/trader/settings` (without linking) and then navigates within the (protected) group to `/trader/overview` is NOT bounced to `/get-started`. The layout stays mounted, useEffect doesn't re-run, the gate doesn't re-check. They see `/trader/overview` with the dashboard's empty-state UI ("Link an exchange" CTA in the sidebar) instead of the hero card.
+
+**Why it's deferred:** not a regression — same behavior existed in PR #24 for any within-group nav. Low impact: the user has a manual path forward (sidebar's "Link an exchange" affordance + the OnboardingNudge would render the "pick a strategy" banner if they did link via settings → it routes back to /overview). Affects only the cohort that lands on settings without coming through get-started, then nav-jumps to overview without linking.
+
+**To act on:** convert the gate to a `useEffect` keyed on `pathname` (replace `initialPathRef.current` with a fresh pathname each fire), so the rule re-evaluates on every nav into `/trader/overview`. Alternatively, mount a small "you skipped, link an exchange" CTA on the dashboard's empty state that points to `/trader/get-started`. Either works; the second is cheaper and avoids re-entering the redirect-loop class of bug.
+
+**File:** [frontend/app/trader/(protected)/layout.tsx](../frontend/app/trader/(protected)/layout.tsx) lines ~393–429.
+
+---
+
 ## Note: strategy_id=1 / v1.0 excluded from nightly refresh — intentional
 
 **Surfaced:** 2026-04-20 during Item 6 investigation (Session C).
