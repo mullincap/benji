@@ -31,10 +31,14 @@ import {
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE || "";
 const BUILD_HASH = process.env.NEXT_PUBLIC_BUILD_HASH || "dev";
 
-function sanitizeNext(raw: string | null): string {
-  if (!raw) return "/";
+/** Returns the validated ?next= path, or null if none was provided.
+ *  Returning null (vs. defaulting to "/") lets the caller distinguish
+ *  "user explicitly wants to land on X" from "no preference, use the
+ *  server-side default_landing rule". */
+function sanitizeNext(raw: string | null): string | null {
+  if (!raw) return null;
   // Same-origin paths only — reject protocol-relative ("//host") and absolute URLs.
-  if (!raw.startsWith("/") || raw.startsWith("//")) return "/";
+  if (!raw.startsWith("/") || raw.startsWith("//")) return null;
   return raw;
 }
 
@@ -53,7 +57,9 @@ export default function SignInPage() {
   const [fieldError, setFieldError] = useState<string | null>(null);
   const [bannerError, setBannerError] = useState<string | null>(null);
   const [lock, setLock] = useState<LockState | null>(null);
-  const [nextPath, setNextPath] = useState<string>("/");
+  // Null when no explicit ?next= was provided. Falsy = let server's
+  // default_landing decide where to route post-signin.
+  const [nextPath, setNextPath] = useState<string | null>(null);
 
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
@@ -98,7 +104,16 @@ export default function SignInPage() {
         if (data?.first_login) {
           router.replace("/auth/welcome");
         } else {
-          router.replace(nextPath);
+          // Routing precedence:
+          //   1. explicit ?next= (deep link, auth-bounce, etc.) — user intent wins
+          //   2. server-side default_landing rule (active allocations? → manager
+          //      else trader)
+          //   3. "/" as a safety net if both are missing
+          const target =
+            nextPath ||
+            (typeof data?.default_landing === "string" ? data.default_landing : null) ||
+            "/";
+          router.replace(target);
         }
         return;
       }

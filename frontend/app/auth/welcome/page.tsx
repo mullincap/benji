@@ -112,7 +112,15 @@ export default function WelcomePage() {
         credentials: "include",
       });
       if (res.ok) {
-        router.replace("/");
+        // Use the server-computed default_landing (same rule signin uses).
+        // Brand-new users have no allocations yet → /trader/overview;
+        // welcome screen is only ever shown on first_login=true so this
+        // is almost always the trader path.
+        const data = await res.json().catch(() => ({}));
+        const target =
+          (typeof data?.default_landing === "string" && data.default_landing) ||
+          "/trader/overview";
+        router.replace(target);
         return;
       }
       setError(`Couldn't complete onboarding (${res.status}). Try again.`);

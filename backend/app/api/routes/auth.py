@@ -120,6 +120,26 @@ def _hash_invite_token(token: str) -> str:
     return hashlib.sha256(token.encode()).hexdigest()
 
 
+# ─── Post-login default landing path ───────────────────────────────────────
+# Server-side rule: users with at least one active allocation land on
+# /manager/overview (the surface that surfaces live state); users with
+# none land on /trader/overview (the workspace where they'd configure
+# their first allocation). Explicit ?next= on signin always overrides
+# this — the rule only applies when the user opens /auth/signin
+# directly with no return-to context.
+
+def _default_landing_for(cur, user_id: str) -> str:
+    cur.execute(
+        "SELECT count(*) AS n FROM user_mgmt.allocations "
+        "WHERE user_id = %s::uuid AND status = 'active'",
+        (user_id,),
+    )
+    row = cur.fetchone()
+    if row and (row["n"] or 0) > 0:
+        return "/manager/overview"
+    return "/trader/overview"
+
+
 def _cookie_secure() -> bool:
     return os.environ.get("COOKIE_SECURE", "false").lower() in ("1", "true", "yes")
 
@@ -309,6 +329,7 @@ def login(body: LoginRequest, response: Response, cur=Depends(get_cursor)) -> di
         "user_id": user_id,
         "email": row["email"],
         "first_login": bool(row["first_login"]),
+        "default_landing": _default_landing_for(cur, user_id),
     }
 
 
@@ -482,12 +503,19 @@ def welcome_complete(
     cur=Depends(get_cursor),
 ) -> dict[str, Any]:
     """Clear the first_login flag. Called when the user clicks 'Enter platform'
-    on /auth/welcome. Idempotent — repeated calls just keep first_login=false."""
+    on /auth/welcome. Idempotent — repeated calls just keep first_login=false.
+
+    Also returns default_landing so the frontend can route the user to
+    the same place a regular signin would (/trader/overview for fresh
+    users with no allocations yet, /manager/overview otherwise)."""
     cur.execute(
         "UPDATE user_mgmt.users SET first_login = FALSE WHERE user_id = %s::uuid",
         (user_id,),
     )
-    return {"ok": True}
+    return {
+        "ok": True,
+        "default_landing": _default_landing_for(cur, user_id),
+    }
 
 
 # ─── User-facing password change ────────────────────────────────────────────
