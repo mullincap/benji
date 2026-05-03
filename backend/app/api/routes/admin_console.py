@@ -820,6 +820,77 @@ def issue_invitation(
     }
 
 
+@router.get("/audit")
+def list_audit_events(
+    action_type: Optional[str] = Query(None),
+    subject_email: Optional[str] = Query(None),
+    actor_email: Optional[str] = Query(None),
+    since: Optional[str] = Query(None, description="ISO timestamp lower bound"),
+    limit: int = Query(100, ge=1, le=500),
+    _admin_id: str = Depends(require_admin),
+    cur=Depends(get_cursor),
+) -> dict[str, Any]:
+    """Read the audit log. Supports server-side filter by action_type,
+    actor email, subject email, and a `since` lower bound. Default 100
+    rows, max 500 — admin views are operator workflows, not bulk export."""
+    where: list[str] = []
+    params: list[Any] = []
+
+    if action_type:
+        where.append("a.action_type = %s")
+        params.append(action_type)
+    if since:
+        where.append("a.created_at >= %s")
+        params.append(since)
+    if actor_email:
+        where.append("au.email ILIKE %s")
+        params.append(f"%{actor_email}%")
+    if subject_email:
+        where.append("(su.email ILIKE %s OR a.action_metadata->>'target_email' ILIKE %s OR a.action_metadata->>'invited_email' ILIKE %s)")
+        params.extend([f"%{subject_email}%"] * 3)
+
+    where_clause = ("WHERE " + " AND ".join(where)) if where else ""
+
+    sql = f"""
+        SELECT a.action_id, a.admin_user_id, a.subject_user_id,
+               a.action_type, a.action_metadata, a.ip_address, a.created_at,
+               au.email AS actor_email,
+               su.email AS subject_email
+        FROM user_mgmt.admin_actions a
+        LEFT JOIN user_mgmt.users au ON au.user_id = a.admin_user_id
+        LEFT JOIN user_mgmt.users su ON su.user_id = a.subject_user_id
+        {where_clause}
+        ORDER BY a.created_at DESC
+        LIMIT %s
+    """
+    cur.execute(sql, [*params, limit])
+    rows = cur.fetchall()
+
+    out = []
+    for r in rows:
+        meta = r["action_metadata"] or {}
+        # Subject prefers an actual user join; falls back to metadata
+        # fields for actions that name a target by string (invitation
+        # issuance, denied admin attempts).
+        subject = (
+            r["subject_email"]
+            or meta.get("target_email")
+            or meta.get("invited_email")
+            or None
+        )
+        out.append({
+            "action_id": str(r["action_id"]),
+            "action_type": r["action_type"],
+            "actor_email": r["actor_email"],
+            "subject_email": subject,
+            "metadata": meta,
+            "ip_address": str(r["ip_address"]) if r["ip_address"] else None,
+            "created_at": r["created_at"].isoformat() if r["created_at"] else None,
+        })
+
+    return {"events": out, "total": len(out)}
+
+
 @router.post("/invitations/{invitation_id}/revoke")
 def revoke_invitation(
     invitation_id: str,

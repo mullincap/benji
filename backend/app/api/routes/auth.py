@@ -185,6 +185,14 @@ class AcceptInviteRequest(BaseModel):
     password: str
 
 
+class ChangePasswordRequest(BaseModel):
+    new_password: str
+    # Optional only when the user is currently using a temporary password
+    # (admin-issued). For self-initiated changes, current_password is
+    # required — verified server-side.
+    current_password: str | None = None
+
+
 # ─── Routes ─────────────────────────────────────────────────────────────────
 
 @router.post("/register")
@@ -479,4 +487,63 @@ def welcome_complete(
         "UPDATE user_mgmt.users SET first_login = FALSE WHERE user_id = %s::uuid",
         (user_id,),
     )
+    return {"ok": True}
+
+
+# ─── User-facing password change ────────────────────────────────────────────
+
+@router.post("/change-password")
+def change_password(
+    body: ChangePasswordRequest,
+    user_id: str = Depends(get_current_user),
+    cur=Depends(get_cursor),
+) -> dict[str, Any]:
+    """User-initiated password change. Two paths:
+
+      1. password_is_temporary = true → current_password NOT required
+         (the temp was already verified at login; admin-issued temps
+         are intentionally one-shot to drive change-on-first-use)
+      2. password_is_temporary = false → current_password REQUIRED and
+         must verify before the new password is accepted
+
+    On success: hash + UPDATE, clear password_is_temporary, set
+    password_set_at = now(), null out password_changed_by (self-change).
+    Other devices' sessions are NOT revoked — distinct from
+    admin-reset behavior, since the user themselves is opting in.
+    """
+    cur.execute(
+        """
+        SELECT password_hash, password_is_temporary
+        FROM user_mgmt.users WHERE user_id = %s::uuid
+        """,
+        (user_id,),
+    )
+    row = cur.fetchone()
+    if not row or not row["password_hash"]:
+        raise HTTPException(status_code=400, detail="Password not set on this account")
+
+    if not row["password_is_temporary"]:
+        if not body.current_password:
+            raise HTTPException(status_code=400, detail="Current password required")
+        if not _verify_password(body.current_password, row["password_hash"]):
+            raise HTTPException(status_code=401, detail="Current password incorrect")
+
+    _validate_password_or_400(body.new_password)
+
+    new_hash = _hash_password(body.new_password)
+    cur.execute(
+        """
+        UPDATE user_mgmt.users
+           SET password_hash = %s,
+               password_is_temporary = FALSE,
+               password_changed_by = NULL,
+               password_set_at = NOW(),
+               failed_login_count = 0,
+               locked_until = NULL
+         WHERE user_id = %s::uuid
+        """,
+        (new_hash, user_id),
+    )
+
+    log.info("User %s changed their own password", user_id)
     return {"ok": True}

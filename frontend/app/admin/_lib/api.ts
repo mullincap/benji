@@ -293,3 +293,50 @@ export async function revokeInvitation(invitationId: string): Promise<{ ok: bool
     }),
   );
 }
+
+// ─── Audit log ────────────────────────────────────────────────────────────
+
+export type AuditEvent = {
+  action_id: string;
+  action_type: string;
+  actor_email: string | null;
+  subject_email: string | null;
+  metadata: Record<string, unknown>;
+  ip_address: string | null;
+  created_at: string | null;
+};
+
+export async function fetchAuditEvents(params: {
+  action_type?: string;
+  subject_email?: string;
+  actor_email?: string;
+  since?: string;
+  limit?: number;
+} = {}): Promise<{ events: AuditEvent[]; total: number }> {
+  const q = new URLSearchParams();
+  if (params.action_type) q.set("action_type", params.action_type);
+  if (params.subject_email) q.set("subject_email", params.subject_email);
+  if (params.actor_email) q.set("actor_email", params.actor_email);
+  if (params.since) q.set("since", params.since);
+  if (params.limit) q.set("limit", String(params.limit));
+  const path = `/api/admin/audit${q.toString() ? `?${q}` : ""}`;
+  return jsonOrThrow(await apiFetch(path));
+}
+
+// ─── User-facing change password (NOT admin-gated) ────────────────────────
+
+export async function changePassword(
+  newPassword: string,
+  currentPassword?: string,
+): Promise<{ ok: boolean }> {
+  return jsonOrThrow(
+    await apiFetch("/api/auth/change-password", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        new_password: newPassword,
+        ...(currentPassword ? { current_password: currentPassword } : {}),
+      }),
+    }),
+  );
+}

@@ -3,6 +3,7 @@ import "@fontsource/space-mono/400.css";
 import "@fontsource/space-mono/700.css";
 import "./globals.css";
 import { AuthProvider } from "./lib/auth";
+import TempPasswordBanner from "./components/TempPasswordBanner";
 
 export const metadata: Metadata = {
   title: "3M - Institutional Returns",
@@ -17,7 +18,10 @@ export default function RootLayout({
   return (
     <html lang="en" className="h-full">
       <body className="h-full">
-        <AuthProvider>{children}</AuthProvider>
+        <AuthProvider>
+          <TempPasswordBanner />
+          {children}
+        </AuthProvider>
       </body>
     </html>
   );
