@@ -21,6 +21,7 @@ DB migration required:
 
 from __future__ import annotations
 
+import hashlib
 import os
 import logging
 from typing import Any
@@ -57,6 +58,64 @@ COOKIE_MAX_AGE = REMEMBER_COOKIE_DAYS * 24 * 3600
 # while locked.
 LOCKOUT_THRESHOLD = 5
 LOCKOUT_DURATION_MINUTES = 15
+
+
+# ─── Password strength validation ───────────────────────────────────────────
+# Mirrors frontend/app/(auth)/_components/PasswordStrengthMeter.tsx exactly.
+# v1a public minimum is score >= 3 ("Good") — corresponds to the
+# "≥12 chars, mixed case, number, symbol" requirement on accept-invite.
+PASSWORD_MIN_SCORE = 3
+
+_COMMON_PASSWORD_SUBSTRINGS = (
+    "password", "qwerty", "admin", "123456", "letmein",
+    "welcome", "monkey", "dragon", "master", "login",
+    "abc123", "iloveyou", "sunshine", "princess", "football",
+    "baseball", "shadow", "superman", "mullincap", "3m3m",
+)
+
+
+def _password_score(password: str) -> int:
+    """Returns 0–4. Mirror of the frontend scorer; keep in sync."""
+    if not password:
+        return 0
+    lower = password.lower()
+    if any(c in lower for c in _COMMON_PASSWORD_SUBSTRINGS):
+        return 1
+
+    classes = (
+        any("a" <= c <= "z" for c in password)
+        + any("A" <= c <= "Z" for c in password)
+        + any(c.isdigit() for c in password)
+        + any(not c.isalnum() for c in password)
+    )
+
+    if len(password) < 8 or classes < 2:
+        return 1
+    if len(password) < 12:
+        return 2
+    if len(password) < 16:
+        return 4 if classes >= 4 else 3
+    return 4 if classes >= 3 else 3
+
+
+def _validate_password_or_400(password: str) -> None:
+    if _password_score(password) < PASSWORD_MIN_SCORE:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Password too weak. Minimum 12 characters with mixed case, "
+                "a number, and a symbol; avoid common substrings."
+            ),
+        )
+
+
+# ─── Invite token helpers ──────────────────────────────────────────────────
+# Tokens are minted via secrets.token_urlsafe(32) and live ONLY in the
+# invite URL. The DB stores the SHA-256 hex digest. Same convention reset
+# tokens will use in Phase 1b.
+
+def _hash_invite_token(token: str) -> str:
+    return hashlib.sha256(token.encode()).hexdigest()
 
 
 def _cookie_secure() -> bool:
@@ -114,6 +173,14 @@ class LoginRequest(BaseModel):
     # session cookie that expires when the browser closes. The DB session
     # row TTL is unchanged either way.
     remember: bool = True
+
+
+class AcceptInviteRequest(BaseModel):
+    first_name: str
+    last_name: str
+    firm: str
+    role: str
+    password: str
 
 
 # ─── Routes ─────────────────────────────────────────────────────────────────
@@ -263,3 +330,117 @@ def me(user_id: str = Depends(get_current_user), cur=Depends(get_cursor)) -> dic
         "firm": row["firm"],
         "role": row["role"],
     }
+
+
+# ─── Invitations (public, token-gated) ─────────────────────────────────────
+
+@router.get("/invite/{token}")
+def get_invite(token: str, cur=Depends(get_cursor)) -> dict[str, Any]:
+    """Return invitation details for the accept-invite screen.
+
+    Public endpoint — the token itself is the auth. Returns 404 for
+    missing, expired, or already-accepted invitations (don't differentiate
+    states publicly so the token can't be probed for state).
+    """
+    token_hash = _hash_invite_token(token)
+    cur.execute("""
+        SELECT inviter_name, inviter_firm, invited_email, expires_at,
+               accepted_at
+        FROM user_mgmt.invitations
+        WHERE token_hash = %s
+    """, (token_hash,))
+    row = cur.fetchone()
+    if not row or row["accepted_at"] is not None or row["expires_at"] <= _now_utc():
+        raise HTTPException(status_code=404, detail="Invitation not found or expired")
+    return {
+        "inviter_name": row["inviter_name"],
+        "inviter_firm": row["inviter_firm"],
+        "invited_email": row["invited_email"],
+        "expires_at": row["expires_at"].isoformat(),
+    }
+
+
+@router.post("/invite/{token}/accept", dependencies=[Depends(RateLimit("invite_accept"))])
+def accept_invite(
+    token: str,
+    body: AcceptInviteRequest,
+    response: Response,
+    cur=Depends(get_cursor),
+) -> dict[str, Any]:
+    """Atomically validate token, create user, mark invitation accepted, sign in."""
+    if not all([body.first_name.strip(), body.last_name.strip(), body.firm.strip(), body.role.strip()]):
+        raise HTTPException(status_code=400, detail="All profile fields are required")
+    _validate_password_or_400(body.password)
+
+    token_hash = _hash_invite_token(token)
+
+    # Lock the invitation row for the duration of the transaction. The
+    # cursor is shared via Depends(get_cursor), so we're inside an
+    # implicit transaction already; SELECT FOR UPDATE prevents two
+    # concurrent accepts on the same token.
+    cur.execute("""
+        SELECT invitation_id, invited_email, expires_at, accepted_at
+        FROM user_mgmt.invitations
+        WHERE token_hash = %s
+        FOR UPDATE
+    """, (token_hash,))
+    invite = cur.fetchone()
+    if not invite or invite["accepted_at"] is not None or invite["expires_at"] <= _now_utc():
+        raise HTTPException(status_code=404, detail="Invitation not found or expired")
+
+    invited_email = invite["invited_email"]
+
+    # Reject if a user with the invited email already exists. The unique
+    # constraint on users.email would catch this on insert, but checking
+    # explicitly gives a cleaner error.
+    cur.execute("SELECT user_id FROM user_mgmt.users WHERE email = %s", (invited_email,))
+    if cur.fetchone():
+        raise HTTPException(status_code=409, detail="An account with that email already exists")
+
+    password_hash = _hash_password(body.password)
+    cur.execute("""
+        INSERT INTO user_mgmt.users
+            (email, password_hash, is_active, email_verified, first_login,
+             first_name, last_name, firm, role,
+             created_at, updated_at)
+        VALUES (%s, %s, TRUE, TRUE, TRUE, %s, %s, %s, %s, NOW(), NOW())
+        RETURNING user_id
+    """, (
+        invited_email, password_hash,
+        body.first_name.strip(), body.last_name.strip(),
+        body.firm.strip(), body.role.strip(),
+    ))
+    new_user_id = str(cur.fetchone()["user_id"])
+
+    cur.execute("""
+        UPDATE user_mgmt.invitations
+           SET accepted_at = NOW(), accepted_user_id = %s::uuid
+         WHERE invitation_id = %s
+    """, (new_user_id, invite["invitation_id"]))
+
+    log.info("Invite accepted: user=%s email=%s", new_user_id, invited_email)
+
+    # Sign in the new user immediately. Persistent cookie (remember=True
+    # default) — invite accepters are unlikely to want session-only.
+    token_value = create_user_session(settings.USER_SESSIONS_FILE, new_user_id)
+    response.set_cookie(
+        key=COOKIE_NAME,
+        value=token_value,
+        max_age=COOKIE_MAX_AGE,
+        httponly=True,
+        secure=_cookie_secure(),
+        samesite="lax",
+        path="/",
+    )
+    return {
+        "ok": True,
+        "user_id": new_user_id,
+        "email": invited_email,
+        "first_login": True,
+    }
+
+
+def _now_utc():
+    """Lazy import: keeps the top-level import surface terse."""
+    from datetime import datetime, timezone
+    return datetime.now(timezone.utc)
