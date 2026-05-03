@@ -240,13 +240,23 @@ export default function OverviewPage() {
   const { instances, exchanges, loading, error } = useTrader();
   const { state: onboardingState } = useOnboardingState();
   const empty = instances.length === 0;
-  // True when the user has flagged a strategy via SYNC CAPITAL but
-  // hasn't completed the wizard yet. The OnboardingNudge banner is
-  // already pointing them at "Finish setup" — the dashboard's
-  // "Select a Strategy" empty-state CTA would contradict that
-  // (telling them to do something they already started). Suppress
-  // the strategy-CTA + the "SETUP TAKES…" text when this is true.
-  const suppressStrategyCta = !!onboardingState?.has_selected_strategy;
+  // True whenever the OnboardingNudge banner is currently in a
+  // pre-allocation state (either "Pick a strategy" OR "Finish setup")
+  // — both have their own primary CTA pointing at the user's next
+  // step, and the dashboard's green "SELECT A STRATEGY" empty-state
+  // CTA would compete. Suppress the green CTA + the "SETUP TAKES…"
+  // text when this is true; the quiet placeholder line takes over.
+  //
+  // Condition: has_exchange (banner can render) AND
+  // !has_active_allocation (we're upstream of the "you're live"
+  // celebration). When has_active_allocation flips true, instances
+  // is non-empty so empty=false and the ghost doesn't render anyway.
+  // Was: !!has_selected_strategy — only covered the "Finish setup"
+  // case; "Pick a strategy" path showed both affordances.
+  const suppressStrategyCta = (
+    !!onboardingState?.has_exchange
+    && !onboardingState?.has_active_allocation
+  );
   const exchangeBalance = exchanges.reduce((s, e) => s + e.balance, 0);
   const totalAllocatedRaw = instances.reduce((s, i) => s + (i.allocation ?? 0), 0);
   const totalAvailable = exchangeBalance > 0 ? exchangeBalance : totalAllocatedRaw;
