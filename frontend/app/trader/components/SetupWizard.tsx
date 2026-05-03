@@ -7,7 +7,8 @@
 
 import React, { useState, useEffect, useRef } from "react";
 import { useTrader, Exchange, fmt, mask } from "../context";
-import { allocatorApi, type ExchangeSlug } from "../api";
+import { useRouter } from "next/navigation";
+import { allocatorApi, parseApiError, type ExchangeSlug } from "../api";
 import AllocationPicker from "./AllocationPicker";
 import { resolveExchangeInfo } from "../_lib/exchange-info";
 
@@ -166,6 +167,7 @@ function suggestedAllocation(availableBalance: number): number {
 }
 
 export default function SetupWizard({ strategyName, onActivate, onCancel }: SetupWizardProps) {
+  const router = useRouter();
   const { exchanges, instances, addExchange, refresh } = useTrader();
 
   const otherAllocated = instances.reduce((s, i) => s + (i.allocation ?? 0), 0);
@@ -255,6 +257,10 @@ export default function SetupWizard({ strategyName, onActivate, onCancel }: Setu
   }
 
   const [verifyError, setVerifyError] = useState<string | null>(null);
+  // True when the verify failure was a 409 (same-user duplicate). Drives
+  // the "Go to Settings" affordance + suppresses the otherwise-misleading
+  // "Check your API keys and try again" copy. Reset alongside verifyError.
+  const [verifyConflict, setVerifyConflict] = useState(false);
 
   async function runVerify() {
     if (!selectedExchangeName) return;
@@ -329,9 +335,16 @@ export default function SetupWizard({ strategyName, onActivate, onCancel }: Setu
       setSelectedExchangeId(newEx.id);
       setTimeout(() => setStep(3), 800);
     } catch (err) {
-      const msg = err instanceof Error ? err.message : "Verification failed";
+      const { status, detail } = parseApiError(err);
+      // 409 = same-user duplicate connection (migration 026 constraint).
+      // Show the backend's specific message instead of the generic "Failed
+      // to verify connection" so the user understands the real issue.
+      const msg = status === 409
+        ? detail
+        : (err instanceof Error ? err.message : "Verification failed");
       addLog(`> Error: ${msg}`);
       setVerifyError(msg);
+      setVerifyConflict(status === 409);
       setVerifyStatus("idle");
     }
   }
@@ -657,9 +670,41 @@ export default function SetupWizard({ strategyName, onActivate, onCancel }: Setu
                 {verifyStatus === "checking" && <span style={{ color: "var(--t2)", animation: "blink-cursor 1s step-end infinite" }}>{"\u258C"}</span>}
               </div>
             )}
-            {verifyError && (
+            {verifyError && !verifyConflict && (
               <div style={{ fontSize: 9, color: "var(--red)", marginBottom: 12 }}>
                 Failed to verify connection. Check your API keys and try again.
+              </div>
+            )}
+            {verifyConflict && (
+              <div style={{
+                background: "var(--red-dim)", border: "1px solid var(--red)",
+                borderRadius: 4, padding: "10px 12px", marginBottom: 12,
+              }}>
+                <div style={{ fontSize: 10, fontWeight: 700, color: "var(--red)", marginBottom: 6 }}>
+                  Already linked
+                </div>
+                <div style={{ fontSize: 10, color: "var(--t1)", lineHeight: 1.5, marginBottom: 8 }}>
+                  {verifyError}
+                </div>
+                <button
+                  type="button"
+                  onClick={() => router.push("/trader/settings")}
+                  style={{
+                    padding: "6px 10px",
+                    background: "transparent",
+                    color: "var(--allocator)",
+                    border: "1px solid var(--allocator)",
+                    borderRadius: 2,
+                    fontSize: 9,
+                    fontWeight: 700,
+                    letterSpacing: "0.14em",
+                    textTransform: "uppercase",
+                    fontFamily: "inherit",
+                    cursor: "pointer",
+                  }}
+                >
+                  Go to Settings →
+                </button>
               </div>
             )}
 

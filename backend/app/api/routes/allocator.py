@@ -1407,6 +1407,38 @@ def store_exchange_keys(
     if exchange == "blofin" and not body.passphrase:
         raise HTTPException(status_code=400, detail="BloFin requires a passphrase")
 
+    # ── Step 1b: same-user duplicate check ───────────────────────────────
+    # Hash the plaintext api_key (sha256, hex). Persisted on the connection
+    # row so the partial unique index from migration 026 enforces the
+    # constraint (user_id, exchange, api_key_hash) WHERE status != 'revoked'.
+    # Pre-check here for a friendlier 409 + clear message; the DB index is
+    # the race-condition backstop for concurrent submits.
+    #
+    # User-scoped only — different users can legitimately link the same
+    # exchange API key (J's test accounts, firms sharing operator credentials).
+    api_key_hash = hashlib.sha256(body.api_key.encode()).hexdigest()
+    cur.execute(
+        """
+        SELECT 1
+          FROM user_mgmt.exchange_connections
+         WHERE user_id = %s::uuid
+           AND exchange = %s
+           AND api_key_hash = %s
+           AND status != 'revoked'
+         LIMIT 1
+        """,
+        (user_id, exchange, api_key_hash),
+    )
+    if cur.fetchone():
+        exchange_display = exchange.capitalize() if exchange == "binance" else "BloFin"
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"This {exchange_display} connection is already linked. "
+                "View it in Settings or remove it before re-linking."
+            ),
+        )
+
     # ── Step 2: encrypt ──────────────────────────────────────────────────
     api_key_enc = encrypt_key(body.api_key)
     api_secret_enc = encrypt_key(body.api_secret)
@@ -1418,14 +1450,14 @@ def store_exchange_keys(
         """
         INSERT INTO user_mgmt.exchange_connections
             (connection_id, user_id, exchange, label,
-             api_key_enc, api_secret_enc, passphrase_enc,
+             api_key_enc, api_secret_enc, passphrase_enc, api_key_hash,
              status, created_at, updated_at)
-        VALUES (%s, %s::uuid, %s, %s, %s, %s, %s,
+        VALUES (%s, %s::uuid, %s, %s, %s, %s, %s, %s,
                 'pending_validation', NOW(), NOW())
         """,
         (
             connection_id, user_id, exchange, body.label,
-            api_key_enc, api_secret_enc, passphrase_enc,
+            api_key_enc, api_secret_enc, passphrase_enc, api_key_hash,
         ),
     )
     cur.connection.commit()
