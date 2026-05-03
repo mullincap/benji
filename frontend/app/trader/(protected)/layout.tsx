@@ -23,6 +23,7 @@ import { usePathname, useRouter } from "next/navigation";
 import Topbar from "../../components/Topbar";
 import { useSidebarCollapsed } from "../../components/useSidebarCollapsed";
 import { TraderProvider, useTrader, STRATEGY_CATALOG, StrategyCatalogEntry } from "../context";
+import OnboardingNudge from "../components/OnboardingNudge";
 import { Chart as ChartJS, ArcElement } from "chart.js";
 import { Doughnut } from "react-chartjs-2";
 
@@ -455,6 +456,7 @@ export default function TraderProtectedLayout({ children }: { children: React.Re
         <div style={{ display: "flex", flex: 1, overflow: "hidden" }}>
           <Sidebar />
           <div style={{ flex: 1, overflow: "auto" }}>
+            <OnboardingNudge />
             {children}
           </div>
         </div>
