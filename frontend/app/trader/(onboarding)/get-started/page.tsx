@@ -6,22 +6,34 @@
  * 1-step onboarding hero — the destination the (protected) trader
  * layout redirects to when has_exchange is false.
  *
- * Layout: a single centered hero card. Status bar → eyebrow → title →
- * subtitle → 2-col exchange picker (BloFin / Binance) → trust bullets
- * → footer help line + "Skip — explore first" link.
+ * Two modes on a single URL (no query params, no sub-routes):
  *
- * Mockup deviation: the Figma uses a purple "allocator" accent for
- * the eyebrow / link arrows / hover. The trader workspace's locked
- * design system has only --green / --amber / --red as accents, so
- * we substitute --green here. Visual hierarchy stays intact and the
- * page reads coherently with the rest of the trader chrome the user
- * sees post-link.
+ *   1. Hero card — status strip → eyebrow → title → subtitle →
+ *      2-col exchange picker (BloFin / Binance) → trust bullets →
+ *      footer help line + "Skip — explore first" link.
  *
- * Card behavior: clicking either exchange option routes to
- * /trader/settings?openLink=<slug>, which the settings page reads on
- * mount to auto-open the LinkWizard. The wizard's exchange dropdown
- * still requires a manual selection in v1 — pre-selection is a
- * commit-6 polish item.
+ *   2. Inline wizard — clicking either exchange card swaps the hero
+ *      out for <ExchangeLinkWizard /> with the picked exchange
+ *      pre-selected. The wizard's Back-on-Step-1 returns to the
+ *      hero (state-only swap, URL unchanged). Wizard onSuccess
+ *      routes to /trader/overview where the OnboardingNudge picks
+ *      up the freshly-linked exchange.
+ *
+ * Pre-Phase-1c the cards deep-linked to /trader/settings?openLink=…
+ * which yanked the user out of the focused single-page hero into the
+ * full settings page (sidebar + linked-exchanges list + capital-events
+ * section). The inline-wizard model keeps the user on the same URL
+ * and same layout throughout the link flow.
+ *
+ * Mockup deviations:
+ *   - The Figma uses a purple "allocator" accent for the eyebrow /
+ *     arrows / hover. The trader workspace's design system originally
+ *     gated only on --green / --amber / --red, so commit 3 of PR #24
+ *     used green for the eyebrow + title accent. The exchange CARDS
+ *     now use --allocator (introduced in commit 4 of PR #24 for the
+ *     OnboardingNudge banners) — they're the page's primary action
+ *     and reading them as purple "next step" affordances differentiates
+ *     them from the green status text and trust-bullet checks.
  *
  * Skip link: stamps sessionStorage via setOnboardingSkipped() and
  * pushes /trader/overview. The (protected) layout's redirect honors
@@ -29,12 +41,16 @@
  * Flag is cleared on logout (see app/lib/auth.tsx signout).
  */
 
-import Link from "next/link";
+import { useState } from "react";
 import { useRouter } from "next/navigation";
+
 import { setOnboardingSkipped } from "../../_lib/onboarding";
+import { ExchangeLinkWizard } from "../../components/ExchangeLinkWizard";
+import type { ExchangeSlug } from "../../api";
 
 export default function GetStartedPage() {
   const router = useRouter();
+  const [linkingExchange, setLinkingExchange] = useState<ExchangeSlug | null>(null);
 
   function onSkip(e: React.MouseEvent<HTMLAnchorElement>) {
     e.preventDefault();
@@ -42,6 +58,22 @@ export default function GetStartedPage() {
     router.push("/trader/overview");
   }
 
+  // ─── Wizard mode ──────────────────────────────────────────────────────────
+  if (linkingExchange !== null) {
+    return (
+      <div style={{ width: "100%", padding: "48px 24px", display: "flex", justifyContent: "center" }}>
+        <div style={{ width: "100%", maxWidth: 720 }}>
+          <ExchangeLinkWizard
+            initialExchange={linkingExchange}
+            onSuccess={() => router.push("/trader/overview")}
+            onCancel={() => setLinkingExchange(null)}
+          />
+        </div>
+      </div>
+    );
+  }
+
+  // ─── Hero mode ────────────────────────────────────────────────────────────
   return (
     <div style={{ width: "100%", padding: "48px 24px", display: "flex", justifyContent: "center" }}>
       <div style={{
@@ -112,12 +144,12 @@ export default function GetStartedPage() {
             <ExchangeCard
               name="BloFin"
               meta="USDT-M perpetuals · recommended"
-              href="/trader/settings?openLink=blofin"
+              onClick={() => setLinkingExchange("blofin")}
             />
             <ExchangeCard
               name="Binance"
               meta="USDT-M perpetuals · institutional"
-              href="/trader/settings?openLink=binance"
+              onClick={() => setLinkingExchange("binance")}
             />
           </div>
 
@@ -125,10 +157,7 @@ export default function GetStartedPage() {
           <ul style={{
             listStyle: "none",
             margin: 0,
-            padding: "16px 18px",
-            background: "var(--bg0)",
-            border: "1px solid var(--line)",
-            borderRadius: 2,
+            padding: "16px 0 0",
           }}>
             <TrustBullet
               strong="Read + trading permissions only."
@@ -189,32 +218,30 @@ export default function GetStartedPage() {
 
 // ─── Pieces ─────────────────────────────────────────────────────────────────
 
-function ExchangeCard({ name, meta, href }: { name: string; meta: string; href: string }) {
+function ExchangeCard({ name, meta, onClick }: { name: string; meta: string; onClick: () => void }) {
+  const [hover, setHover] = useState(false);
+  const arrowColor = hover ? "var(--allocator)" : "var(--t2)";
   return (
-    <Link
-      href={href}
+    <button
+      type="button"
+      onClick={onClick}
+      onMouseEnter={() => setHover(true)}
+      onMouseLeave={() => setHover(false)}
       style={{
         padding: "18px",
-        background: "var(--bg0)",
-        border: "1px solid var(--line)",
+        background: "var(--allocator-soft)",
+        border: `1px solid ${hover ? "#c0a8ff" : "var(--allocator)"}`,
         borderRadius: 2,
         cursor: "pointer",
         display: "flex",
         alignItems: "center",
         justifyContent: "space-between",
         gap: 14,
-        textDecoration: "none",
-        transition: "border-color 0.15s ease, background 0.15s ease, transform 0.15s ease",
-      }}
-      onMouseEnter={(e) => {
-        e.currentTarget.style.borderColor = "var(--green)";
-        e.currentTarget.style.background = "var(--green-dim)";
-        e.currentTarget.style.transform = "translateY(-1px)";
-      }}
-      onMouseLeave={(e) => {
-        e.currentTarget.style.borderColor = "var(--line)";
-        e.currentTarget.style.background = "var(--bg0)";
-        e.currentTarget.style.transform = "translateY(0)";
+        textAlign: "left",
+        font: "inherit",
+        color: "inherit",
+        transform: hover ? "translateY(-2px)" : "translateY(0)",
+        transition: "border-color 0.15s ease, transform 0.15s ease",
       }}
     >
       <div>
@@ -225,8 +252,8 @@ function ExchangeCard({ name, meta, href }: { name: string; meta: string; href: 
           {meta}
         </div>
       </div>
-      <span style={{ color: "var(--t2)", fontSize: 14 }}>→</span>
-    </Link>
+      <span style={{ color: arrowColor, fontSize: 14, transition: "color 0.15s ease" }}>→</span>
+    </button>
   );
 }
 
