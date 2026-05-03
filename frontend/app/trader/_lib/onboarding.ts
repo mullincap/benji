@@ -25,6 +25,14 @@ export type OnboardingState = {
   has_exchange: boolean;
   has_selected_strategy: boolean;
   selected_strategy_id: string | null;
+  // selected_strategy_slug is the catalog slug used to build
+  // /trader/strategies/<slug> deep links. selected_strategy_id is a
+  // UUID and would 404 if used as the URL path. The two fields can
+  // currently equal selected_strategy_name (all sourced from the same
+  // audit.strategies.name column), but they're surfaced under
+  // dedicated keys so future schema changes don't silently break
+  // routing.
+  selected_strategy_slug: string | null;
   selected_strategy_name: string | null;
   selected_strategy_version: string | null;
   selected_strategy_sharpe: number | null;
