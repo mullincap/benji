@@ -35,6 +35,79 @@ const EXCHANGE_KEY_STEPS: Record<string, string[]> = {
   ],
 };
 
+// ─── Exchange tile (Step 1) ─────────────────────────────────────────────────
+
+// Selectable exchange tile shared across Step 1's three render sites
+// (already-linked exchanges, expanded "link a different" list, and the
+// fresh-account full catalog). Default (unselected) state uses the
+// allocator-purple language matching /trader/get-started's hero cards
+// — these are the user's primary action affordances on Step 1, not
+// page chrome. Selected state stays green to mean "this one is my
+// pick" — that semantic is locked across the trader workspace.
+function ExchangeTile({
+  name, badge, subtitle, selected, onClick,
+}: {
+  name: string;
+  badge: string;
+  subtitle: string;
+  selected: boolean;
+  onClick: () => void;
+}) {
+  const [hover, setHover] = useState(false);
+  const borderColor = selected
+    ? "var(--green)"
+    : hover ? "#c0a8ff" : "var(--allocator)";
+  const background = selected
+    ? "var(--green-dim)"
+    : "var(--allocator-soft)";
+  const transform = !selected && hover ? "translateY(-1px)" : "translateY(0)";
+  return (
+    <div
+      onClick={onClick}
+      onMouseEnter={() => setHover(true)}
+      onMouseLeave={() => setHover(false)}
+      style={{
+        background,
+        border: `1px solid ${borderColor}`,
+        borderRadius: 6,
+        padding: "14px 14px",
+        cursor: "pointer",
+        display: "flex",
+        alignItems: "center",
+        gap: 10,
+        transform,
+        transition: "border-color 0.15s ease, background 0.15s ease, transform 0.15s ease",
+      }}
+    >
+      <div style={{
+        width: 32, height: 32, borderRadius: 4, flexShrink: 0,
+        background: "var(--bg3)",
+        display: "flex", alignItems: "center", justifyContent: "center",
+        fontSize: 11, fontWeight: 700, color: "var(--t1)",
+      }}>{badge}</div>
+      <div style={{ flex: 1, minWidth: 0 }}>
+        <div style={{ fontSize: 12, fontWeight: 700, color: "var(--t0)" }}>{name}</div>
+        <div style={{
+          fontSize: 10, color: "var(--t2)",
+          overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+        }}>{subtitle}</div>
+      </div>
+      <div style={{
+        width: 18, height: 18, borderRadius: "50%", flexShrink: 0,
+        background: selected ? "var(--green)" : "transparent",
+        border: selected ? "none" : "1.5px solid var(--line)",
+        display: "flex", alignItems: "center", justifyContent: "center",
+      }}>
+        {selected && (
+          <svg width="10" height="10" viewBox="0 0 10 10" fill="none">
+            <polyline points="1.5,5 4,7.5 8.5,2.5" stroke="var(--bg0)" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+          </svg>
+        )}
+      </div>
+    </div>
+  );
+}
+
 // ─── Step bar ────────────────────────────────────────────────────────────────
 
 function StepBar({ current }: { current: number }) {
@@ -374,37 +447,21 @@ export default function SetupWizard({ strategyName, onActivate, onCancel }: Setu
         <div>
           {exchanges.length > 0 ? (
             <>
-              {/* Linked exchanges */}
+              {/* Linked exchanges — selectable tiles. Multi-exchange
+                  case naturally renders multiple tiles in the grid. */}
               <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8, marginBottom: 12 }}>
                 {exchanges.map(ex => {
                   const sel = selectedExchangeName === ex.name && selectedExchangeId === ex.id;
                   const catalogEntry = EXCHANGE_OPTIONS.find(o => o.name === ex.name);
                   return (
-                    <div key={ex.id} onClick={() => { setSelectedExchangeName(ex.name); setSelectedExchangeId(ex.id); }} style={{
-                      background: sel ? "var(--green-dim)" : "var(--bg2)",
-                      border: `1px solid ${sel ? "var(--green)" : "var(--line)"}`,
-                      borderRadius: 6, padding: "14px 14px", cursor: "pointer",
-                      display: "flex", alignItems: "center", gap: 10,
-                      transition: "all 0.15s ease",
-                    }}>
-                      <div style={{
-                        width: 32, height: 32, borderRadius: 4, flexShrink: 0,
-                        background: "var(--bg3)", display: "flex", alignItems: "center", justifyContent: "center",
-                        fontSize: 11, fontWeight: 700, color: "var(--t1)",
-                      }}>{catalogEntry?.badge ?? ex.name.slice(0, 2).toUpperCase()}</div>
-                      <div style={{ flex: 1, minWidth: 0 }}>
-                        <div style={{ fontSize: 12, fontWeight: 700, color: "var(--t0)" }}>{ex.name}</div>
-                        <div style={{ fontSize: 10, color: "var(--t2)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{ex.maskedKey}</div>
-                      </div>
-                      <div style={{
-                        width: 18, height: 18, borderRadius: "50%", flexShrink: 0,
-                        background: sel ? "var(--green)" : "transparent",
-                        border: sel ? "none" : "1.5px solid var(--line)",
-                        display: "flex", alignItems: "center", justifyContent: "center",
-                      }}>
-                        {sel && <svg width="10" height="10" viewBox="0 0 10 10" fill="none"><polyline points="1.5,5 4,7.5 8.5,2.5" stroke="var(--bg0)" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/></svg>}
-                      </div>
-                    </div>
+                    <ExchangeTile
+                      key={ex.id}
+                      name={ex.name}
+                      badge={catalogEntry?.badge ?? ex.name.slice(0, 2).toUpperCase()}
+                      subtitle={ex.maskedKey}
+                      selected={sel}
+                      onClick={() => { setSelectedExchangeName(ex.name); setSelectedExchangeId(ex.id); }}
+                    />
                   );
                 })}
               </div>
@@ -413,12 +470,29 @@ export default function SetupWizard({ strategyName, onActivate, onCancel }: Setu
               {EXCHANGE_OPTIONS.filter(o => !exchanges.some(e => e.name === o.name)).length > 0 && (
                 <>
                   {!showNewExchanges && (
-                    <span
+                    <button
+                      type="button"
                       onClick={() => setShowNewExchanges(true)}
-                      style={{ fontSize: 9, color: "var(--t3)", cursor: "pointer", transition: "color 0.15s ease", textDecoration: "none" }}
-                      onMouseEnter={e => { e.currentTarget.style.textDecoration = "underline"; }}
-                      onMouseLeave={e => { e.currentTarget.style.textDecoration = "none"; }}
-                    >Link a different exchange &rarr;</span>
+                      style={{
+                        display: "inline-flex", alignItems: "center", gap: 6,
+                        padding: "7px 12px",
+                        background: "transparent",
+                        border: "1px dashed var(--allocator)",
+                        borderRadius: 3,
+                        color: "var(--allocator)",
+                        fontSize: 9,
+                        fontWeight: 700,
+                        letterSpacing: "0.12em",
+                        textTransform: "uppercase",
+                        fontFamily: "inherit",
+                        cursor: "pointer",
+                        transition: "background 0.12s ease",
+                      }}
+                      onMouseEnter={e => { e.currentTarget.style.background = "var(--allocator-soft)"; }}
+                      onMouseLeave={e => { e.currentTarget.style.background = "transparent"; }}
+                    >
+                      Link a different exchange &rarr;
+                    </button>
                   )}
                   <div style={{
                     maxHeight: showNewExchanges ? 300 : 0,
@@ -427,36 +501,16 @@ export default function SetupWizard({ strategyName, onActivate, onCancel }: Setu
                     marginTop: showNewExchanges ? 12 : 0,
                   }}>
                     <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8 }}>
-                      {EXCHANGE_OPTIONS.filter(o => !exchanges.some(e => e.name === o.name)).map(opt => {
-                        const sel = selectedExchangeName === opt.name && !selectedExchangeId;
-                        return (
-                          <div key={opt.name} onClick={() => { setSelectedExchangeName(opt.name); setSelectedExchangeId(null); }} style={{
-                            background: sel ? "var(--green-dim)" : "var(--bg2)",
-                            border: `1px solid ${sel ? "var(--green)" : "var(--line)"}`,
-                            borderRadius: 6, padding: "14px 14px", cursor: "pointer",
-                            display: "flex", alignItems: "center", gap: 10,
-                            transition: "all 0.15s ease",
-                          }}>
-                            <div style={{
-                              width: 32, height: 32, borderRadius: 4, flexShrink: 0,
-                              background: "var(--bg3)", display: "flex", alignItems: "center", justifyContent: "center",
-                              fontSize: 11, fontWeight: 700, color: "var(--t1)",
-                            }}>{opt.badge}</div>
-                            <div style={{ flex: 1, minWidth: 0 }}>
-                              <div style={{ fontSize: 12, fontWeight: 700, color: "var(--t0)" }}>{opt.name}</div>
-                              <div style={{ fontSize: 10, color: "var(--t2)" }}>{opt.markets}</div>
-                            </div>
-                            <div style={{
-                              width: 18, height: 18, borderRadius: "50%", flexShrink: 0,
-                              background: sel ? "var(--green)" : "transparent",
-                              border: sel ? "none" : "1.5px solid var(--line)",
-                              display: "flex", alignItems: "center", justifyContent: "center",
-                            }}>
-                              {sel && <svg width="10" height="10" viewBox="0 0 10 10" fill="none"><polyline points="1.5,5 4,7.5 8.5,2.5" stroke="var(--bg0)" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/></svg>}
-                            </div>
-                          </div>
-                        );
-                      })}
+                      {EXCHANGE_OPTIONS.filter(o => !exchanges.some(e => e.name === o.name)).map(opt => (
+                        <ExchangeTile
+                          key={opt.name}
+                          name={opt.name}
+                          badge={opt.badge}
+                          subtitle={opt.markets}
+                          selected={selectedExchangeName === opt.name && !selectedExchangeId}
+                          onClick={() => { setSelectedExchangeName(opt.name); setSelectedExchangeId(null); }}
+                        />
+                      ))}
                     </div>
                   </div>
                 </>
@@ -466,36 +520,16 @@ export default function SetupWizard({ strategyName, onActivate, onCancel }: Setu
           ) : (
             /* No linked exchanges — show full catalog */
             <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8, marginBottom: 16 }}>
-              {EXCHANGE_OPTIONS.map(opt => {
-                const sel = selectedExchangeName === opt.name && !selectedExchangeId;
-                return (
-                  <div key={opt.name} onClick={() => { setSelectedExchangeName(opt.name); setSelectedExchangeId(null); }} style={{
-                    background: sel ? "var(--green-dim)" : "var(--bg2)",
-                    border: `1px solid ${sel ? "var(--green)" : "var(--line)"}`,
-                    borderRadius: 6, padding: "14px 14px", cursor: "pointer",
-                    display: "flex", alignItems: "center", gap: 10,
-                    transition: "all 0.15s ease",
-                  }}>
-                    <div style={{
-                      width: 32, height: 32, borderRadius: 4, flexShrink: 0,
-                      background: "var(--bg3)", display: "flex", alignItems: "center", justifyContent: "center",
-                      fontSize: 11, fontWeight: 700, color: "var(--t1)",
-                    }}>{opt.badge}</div>
-                    <div style={{ flex: 1, minWidth: 0 }}>
-                      <div style={{ fontSize: 12, fontWeight: 700, color: "var(--t0)" }}>{opt.name}</div>
-                      <div style={{ fontSize: 10, color: "var(--t2)" }}>{opt.markets}</div>
-                    </div>
-                    <div style={{
-                      width: 18, height: 18, borderRadius: "50%", flexShrink: 0,
-                      background: sel ? "var(--green)" : "transparent",
-                      border: sel ? "none" : "1.5px solid var(--line)",
-                      display: "flex", alignItems: "center", justifyContent: "center",
-                    }}>
-                      {sel && <svg width="10" height="10" viewBox="0 0 10 10" fill="none"><polyline points="1.5,5 4,7.5 8.5,2.5" stroke="var(--bg0)" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/></svg>}
-                    </div>
-                  </div>
-                );
-              })}
+              {EXCHANGE_OPTIONS.map(opt => (
+                <ExchangeTile
+                  key={opt.name}
+                  name={opt.name}
+                  badge={opt.badge}
+                  subtitle={opt.markets}
+                  selected={selectedExchangeName === opt.name && !selectedExchangeId}
+                  onClick={() => { setSelectedExchangeName(opt.name); setSelectedExchangeId(null); }}
+                />
+              ))}
             </div>
           )}
 
