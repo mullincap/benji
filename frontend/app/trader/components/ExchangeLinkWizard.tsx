@@ -49,6 +49,7 @@ import {
   type ExchangePermissions,
   type StoreKeysSuccess,
 } from "../api";
+import { resolveExchangeInfo } from "../_lib/exchange-info";
 
 const SUPPORTED_EXCHANGES: ExchangeSlug[] = ["binance", "blofin"];
 const VERIFY_STEP_LOG_LINES = [
@@ -310,6 +311,11 @@ export function ExchangeLinkWizard({
   const [secretKey, setSecretKey] = useState("");
   const [passphrase, setPassphrase] = useState("");
   const [step1Errors, setStep1Errors] = useState<Record<string, string>>({});
+  // "Need help creating your API keys?" expandable. Collapsed by
+  // default — experienced users skip it; new users have a one-click
+  // path to per-exchange step-by-step guidance + the API-management
+  // link.
+  const [showApiKeyHelp, setShowApiKeyHelp] = useState(false);
 
   // Step 2 state
   const [verify, setVerify] = useState<VerifyState>({ kind: "idle" });
@@ -438,6 +444,90 @@ export function ExchangeLinkWizard({
               <div>&middot; Do not enable <span style={{ color: "var(--t1)" }}>Transfer</span> or <span style={{ color: "var(--t1)" }}>Withdraw</span></div>
             </div>
           )}
+
+          {/* "Need help creating your API keys?" expandable.
+              Renders only when an exchange is selected (so we can
+              show the right per-exchange instructions) AND that
+              exchange has a non-empty instruction set in
+              EXCHANGE_INFO. Silently degrades to nothing for
+              future exchanges added before their entry lands. */}
+          {(() => {
+            if (!exchange) return null;
+            const info = resolveExchangeInfo(exchange);
+            if (info.apiKeyInstructions.length === 0) return null;
+            return (
+              <div style={{ marginBottom: 12 }}>
+                <button
+                  type="button"
+                  onClick={() => setShowApiKeyHelp(v => !v)}
+                  style={{
+                    display: "inline-flex", alignItems: "center", gap: 6,
+                    padding: "4px 0",
+                    background: "transparent",
+                    border: "none",
+                    color: "var(--allocator)",
+                    fontSize: 11,
+                    fontWeight: 700,
+                    fontFamily: "inherit",
+                    cursor: "pointer",
+                  }}
+                >
+                  Need help creating your API keys?
+                  <span style={{
+                    display: "inline-block",
+                    transition: "transform 0.15s ease",
+                    transform: showApiKeyHelp ? "rotate(180deg)" : "rotate(0deg)",
+                    fontSize: 9,
+                  }}>▾</span>
+                </button>
+                {showApiKeyHelp && (
+                  <div style={{
+                    marginTop: 8,
+                    padding: "12px 14px",
+                    background: "var(--bg2)",
+                    border: "1px solid var(--line)",
+                    borderLeft: "3px solid var(--allocator)",
+                    borderRadius: 3,
+                  }}>
+                    <ol style={{
+                      margin: "0 0 12px",
+                      paddingLeft: 18,
+                      color: "var(--t1)",
+                      fontSize: 11,
+                      lineHeight: 1.7,
+                    }}>
+                      {info.apiKeyInstructions.map((line, i) => (
+                        <li key={i}>{line}</li>
+                      ))}
+                    </ol>
+                    {info.apiKeyManagementUrl !== "#" && (
+                      <a
+                        href={info.apiKeyManagementUrl}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        style={{
+                          display: "inline-flex", alignItems: "center", gap: 6,
+                          padding: "7px 12px",
+                          background: "var(--allocator)",
+                          color: "#0d0518",
+                          border: "1px solid var(--allocator)",
+                          borderRadius: 2,
+                          fontSize: 9,
+                          fontWeight: 700,
+                          letterSpacing: "0.14em",
+                          textTransform: "uppercase",
+                          textDecoration: "none",
+                          whiteSpace: "nowrap",
+                        }}
+                      >
+                        {info.apiKeyInstructionsLabel}
+                      </a>
+                    )}
+                  </div>
+                )}
+              </div>
+            );
+          })()}
 
           {/* API key */}
           <div style={{ marginBottom: 10 }}>

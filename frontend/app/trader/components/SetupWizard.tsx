@@ -9,6 +9,7 @@ import React, { useState, useEffect, useRef } from "react";
 import { useTrader, Exchange, fmt, mask } from "../context";
 import { allocatorApi, type ExchangeSlug } from "../api";
 import AllocationPicker from "./AllocationPicker";
+import { resolveExchangeInfo } from "../_lib/exchange-info";
 
 // ─── Exchange catalog ───────────────────────────────────────────────────────
 
@@ -18,47 +19,6 @@ const EXCHANGE_OPTIONS: { name: string; slug: ExchangeSlug; badge: string; marke
   { name: "Binance", slug: "binance", badge: "BN", markets: "Spot · Futures · Margin" },
   { name: "BloFin",  slug: "blofin",  badge: "BF", markets: "Futures" },
 ];
-
-// Per-exchange metadata for the empty-balance guidance panel on Step 3.
-// Keyed by slug. accountUrl is the canonical Assets/Wallet view that
-// lets the user both deposit AND transfer between wallets — covers
-// both empty-everywhere and funds-in-spot-wallet cases from a single
-// landing page. futuresWalletLabel uses each exchange's actual UI
-// terminology so users can find the right wallet without translation.
-const EXCHANGE_INFO: Record<string, { accountUrl: string; futuresWalletLabel: string; displayName: string }> = {
-  blofin: {
-    accountUrl: "https://blofin.com/assets/overview",
-    futuresWalletLabel: "USDT-M wallet",
-    displayName: "BloFin",
-  },
-  binance: {
-    accountUrl: "https://www.binance.com/en/my/wallet/account/overview",
-    futuresWalletLabel: "USDⓈ-M Futures wallet",
-    displayName: "Binance",
-  },
-};
-
-// Resolve the EXCHANGE_INFO entry for the wizard's currently-targeted
-// exchange. Falls back to a generic shape when the exchange isn't in
-// the map (future exchange added without an entry, or null/unknown
-// state) so the panel still renders something usable instead of crashing.
-function resolveExchangeInfo(exchangeName: string | null) {
-  if (exchangeName) {
-    const slug = exchangeName.toLowerCase();
-    const hit = EXCHANGE_INFO[slug];
-    if (hit) return hit;
-    return {
-      accountUrl: "#",
-      futuresWalletLabel: "futures wallet",
-      displayName: exchangeName.charAt(0).toUpperCase() + exchangeName.slice(1).toLowerCase(),
-    };
-  }
-  return {
-    accountUrl: "#",
-    futuresWalletLabel: "futures wallet",
-    displayName: "your exchange",
-  };
-}
 
 const EXCHANGE_KEY_STEPS: Record<string, string[]> = {
   Binance: [
