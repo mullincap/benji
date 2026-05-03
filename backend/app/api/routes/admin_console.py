@@ -636,7 +636,12 @@ def _now_utc():
 
 class IssueInviteRequest(BaseModel):
     email: str
-    firm: str
+    # firm is optional — matches the acceptance form's symmetric change
+    # (PR #36). Currently dead code on this endpoint (the inviter_firm
+    # stored on the invitation row comes from the calling admin's own
+    # user record, not from body.firm); see the issue_invitation
+    # handler for context.
+    firm: str | None = None
     role: str
     expires_in_days: int = Field(default=7, ge=1, le=30)
 
@@ -734,8 +739,10 @@ def issue_invitation(
     invited_email = body.email.strip().lower()
     if not invited_email or "@" not in invited_email:
         raise HTTPException(status_code=400, detail="Valid email required")
-    if not body.firm.strip():
-        raise HTTPException(status_code=400, detail="Firm required")
+    # firm dropped from required check — it's optional on the admin form
+    # and currently dead code anyway (inviter_firm uses admin_row["firm"]
+    # below, not body.firm). Role still required since the form always
+    # sends a non-empty value from its dropdown.
     if not body.role.strip():
         raise HTTPException(status_code=400, detail="Role required")
 
@@ -776,15 +783,31 @@ def issue_invitation(
     token_hash = _hash_invite_token(token)
     expires_at = _now_utc() + timedelta(days=body.expires_in_days)
 
+    # Persist body.firm + body.role as non-binding suggestions on the
+    # invitation row. Acceptance form prefills from these but the
+    # invitee can override either field (the persisted user record
+    # uses the values from the accept POST, not from these columns).
+    # Whitespace-only firm collapses to NULL — same normalization the
+    # acceptance form uses on the user_mgmt.users.firm column.
+    suggested_firm = body.firm.strip() if body.firm and body.firm.strip() else None
+    suggested_role = body.role.strip() if body.role and body.role.strip() else None
+
     cur.execute(
         """
         INSERT INTO user_mgmt.invitations
             (token_hash, invited_email, inviter_user_id,
-             inviter_name, inviter_firm, expires_at)
-        VALUES (%s, %s, %s::uuid, %s, %s, %s)
+             inviter_name, inviter_firm,
+             suggested_firm, suggested_role,
+             expires_at)
+        VALUES (%s, %s, %s::uuid, %s, %s, %s, %s, %s)
         RETURNING invitation_id
         """,
-        (token_hash, invited_email, admin_id, inviter_name, inviter_firm, expires_at),
+        (
+            token_hash, invited_email, admin_id,
+            inviter_name, inviter_firm,
+            suggested_firm, suggested_role,
+            expires_at,
+        ),
     )
     invitation_id = str(cur.fetchone()["invitation_id"])
 

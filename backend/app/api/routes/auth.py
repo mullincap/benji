@@ -398,7 +398,7 @@ def get_invite(token: str, cur=Depends(get_cursor)) -> dict[str, Any]:
     token_hash = _hash_invite_token(token)
     cur.execute("""
         SELECT inviter_name, inviter_firm, invited_email, expires_at,
-               accepted_at
+               accepted_at, suggested_firm, suggested_role
         FROM user_mgmt.invitations
         WHERE token_hash = %s
     """, (token_hash,))
@@ -410,6 +410,12 @@ def get_invite(token: str, cur=Depends(get_cursor)) -> dict[str, Any]:
         "inviter_firm": row["inviter_firm"],
         "invited_email": row["invited_email"],
         "expires_at": row["expires_at"].isoformat(),
+        # Non-binding hints from the admin's "New Invitation" form.
+        # Acceptance form prefills from these; invitee can override.
+        # NULL for invitations issued before migration 025 OR via the
+        # CLI tool (which doesn't capture these fields).
+        "suggested_firm": row["suggested_firm"],
+        "suggested_role": row["suggested_role"],
     }
 
 
