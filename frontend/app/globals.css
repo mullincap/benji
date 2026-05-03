@@ -33,10 +33,43 @@ html {
   --green: #00c896;
   --green-dim: #00c89618;
   --green-mid: #00c89640;
+  --green-bright: #39ff85;            /* hover state on primary CTAs */
+  --green-soft: rgba(0, 200, 150, 0.12); /* OTP filled cells, focus rings */
   --amber: #f0a500;
   --amber-dim: #f0a50018;
   --red: #ff4d4d;
   --red-dim: #ff4d4d18;
+  --border-bright: #34343a;           /* hover border on secondary buttons */
+}
+
+/* ─── Auth flow scoped palette ─────────────────────────────────
+ * The auth-flow visual reference uses a slightly cooler palette than
+ * the rest of the app (true-black #080809 page bg, narrower border
+ * spread). Rather than retheme the whole app, we scope the mockup
+ * palette to .auth-shell — applied by the (auth) route group layout —
+ * so existing tokens resolve to mockup-matched values inside auth
+ * routes only. Components reference var(--bg0) / var(--t1) / etc.
+ * unchanged; the scope re-binds those vars for auth pages.
+ */
+.auth-shell {
+  --bg0: #080809;       /* page background */
+  --bg1: #0c0c0e;       /* card surface */
+  --bg2: #111114;       /* raised panels (inside card) */
+  --bg3: #080809;       /* input bg = page bg, deeper than card */
+  --line: #242428;      /* default borders */
+  --line2: #34343a;     /* hover borders */
+  --t0: #e8e8ec;        /* primary text */
+  --t1: #a09d96;        /* secondary text (form values, labels) */
+  --t2: #8a8a92;        /* muted text (helpers) */
+  --t3: #5a5a62;        /* hint text (eyebrows, dividers) */
+
+  font-size: 14px;
+  background: var(--bg0);
+  color: var(--t0);
+  min-height: 100vh;
+  /* Subtle dot grid backdrop, matching the mockup's radial-gradient */
+  background-image: radial-gradient(circle, rgba(36, 36, 40, 0.5) 1px, transparent 1px);
+  background-size: 24px 24px;
 }
 
 @keyframes pulse-dot {
