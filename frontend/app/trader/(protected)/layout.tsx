@@ -402,15 +402,27 @@ export default function TraderProtectedLayout({ children }: { children: React.Re
       .then((data) => {
         if (cancelled) return;
         if (data?.user_id) {
-          // Onboarding gate: users without an exchange linked are sent
-          // to /trader/get-started (the 1-step setup flow). Honors the
-          // sessionStorage skip flag so a user who clicked "Skip —
-          // explore first" can browse the dashboard without bouncing.
-          // The skip flag is sessionStorage so it auto-clears on
-          // logout (and on a new browser session).
+          // Onboarding gate: only /trader/overview gates on onboarding
+          // completion. Settings, exchange-link, and account routes must
+          // remain reachable without an exchange linked, otherwise the
+          // user has no path to complete onboarding (the BloFin / Binance
+          // cards on /trader/get-started route to
+          // /trader/settings?openLink=… — if this layout bounced that
+          // back to /get-started, the link flow would be unreachable).
+          //
+          // The exact-match scope is the minimum that still funnels
+          // fresh dashboard visits into the hero. Strategy detail,
+          // traders/[id], and other deeper routes are unaffected —
+          // anyone navigating there directly is signalling intent
+          // and shouldn't be hijacked.
+          //
+          // Skip flag honored: a user who clicked "Skip — explore first"
+          // on /get-started lands on /trader/overview without bouncing
+          // back. sessionStorage auto-clears on tab close + logout.
+          const onOverview = initialPathRef.current === "/trader/overview";
           const skipped = (typeof window !== "undefined")
             && sessionStorage.getItem("onboarding_skipped") === "true";
-          if (!data.has_exchange && !skipped) {
+          if (onOverview && !data.has_exchange && !skipped) {
             setAuthState("unauthed"); // suppress flash; layout returns null
             router.replace("/trader/get-started");
             return;
