@@ -114,21 +114,23 @@ export default function WelcomePage() {
         credentials: "include",
       });
       if (res.ok) {
-        // Use the server-computed default_landing (same rule signin uses).
-        // Brand-new users have no allocations yet → /trader/overview;
-        // welcome screen is only ever shown on first_login=true so this
-        // is almost always the trader path.
-        const data = await res.json().catch(() => ({}));
+        // Welcome screen renders only on first_login=true, so by
+        // definition the user has no exchange linked / no allocations
+        // yet. Send them directly to the get-started hero. The
+        // (onboarding)/layout.tsx redirect bounces returning users
+        // with has_exchange=true back to /trader/overview, so this
+        // doesn't strand anyone if first_login somehow flips before
+        // an exchange is linked. (Pre-Phase-1b this honored the
+        // server's default_landing — that branch was effectively
+        // dead since first-login users always resolved to overview.)
+        //
         // Refresh AuthProvider state so the next page sees the cleared
         // first_login flag and topbar UI gated on `user` (e.g. SIGN OUT)
         // is populated. AuthProvider only fetches on mount; without
         // this, the next page renders with a stale user that's either
         // null or still has first_login=true.
         await refetch();
-        const target =
-          (typeof data?.default_landing === "string" && data.default_landing) ||
-          "/trader/overview";
-        router.replace(target);
+        router.replace("/trader/get-started");
         return;
       }
       setError(`Couldn't complete onboarding (${res.status}). Try again.`);

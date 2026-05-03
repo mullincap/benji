@@ -1994,6 +1994,15 @@ export default function SettingsPage() {
     // Snapshot was already fetched inline by the backend; the next /snapshots call picks it up.
     try { await allocatorApi.refreshSnapshots(); } catch { /* non-fatal */ }
     await refresh();
+    // If the user arrived via the get-started hero (?openLink=...),
+    // route them to /trader/overview so the OnboardingNudge's "pick a
+    // strategy" banner picks up the freshly-linked exchange. Without
+    // this hop, the user is stranded on /trader/settings — the
+    // (protected) layout's redirect doesn't fire (has_exchange is now
+    // true) and the nudge doesn't render outside /trader/overview.
+    if (searchParams.get("openLink")) {
+      router.replace("/trader/overview");
+    }
   }
 
   return (
