@@ -38,10 +38,14 @@ last_ip caveat:
 
 from __future__ import annotations
 
+import hashlib
 import logging
+import secrets
+from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request
+from pydantic import BaseModel, Field
 
 from ...db import get_cursor
 from ...services.admin_audit import _client_ip, log_admin_action, require_admin
@@ -612,6 +616,247 @@ def admin_unlock_user(
         action_type="user_unlocked",
         subject_user_id=user_id,
         metadata={"target_email": target["email"]},
+        ip=_client_ip(request),
+    )
+    return {"ok": True}
+
+
+# ─── Invitations ───────────────────────────────────────────────────────────
+# Mirrors the CLI flow shipped in Phase 1a (backend/app/cli/issue_invite.py)
+# but exposed as HTTP endpoints for the admin UI. Same token convention:
+# secrets.token_urlsafe(32) for the URL value, sha256 hex digest stored.
+
+def _hash_invite_token(token: str) -> str:
+    return hashlib.sha256(token.encode()).hexdigest()
+
+
+def _now_utc():
+    return datetime.now(timezone.utc)
+
+
+class IssueInviteRequest(BaseModel):
+    email: str
+    firm: str
+    role: str
+    expires_in_days: int = Field(default=7, ge=1, le=30)
+
+
+def _format_invitation(row: dict) -> dict[str, Any]:
+    """Common shape for invitation list rows. Token value never exposed —
+    plaintext only ever exists in the issue_invitation response."""
+    accepted_at = row["accepted_at"]
+    expires_at = row["expires_at"]
+    now = _now_utc()
+    if accepted_at is not None:
+        status = "accepted"
+    elif expires_at <= now:
+        status = "expired"
+    elif (expires_at - now) < timedelta(hours=24):
+        status = "expiring"
+    else:
+        status = "pending"
+    return {
+        "invitation_id": str(row["invitation_id"]),
+        "invited_email": row["invited_email"],
+        "inviter_name": row["inviter_name"],
+        "inviter_firm": row["inviter_firm"],
+        "inviter_email": row.get("inviter_email"),
+        "expires_at": expires_at.isoformat() if expires_at else None,
+        "accepted_at": accepted_at.isoformat() if accepted_at else None,
+        "created_at": row["created_at"].isoformat() if row["created_at"] else None,
+        "status": status,
+    }
+
+
+@router.get("/invitations")
+def list_invitations(
+    status: Optional[str] = Query(None, description="pending|expiring|accepted|expired"),
+    _admin_id: str = Depends(require_admin),
+    cur=Depends(get_cursor),
+) -> dict[str, Any]:
+    """Lists invitations with computed status (pending|expiring|accepted|expired).
+
+    `expiring` is a sub-state of pending: same row, but expires_at is
+    within 24h. The frontend filter pills surface 'pending' as the
+    union of pending + expiring; 'expiring' is also queryable directly
+    for the at-risk view."""
+    cur.execute(
+        """
+        SELECT i.invitation_id, i.invited_email, i.inviter_user_id,
+               i.inviter_name, i.inviter_firm,
+               i.created_at, i.expires_at, i.accepted_at,
+               u.email AS inviter_email
+        FROM user_mgmt.invitations i
+        LEFT JOIN user_mgmt.users u ON u.user_id = i.inviter_user_id
+        ORDER BY i.created_at DESC
+        """
+    )
+    rows = cur.fetchall()
+    items = [_format_invitation(r) for r in rows]
+    if status:
+        # 'pending' filter folds in 'expiring' rows since they're the
+        # same admin-action set (still revocable, still copyable).
+        if status == "pending":
+            items = [it for it in items if it["status"] in ("pending", "expiring")]
+        else:
+            items = [it for it in items if it["status"] == status]
+
+    stats = {
+        "pending": sum(1 for it in items if it["status"] in ("pending", "expiring")),
+        "expiring": sum(1 for it in items if it["status"] == "expiring"),
+        "accepted": sum(1 for it in items if it["status"] == "accepted"),
+        "expired": sum(1 for it in items if it["status"] == "expired"),
+    }
+    total_decisions = stats["accepted"] + stats["expired"]
+    acceptance_rate = (stats["accepted"] / total_decisions) if total_decisions > 0 else None
+
+    return {
+        "invitations": items,
+        "total": len(items),
+        "stats": {**stats, "acceptance_rate": acceptance_rate},
+    }
+
+
+@router.post("/invitations")
+def issue_invitation(
+    body: IssueInviteRequest,
+    request: Request,
+    admin_id: str = Depends(require_admin),
+    cur=Depends(get_cursor),
+) -> dict[str, Any]:
+    """Mint a fresh invitation. Returns the invite URL ONCE — token
+    plaintext is never persisted, only the SHA-256 hash. Admin sends
+    the URL out-of-band.
+
+    Validates: invitee email isn't already a user, no pending invite
+    for that email already exists. Inviter context (name + firm) comes
+    from the calling admin's own user row."""
+    invited_email = body.email.strip().lower()
+    if not invited_email or "@" not in invited_email:
+        raise HTTPException(status_code=400, detail="Valid email required")
+    if not body.firm.strip():
+        raise HTTPException(status_code=400, detail="Firm required")
+    if not body.role.strip():
+        raise HTTPException(status_code=400, detail="Role required")
+
+    # Ensure no existing user with that email
+    cur.execute("SELECT user_id FROM user_mgmt.users WHERE lower(email) = %s", (invited_email,))
+    if cur.fetchone():
+        raise HTTPException(status_code=409, detail="A user with that email already exists")
+
+    # Reject duplicate pending invite (matches CLI behavior)
+    cur.execute(
+        """
+        SELECT invitation_id FROM user_mgmt.invitations
+         WHERE lower(invited_email) = %s
+           AND accepted_at IS NULL
+           AND expires_at > NOW()
+        """,
+        (invited_email,),
+    )
+    if cur.fetchone():
+        raise HTTPException(status_code=409, detail="A pending invitation for that email already exists")
+
+    # Resolve inviter context. Falls back to email if name/firm fields
+    # are NULL on the admin user row (e.g. legacy admins predating the
+    # accept-invite flow that populates first_name etc.).
+    cur.execute(
+        "SELECT email, first_name, last_name, firm FROM user_mgmt.users WHERE user_id = %s::uuid",
+        (admin_id,),
+    )
+    admin_row = cur.fetchone()
+    inviter_name = (
+        " ".join(filter(None, [admin_row["first_name"], admin_row["last_name"]]))
+        or admin_row["email"]
+    )
+    inviter_firm = (admin_row["firm"] or "Mullincap").strip()
+
+    # Mint
+    token = secrets.token_urlsafe(32)
+    token_hash = _hash_invite_token(token)
+    expires_at = _now_utc() + timedelta(days=body.expires_in_days)
+
+    cur.execute(
+        """
+        INSERT INTO user_mgmt.invitations
+            (token_hash, invited_email, inviter_user_id,
+             inviter_name, inviter_firm, expires_at)
+        VALUES (%s, %s, %s::uuid, %s, %s, %s)
+        RETURNING invitation_id
+        """,
+        (token_hash, invited_email, admin_id, inviter_name, inviter_firm, expires_at),
+    )
+    invitation_id = str(cur.fetchone()["invitation_id"])
+
+    # Audit
+    log_admin_action(
+        cur,
+        admin_user_id=admin_id,
+        action_type="invitation_issued",
+        metadata={
+            "invitation_id": invitation_id,
+            "invited_email": invited_email,
+            "firm": body.firm.strip(),
+            "role": body.role.strip(),
+            "expires_in_days": body.expires_in_days,
+        },
+        ip=_client_ip(request),
+    )
+
+    # Build the URL using request scheme + host so the admin gets a
+    # link that works on whichever environment they're on. Falls back
+    # to mullincap.com if forwarding headers are missing.
+    proto = request.headers.get("x-forwarded-proto") or request.url.scheme
+    host = request.headers.get("x-forwarded-host") or request.headers.get("host") or "mullincap.com"
+    invite_url = f"{proto}://{host}/auth/invite?token={token}"
+
+    log.info("Admin %s issued invite %s for %s", admin_id, invitation_id, invited_email)
+
+    return {
+        "ok": True,
+        "invitation_id": invitation_id,
+        "invite_url": invite_url,
+        "expires_at": expires_at.isoformat(),
+    }
+
+
+@router.post("/invitations/{invitation_id}/revoke")
+def revoke_invitation(
+    invitation_id: str,
+    request: Request,
+    admin_id: str = Depends(require_admin),
+    cur=Depends(get_cursor),
+) -> dict[str, Any]:
+    """Force the invitation to expire immediately. Used when the
+    invited person bounces, the email was wrong, or we simply changed
+    our mind. Already-accepted invitations are 409s — they're settled
+    history."""
+    cur.execute(
+        """
+        SELECT invitation_id, invited_email, accepted_at, expires_at
+        FROM user_mgmt.invitations
+        WHERE invitation_id = %s::uuid
+        """,
+        (invitation_id,),
+    )
+    row = cur.fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="Invitation not found")
+    if row["accepted_at"] is not None:
+        raise HTTPException(status_code=409, detail="Cannot revoke an already-accepted invitation")
+
+    cur.execute(
+        "UPDATE user_mgmt.invitations SET expires_at = NOW() WHERE invitation_id = %s::uuid",
+        (invitation_id,),
+    )
+    log_admin_action(
+        cur,
+        admin_user_id=admin_id,
+        action_type="invitation_revoked",
+        metadata={
+            "invitation_id": invitation_id,
+            "invited_email": row["invited_email"],
+        },
         ip=_client_ip(request),
     )
     return {"ok": True}

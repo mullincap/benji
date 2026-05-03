@@ -224,3 +224,72 @@ export async function adminUnlockUser(userId: string): Promise<{ ok: boolean }> 
     }),
   );
 }
+
+// ─── Invitations ──────────────────────────────────────────────────────────
+
+export type InvitationStatus = "pending" | "expiring" | "accepted" | "expired";
+
+export type Invitation = {
+  invitation_id: string;
+  invited_email: string;
+  inviter_name: string;
+  inviter_firm: string;
+  inviter_email: string | null;
+  expires_at: string | null;
+  accepted_at: string | null;
+  created_at: string | null;
+  status: InvitationStatus;
+};
+
+export type InvitationsListResponse = {
+  invitations: Invitation[];
+  total: number;
+  stats: {
+    pending: number;
+    expiring: number;
+    accepted: number;
+    expired: number;
+    acceptance_rate: number | null;
+  };
+};
+
+export type IssueInviteBody = {
+  email: string;
+  firm: string;
+  role: string;
+  expires_in_days: number;
+};
+
+export type IssueInviteResponse = {
+  ok: boolean;
+  invitation_id: string;
+  invite_url: string;
+  expires_at: string;
+};
+
+export async function fetchInvitations(params: {
+  status?: InvitationStatus | "all";
+} = {}): Promise<InvitationsListResponse> {
+  const q = new URLSearchParams();
+  if (params.status && params.status !== "all") q.set("status", params.status);
+  const path = `/api/admin/invitations${q.toString() ? `?${q}` : ""}`;
+  return jsonOrThrow<InvitationsListResponse>(await apiFetch(path));
+}
+
+export async function issueInvitation(body: IssueInviteBody): Promise<IssueInviteResponse> {
+  return jsonOrThrow(
+    await apiFetch("/api/admin/invitations", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }),
+  );
+}
+
+export async function revokeInvitation(invitationId: string): Promise<{ ok: boolean }> {
+  return jsonOrThrow(
+    await apiFetch(`/api/admin/invitations/${encodeURIComponent(invitationId)}/revoke`, {
+      method: "POST",
+    }),
+  );
+}
