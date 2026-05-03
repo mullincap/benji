@@ -3,6 +3,8 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
 import { useRouter, usePathname } from 'next/navigation';
 
+import { useAuth } from '../lib/auth';
+
 // ─── Theme definitions ───────────────────────────────────────────────────────
 
 type ModuleKey = 'compiler' | 'indexer' | 'simulator' | 'allocator' | 'manager';
@@ -154,6 +156,7 @@ export default function Topbar() {
   const themeRef = useRef<HTMLDivElement | null>(null);
   const router = useRouter();
   const pathname = usePathname();
+  const { user, signout } = useAuth();
 
   const activeModule = getActiveModule(pathname);
   const theme = THEMES[themeId] ?? THEMES.spectrum;
@@ -615,6 +618,35 @@ export default function Topbar() {
         </div>
 
         <Divider />
+
+        {/* Sign out — matches EXIT visual treatment, only renders when authed.
+            EXIT navigates to / (preserves session); SIGN OUT destroys the
+            session and bounces to /auth/signin. confirm() is the safety
+            net per Phase 1b spec — no inline-double-click pattern exists
+            elsewhere in the app, so the standard browser dialog wins. */}
+        {user && (
+          <button
+            onClick={() => {
+              if (window.confirm('Sign out?')) {
+                void signout();
+              }
+            }}
+            title={`Sign out ${user.email}`}
+            style={{
+              background: 'transparent', border: '1px solid var(--line)',
+              borderRadius: 3, height: 28, padding: '0 10px',
+              fontSize: 9, color: 'var(--t3)', cursor: 'pointer',
+              transition: 'all 0.15s ease',
+              display: 'inline-flex', alignItems: 'center', gap: 4,
+              fontFamily: 'var(--font-space-mono), Space Mono, monospace',
+              marginRight: 4,
+            }}
+            onMouseEnter={e => { e.currentTarget.style.borderColor = 'var(--line2)'; e.currentTarget.style.color = 'var(--t2)'; }}
+            onMouseLeave={e => { e.currentTarget.style.borderColor = 'var(--line)'; e.currentTarget.style.color = 'var(--t3)'; }}
+          >
+            SIGN OUT
+          </button>
+        )}
 
         {/* Exit to landing */}
         <button
