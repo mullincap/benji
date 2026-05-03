@@ -10,6 +10,7 @@ from app.api.routes.jobs import router as jobs_router
 from app.api.routes.compiler import router as compiler_router
 from app.api.routes.indexer import router as indexer_router
 from app.api.routes.admin import router as admin_router
+from app.api.routes.admin_console import router as admin_console_router
 from app.api.routes.auth import router as auth_router
 from app.api.routes.allocator import router as allocator_router
 from app.api.routes.manager import router as manager_router
@@ -46,6 +47,7 @@ app.add_middleware(
 
 app.include_router(jobs_router)
 app.include_router(admin_router)
+app.include_router(admin_console_router)
 app.include_router(auth_router)
 app.include_router(compiler_router)
 app.include_router(indexer_router)
