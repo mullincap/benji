@@ -24,6 +24,7 @@ import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
 
+import { useAuth } from "../../lib/auth";
 import {
   AuthCard,
   Button,
@@ -61,6 +62,7 @@ type LoadState =
 
 export default function AcceptInvitePage() {
   const router = useRouter();
+  const { refetch } = useAuth();
   const [token, setToken] = useState<string | null>(null);
 
   const [state, setState] = useState<LoadState>({ kind: "loading" });
@@ -157,6 +159,12 @@ export default function AcceptInvitePage() {
       );
 
       if (res.ok) {
+        // Refresh AuthProvider state so /auth/welcome (and onward
+        // pages) see the just-created user. AuthProvider only fetches
+        // on mount; without this, downstream topbar UI gated on
+        // `user` (e.g. SIGN OUT button) stays hidden until first
+        // hard reload.
+        await refetch();
         router.replace("/auth/welcome");
         return;
       }
