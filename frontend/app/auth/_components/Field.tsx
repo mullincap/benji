@@ -5,9 +5,15 @@
  * helper line below the input. Supports a `rightSlot` in the label row
  * for inline links like "Forgot password?". `helperKind` switches the
  * helper color: default (dim), error (red), success (green).
+ *
+ * a11y: when helper text is present and htmlFor is set, Field injects
+ * aria-describedby on the child input pointing to the helper element's
+ * id. This requires the child to be a single element that accepts
+ * aria-* props (Input/Select/Checkbox here) — the cloneElement is a
+ * no-op for fragments and string children, falling back gracefully.
  */
 
-import type { ReactNode } from "react";
+import { Children, cloneElement, isValidElement, type ReactElement, type ReactNode } from "react";
 
 type HelperKind = "default" | "error" | "success";
 
@@ -34,6 +40,27 @@ export default function Field({
   rightSlot,
   children,
 }: Props) {
+  const helperId = helper && htmlFor ? `${htmlFor}-helper` : undefined;
+
+  // Inject aria-describedby on the first valid element child when helper
+  // is present. Subsequent siblings (e.g. PasswordStrengthMeter) pass
+  // through unchanged. Computed up-front so the render function stays
+  // pure (no mutation inside Children.map).
+  const childArray = Children.toArray(children);
+  const firstElementIndex = helperId
+    ? childArray.findIndex((c) => isValidElement(c))
+    : -1;
+  const decorated = childArray.map((child, i) => {
+    if (i !== firstElementIndex || !helperId || !isValidElement(child)) {
+      return child;
+    }
+    const existing = (child.props as { "aria-describedby"?: string })["aria-describedby"];
+    const next = existing ? `${existing} ${helperId}` : helperId;
+    return cloneElement(child as ReactElement<{ "aria-describedby"?: string }>, {
+      "aria-describedby": next,
+    });
+  });
+
   return (
     <div style={{ marginBottom: 16 }}>
       <div
@@ -57,9 +84,11 @@ export default function Field({
         </label>
         {rightSlot}
       </div>
-      {children}
+      {decorated}
       {helper && (
         <div
+          id={helperId}
+          role={helperKind === "error" ? "alert" : undefined}
           style={{
             marginTop: 6,
             fontSize: 11,

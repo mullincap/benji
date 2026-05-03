@@ -7,9 +7,15 @@
  * on the `checked` prop, plus the children as the clickable label. The
  * checked-state checkmark is drawn with a rotated CSS border (no SVG
  * dependency).
+ *
+ * a11y: the native <input type="checkbox"> remains in the focus order
+ * (it's positioned offscreen but not display:none). We track its focus
+ * state via React onFocus/onBlur and paint a green focus ring on the
+ * visible custom box, since the native input itself is invisible to
+ * sighted keyboard users.
  */
 
-import type { ReactNode } from "react";
+import { useState, type ReactNode } from "react";
 
 type Props = {
   checked: boolean;
@@ -22,6 +28,7 @@ type Props = {
 
 export default function Checkbox({ checked, onChange, children, disabled, id }: Props) {
   const inputId = id || `checkbox-${stableIdFrom(children)}`;
+  const [focused, setFocused] = useState(false);
   return (
     <label
       htmlFor={inputId}
@@ -40,8 +47,11 @@ export default function Checkbox({ checked, onChange, children, disabled, id }: 
         checked={checked}
         disabled={disabled}
         onChange={(e) => onChange(e.target.checked)}
+        onFocus={() => setFocused(true)}
+        onBlur={() => setFocused(false)}
         style={{
-          /* Hide the native checkbox without removing it from a11y tree. */
+          /* Hide the native checkbox visually without removing it from
+             the focus order or the accessibility tree. */
           position: "absolute",
           opacity: 0,
           width: 0,
@@ -57,6 +67,7 @@ export default function Checkbox({ checked, onChange, children, disabled, id }: 
           border: `1px solid ${checked ? "var(--green)" : "var(--line2)"}`,
           background: checked ? "var(--green)" : "var(--bg3)",
           borderRadius: 2,
+          boxShadow: focused ? "0 0 0 3px var(--green-soft)" : "none",
           flexShrink: 0,
           marginTop: 1,
           position: "relative",
