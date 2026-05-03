@@ -1443,29 +1443,24 @@ export default function SettingsPage() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const { exchanges, instances, removeExchange, loading, refresh } = useTrader();
-  const [showWizard, setShowWizard] = useState(false);
-  const [removingId, setRemovingId] = useState<string | null>(null);
-  const [confirmRemove, setConfirmRemove] = useState<string | null>(null);
-  const [blockedRemove, setBlockedRemove] = useState<string | null>(null);
-
-  // Auto-open the ExchangeLinkWizard when arriving via ?openLink=…
-  // (e.g. legacy bookmark or any caller that still deep-links here —
-  // /trader/get-started inlines the wizard now and no longer routes
-  // here). The wizard reads `initialExchange` (computed below) for
-  // pre-selection.
-  useEffect(() => {
-    if (searchParams.get("openLink")) {
-      setShowWizard(true);
-    }
-  }, [searchParams]);
 
   // Validate the openLink query param against the wizard's slug union.
   // Anything else (missing, "foo", etc.) yields null → no pre-fill.
+  // Auto-open the wizard synchronously on mount when openLink is set
+  // — using lazy useState init avoids the prior mount flicker where
+  // the linked-exchanges list briefly rendered before a useEffect
+  // flipped showWizard to true. Caller flow: legacy bookmarks or any
+  // future deep-link to settings; /trader/get-started inlines its own
+  // wizard and no longer routes here.
   const openLinkParam = searchParams.get("openLink");
   const initialExchange =
     openLinkParam === "blofin" || openLinkParam === "binance"
       ? openLinkParam
       : null;
+  const [showWizard, setShowWizard] = useState(initialExchange !== null);
+  const [removingId, setRemovingId] = useState<string | null>(null);
+  const [confirmRemove, setConfirmRemove] = useState<string | null>(null);
+  const [blockedRemove, setBlockedRemove] = useState<string | null>(null);
 
   async function handleWizardComplete() {
     setShowWizard(false);
