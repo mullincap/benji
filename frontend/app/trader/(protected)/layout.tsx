@@ -3,16 +3,22 @@
 /**
  * frontend/app/trader/(protected)/layout.tsx
  * ==========================================
- * Protected layout for all /trader/* pages except /trader/login.
+ * Protected layout for all /trader/* pages.
  *
  * On mount, calls GET /api/auth/me. If unauthenticated (401), redirects to
- * /trader/login. Renders nothing until the auth check resolves so we never
- * flash protected content to an unauthenticated user.
+ * /auth/signin?next=<current-path> so the user returns to their intended
+ * destination after signing in. Renders nothing until the auth check
+ * resolves so we never flash protected content to an unauthenticated user.
  *
  * Once authenticated, renders: TraderProvider > Topbar > Sidebar > children.
+ *
+ * Pre-Phase-1a this layout bounced to /trader/login (the trader-portal-only
+ * signin page). Phase 1a unified signin at /auth/signin; the old route
+ * still exists as a redirect stub at /trader/(public)/login/page.tsx for
+ * stale bookmarks.
  */
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { usePathname, useRouter } from "next/navigation";
 import Topbar from "../../components/Topbar";
 import { useSidebarCollapsed } from "../../components/useSidebarCollapsed";
@@ -374,10 +380,19 @@ function Sidebar() {
 
 export default function TraderProtectedLayout({ children }: { children: React.ReactNode }) {
   const router = useRouter();
+  const pathname = usePathname();
   const [authState, setAuthState] = useState<AuthState>("loading");
+
+  // Capture the original landing path via a ref so the auth check only
+  // fires on mount (not on every navigation through this layout). The
+  // ?next= we send to /auth/signin reflects what the user originally
+  // tried to access — re-running the /me check on every nav inside the
+  // layout would just be network spam.
+  const initialPathRef = useRef(pathname);
 
   useEffect(() => {
     let cancelled = false;
+    const signinHref = "/auth/signin?next=" + encodeURIComponent(initialPathRef.current);
     fetch(`${API_BASE}/api/auth/me`, { credentials: "include" })
       .then((r) => {
         if (r.ok) return r.json();
@@ -389,13 +404,13 @@ export default function TraderProtectedLayout({ children }: { children: React.Re
           setAuthState("authed");
         } else {
           setAuthState("unauthed");
-          router.replace("/trader/login");
+          router.replace(signinHref);
         }
       })
       .catch(() => {
         if (cancelled) return;
         setAuthState("unauthed");
-        router.replace("/trader/login");
+        router.replace(signinHref);
       });
     return () => { cancelled = true; };
   }, [router]);
