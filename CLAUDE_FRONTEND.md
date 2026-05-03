@@ -20,12 +20,14 @@ frontend/app/
   compiler/(protected)/   coverage | days | marketcap | symbols | jobs
   indexer/(protected)/
   simulator/              page.tsx — single-page audit runner (no subroutes)
-  allocator/(protected)/  trader-user login under /trader/(public)/login (separate auth)
+  allocator/(protected)/  per-user trader workspace; signin at /auth/signin
   manager/(protected)/    overview | execution | portfolios | chat
+  auth/                   Phase 1a unified signin/invite/welcome
+  admin/                  Phase 1 admin console (gated on user.is_admin)
   components/             shared UI (Topbar, StatusBar, Skeleton, RightPanel, LeftPanel, ...)
 ```
 
-`(protected)` routes require a valid session cookie. Compiler / indexer / manager share the admin `admin_session` cookie and all redirect unauthenticated users to `/login?next=<current-path>`, which returns them to the originating route after a successful login. The trader module uses a separate per-user session and still has its own `/trader/login`.
+`(protected)` routes require a valid session cookie. Compiler / indexer / manager share the admin `admin_session` cookie and all redirect unauthenticated users to `/login?next=<current-path>`, which returns them to the originating route after a successful login. The trader module and the /admin module use the per-user `user_session` cookie (Phase 1a) and redirect unauthenticated users to `/auth/signin?next=<current-path>`.
 
 ## API_BASE pattern
 
@@ -43,7 +45,9 @@ fetch(`${API_BASE}/api/...`, { credentials: "include" })
 
 - `credentials: "include"` on every fetch
 - `res.status === 401` → show "Session expired" banner (don't auto-redirect)
-- Admin pages (compiler, indexer, manager) gate on `/api/admin/whoami` and redirect to `/login?next=<path>` on 401; allocator pages use a per-user session via `/api/auth/me` and redirect to `/trader/login`
+- Compiler / indexer / manager gate on `/api/admin/whoami` (legacy passphrase admin) and redirect to `/login?next=<path>` on 401
+- Trader / admin pages use the per-user session via `/api/auth/me` and redirect to `/auth/signin?next=<path>` on 401 (Phase 1a unified flow)
+- Stale bookmarks to `/trader/login` redirect to `/auth/signin` via the stub at `frontend/app/trader/(public)/login/page.tsx`
 
 ## Design system tokens
 

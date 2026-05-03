@@ -1,14 +1,18 @@
 /**
  * frontend/app/trader/(public)/layout.tsx
  * =======================================
- * Layout for the public sub-tree of /trader/* — currently only /trader/login.
+ * Layout for the public sub-tree of /trader/* — currently only the
+ * /trader/login redirect stub.
  *
- * No auth check, no sidebar. Renders the shared Topbar at the top, then
- * centers the children (login form) in the remaining space.
+ * Pre-Phase-1a this layout wrapped a real signin form. Phase 1a
+ * unified signin at /auth/signin (PR #15); the only remaining child
+ * here is the redirect-only page that bounces stale bookmarks to
+ * /auth/signin. The layout itself is largely vestigial — kept until
+ * the /trader/login URL is decommissioned entirely.
  *
- * Sibling layout: app/trader/(protected)/layout.tsx wraps all other /trader/*
- * pages with an auth guard + sidebar. The route group parens "(public)" do not
- * appear in the URL — the login page is reachable at /trader/login.
+ * No auth check, no sidebar. Renders the shared Topbar at the top
+ * so a user who lands here briefly during the redirect doesn't see
+ * a chrome-less page, then centers the (effectively empty) child.
  */
 
 import Topbar from "../../components/Topbar";
