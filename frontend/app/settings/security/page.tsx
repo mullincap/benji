@@ -169,16 +169,16 @@ export default function SecurityPage() {
               <>
                 Take me to{" "}
                 <Link
-                  href="/"
+                  href="/trader/overview"
                   style={{ color: "var(--green)", textDecoration: "none", marginLeft: 6 }}
                 >
-                  the dashboard
+                  the workspace
                 </Link>
               </>
             }
           >
             <Link
-              href="/"
+              href="/trader/overview"
               style={{
                 display: "inline-flex",
                 alignItems: "center",

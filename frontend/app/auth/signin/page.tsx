@@ -118,11 +118,17 @@ export default function SignInPage() {
           //   1. explicit ?next= (deep link, auth-bounce, etc.) — user intent wins
           //   2. server-side default_landing rule (active allocations? → manager
           //      else trader)
-          //   3. "/" as a safety net if both are missing
+          //   3. /trader/overview as the generic app home if both are missing
+          //
+          // The fallback used to be "/" which dropped users on the marketing
+          // landing page — surprising for someone who just signed in.
+          // /trader/overview is the conservative app home; users with active
+          // allocations would normally hit case (2) and land on /manager
+          // /overview directly.
           const target =
             nextPath ||
             (typeof data?.default_landing === "string" ? data.default_landing : null) ||
-            "/";
+            "/trader/overview";
           router.replace(target);
         }
         return;
