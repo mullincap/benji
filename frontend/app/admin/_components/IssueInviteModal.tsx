@@ -18,12 +18,16 @@ import { useState } from "react";
 import Modal from "./Modal";
 import { issueInvitation } from "../_lib/api";
 
+// Mirrors the acceptance-form list (frontend/app/auth/invite/page.tsx).
+// Trader leads (platform's primary persona today), Allocator next, then
+// alphabetical. First entry is the form's default.
 const ROLE_OPTIONS = [
-  "Fund Manager",
+  "Trader",
   "Allocator",
-  "Quant",
   "Analyst",
+  "Fund Manager",
   "Other",
+  "Quant / Researcher",
 ] as const;
 
 const EXPIRES_OPTIONS: Array<{ value: number; label: string }> = [
@@ -42,7 +46,7 @@ type Props = {
 export default function IssueInviteModal({ onClose, onIssued }: Props) {
   const [email, setEmail] = useState("");
   const [firm, setFirm] = useState("");
-  const [role, setRole] = useState<string>("Allocator");
+  const [role, setRole] = useState<string>(ROLE_OPTIONS[0]); // Trader default
   const [expires, setExpires] = useState<number>(7);
 
   const [submitting, setSubmitting] = useState(false);
@@ -54,15 +58,16 @@ export default function IssueInviteModal({ onClose, onIssued }: Props) {
 
   async function handleGenerate() {
     setError(null);
-    if (!email.trim() || !firm.trim()) {
-      setError("Email and firm are required.");
+    if (!email.trim()) {
+      setError("Email is required.");
       return;
     }
     setSubmitting(true);
     try {
       const res = await issueInvitation({
         email: email.trim(),
-        firm: firm.trim(),
+        // firm is optional; whitespace-only collapses to null.
+        firm: firm.trim() || null,
         role,
         expires_in_days: expires,
       });
@@ -224,7 +229,7 @@ export default function IssueInviteModal({ onClose, onIssued }: Props) {
       </Field>
 
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
-        <Field label="Firm">
+        <Field label="Firm (optional)">
           <Input
             value={firm}
             onChange={setFirm}

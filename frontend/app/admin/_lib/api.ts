@@ -255,7 +255,7 @@ export type InvitationsListResponse = {
 
 export type IssueInviteBody = {
   email: string;
-  firm: string;
+  firm: string | null;
   role: string;
   expires_in_days: number;
 };

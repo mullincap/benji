@@ -636,7 +636,12 @@ def _now_utc():
 
 class IssueInviteRequest(BaseModel):
     email: str
-    firm: str
+    # firm is optional — matches the acceptance form's symmetric change
+    # (PR #36). Currently dead code on this endpoint (the inviter_firm
+    # stored on the invitation row comes from the calling admin's own
+    # user record, not from body.firm); see the issue_invitation
+    # handler for context.
+    firm: str | None = None
     role: str
     expires_in_days: int = Field(default=7, ge=1, le=30)
 
@@ -734,8 +739,10 @@ def issue_invitation(
     invited_email = body.email.strip().lower()
     if not invited_email or "@" not in invited_email:
         raise HTTPException(status_code=400, detail="Valid email required")
-    if not body.firm.strip():
-        raise HTTPException(status_code=400, detail="Firm required")
+    # firm dropped from required check — it's optional on the admin form
+    # and currently dead code anyway (inviter_firm uses admin_row["firm"]
+    # below, not body.firm). Role still required since the form always
+    # sends a non-empty value from its dropdown.
     if not body.role.strip():
         raise HTTPException(status_code=400, detail="Role required")
 
