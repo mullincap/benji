@@ -109,6 +109,32 @@ def get_onboarding_state(
     has_selected_strategy = selected_strategy_id is not None
     strategy_slug = sel["strategy_slug"] if sel else None
 
+    # When the user has an active allocation, fetch its strategy name for
+    # the "you're live" banner copy. Distinct from selected_strategy_*
+    # fields above — those are cleared the moment an allocation is
+    # created (atomically with the insert in allocator.py:create_allocation),
+    # so by the time the live banner needs to render, selected_strategy_id
+    # is already null. The live banner reads from the allocation directly.
+    # Most-recent active row by created_at — covers the multi-allocation
+    # case (banner mentions the latest one, which is usually the most
+    # relevant context for a "you just deployed" celebration).
+    active_strategy_name: str | None = None
+    if has_active_allocation:
+        cur.execute(
+            """
+            SELECT s.name AS strategy_name
+              FROM user_mgmt.allocations a
+              JOIN audit.strategy_versions sv ON sv.strategy_version_id = a.strategy_version_id
+              JOIN audit.strategies s ON s.strategy_id = sv.strategy_id
+             WHERE a.user_id = %s::uuid AND a.status = 'active'
+             ORDER BY a.created_at DESC
+             LIMIT 1
+            """,
+            (user_id,),
+        )
+        row = cur.fetchone()
+        active_strategy_name = row["strategy_name"] if row else None
+
     return {
         "has_exchange": has_exchange,
         "has_selected_strategy": has_selected_strategy,
@@ -118,6 +144,7 @@ def get_onboarding_state(
         "selected_strategy_version": sel["version_label"] if sel else None,
         "selected_strategy_sharpe": float(sel["sharpe"]) if sel and sel["sharpe"] is not None else None,
         "has_active_allocation": has_active_allocation,
+        "active_allocation_strategy_name": active_strategy_name,
     }
 
 
