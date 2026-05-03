@@ -27,6 +27,7 @@ import {
 } from "../_components";
 import { type Column } from "../_components/AdminTable";
 import { deriveInitials } from "../_components/Avatar";
+import IssueInviteModal from "../_components/IssueInviteModal";
 import {
   fetchUsers,
   type UserStatus,
@@ -52,6 +53,7 @@ export default function UsersPage() {
 
   const [search, setSearch] = useState("");
   const [statusFilter, setStatusFilter] = useState<UserStatus | "all">("all");
+  const [issueOpen, setIssueOpen] = useState(false);
   const [users, setUsers] = useState<UserSummary[] | null>(null);
   const [stats, setStats] = useState<{
     total: number;
@@ -231,6 +233,25 @@ export default function UsersPage() {
             )}
           </h1>
         </div>
+        <button
+          type="button"
+          onClick={() => setIssueOpen(true)}
+          style={{
+            background: "var(--amber)",
+            color: "#1a1100",
+            border: "1px solid var(--amber)",
+            borderRadius: 2,
+            padding: "9px 14px",
+            fontFamily: "inherit",
+            fontSize: 11,
+            fontWeight: 700,
+            letterSpacing: "0.12em",
+            textTransform: "uppercase",
+            cursor: "pointer",
+          }}
+        >
+          + New Invitation
+        </button>
       </div>
 
       <TerminalStatusBar
@@ -323,6 +344,12 @@ export default function UsersPage() {
           emptyMessage="No users match your filters."
         />
       )}
+
+      {/* New-invitation modal — same component the /admin/invitations
+          page uses. We don't refresh the users list here on success
+          because issuing an invitation doesn't create a user (the new
+          user only appears once they accept). */}
+      {issueOpen && <IssueInviteModal onClose={() => setIssueOpen(false)} />}
     </div>
   );
 }
