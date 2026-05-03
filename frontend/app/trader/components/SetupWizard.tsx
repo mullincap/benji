@@ -19,6 +19,47 @@ const EXCHANGE_OPTIONS: { name: string; slug: ExchangeSlug; badge: string; marke
   { name: "BloFin",  slug: "blofin",  badge: "BF", markets: "Futures" },
 ];
 
+// Per-exchange metadata for the empty-balance guidance panel on Step 3.
+// Keyed by slug. accountUrl is the canonical Assets/Wallet view that
+// lets the user both deposit AND transfer between wallets — covers
+// both empty-everywhere and funds-in-spot-wallet cases from a single
+// landing page. futuresWalletLabel uses each exchange's actual UI
+// terminology so users can find the right wallet without translation.
+const EXCHANGE_INFO: Record<string, { accountUrl: string; futuresWalletLabel: string; displayName: string }> = {
+  blofin: {
+    accountUrl: "https://blofin.com/assets/overview",
+    futuresWalletLabel: "USDT-M wallet",
+    displayName: "BloFin",
+  },
+  binance: {
+    accountUrl: "https://www.binance.com/en/my/wallet/account/overview",
+    futuresWalletLabel: "USDⓈ-M Futures wallet",
+    displayName: "Binance",
+  },
+};
+
+// Resolve the EXCHANGE_INFO entry for the wizard's currently-targeted
+// exchange. Falls back to a generic shape when the exchange isn't in
+// the map (future exchange added without an entry, or null/unknown
+// state) so the panel still renders something usable instead of crashing.
+function resolveExchangeInfo(exchangeName: string | null) {
+  if (exchangeName) {
+    const slug = exchangeName.toLowerCase();
+    const hit = EXCHANGE_INFO[slug];
+    if (hit) return hit;
+    return {
+      accountUrl: "#",
+      futuresWalletLabel: "futures wallet",
+      displayName: exchangeName.charAt(0).toUpperCase() + exchangeName.slice(1).toLowerCase(),
+    };
+  }
+  return {
+    accountUrl: "#",
+    futuresWalletLabel: "futures wallet",
+    displayName: "your exchange",
+  };
+}
+
 const EXCHANGE_KEY_STEPS: Record<string, string[]> = {
   Binance: [
     "Log into Binance \u2192 profile icon \u2192 API Management",
@@ -653,82 +694,92 @@ export default function SetupWizard({ strategyName, onActivate, onCancel }: Setu
         <div>
           {availableBalance > 0 ? (
             <AllocationPicker value={allocation} onChange={setAllocation} otherAllocated={otherAllocated} />
-          ) : (
+          ) : (() => {
             // Empty-balance guidance panel. Replaces the slider entirely
             // when there's nothing to allocate — a slider with $0 max
-            // is meaningless. Single unified copy (no spot vs futures
-            // distinction) because extending the snapshot pipeline to
-            // also fetch BloFin spot balance is a multi-day refactor;
-            // filed as a polish follow-up. The Open BloFin Account link
-            // points to BloFin's main account page where users can both
-            // deposit AND transfer between wallets, so the panel covers
-            // both "no funds anywhere" and "funds in spot, not futures".
-            <div style={{
-              background: "var(--bg2)",
-              border: "1px solid var(--line)",
-              borderLeft: "3px solid var(--allocator)",
-              borderRadius: 3,
-              padding: "18px 20px",
-              marginBottom: 14,
-            }}>
+            // is meaningless. Per-exchange copy + URLs via EXCHANGE_INFO
+            // so users land on the right Assets/Wallet view and see the
+            // exchange's actual wallet terminology ("USDT-M wallet" on
+            // BloFin, "USDⓈ-M Futures wallet" on Binance).
+            //
+            // Spot vs futures detection (showing only the relevant case)
+            // would need spot balance in the snapshot pipeline; that's
+            // a multi-day refactor (new BloFin asset endpoint, schema
+            // columns, writer) so the unified copy covers both deposit
+            // AND transfer-from-spot from a single panel.
+            const ex = resolveExchangeInfo(selectedExchangeName);
+            return (
               <div style={{
-                fontSize: 9, fontWeight: 700, letterSpacing: "0.12em",
-                textTransform: "uppercase", color: "var(--allocator)",
-                marginBottom: 8,
+                background: "var(--bg2)",
+                border: "1px solid var(--line)",
+                borderLeft: "3px solid var(--allocator)",
+                borderRadius: 3,
+                padding: "18px 20px",
+                marginBottom: 14,
               }}>
-                No available balance
+                <div style={{
+                  fontSize: 9, fontWeight: 700, letterSpacing: "0.12em",
+                  textTransform: "uppercase", color: "var(--allocator)",
+                  marginBottom: 8,
+                }}>
+                  No available balance
+                </div>
+                <div style={{ fontSize: 13, color: "var(--t0)", fontWeight: 700, marginBottom: 8, lineHeight: 1.4 }}>
+                  Your {ex.displayName} {ex.futuresWalletLabel} has no available balance.
+                </div>
+                <div style={{ fontSize: 11, color: "var(--t1)", lineHeight: 1.6, marginBottom: 6 }}>
+                  To allocate to {strategyName}, you&apos;ll need USDT in your {ex.futuresWalletLabel}:
+                </div>
+                <ul style={{
+                  fontSize: 11, color: "var(--t1)", lineHeight: 1.6,
+                  margin: "0 0 14px", paddingLeft: 18,
+                }}>
+                  <li>Deposit USDT to your {ex.displayName} account, or</li>
+                  <li>Transfer existing USDT from another wallet (Spot/Funding) to your {ex.futuresWalletLabel}</li>
+                </ul>
+                <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+                  <a
+                    href={ex.accountUrl}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    style={{
+                      display: "inline-flex", alignItems: "center", gap: 6,
+                      padding: "8px 14px",
+                      background: "var(--allocator)",
+                      color: "#0d0518",
+                      border: "1px solid var(--allocator)",
+                      borderRadius: 2,
+                      fontSize: 9, fontWeight: 700,
+                      letterSpacing: "0.14em", textTransform: "uppercase",
+                      textDecoration: "none",
+                      whiteSpace: "nowrap",
+                    }}
+                  >
+                    Open {ex.displayName} account →
+                  </a>
+                  <button
+                    onClick={handleRefreshBalance}
+                    disabled={refreshingBalance}
+                    style={{
+                      display: "inline-flex", alignItems: "center", gap: 6,
+                      padding: "8px 14px",
+                      background: "transparent",
+                      color: "var(--t1)",
+                      border: "1px solid var(--border-bright)",
+                      borderRadius: 2,
+                      fontSize: 9, fontWeight: 700,
+                      letterSpacing: "0.14em", textTransform: "uppercase",
+                      cursor: refreshingBalance ? "default" : "pointer",
+                      opacity: refreshingBalance ? 0.5 : 1,
+                      whiteSpace: "nowrap",
+                    }}
+                  >
+                    {refreshingBalance ? "Refreshing…" : "Refresh balance"}
+                  </button>
+                </div>
               </div>
-              <div style={{ fontSize: 13, color: "var(--t0)", fontWeight: 700, marginBottom: 6, lineHeight: 1.4 }}>
-                Your BloFin futures wallet is empty.
-              </div>
-              <div style={{ fontSize: 11, color: "var(--t1)", lineHeight: 1.6, marginBottom: 14 }}>
-                To allocate to {strategyName}, either deposit USDT to BloFin
-                or transfer existing USDT from your spot wallet into your
-                futures wallet. Once funds are visible, click{" "}
-                <span style={{ color: "var(--allocator)", fontWeight: 700 }}>Refresh balance</span>.
-              </div>
-              <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
-                <a
-                  href="https://blofin.com/account"
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  style={{
-                    display: "inline-flex", alignItems: "center", gap: 6,
-                    padding: "8px 14px",
-                    background: "var(--allocator)",
-                    color: "#0d0518",
-                    border: "1px solid var(--allocator)",
-                    borderRadius: 2,
-                    fontSize: 9, fontWeight: 700,
-                    letterSpacing: "0.14em", textTransform: "uppercase",
-                    textDecoration: "none",
-                    whiteSpace: "nowrap",
-                  }}
-                >
-                  Open BloFin account →
-                </a>
-                <button
-                  onClick={handleRefreshBalance}
-                  disabled={refreshingBalance}
-                  style={{
-                    display: "inline-flex", alignItems: "center", gap: 6,
-                    padding: "8px 14px",
-                    background: "transparent",
-                    color: "var(--t1)",
-                    border: "1px solid var(--border-bright)",
-                    borderRadius: 2,
-                    fontSize: 9, fontWeight: 700,
-                    letterSpacing: "0.14em", textTransform: "uppercase",
-                    cursor: refreshingBalance ? "default" : "pointer",
-                    opacity: refreshingBalance ? 0.5 : 1,
-                    whiteSpace: "nowrap",
-                  }}
-                >
-                  {refreshingBalance ? "Refreshing…" : "Refresh balance"}
-                </button>
-              </div>
-            </div>
-          )}
+            );
+          })()}
 
           <div style={{ display: "flex", justifyContent: "space-between", borderTop: "0.5px solid var(--line)", paddingTop: 14 }}>
             <button onClick={() => setStep(linkedExchange ? 1 : 2)} style={{ padding: "10px 16px", background: "transparent", color: "var(--t2)", border: "1px solid var(--line)", borderRadius: 3, fontSize: 9, fontWeight: 700, letterSpacing: "0.12em", textTransform: "uppercase", cursor: "pointer" }}>&larr; BACK</button>
