@@ -362,8 +362,10 @@ export function ExchangeLinkWizard({
       });
       lineTimers.forEach(clearTimeout);
       setVerify({ kind: "ok", result });
-      // Auto-advance to step 3 so user sees live permissions
-      setTimeout(() => setStep(3), 400);
+      // No auto-advance — Step 2 now shows a CONTINUE button on success
+      // so the user has a moment to see what was verified before
+      // moving on. (Was: setTimeout(() => setStep(3), 400) — flashed
+      // past too fast for users to read the verification log.)
     } catch (err) {
       lineTimers.forEach(clearTimeout);
       const { status, detail } = parseApiError(err);
@@ -371,6 +373,20 @@ export function ExchangeLinkWizard({
       setVerify({ kind: "err", status, detail });
     }
   }
+
+  // Auto-fire verification on Step 2 mount. The user just submitted
+  // keys on Step 1 — there's no decision to make on Step 2 before
+  // running verification. The button click was friction with no
+  // purpose. Guarded by verify.kind === "idle" so navigating back to
+  // Step 1 and forward again doesn't re-fire on top of an in-flight
+  // / completed call. Re-firing AFTER an error is still possible via
+  // the TRY AGAIN button (manual retry on transient failures stays).
+  useEffect(() => {
+    if (step === 2 && verify.kind === "idle") {
+      runVerify();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [step]);
 
   const step1Valid =
     !!exchange
@@ -602,7 +618,14 @@ export function ExchangeLinkWizard({
               background: "var(--bg0)", border: "1px solid var(--line)", borderRadius: 3,
               padding: 12, height: 140, overflowY: "auto", marginBottom: 14, fontSize: 10, lineHeight: 1.9,
             }}>
-              {verify.kind === "idle" && <span style={{ color: "var(--t2)" }}>_ awaiting verification</span>}
+              {/* idle state is effectively unreachable — the mount-effect
+                  fires runVerify() the moment Step 2 renders. Kept as a
+                  safety net for the brief instant between mount and
+                  effect-fire, and so the type discriminator stays
+                  exhaustive. */}
+              {verify.kind === "idle" && (
+                <span style={{ color: "var(--t2)" }}>Verifying connection...</span>
+              )}
               {verify.kind === "checking" && (
                 <>
                   {VERIFY_STEP_LOG_LINES.slice(0, verify.visibleLines).map((l, i) => (
@@ -653,11 +676,16 @@ export function ExchangeLinkWizard({
               {"←"} Back
             </button>
             <div>
-              {verify.kind === "idle" && (
-                <button onClick={runVerify} style={primaryBtnStyle}>RUN VERIFICATION</button>
-              )}
-              {verify.kind === "checking" && (
+              {/* idle/checking show no advance affordance — the auto-fire
+                  on mount drives the state forward. ok renders CONTINUE
+                  (no auto-advance, so the user has a moment to read what
+                  was verified before moving on). err exposes TRY AGAIN
+                  for transient retries. */}
+              {(verify.kind === "idle" || verify.kind === "checking") && (
                 <span style={{ fontSize: 10, color: "var(--t2)" }}>Verifying...</span>
+              )}
+              {verify.kind === "ok" && (
+                <button onClick={() => setStep(3)} style={primaryBtnStyle}>CONTINUE &rarr;</button>
               )}
               {verify.kind === "err" && (
                 <button onClick={runVerify} style={primaryBtnStyle}>TRY AGAIN &rarr;</button>
