@@ -24,12 +24,16 @@ import Link from "next/link";
 import { AdminCard, AdminTable, Avatar, StatusPill, TerminalStatusBar } from "../../_components";
 import { type Column } from "../../_components/AdminTable";
 import { deriveInitials } from "../../_components/Avatar";
+import ResetPasswordModal from "../../_components/ResetPasswordModal";
 import {
   type Allocation,
   type CapitalEvent,
   type ConnectionRow,
   type SessionRow,
   type UserDetail,
+  adminLockUser,
+  adminRevokeSessions,
+  adminUnlockUser,
   fetchUserAllocations,
   fetchUserCapitalEvents,
   fetchUserConnections,
@@ -66,6 +70,75 @@ export default function UserDetailPage({
   const [error, setError] = useState<string | null>(null);
 
   const [activeTab, setActiveTab] = useState<TabKey>("allocations");
+
+  const [resetOpen, setResetOpen] = useState(false);
+  const [actionToast, setActionToast] = useState<{ kind: "ok" | "err"; msg: string } | null>(null);
+  const [actionInflight, setActionInflight] = useState<string | null>(null);
+
+  // Auto-clear toast after 4s.
+  useEffect(() => {
+    if (!actionToast) return;
+    const id = window.setTimeout(() => setActionToast(null), 4000);
+    return () => window.clearTimeout(id);
+  }, [actionToast]);
+
+  async function handleRevokeSessions() {
+    if (actionInflight || !user) return;
+    if (!window.confirm(`Revoke all active sessions for ${user.email}? They will be signed out immediately on every device.`)) return;
+    setActionInflight("revoke");
+    try {
+      const r = await adminRevokeSessions(user.user_id);
+      setActionToast({ kind: "ok", msg: `Revoked ${r.sessions_revoked} session${r.sessions_revoked === 1 ? "" : "s"}.` });
+      // Refresh detail counts.
+      const refreshed = await fetchUserDetail(user.user_id);
+      setUser(refreshed);
+      // Sessions tab cache is stale — clear so next visit re-fetches.
+      setSessions(null);
+    } catch (err) {
+      setActionToast({ kind: "err", msg: err instanceof Error ? err.message : String(err) });
+    } finally {
+      setActionInflight(null);
+    }
+  }
+
+  async function handleLockToggle() {
+    if (actionInflight || !user) return;
+    const isCurrentlyLocked = user.locked_until != null && new Date(user.locked_until) > new Date();
+    const verb = isCurrentlyLocked ? "Unlock" : "Lock";
+    if (!window.confirm(`${verb} ${user.email}?${isCurrentlyLocked ? "" : " They will not be able to sign in for 24 hours."}`)) return;
+    setActionInflight("lock");
+    try {
+      if (isCurrentlyLocked) {
+        await adminUnlockUser(user.user_id);
+        setActionToast({ kind: "ok", msg: "Account unlocked." });
+      } else {
+        await adminLockUser(user.user_id, 24);
+        setActionToast({ kind: "ok", msg: "Account locked for 24 hours." });
+      }
+      const refreshed = await fetchUserDetail(user.user_id);
+      setUser(refreshed);
+    } catch (err) {
+      setActionToast({ kind: "err", msg: err instanceof Error ? err.message : String(err) });
+    } finally {
+      setActionInflight(null);
+    }
+  }
+
+  async function handleResetClosed(generated: boolean) {
+    setResetOpen(false);
+    if (generated && user) {
+      // Refresh after reset to pick up password_is_temporary + revoked
+      // session counts. The temp password value itself is shown only
+      // inside the modal — never persisted in this component's state.
+      try {
+        const refreshed = await fetchUserDetail(user.user_id);
+        setUser(refreshed);
+      } catch {
+        // best-effort
+      }
+      setSessions(null);
+    }
+  }
 
   // Per-tab caches. null = not yet loaded; [] = loaded but empty.
   const [allocations, setAllocations] = useState<Allocation[] | null>(null);
@@ -230,13 +303,38 @@ export default function UserDetailPage({
         }
       />
 
+      {actionToast && (
+        <div
+          role="status"
+          aria-live="polite"
+          style={{
+            marginBottom: 16,
+            padding: "10px 14px",
+            background: actionToast.kind === "ok" ? "rgba(0, 200, 150, 0.08)" : "rgba(239, 68, 68, 0.06)",
+            border: `1px solid ${actionToast.kind === "ok" ? "rgba(0, 200, 150, 0.4)" : "rgba(239, 68, 68, 0.4)"}`,
+            borderLeft: `2px solid ${actionToast.kind === "ok" ? "var(--green)" : "var(--red)"}`,
+            borderRadius: 2,
+            color: actionToast.kind === "ok" ? "var(--green)" : "var(--red)",
+            fontSize: 12,
+          }}
+        >
+          {actionToast.msg}
+        </div>
+      )}
+
       {/* ─── Two-column layout ────────────────────────────────────────────── */}
       <div style={{ display: "grid", gridTemplateColumns: "360px 1fr", gap: 20, alignItems: "flex-start" }}>
         {/* LEFT: identity card + meta */}
         <AdminCard flush>
           <IdentityBlock user={user} />
           <MetaList user={user} />
-          <ActionsList userId={user.user_id} disabled />
+          <ActionsList
+            user={user}
+            inflight={actionInflight}
+            onResetPassword={() => setResetOpen(true)}
+            onRevokeSessions={handleRevokeSessions}
+            onLockToggle={handleLockToggle}
+          />
         </AdminCard>
 
         {/* RIGHT: tabs */}
@@ -292,6 +390,17 @@ export default function UserDetailPage({
           )}
         </div>
       </div>
+
+      {resetOpen && user && (
+        <ResetPasswordModal
+          userId={user.user_id}
+          userEmail={user.email}
+          userName={[user.first_name, user.last_name].filter(Boolean).join(" ") || user.email}
+          onClose={() => {
+            void handleResetClosed(true);
+          }}
+        />
+      )}
     </div>
   );
 }
@@ -396,14 +505,24 @@ function MetaList({ user }: { user: UserDetail }) {
   );
 }
 
-function ActionsList({ disabled }: { userId: string; disabled?: boolean }) {
-  // Action handlers land in commit 5. For now buttons are disabled with
-  // a "(commit 5)" hint so the layout is visible without misleading the
-  // operator into thinking the button works.
-  const btnStyle: React.CSSProperties = {
+function ActionsList({
+  user,
+  inflight,
+  onResetPassword,
+  onRevokeSessions,
+  onLockToggle,
+}: {
+  user: UserDetail;
+  inflight: string | null;
+  onResetPassword: () => void;
+  onRevokeSessions: () => void;
+  onLockToggle: () => void;
+}) {
+  const isLocked = user.locked_until != null && new Date(user.locked_until) > new Date();
+  const baseBtnStyle: React.CSSProperties = {
     width: "100%",
     background: "transparent",
-    color: disabled ? "var(--t3)" : "var(--t0)",
+    color: "var(--t0)",
     border: "1px solid var(--line2)",
     borderRadius: 2,
     padding: "10px 12px",
@@ -412,9 +531,8 @@ function ActionsList({ disabled }: { userId: string; disabled?: boolean }) {
     fontWeight: 700,
     letterSpacing: "0.12em",
     textTransform: "uppercase",
-    cursor: disabled ? "not-allowed" : "pointer",
+    cursor: "pointer",
     textAlign: "left",
-    opacity: disabled ? 0.5 : 1,
   };
 
   return (
@@ -427,17 +545,43 @@ function ActionsList({ disabled }: { userId: string; disabled?: boolean }) {
         gap: 8,
       }}
     >
-      <button disabled={disabled} style={btnStyle}>
-        ⏳ Reset Password{disabled ? " (commit 5)" : ""}
-      </button>
-      <button disabled={disabled} style={btnStyle}>
-        ↺ Revoke All Sessions{disabled ? " (commit 5)" : ""}
+      <button
+        type="button"
+        onClick={onResetPassword}
+        disabled={inflight !== null}
+        style={{ ...baseBtnStyle, opacity: inflight ? 0.6 : 1 }}
+      >
+        ⏳ Reset Password
       </button>
       <button
-        disabled={disabled}
-        style={{ ...btnStyle, color: disabled ? "var(--t3)" : "var(--red)", borderColor: disabled ? "var(--line2)" : "rgba(239,68,68,0.4)" }}
+        type="button"
+        onClick={onRevokeSessions}
+        disabled={inflight !== null || user.sessions_active === 0}
+        style={{
+          ...baseBtnStyle,
+          opacity: inflight === "revoke" ? 0.6 : user.sessions_active === 0 ? 0.4 : 1,
+          cursor: user.sessions_active === 0 ? "not-allowed" : "pointer",
+        }}
       >
-        🔒 Lock Account{disabled ? " (commit 5)" : ""}
+        ↺ Revoke All Sessions
+        {user.sessions_active > 0 && (
+          <span style={{ color: "var(--t3)", fontWeight: 400, marginLeft: 6, fontSize: 10 }}>
+            ({user.sessions_active})
+          </span>
+        )}
+      </button>
+      <button
+        type="button"
+        onClick={onLockToggle}
+        disabled={inflight !== null}
+        style={{
+          ...baseBtnStyle,
+          color: isLocked ? "var(--green)" : "var(--red)",
+          borderColor: isLocked ? "rgba(0,200,150,0.4)" : "rgba(239,68,68,0.4)",
+          opacity: inflight === "lock" ? 0.6 : 1,
+        }}
+      >
+        {isLocked ? "🔓 Unlock Account" : "🔒 Lock Account (24h)"}
       </button>
     </div>
   );
