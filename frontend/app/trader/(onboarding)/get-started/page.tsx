@@ -141,15 +141,22 @@ export default function GetStartedPage() {
             gap: 12,
             marginBottom: 24,
           }}>
-            <ExchangeCard
-              name="BloFin"
-              meta="USDT-M perpetuals · recommended"
-              onClick={() => setLinkingExchange("blofin")}
-            />
+            {/* Binance is the only exchange we promote in user-facing
+                onboarding right now. BloFin's card stays rendered but
+                visually-disabled — looks unavailable to demo users
+                (e.g. Juan), still clickable for J's internal testing
+                via the same wizard flow. Flip BloFin's
+                visuallyDisabled to false to re-promote when ready. */}
             <ExchangeCard
               name="Binance"
               meta="USDT-M perpetuals · institutional"
               onClick={() => setLinkingExchange("binance")}
+            />
+            <ExchangeCard
+              name="BloFin"
+              meta="USDT-M perpetuals · coming soon"
+              onClick={() => setLinkingExchange("blofin")}
+              visuallyDisabled
             />
           </div>
 
@@ -218,9 +225,23 @@ export default function GetStartedPage() {
 
 // ─── Pieces ─────────────────────────────────────────────────────────────────
 
-function ExchangeCard({ name, meta, onClick }: { name: string; meta: string; onClick: () => void }) {
+// `visuallyDisabled` makes the card LOOK unavailable (muted surface,
+// no hover affordances, "[ COMING SOON ]" badge instead of the arrow)
+// while keeping onClick wired. The behavioral departure from a real
+// disable is intentional — it lets J click through the BloFin link
+// path internally for testing without users perceiving it as a
+// promoted option. Flip back to false when ready to ship.
+function ExchangeCard({
+  name, meta, onClick, visuallyDisabled = false,
+}: {
+  name: string;
+  meta: string;
+  onClick: () => void;
+  visuallyDisabled?: boolean;
+}) {
   const [hover, setHover] = useState(false);
-  const arrowColor = hover ? "var(--allocator)" : "var(--t2)";
+  const showHover = hover && !visuallyDisabled;
+  const arrowColor = showHover ? "var(--allocator)" : "var(--t2)";
   return (
     <button
       type="button"
@@ -229,10 +250,15 @@ function ExchangeCard({ name, meta, onClick }: { name: string; meta: string; onC
       onMouseLeave={() => setHover(false)}
       style={{
         padding: "18px",
-        background: "var(--allocator-soft)",
-        border: `1px solid ${hover ? "#c0a8ff" : "var(--allocator)"}`,
+        background: visuallyDisabled ? "var(--bg2)" : "var(--allocator-soft)",
+        border: `1px solid ${
+          visuallyDisabled
+            ? "var(--line)"
+            : showHover ? "#c0a8ff" : "var(--allocator)"
+        }`,
         borderRadius: 2,
-        cursor: "pointer",
+        cursor: visuallyDisabled ? "default" : "pointer",
+        opacity: visuallyDisabled ? 0.45 : 1,
         display: "flex",
         alignItems: "center",
         justifyContent: "space-between",
@@ -240,7 +266,7 @@ function ExchangeCard({ name, meta, onClick }: { name: string; meta: string; onC
         textAlign: "left",
         font: "inherit",
         color: "inherit",
-        transform: hover ? "translateY(-2px)" : "translateY(0)",
+        transform: showHover ? "translateY(-2px)" : "translateY(0)",
         transition: "border-color 0.15s ease, transform 0.15s ease",
       }}
     >
@@ -252,7 +278,20 @@ function ExchangeCard({ name, meta, onClick }: { name: string; meta: string; onC
           {meta}
         </div>
       </div>
-      <span style={{ color: arrowColor, fontSize: 14, transition: "color 0.15s ease" }}>→</span>
+      {visuallyDisabled ? (
+        <span style={{
+          color: "var(--t2)",
+          fontSize: 9,
+          fontWeight: 700,
+          letterSpacing: "0.12em",
+          textTransform: "uppercase",
+          whiteSpace: "nowrap",
+        }}>
+          [ Coming soon ]
+        </span>
+      ) : (
+        <span style={{ color: arrowColor, fontSize: 14, transition: "color 0.15s ease" }}>→</span>
+      )}
     </button>
   );
 }
