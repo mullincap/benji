@@ -7,6 +7,7 @@ import { allocatorApi } from "../../../api";
 import EquityCurveSvg from "../../../equity-curve";
 import SetupWizard from "../../../components/SetupWizard";
 import { selectStrategy, useOnboardingState } from "../../../_lib/onboarding";
+import { useAuth } from "../../../../lib/auth";
 
 // ─── Metric card ─────────────────────────────────────────────────────────────
 
@@ -252,6 +253,8 @@ export default function MarketplaceDetailPage() {
   const cat = STRATEGY_CATALOG[id as StrategyType];
   const { instances, addInstance, updateInstance, removeInstance, refresh } = useTrader();
   const { state: onboardingState, status: onboardingStatus } = useOnboardingState();
+  const { user } = useAuth();
+  const isAdmin = !!user?.is_admin;
 
   // All hooks must run before the `if (!cat) return` short-circuit
   // below — React's rules-of-hooks require a stable hook order across
@@ -628,32 +631,63 @@ export default function MarketplaceDetailPage() {
             sees a clear "click SYNC CAPITAL" signal.
             Auto-dismisses the moment the wizard opens or the user
             navigates past this strategy. */}
-        {resumeAttempted
-          && onboardingReady
-          && onboardingSlugMatches
-          && !wizardOpen
-          && !resumeWizardWasOpened
-          && !hasLiveOrPausedInstance && (
-          <div style={{
-            background: "var(--allocator-soft)",
-            border: "1px solid var(--allocator)",
-            borderLeft: "3px solid var(--allocator)",
-            borderRadius: 2,
-            padding: "10px 14px",
-            marginBottom: 16,
-            color: "var(--t0)",
-            fontSize: 11,
-            lineHeight: 1.5,
-            display: "flex",
-            alignItems: "center",
-            gap: 8,
-          }}>
-            <span style={{ color: "var(--allocator)", fontSize: 14, lineHeight: 1 }}>↑</span>
-            <span>
-              <span style={{ color: "var(--allocator)", fontWeight: 700 }}>Click SYNC CAPITAL</span> in the header to finish setup.
-            </span>
-          </div>
-        )}
+        {/* Unified onboarding callout — points users at the SYNC CAPITAL
+            button when they're mid-flow. Two arms of the same intent:
+              A. resume-deep-link (PR #35): user landed via "Finish setup"
+                 banner CTA. Slug-match required. Copy: "to finish setup".
+              B. organic mid-flow (PART 6): user is in any pre-allocation
+                 state and clicked through from the catalog (no resume
+                 query param). Copy: "to start". No slug-match needed —
+                 they're inspecting whichever strategy they clicked.
+            Both gated to non-admins, both auto-dismiss when the wizard
+            opens, both suppressed once the user has a live/paused
+            allocation. The resumeWizardWasOpened latch prevents
+            re-showing after the user closes the wizard from the resume
+            arm. */}
+        {(() => {
+          const inOnboardingFlow = (
+            onboardingReady
+            && !!onboardingState?.has_exchange
+            && !onboardingState?.has_active_allocation
+          );
+          const resumeArm = resumeAttempted && onboardingSlugMatches;
+          const organicArm = inOnboardingFlow && !resumeAttempted;
+          const showCallout = (
+            (resumeArm || organicArm)
+            && !isAdmin
+            && !wizardOpen
+            && !resumeWizardWasOpened
+            && !hasLiveOrPausedInstance
+          );
+          if (!showCallout) return null;
+          // Resume arm copy frames the existing setup as something to
+          // finish; organic arm frames it as something to start.
+          const trailingCopy = resumeArm
+            ? "in the header to finish setup."
+            : "in the header to start.";
+          return (
+            <div style={{
+              background: "var(--allocator-soft)",
+              border: "1px solid var(--allocator)",
+              borderLeft: "3px solid var(--allocator)",
+              borderRadius: 2,
+              padding: "10px 14px",
+              marginBottom: 16,
+              color: "var(--t0)",
+              fontSize: 11,
+              lineHeight: 1.5,
+              display: "flex",
+              alignItems: "center",
+              gap: 8,
+            }}>
+              <span style={{ color: "var(--allocator)", fontSize: 14, lineHeight: 1 }}>↑</span>
+              <span>
+                {!resumeArm && <>Ready to allocate? </>}
+                <span style={{ color: "var(--allocator)", fontWeight: 700 }}>Click SYNC CAPITAL</span> {trailingCopy}
+              </span>
+            </div>
+          );
+        })()}
 
         {/* Stats strip — 6 cards */}
         <div style={{ display: "grid", gridTemplateColumns: "repeat(6, 1fr)", gap: 8, marginBottom: 20 }}>

@@ -4,10 +4,8 @@ import { useCallback, useEffect, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useTrader, STRATEGY_CATALOG, CAPACITY_DATA, StrategyType, StrategyCatalogEntry, fmt, RISK_COLOR, RISK_DIM } from "../../context";
 import { allocatorApi } from "../../api";
-
-// TODO: extract a shared useIsAdmin() hook once >2 pages need it (simulator,
-// strategies, manager all duplicate this whoami probe).
-const API_BASE = process.env.NEXT_PUBLIC_API_BASE || "";
+import { useAuth } from "../../../lib/auth";
+import { useOnboardingState } from "../../_lib/onboarding";
 
 function fmtAbbrev(n: number): string {
   if (n >= 1000000) return `$${(n / 1000000).toFixed(1)}m`;
@@ -202,7 +200,8 @@ function RetiredPill() {
 function CanonicalPill() {
   // Teal/cyan so it reads distinctly from the amber "Retired" pill and the
   // green/amber/red risk tags. Non-actionable — promotion/demotion happens
-  // via the Make Canonical button on the opposing card.
+  // via the Make Canonical button on the opposing card. Admin-only —
+  // non-admins see the user-facing RecommendedBadge instead.
   return (
     <span style={{
       fontSize: 9, fontWeight: 700, letterSpacing: "0.12em",
@@ -213,6 +212,26 @@ function CanonicalPill() {
       borderRadius: 3, padding: "3px 8px",
     }}>
       Canonical
+    </span>
+  );
+}
+
+// User-facing counterpart to CanonicalPill — surfaces the platform-
+// recommended canonical strategy to first-time non-admin users without
+// exposing admin terminology. Allocator-purple to fit the onboarding-
+// flow visual language. Render conditions are computed in the parent
+// (recommendedTypes); this component just renders the pill.
+function RecommendedBadge() {
+  return (
+    <span style={{
+      fontSize: 9, fontWeight: 700, letterSpacing: "0.12em",
+      textTransform: "uppercase",
+      color: "var(--allocator)",
+      background: "var(--allocator-soft)",
+      border: "1px solid var(--allocator)",
+      borderRadius: 3, padding: "3px 8px",
+    }}>
+      Recommended
     </span>
   );
 }
@@ -644,10 +663,15 @@ export default function StrategiesPage() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const { instances, loading, includeRetired, setIncludeRetired, refresh } = useTrader();
+  const { user } = useAuth();
+  const { state: onboardingState } = useOnboardingState();
   const [hoveredIndex, setHoveredIndex] = useState<number | null>(null);
   const [view, setView] = useState<"list" | "grid">("list");
 
-  const [isAdmin, setIsAdmin] = useState(false);
+  // is_admin sourced from the AuthProvider context (single source of
+  // truth). Replaces a previous local /api/admin/whoami probe that
+  // duplicated the auth fetch.
+  const isAdmin = !!user?.is_admin;
   const [publishOverrides, setPublishOverrides] = useState<Record<number, boolean>>({});
   const [inflight, setInflight] = useState<Record<number, boolean>>({});
   const [toggleError, setToggleError] = useState<ToggleError>(null);
@@ -681,18 +705,7 @@ export default function StrategiesPage() {
     return () => clearTimeout(t);
   }, [renameToast]);
 
-  useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      try {
-        const res = await fetch(`${API_BASE}/api/admin/whoami`, { credentials: "include" });
-        if (!cancelled) setIsAdmin(res.ok);
-      } catch {
-        if (!cancelled) setIsAdmin(false);
-      }
-    })();
-    return () => { cancelled = true; };
-  }, []);
+  // (whoami probe removed — isAdmin now comes from AuthProvider above.)
 
   // URL ?show_retired=1 only honored for admins. Non-admins never see retired strategies
   // (the server also enforces this via the include_retired admin gate).
@@ -825,6 +838,29 @@ export default function StrategiesPage() {
   // Look up the current canonical's display name for the confirm modal.
   const currentCanonicalDisplayName = CATALOG_ENTRIES.find(([, c]) => c.isCanonical)?.[1].name ?? null;
 
+  // RECOMMENDED nudge — surface the platform-canonical strategy to first-
+  // time non-admin users. Eligibility:
+  //   - non-admin (admins see CANONICAL pill instead)
+  //   - user is in onboarding state #2 or earlier (no allocation yet)
+  //   - strategy is canonical AND not at capacity max
+  // If multiple canonical strategies exist (shouldn't happen — backend
+  // promote-canonical demotes the previous one — but defensive), all
+  // get the badge; only the first-rendered gets the inline note.
+  const showRecommendedToUser = (
+    !isAdmin
+    && !!onboardingState?.has_exchange
+    && !onboardingState?.has_active_allocation
+  );
+  const recommendedTypes = showRecommendedToUser
+    ? CATALOG_ENTRIES
+        .filter(([type, c]) => {
+          const cap = CAPACITY_DATA[type];
+          return c.isCanonical && cap && cap.deployed < cap.capacity;
+        })
+        .map(([type]) => type)
+    : [];
+  const firstRecommendedType = recommendedTypes[0] ?? null;
+
   function isDominant(index: number) {
     return hoveredIndex === null ? index === 0 : hoveredIndex === index;
   }
@@ -897,6 +933,8 @@ export default function StrategiesPage() {
           {CATALOG_ENTRIES.map(([type, cat], index) => {
             const hasInstance = instances.some(i => i.strategyType === type);
             const dominant = isDominant(index);
+            const isRecommended = recommendedTypes.includes(type);
+            const showRecommendedNote = type === firstRecommendedType;
             const strategyId = cat.strategyId;
             const hasAdminToggle = isAdmin && strategyId > 0;
             const effectivePublished = publishOverrides[strategyId] ?? cat.isPublished;
@@ -945,7 +983,7 @@ export default function StrategiesPage() {
                           color: RISK_COLOR[cat.risk], background: RISK_DIM[cat.risk],
                           borderRadius: 3, padding: "3px 8px",
                         }}>{cat.risk}</span>
-                        {cat.isCanonical && <CanonicalPill />}
+                        {cat.isCanonical && (isAdmin ? <CanonicalPill /> : isRecommended ? <RecommendedBadge /> : null)}
                         {!effectivePublished && <RetiredPill />}
                       </div>
                       {cardError && (
@@ -956,6 +994,11 @@ export default function StrategiesPage() {
                       <p style={{ fontSize: 10, color: dominant ? "var(--t1)" : "var(--t3)", margin: 0, lineHeight: 1.5, maxWidth: 560, transition: trans }}>
                         {cat.description}
                       </p>
+                      {showRecommendedNote && (
+                        <div style={{ fontSize: 10, color: "var(--allocator)", marginTop: 6, letterSpacing: "0.02em" }}>
+                          ↑ Recommended for your first allocation
+                        </div>
+                      )}
                     </div>
 
                     <div style={{ display: "flex", alignItems: "center", gap: 16, flexShrink: 0, marginLeft: 24 }}>
@@ -995,8 +1038,11 @@ export default function StrategiesPage() {
                       { label: "SHARPE", value: fmt(cat.sharpe, 2), first: true },
                       { label: "CAGR", value: `${fmt(cat.cagr, 1)}%` },
                       { label: "MAX DD", value: `-${fmt(cat.maxDd, 1)}%` },
-                      { label: "WIN RATE", value: `${fmt(cat.winRate, 0)}%` },
-                      { label: "AVG 1M", value: `+${fmt(cat.avg1m, 1)}%` },
+                      // winRate / avg1m can be null (audit metrics not yet
+                      // computed). Render "—" rather than "0%" / "+0.0%"
+                      // so the placeholder doesn't read as a real metric.
+                      { label: "WIN RATE", value: cat.winRate == null ? "—" : `${fmt(cat.winRate, 0)}%` },
+                      { label: "AVG 1M", value: cat.avg1m == null ? "—" : `+${fmt(cat.avg1m, 1)}%` },
                     ].map(s => (
                       <div key={s.label} style={{ borderLeft: s.first ? "none" : "1px solid var(--line)", paddingLeft: s.first ? 0 : 14 }}>
                         <div style={{ fontSize: 9, color: "var(--t2)", letterSpacing: "0.12em", fontWeight: 700, textTransform: "uppercase", marginBottom: 3 }}>{s.label}</div>
@@ -1058,13 +1104,18 @@ export default function StrategiesPage() {
                 <p style={{ fontSize: 10, color: dominant ? "var(--t1)" : "var(--t3)", margin: "0 0 14px", lineHeight: 1.5, flex: 1, transition: trans }}>
                   {cat.description}
                 </p>
+                {showRecommendedNote && (
+                  <div style={{ fontSize: 10, color: "var(--allocator)", marginTop: -8, marginBottom: 14, letterSpacing: "0.02em" }}>
+                    ↑ Recommended for your first allocation
+                  </div>
+                )}
 
                 {/* Stats — vertical in grid mode, no dividers */}
                 <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8, paddingTop: 12, borderTop: "1px solid var(--line)", marginBottom: 12 }}>
                   {[
                     { label: "SHARPE", value: fmt(cat.sharpe, 2) },
                     { label: "MAX DD", value: `-${fmt(cat.maxDd, 1)}%` },
-                    { label: "WIN RATE", value: `${fmt(cat.winRate, 0)}%` },
+                    { label: "WIN RATE", value: cat.winRate == null ? "—" : `${fmt(cat.winRate, 0)}%` },
                   ].map(s => (
                     <div key={s.label}>
                       <div style={{ fontSize: 9, color: "var(--t2)", letterSpacing: "0.12em", fontWeight: 700, textTransform: "uppercase", marginBottom: 3 }}>{s.label}</div>

@@ -68,12 +68,20 @@ export interface StrategyCatalogEntry {
   description: string;
   sharpe: number;
   maxDd: number;
-  winRate: number;
+  // winRate and avg1m can be NULL when the strategy's audit metrics
+  // haven't computed them yet (verified on prod: alts_main and
+  // alpha_tail_guardrail_high_lev both have NULL win_rate_daily +
+  // NULL avg_daily_ret_pct in audit.strategy_versions.current_metrics).
+  // Render sites must distinguish null ("not computed") from 0
+  // ("computed and the value is zero") and show "—" for null —
+  // otherwise the catalog cards display "WIN RATE 0%" / "AVG 1M
+  // +0.0%" which reads as a real-but-bad metric, not as "no data".
+  winRate: number | null;
   worstMonth: number;
   ytd: number;
   cagr: number;
   profitFactor: number;
-  avg1m: number;
+  avg1m: number | null;
   activeDays: number;
   vol: number;
   simpleReturn: number;
@@ -112,12 +120,15 @@ function mapApiStrategyToCatalog(s: ApiStrategy): StrategyCatalogEntry {
     description: s.description || "",
     sharpe: m.sharpe ?? 0,
     maxDd: Math.abs(m.max_dd_pct ?? 0),
-    winRate: m.win_rate_daily ?? 0,
+    // Preserve null for not-yet-computed metrics so render sites can
+    // show "—" instead of a misleading "0%" / "+0.0%". See type
+    // comment on StrategyCatalogEntry for the prod-verified rationale.
+    winRate: m.win_rate_daily ?? null,
     worstMonth: Math.abs(m.worst_month_pct ?? 0),
     ytd: m.total_return_pct ?? 0,
     cagr: m.cagr_pct ?? 0,
     profitFactor: m.profit_factor ?? 0,
-    avg1m: (m.avg_daily_ret_pct ?? 0) * 21, // approximate monthly
+    avg1m: m.avg_daily_ret_pct == null ? null : m.avg_daily_ret_pct * 21,
     activeDays: m.active_days ?? 0,
     vol: 0, // not directly available from this query
     simpleReturn: m.total_return_pct ?? 0,
