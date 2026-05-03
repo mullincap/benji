@@ -698,7 +698,6 @@ export default function Topbar() {
               transition: 'all 0.15s ease',
               display: 'inline-flex', alignItems: 'center', gap: 4,
               fontFamily: 'var(--font-space-mono), Space Mono, monospace',
-              marginRight: 4,
             }}
             onMouseEnter={e => { e.currentTarget.style.borderColor = 'var(--line2)'; e.currentTarget.style.color = 'var(--t2)'; }}
             onMouseLeave={e => { e.currentTarget.style.borderColor = 'var(--line)'; e.currentTarget.style.color = 'var(--t3)'; }}
@@ -706,24 +705,6 @@ export default function Topbar() {
             SIGN OUT
           </button>
         )}
-
-        {/* Exit to landing */}
-        <button
-          onClick={() => router.push('/')}
-          style={{
-            background: 'transparent', border: '1px solid var(--line)',
-            borderRadius: 3, height: 28, padding: '0 10px',
-            fontSize: 9, color: 'var(--t3)', cursor: 'pointer',
-            transition: 'all 0.15s ease',
-            display: 'inline-flex', alignItems: 'center', gap: 4,
-            fontFamily: 'var(--font-space-mono), Space Mono, monospace',
-          }}
-          onMouseEnter={e => { e.currentTarget.style.borderColor = 'var(--line2)'; e.currentTarget.style.color = 'var(--t2)'; }}
-          onMouseLeave={e => { e.currentTarget.style.borderColor = 'var(--line)'; e.currentTarget.style.color = 'var(--t3)'; }}
-        >
-          EXIT
-          <svg width="10" height="10" viewBox="0 0 10 10" fill="none"><path d="M4 1L8 5L4 9" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round"/></svg>
-        </button>
 
       </div>
     </div>
