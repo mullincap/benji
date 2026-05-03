@@ -24,6 +24,7 @@ import { useRouter } from "next/navigation";
 import Link from "next/link";
 
 import { AuthCard, Button } from "../_components";
+import { useAuth } from "../../lib/auth";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE || "";
 
@@ -66,6 +67,7 @@ const QUICKSTART: { num: string; title: string; desc: string; href: string }[] =
 
 export default function WelcomePage() {
   const router = useRouter();
+  const { refetch } = useAuth();
   const [me, setMe] = useState<Me | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -117,6 +119,12 @@ export default function WelcomePage() {
         // welcome screen is only ever shown on first_login=true so this
         // is almost always the trader path.
         const data = await res.json().catch(() => ({}));
+        // Refresh AuthProvider state so the next page sees the cleared
+        // first_login flag and topbar UI gated on `user` (e.g. SIGN OUT)
+        // is populated. AuthProvider only fetches on mount; without
+        // this, the next page renders with a stale user that's either
+        // null or still has first_login=true.
+        await refetch();
         const target =
           (typeof data?.default_landing === "string" && data.default_landing) ||
           "/trader/overview";

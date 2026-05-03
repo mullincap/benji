@@ -27,6 +27,7 @@ import {
   Field,
   Input,
 } from "../_components";
+import { useAuth } from "../../lib/auth";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE || "";
 const BUILD_HASH = process.env.NEXT_PUBLIC_BUILD_HASH || "dev";
@@ -49,6 +50,7 @@ type LockState = {
 
 export default function SignInPage() {
   const router = useRouter();
+  const { refetch } = useAuth();
 
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -100,6 +102,14 @@ export default function SignInPage() {
 
       if (res.ok) {
         const data = await res.json().catch(() => ({}));
+        // Refresh AuthProvider state BEFORE navigating. AuthProvider
+        // only fetches /me on mount; without this, the next page
+        // would render with a stale null user and any topbar UI gated
+        // on user (e.g. SIGN OUT button) would stay hidden until the
+        // first hard reload. See PR addressing the empty-state
+        // sign-out bug — gate is already correct, the staleness is
+        // what was breaking it.
+        await refetch();
         // First-login users land on /auth/welcome regardless of ?next.
         if (data?.first_login) {
           router.replace("/auth/welcome");
