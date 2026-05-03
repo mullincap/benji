@@ -41,6 +41,7 @@
  */
 
 import { useEffect, useRef, useState } from "react";
+import { useRouter } from "next/navigation";
 
 import {
   allocatorApi,
@@ -303,6 +304,7 @@ export function ExchangeLinkWizard({
   onSuccess: (connectionId: string) => void;
   onCancel: () => void;
 }) {
+  const router = useRouter();
   const [step, setStep] = useState<1 | 2 | 3 | 4>(1);
 
   // Step 1 form state
@@ -651,7 +653,8 @@ export function ExchangeLinkWizard({
               padding: "14px 16px", marginBottom: 14,
             }}>
               <div style={{ fontSize: 11, fontWeight: 700, color: "var(--red)", marginBottom: 8 }}>
-                {verify.status === 503 ? "✗ Exchange unreachable"
+                {verify.status === 409 ? "✗ Already linked"
+                  : verify.status === 503 ? "✗ Exchange unreachable"
                   : verify.status === 400 ? "✗ Connection failed"
                   : "✗ Something went wrong"}
               </div>
@@ -663,6 +666,33 @@ export function ExchangeLinkWizard({
               <div style={{ fontSize: 10, color: "var(--t1)", lineHeight: 1.5 }}>
                 {verify.detail}
               </div>
+              {/* 409 = same-user duplicate (migration 026 constraint).
+                  TRY AGAIN won't help — the constraint is per-user-key,
+                  not transient. Give a path to Settings instead so the
+                  user can find / manage / remove the existing
+                  connection. */}
+              {verify.status === 409 && (
+                <button
+                  type="button"
+                  onClick={() => router.push("/trader/settings")}
+                  style={{
+                    marginTop: 10,
+                    padding: "7px 12px",
+                    background: "transparent",
+                    color: "var(--allocator)",
+                    border: "1px solid var(--allocator)",
+                    borderRadius: 2,
+                    fontSize: 9,
+                    fontWeight: 700,
+                    letterSpacing: "0.14em",
+                    textTransform: "uppercase",
+                    fontFamily: "inherit",
+                    cursor: "pointer",
+                  }}
+                >
+                  Go to Settings →
+                </button>
+              )}
             </div>
           )}
 
@@ -680,14 +710,17 @@ export function ExchangeLinkWizard({
                   on mount drives the state forward. ok renders CONTINUE
                   (no auto-advance, so the user has a moment to read what
                   was verified before moving on). err exposes TRY AGAIN
-                  for transient retries. */}
+                  for transient retries — except on 409, where retrying
+                  the same key won't change the outcome (it's already
+                  linked); the inline "Go to Settings" button in the
+                  error panel above is the correct affordance there. */}
               {(verify.kind === "idle" || verify.kind === "checking") && (
                 <span style={{ fontSize: 10, color: "var(--t2)" }}>Verifying...</span>
               )}
               {verify.kind === "ok" && (
                 <button onClick={() => setStep(3)} style={primaryBtnStyle}>CONTINUE &rarr;</button>
               )}
-              {verify.kind === "err" && (
+              {verify.kind === "err" && verify.status !== 409 && (
                 <button onClick={runVerify} style={primaryBtnStyle}>TRY AGAIN &rarr;</button>
               )}
             </div>
