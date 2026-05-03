@@ -6,6 +6,7 @@ import { useTrader, STRATEGY_CATALOG, CAPACITY_DATA, StrategyType, StrategyInsta
 import { allocatorApi } from "../../../api";
 import EquityCurveSvg from "../../../equity-curve";
 import SetupWizard from "../../../components/SetupWizard";
+import { useOnboardingState, selectStrategy } from "../../../_lib/onboarding";
 
 // ─── Metric card ─────────────────────────────────────────────────────────────
 
@@ -250,10 +251,11 @@ export default function MarketplaceDetailPage() {
   const cat = STRATEGY_CATALOG[id as StrategyType];
   const { instances, addInstance, updateInstance, removeInstance, refresh } = useTrader();
 
-  if (!cat) {
-    return <div style={{ background: "var(--bg0)", padding: 28, minHeight: "100%", color: "var(--t2)", fontSize: 10 }}>Strategy not found.</div>;
-  }
-
+  // All hooks must run before the `if (!cat) return` short-circuit
+  // below — React's rules-of-hooks require a stable hook order across
+  // renders. The instance derivations and the onboarding-state hook
+  // are safe to compute even when cat is undefined; the JSX is what
+  // depends on cat being present.
   const hasInstance = instances.some(i => i.strategyType === id);
   const hasLiveInstance = instances.some(i => i.strategyType === id && i.status === "live");
   const unlinkedInstance = instances.find(i => i.strategyType === id && i.status === "unlinked");
@@ -265,6 +267,42 @@ export default function MarketplaceDetailPage() {
   const [confirmRemove, setConfirmRemove] = useState(false);
   const [addedHover, setAddedHover] = useState(false);
   const sentinelRef = useRef<HTMLDivElement>(null);
+
+  // Onboarding "Select this strategy" affordance — only relevant for
+  // users who have linked an exchange but haven't created an allocation
+  // yet. Clicking POSTs to /api/onboarding/select-strategy and routes
+  // back to /trader/overview where the "Deploy capital" nudge banner
+  // (mounted in the protected layout) shows the selection interpolated.
+  const { state: onboardingState, status: onboardingStatus } = useOnboardingState();
+  const [selecting, setSelecting] = useState(false);
+  const [selectError, setSelectError] = useState<string | null>(null);
+  const showSelect = (
+    onboardingStatus === "ready"
+    && !!onboardingState
+    && onboardingState.has_exchange
+    && !onboardingState.has_active_allocation
+    && !!cat?.strategyVersionId
+  );
+  const isSelected = (
+    showSelect
+    && onboardingState!.selected_strategy_id === cat!.strategyVersionId
+  );
+
+  async function handleSelect() {
+    if (!cat?.strategyVersionId) return;
+    setSelecting(true);
+    setSelectError(null);
+    try {
+      await selectStrategy(cat.strategyVersionId);
+      // OnboardingNudge in the (protected) layout refetches on
+      // pathname change to /trader/overview, so the new selection
+      // is reflected by the time the banner renders.
+      router.push("/trader/overview");
+    } catch (err) {
+      setSelecting(false);
+      setSelectError(err instanceof Error ? err.message : String(err));
+    }
+  }
 
   // Real daily equity + returns for this strategy. Populated by the
   // /returns endpoint (backed by audit.equity_curves, refreshed nightly).
@@ -395,6 +433,14 @@ export default function MarketplaceDetailPage() {
     setAddedHover(false);
   }
 
+  // Unknown id — render the not-found state. Placed AFTER all hooks
+  // so the rules-of-hooks invariant holds; the function bodies above
+  // (handleAdd / handleRemove) reference cat.* fields but are only
+  // invoked from JSX that never mounts when we return early here.
+  if (!cat) {
+    return <div style={{ background: "var(--bg0)", padding: 28, minHeight: "100%", color: "var(--t2)", fontSize: 10 }}>Strategy not found.</div>;
+  }
+
   return (
     <div style={{ background: "var(--bg0)", padding: "28px", minHeight: "100%" }}>
       <div style={{ maxWidth: 960, margin: "0 auto" }}>
@@ -438,6 +484,44 @@ export default function MarketplaceDetailPage() {
                 </div>
               )}
             </div>
+            <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", justifyContent: "flex-end" }}>
+            {showSelect && (
+              isSelected ? (
+                <span style={{
+                  display: "inline-flex", alignItems: "center", gap: 6,
+                  fontSize: 9, fontWeight: 700, letterSpacing: "0.12em", textTransform: "uppercase",
+                  color: "var(--allocator)",
+                  border: "0.5px solid var(--allocator)",
+                  background: "var(--allocator-soft)",
+                  borderRadius: 3, padding: "9px 14px",
+                  whiteSpace: "nowrap",
+                }}>
+                  <svg width="10" height="10" viewBox="0 0 10 10" fill="none">
+                    <polyline points="1.5,5 4,7.5 8.5,2.5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+                  </svg>
+                  Selected
+                </span>
+              ) : (
+                <button
+                  onClick={handleSelect}
+                  disabled={selecting}
+                  style={{
+                    display: "inline-flex", alignItems: "center",
+                    fontSize: 9, fontWeight: 700, letterSpacing: "0.12em", textTransform: "uppercase",
+                    whiteSpace: "nowrap",
+                    background: "transparent",
+                    color: "var(--allocator)",
+                    border: "0.5px solid var(--allocator)",
+                    borderRadius: 3, padding: "9px 14px",
+                    cursor: selecting ? "default" : "pointer",
+                    opacity: selecting ? 0.6 : 1,
+                    transition: "all 0.15s ease",
+                  }}
+                >
+                  {selecting ? "Selecting…" : "Select this strategy"}
+                </button>
+              )
+            )}
             {hasLiveOrPausedInstance ? (
               /* Live/paused — VIEW TRADER → */
               <button
@@ -507,7 +591,13 @@ export default function MarketplaceDetailPage() {
                 SYNC CAPITAL
               </button>
             )}
+            </div>
           </div>
+          {selectError && (
+            <div style={{ marginTop: 6, fontSize: 9, color: "var(--red)", textAlign: "right" }}>
+              Couldn&apos;t select strategy: {selectError}
+            </div>
+          )}
         </div>
 
         {/* Capacity + social proof */}

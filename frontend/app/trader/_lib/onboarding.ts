@@ -48,6 +48,20 @@ export function clearOnboardingSkipped(): void {
   sessionStorage.removeItem(SKIP_FLAG_KEY);
 }
 
+// ─── Mutations ──────────────────────────────────────────────────────────────
+
+export async function selectStrategy(strategyVersionId: string): Promise<void> {
+  const res = await apiFetch("/api/onboarding/select-strategy", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ strategy_version_id: strategyVersionId }),
+  });
+  if (!res.ok) {
+    const detail = await res.text().catch(() => "");
+    throw new Error(`select-strategy failed (HTTP ${res.status}): ${detail || res.statusText}`);
+  }
+}
+
 type Status = "loading" | "ready" | "error";
 
 export function useOnboardingState() {
