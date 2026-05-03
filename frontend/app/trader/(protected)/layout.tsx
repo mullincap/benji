@@ -401,6 +401,19 @@ export default function TraderProtectedLayout({ children }: { children: React.Re
       .then((data) => {
         if (cancelled) return;
         if (data?.user_id) {
+          // Onboarding gate: users without an exchange linked are sent
+          // to /trader/get-started (the 1-step setup flow). Honors the
+          // sessionStorage skip flag so a user who clicked "Skip —
+          // explore first" can browse the dashboard without bouncing.
+          // The skip flag is sessionStorage so it auto-clears on
+          // logout (and on a new browser session).
+          const skipped = (typeof window !== "undefined")
+            && sessionStorage.getItem("onboarding_skipped") === "true";
+          if (!data.has_exchange && !skipped) {
+            setAuthState("unauthed"); // suppress flash; layout returns null
+            router.replace("/trader/get-started");
+            return;
+          }
           setAuthState("authed");
         } else {
           setAuthState("unauthed");

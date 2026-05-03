@@ -40,6 +40,7 @@ export type AuthUser = {
   role: string | null;
   is_admin: boolean;
   password_is_temporary: boolean;
+  has_exchange: boolean;
 };
 
 type AuthContextValue = {
@@ -80,6 +81,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       });
     } catch {
       // Best-effort — even if the call fails we still clear local state.
+    }
+    // Clear the trader onboarding "skip — explore first" flag so the
+    // next sign-in in this tab gets the normal get-started gate.
+    // (Source of truth for the key is frontend/app/trader/_lib/onboarding.ts.)
+    if (typeof window !== "undefined") {
+      sessionStorage.removeItem("onboarding_skipped");
     }
     setUser(null);
     router.replace("/auth/signin");
