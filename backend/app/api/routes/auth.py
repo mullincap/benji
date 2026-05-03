@@ -200,7 +200,12 @@ class LoginRequest(BaseModel):
 class AcceptInviteRequest(BaseModel):
     first_name: str
     last_name: str
-    firm: str
+    # firm is optional — many invitees (especially solo traders) don't have
+    # a firm to enter, and the previous "all profile fields required" gate
+    # blocked them at the form. Frontend shows it as "Firm (optional)";
+    # null/empty here gets persisted as NULL on user_mgmt.users.firm
+    # (column is already nullable, no migration needed).
+    firm: str | None = None
     role: str
     password: str
 
@@ -416,8 +421,10 @@ def accept_invite(
     cur=Depends(get_cursor),
 ) -> dict[str, Any]:
     """Atomically validate token, create user, mark invitation accepted, sign in."""
-    if not all([body.first_name.strip(), body.last_name.strip(), body.firm.strip(), body.role.strip()]):
-        raise HTTPException(status_code=400, detail="All profile fields are required")
+    # firm dropped from the required check — see AcceptInviteRequest
+    # docstring. Other profile fields stay required.
+    if not all([body.first_name.strip(), body.last_name.strip(), body.role.strip()]):
+        raise HTTPException(status_code=400, detail="first_name, last_name, and role are required")
     _validate_password_or_400(body.password)
 
     token_hash = _hash_invite_token(token)
@@ -446,6 +453,11 @@ def accept_invite(
         raise HTTPException(status_code=409, detail="An account with that email already exists")
 
     password_hash = _hash_password(body.password)
+    # Normalize firm: null / empty / whitespace-only all collapse to NULL
+    # in the DB so downstream consumers don't need to distinguish the
+    # three "no firm" representations.
+    firm_normalized = body.firm.strip() if body.firm and body.firm.strip() else None
+
     cur.execute("""
         INSERT INTO user_mgmt.users
             (email, password_hash, is_active, email_verified, first_login,
@@ -456,7 +468,7 @@ def accept_invite(
     """, (
         invited_email, password_hash,
         body.first_name.strip(), body.last_name.strip(),
-        body.firm.strip(), body.role.strip(),
+        firm_normalized, body.role.strip(),
     ))
     new_user_id = str(cur.fetchone()["user_id"])
 
