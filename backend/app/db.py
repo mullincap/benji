@@ -59,7 +59,26 @@ def get_worker_conn():
 def get_cursor() -> Generator:
     """
     FastAPI dependency yielding a RealDictCursor.
-    Handles connection errors as HTTP 503 and rolls back on query errors as 500.
+
+    Transaction lifecycle contract:
+      Commits on:
+        - clean return (success path)
+        - HTTPException raise — 4xx responses can carry intentional state
+          mutations (e.g. failed-login bookkeeping in auth.py: the counter
+          increment must persist even though the response is 401/423).
+          The mutation persists; the response status is the side-channel.
+      Rolls back on:
+        - psycopg2.Error (translated to a 500 response)
+        - any other Python exception (unhandled bug → propagates up)
+
+    Implication: a route that needs to record a mutation alongside a
+    non-2xx response should just raise HTTPException after the mutation;
+    no manual conn.commit() needed. A route that needs the OLD
+    rollback-on-non-2xx behavior must validate up-front (raise BEFORE
+    mutating). All existing routes in this codebase already validate
+    up-front, so this contract change should be regression-safe — but
+    if you add a route that mutates then raises 4xx and expected the
+    mutation to be discarded, refactor it to validate first.
     """
     try:
         conn = get_conn()
@@ -70,9 +89,17 @@ def get_cursor() -> Generator:
     try:
         yield cur
         conn.commit()
+    except HTTPException:
+        # 4xx responses can carry intentional state mutations (e.g.
+        # failed-login bookkeeping). Persist them, then re-raise.
+        conn.commit()
+        raise
     except psycopg2.Error as e:
         conn.rollback()
         raise HTTPException(status_code=500, detail=f"Database error: {e}")
+    except Exception:
+        conn.rollback()
+        raise
     finally:
         cur.close()
         conn.close()

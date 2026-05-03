@@ -24,6 +24,8 @@ from __future__ import annotations
 import hashlib
 import os
 import logging
+import secrets
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import bcrypt
@@ -252,6 +254,8 @@ def login(body: LoginRequest, response: Response, cur=Depends(get_cursor)) -> di
 
     if not _verify_password(body.password, row["password_hash"]):
         # Failed-attempt accounting; trigger lockout at the threshold.
+        # The UPDATEs persist even though we raise HTTPException — see
+        # the transaction-lifecycle contract on get_cursor (db.py).
         new_count = (row["failed_login_count"] or 0) + 1
         if new_count >= LOCKOUT_THRESHOLD:
             cur.execute("""
@@ -422,7 +426,20 @@ def accept_invite(
 
     # Sign in the new user immediately. Persistent cookie (remember=True
     # default) — invite accepters are unlikely to want session-only.
-    token_value = create_user_session(settings.USER_SESSIONS_FILE, new_user_id)
+    #
+    # Insert the session row using the REQUEST cursor (not create_user_session)
+    # so it lands in the same transaction as the user INSERT. Otherwise the
+    # session row's FK to users would fail — create_user_session opens its own
+    # connection which can't see the uncommitted user row.
+    token_value = secrets.token_hex(32)
+    session_expires = datetime.now(timezone.utc) + timedelta(days=30)
+    cur.execute(
+        """
+        INSERT INTO user_mgmt.user_sessions (token, user_id, created_at, expires_at)
+        VALUES (%s, %s::uuid, NOW(), %s)
+        """,
+        (token_value, new_user_id, session_expires),
+    )
     response.set_cookie(
         key=COOKIE_NAME,
         value=token_value,
