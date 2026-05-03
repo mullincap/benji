@@ -1756,7 +1756,15 @@ class AllocationRequest(BaseModel):
 
 @router.post("/allocations")
 def create_allocation(body: AllocationRequest, user_id: str = Depends(get_current_user), cur=Depends(get_cursor)) -> dict[str, Any]:
-    """Create a new allocation (strategy instance) for the authenticated user."""
+    """Create a new allocation (strategy instance) for the authenticated user.
+
+    Side-effect: clears the user's selected_strategy_id (set by
+    /api/onboarding/select-strategy in the get-started flow). Atomic
+    with the allocation insert via the shared request cursor — both
+    commit together via the get_cursor contract. Without this the
+    "you have a strategy selected" nudge would keep showing after the
+    user has actually allocated.
+    """
     if body.capital_usd <= 0:
         raise HTTPException(status_code=400, detail="capital_usd must be positive")
 
@@ -1768,6 +1776,20 @@ def create_allocation(body: AllocationRequest, user_id: str = Depends(get_curren
         VALUES (%s, %s::uuid, %s::uuid, %s::uuid, %s, 'active', NOW(), NOW())
         RETURNING allocation_id
     """, (allocation_id, user_id, body.strategy_version_id, body.connection_id, body.capital_usd))
+
+    # Clear the onboarding strategy selection. Idempotent — no-op if it
+    # was already null (user allocated to a different strategy than the
+    # one they had selected, or didn't go through the get-started flow
+    # at all).
+    cur.execute(
+        """
+        UPDATE user_mgmt.users
+           SET selected_strategy_id = NULL,
+               selected_strategy_at = NULL
+         WHERE user_id = %s::uuid AND selected_strategy_id IS NOT NULL
+        """,
+        (user_id,),
+    )
 
     return {"allocation_id": allocation_id, "status": "active"}
 
