@@ -2,7 +2,7 @@
  * frontend/middleware.ts
  * ======================
  * Next.js middleware runs before every request matching the `config.matcher`
- * paths. We do TWO things here:
+ * paths. We do THREE things here:
  *
  *   (a) Bounce already-authenticated users away from /auth/signin and
  *       /auth/invite — no point making them re-enter credentials.
@@ -15,10 +15,24 @@
  *       admin request) or a parallel cookie. Layout-level is sufficient
  *       and matches the existing /trader/(protected) pattern.
  *
+ *   (c) Bounce already-authenticated users away from / (the marketing
+ *       landing). Authed users hitting / via direct URL or via stale
+ *       links get sent to /trader/overview — the conservative app
+ *       home. Users with active allocations who signin directly
+ *       still go to /manager/overview via the explicit signin flow's
+ *       default_landing rule; this middleware redirect only covers
+ *       the "user is already authed and somehow ended up at /" case.
+ *
+ *       Side effect: the topbar's EXIT button (router.push('/'))
+ *       becomes effectively a no-op for authed users — they get
+ *       bounced back to /trader/overview. SIGN OUT (Phase 1b PR #17)
+ *       is the canonical "leave the app" affordance now; EXIT is
+ *       redundant and a candidate for removal in a separate cleanup.
+ *
  * Auth check is cookie-presence only. Validity is verified server-side
  * on every API call; if the cookie is stale or tampered with, the user
- * lands on / and their first authenticated request will 401 → redirect
- * back to /auth/signin.
+ * lands on /trader/overview, the (protected) layout's /me check 401s,
+ * and they bounce back to /auth/signin via that layout's redirect.
  *
  * /auth/welcome is intentionally NOT in the matcher: that page's own
  * mount-effect handles the first_login=true vs false branch.
@@ -46,10 +60,21 @@ export function middleware(request: NextRequest) {
     return NextResponse.next();
   }
 
+  // Marketing landing — kick authed users into the app.
+  if (path === "/") {
+    if (session) {
+      const url = request.nextUrl.clone();
+      url.pathname = "/trader/overview";
+      url.search = "";
+      return NextResponse.redirect(url);
+    }
+    return NextResponse.next();
+  }
+
   // /auth/signin and /auth/invite — bounce already-authenticated users.
   if (session) {
     const url = request.nextUrl.clone();
-    url.pathname = "/";
+    url.pathname = "/trader/overview";
     url.search = "";
     return NextResponse.redirect(url);
   }
@@ -59,6 +84,7 @@ export function middleware(request: NextRequest) {
 
 export const config = {
   matcher: [
+    "/",
     "/auth/signin",
     "/auth/invite",
     "/auth/invite/:path*",
