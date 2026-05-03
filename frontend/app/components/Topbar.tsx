@@ -7,13 +7,20 @@ import { useAuth } from '../lib/auth';
 
 // ─── Theme definitions ───────────────────────────────────────────────────────
 
-type ModuleKey = 'compiler' | 'indexer' | 'simulator' | 'allocator' | 'manager';
+type ModuleKey = 'compiler' | 'indexer' | 'simulator' | 'allocator' | 'manager' | 'admin';
 
 interface ThemeDef {
   label: string;
   colors: Record<ModuleKey, string>;
   disabled?: boolean;
 }
+
+// Admin's accent is locked to amber #F0A500 across every theme — it's a
+// distinct surface from the 5 canonical modules and shouldn't recolor on
+// theme switch. The theme dropdown's 5-swatch preview deliberately
+// omits admin so the user-facing theme picker still reads as "5 module
+// colors".
+const ADMIN_ACCENT = '#F0A500';
 
 const THEMES: Record<string, ThemeDef> = {
   spectrum: {
@@ -24,6 +31,7 @@ const THEMES: Record<string, ThemeDef> = {
       simulator: '#C47DFF',
       allocator: '#FFB830',
       manager: '#FF5E5E',
+      admin: ADMIN_ACCENT,
     },
   },
   terminal: {
@@ -34,6 +42,7 @@ const THEMES: Record<string, ThemeDef> = {
       simulator: '#D4E84A',
       allocator: '#F0A500',
       manager: '#E060FF',
+      admin: ADMIN_ACCENT,
     },
   },
   institutional: {
@@ -44,6 +53,7 @@ const THEMES: Record<string, ThemeDef> = {
       simulator: '#9B7FE8',
       allocator: '#C9A84C',
       manager: '#C96060',
+      admin: ADMIN_ACCENT,
     },
   },
   electric: {
@@ -54,11 +64,12 @@ const THEMES: Record<string, ThemeDef> = {
       simulator: '#39FF85',
       allocator: '#A78BFF',
       manager: '#7B5FFF',
+      admin: ADMIN_ACCENT,
     },
   },
   oxide: {
     label: 'Oxide',
-    colors: { compiler: '', indexer: '', simulator: '', allocator: '', manager: '' },
+    colors: { compiler: '', indexer: '', simulator: '', allocator: '', manager: '', admin: ADMIN_ACCENT },
     disabled: true,
   },
 };
@@ -110,6 +121,9 @@ const MODULES: Array<{ key: ModuleKey; icon: string; href: string; pill: string;
   { key: 'simulator', icon: '◴',  href: '/simulator', pill: 'SIM',   shortcut: '3' },
   { key: 'allocator', icon: '⚙',  href: '/trader',    pill: 'ALLOC', shortcut: '4' },
   { key: 'manager',   icon: '▣',  href: '/manager',   pill: 'MGR',   shortcut: '5' },
+  // Admin slot is filtered out for non-admin users at render time. It
+  // stays at index 5 so ⌘6 maps consistently when the user is admin.
+  { key: 'admin',     icon: '⚡', href: '/admin',     pill: 'ADMIN', shortcut: '6' },
 ];
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -227,7 +241,10 @@ export default function Topbar() {
     return () => { cancelled = true; clearInterval(id); };
   }, [pathname]);
 
-  // Keyboard shortcuts: ⌘1–5 navigate to modules
+  // Keyboard shortcuts: ⌘1–5 navigate to modules; ⌘6 to /admin
+  // (admin-only — non-admins ignore ⌘6 to avoid the bumpy redirect
+  // through the admin layout's own deny path).
+  const isAdmin = user?.is_admin === true;
   useEffect(() => {
     function onKeyDown(e: KeyboardEvent) {
       if (!e.metaKey && !e.ctrlKey) return;
@@ -236,11 +253,14 @@ export default function Topbar() {
         e.preventDefault();
         const mod = MODULES[idx - 1];
         if (mod?.href) router.push(mod.href);
+      } else if (idx === 6 && isAdmin) {
+        e.preventDefault();
+        router.push('/admin');
       }
     }
     document.addEventListener('keydown', onKeyDown);
     return () => document.removeEventListener('keydown', onKeyDown);
-  }, [router]);
+  }, [router, isAdmin]);
 
   const selectTheme = useCallback((id: string) => {
     if (THEMES[id]?.disabled) return;
@@ -349,7 +369,7 @@ export default function Topbar() {
               boxShadow: '0 10px 24px rgba(0,0,0,0.35)',
             }}
           >
-            {MODULES.map((item) => {
+            {MODULES.filter((item) => item.key !== 'admin' || isAdmin).map((item) => {
               const isActive = pathname.startsWith(item.href);
               const itemAccent = resolveAccent(themeId, item.key);
               return (
@@ -415,7 +435,7 @@ export default function Topbar() {
         <Divider />
 
         {/* ─── Module pill row ──────────────────────────────────────────────── */}
-        {MODULES.map((item) => {
+        {MODULES.filter((item) => item.key !== 'admin' || isAdmin).map((item) => {
           const isActive = pathname.startsWith(item.href);
           const pillAccent = resolveAccent(themeId, item.key);
           return (
@@ -461,6 +481,45 @@ export default function Topbar() {
 
       {/* ─── Right side ─────────────────────────────────────────────────────── */}
       <div style={{ display: 'flex', alignItems: 'center', gap: 0 }}>
+
+        {/* ADMIN MODE pill — visible only inside /admin/*. The
+            distinct amber pill makes it visually obvious when an admin
+            is operating with elevated scope versus their regular
+            module workflow. */}
+        {pathname.startsWith('/admin') && isAdmin && (
+          <>
+            <span
+              title="Admin operations are audit-logged"
+              style={{
+                display: 'inline-flex',
+                alignItems: 'center',
+                gap: 6,
+                padding: '4px 10px',
+                background: 'rgba(240, 165, 0, 0.12)',
+                border: '1px solid var(--amber)',
+                borderRadius: 2,
+                color: 'var(--amber)',
+                fontSize: 9,
+                letterSpacing: '0.16em',
+                textTransform: 'uppercase',
+                fontWeight: 700,
+                marginRight: 8,
+              }}
+            >
+              <span
+                style={{
+                  width: 6,
+                  height: 6,
+                  borderRadius: '50%',
+                  background: 'var(--amber)',
+                  animation: 'pulse-dot 2s ease-in-out infinite',
+                }}
+              />
+              Admin Mode
+            </span>
+            <Divider />
+          </>
+        )}
 
         {/* Total exchange equity — only when authed */}
         {equity != null && (

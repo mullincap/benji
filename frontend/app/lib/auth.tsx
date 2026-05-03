@@ -38,6 +38,8 @@ export type AuthUser = {
   last_name: string | null;
   firm: string | null;
   role: string | null;
+  is_admin: boolean;
+  password_is_temporary: boolean;
 };
 
 type AuthContextValue = {

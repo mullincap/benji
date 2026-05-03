@@ -318,7 +318,8 @@ def me(user_id: str = Depends(get_current_user), cur=Depends(get_cursor)) -> dic
     """Return current authenticated user info."""
     cur.execute("""
         SELECT user_id, email, created_at, first_login,
-               first_name, last_name, firm, role
+               first_name, last_name, firm, role,
+               is_admin, password_is_temporary
         FROM user_mgmt.users WHERE user_id = %s::uuid
     """, (user_id,))
     row = cur.fetchone()
@@ -333,6 +334,8 @@ def me(user_id: str = Depends(get_current_user), cur=Depends(get_cursor)) -> dic
         "last_name": row["last_name"],
         "firm": row["firm"],
         "role": row["role"],
+        "is_admin": bool(row["is_admin"]),
+        "password_is_temporary": bool(row["password_is_temporary"]),
     }
 
 
