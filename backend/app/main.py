@@ -12,6 +12,7 @@ from app.api.routes.indexer import router as indexer_router
 from app.api.routes.admin import router as admin_router
 from app.api.routes.admin_console import router as admin_console_router
 from app.api.routes.auth import router as auth_router
+from app.api.routes.onboarding import router as onboarding_router
 from app.api.routes.allocator import router as allocator_router
 from app.api.routes.manager import router as manager_router
 from app.api.routes.manager_live import router as manager_live_router
@@ -49,6 +50,7 @@ app.include_router(jobs_router)
 app.include_router(admin_router)
 app.include_router(admin_console_router)
 app.include_router(auth_router)
+app.include_router(onboarding_router)
 app.include_router(compiler_router)
 app.include_router(indexer_router)
 app.include_router(allocator_router)

@@ -40,6 +40,14 @@ html {
   --red: #ff4d4d;
   --red-dim: #ff4d4d18;
   --border-bright: #34343a;           /* hover border on secondary buttons */
+
+  /* Allocator-flow accent — used by the trader onboarding nudge banners
+   * ("pick a strategy", "deploy capital") to differentiate "next step"
+   * prompts from the green/amber/red status semantics used elsewhere
+   * in the trader workspace. Scoped narrowly: do NOT reach for this
+   * in general trader chrome. */
+  --allocator: #a78bff;
+  --allocator-soft: rgba(167, 139, 255, 0.10);
 }
 
 /* ─── Auth flow scoped palette ─────────────────────────────────

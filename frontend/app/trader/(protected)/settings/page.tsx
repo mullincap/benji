@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useEffect, useRef, useCallback } from "react";
-import { useRouter } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import { useTrader, Exchange } from "../../context";
 import {
   allocatorApi,
@@ -1969,11 +1969,23 @@ function AnchorEditModal({
 
 export default function SettingsPage() {
   const router = useRouter();
+  const searchParams = useSearchParams();
   const { exchanges, instances, removeExchange, loading, refresh } = useTrader();
   const [showWizard, setShowWizard] = useState(false);
   const [removingId, setRemovingId] = useState<string | null>(null);
   const [confirmRemove, setConfirmRemove] = useState<string | null>(null);
   const [blockedRemove, setBlockedRemove] = useState<string | null>(null);
+
+  // Auto-open the LinkWizard when arriving from /trader/get-started.
+  // The hero card on the onboarding page sends users here with
+  // ?openLink=blofin or ?openLink=binance; we honor any non-empty
+  // openLink value (the wizard's own dropdown gates the actual
+  // exchange selection — pre-fill is a future polish item).
+  useEffect(() => {
+    if (searchParams.get("openLink")) {
+      setShowWizard(true);
+    }
+  }, [searchParams]);
 
   async function handleWizardComplete() {
     setShowWizard(false);
@@ -1982,6 +1994,15 @@ export default function SettingsPage() {
     // Snapshot was already fetched inline by the backend; the next /snapshots call picks it up.
     try { await allocatorApi.refreshSnapshots(); } catch { /* non-fatal */ }
     await refresh();
+    // If the user arrived via the get-started hero (?openLink=...),
+    // route them to /trader/overview so the OnboardingNudge's "pick a
+    // strategy" banner picks up the freshly-linked exchange. Without
+    // this hop, the user is stranded on /trader/settings — the
+    // (protected) layout's redirect doesn't fire (has_exchange is now
+    // true) and the nudge doesn't render outside /trader/overview.
+    if (searchParams.get("openLink")) {
+      router.replace("/trader/overview");
+    }
   }
 
   return (

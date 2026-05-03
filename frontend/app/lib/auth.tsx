@@ -40,6 +40,7 @@ export type AuthUser = {
   role: string | null;
   is_admin: boolean;
   password_is_temporary: boolean;
+  has_exchange: boolean;
 };
 
 type AuthContextValue = {
@@ -80,6 +81,20 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       });
     } catch {
       // Best-effort — even if the call fails we still clear local state.
+    }
+    // Clear the per-session trader onboarding flags so the next
+    // sign-in in this tab gets a fresh onboarding experience:
+    //   - onboarding_skipped: the get-started "Skip — explore first" flag
+    //   - onboarding_nudge_dismissed:<kind>: per-session dismiss for the
+    //     "pick a strategy" / "deploy capital" purple banners
+    // The localStorage permanent-dismiss for the "you're live" green
+    // banner is namespaced by user_id and intentionally preserved here.
+    // (Source of truth: frontend/app/trader/_lib/onboarding.ts and
+    // frontend/app/trader/components/OnboardingNudge.tsx.)
+    if (typeof window !== "undefined") {
+      sessionStorage.removeItem("onboarding_skipped");
+      sessionStorage.removeItem("onboarding_nudge_dismissed:pick");
+      sessionStorage.removeItem("onboarding_nudge_dismissed:deploy");
     }
     setUser(null);
     router.replace("/auth/signin");

@@ -344,12 +344,23 @@ def logout(request: Request, response: Response) -> dict[str, Any]:
 
 @router.get("/me")
 def me(user_id: str = Depends(get_current_user), cur=Depends(get_cursor)) -> dict[str, Any]:
-    """Return current authenticated user info."""
+    """Return current authenticated user info.
+
+    has_exchange is computed via a cheap EXISTS subquery so the trader
+    (protected) layout and /trader/get-started page can decide their
+    redirect direction without a second round-trip to /onboarding/state.
+    The fuller onboarding state (selected strategy, active allocation,
+    etc.) lives at /api/onboarding/state — keeping /me lean since it's
+    polled on every page mount."""
     cur.execute("""
-        SELECT user_id, email, created_at, first_login,
-               first_name, last_name, firm, role,
-               is_admin, password_is_temporary
-        FROM user_mgmt.users WHERE user_id = %s::uuid
+        SELECT u.user_id, u.email, u.created_at, u.first_login,
+               u.first_name, u.last_name, u.firm, u.role,
+               u.is_admin, u.password_is_temporary,
+               EXISTS(
+                 SELECT 1 FROM user_mgmt.exchange_connections ec
+                  WHERE ec.user_id = u.user_id AND ec.status != 'revoked'
+               ) AS has_exchange
+        FROM user_mgmt.users u WHERE u.user_id = %s::uuid
     """, (user_id,))
     row = cur.fetchone()
     if not row:
@@ -365,6 +376,7 @@ def me(user_id: str = Depends(get_current_user), cur=Depends(get_cursor)) -> dic
         "role": row["role"],
         "is_admin": bool(row["is_admin"]),
         "password_is_temporary": bool(row["password_is_temporary"]),
+        "has_exchange": bool(row["has_exchange"]),
     }
 
 

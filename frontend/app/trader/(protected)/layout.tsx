@@ -23,6 +23,7 @@ import { usePathname, useRouter } from "next/navigation";
 import Topbar from "../../components/Topbar";
 import { useSidebarCollapsed } from "../../components/useSidebarCollapsed";
 import { TraderProvider, useTrader, STRATEGY_CATALOG, StrategyCatalogEntry } from "../context";
+import OnboardingNudge from "../components/OnboardingNudge";
 import { Chart as ChartJS, ArcElement } from "chart.js";
 import { Doughnut } from "react-chartjs-2";
 
@@ -401,6 +402,19 @@ export default function TraderProtectedLayout({ children }: { children: React.Re
       .then((data) => {
         if (cancelled) return;
         if (data?.user_id) {
+          // Onboarding gate: users without an exchange linked are sent
+          // to /trader/get-started (the 1-step setup flow). Honors the
+          // sessionStorage skip flag so a user who clicked "Skip —
+          // explore first" can browse the dashboard without bouncing.
+          // The skip flag is sessionStorage so it auto-clears on
+          // logout (and on a new browser session).
+          const skipped = (typeof window !== "undefined")
+            && sessionStorage.getItem("onboarding_skipped") === "true";
+          if (!data.has_exchange && !skipped) {
+            setAuthState("unauthed"); // suppress flash; layout returns null
+            router.replace("/trader/get-started");
+            return;
+          }
           setAuthState("authed");
         } else {
           setAuthState("unauthed");
@@ -442,6 +456,7 @@ export default function TraderProtectedLayout({ children }: { children: React.Re
         <div style={{ display: "flex", flex: 1, overflow: "hidden" }}>
           <Sidebar />
           <div style={{ flex: 1, overflow: "auto" }}>
+            <OnboardingNudge />
             {children}
           </div>
         </div>
