@@ -190,8 +190,19 @@ function FinishSetupBanner({ state, onDismiss }: { state: OnboardingState; onDis
     // URL path. Fall back to the catalog if slug is null/missing
     // (legacy data, race between mutation + state read) so the user is
     // never stuck — better catalog landing than a 404.
+    //
+    // ?resume=true is the deep-link signal: the user is mid-flow, not
+    // browsing. The strategy detail page reads it on mount, sanity-
+    // checks against /api/onboarding/state's selected_strategy_slug,
+    // and auto-opens the SYNC CAPITAL wizard if the match is clean.
+    // Falls through to a static page (with a fallback callout) if
+    // the slug doesn't match (URL tampering / stale link).
+    //
+    // Catalog fallback drops the resume param — there's no specific
+    // strategy to resume into, so dumping the user on the catalog
+    // index without a "you're mid-flow" signal is the cleaner read.
     if (state.selected_strategy_slug) {
-      router.push(`/trader/strategies/${state.selected_strategy_slug}`);
+      router.push(`/trader/strategies/${state.selected_strategy_slug}?resume=true`);
     } else {
       router.push("/trader/strategies");
     }
