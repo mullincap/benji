@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useEffect, useRef } from "react";
-import { useParams, useRouter } from "next/navigation";
+import { useParams, useRouter, useSearchParams } from "next/navigation";
 import { useTrader, STRATEGY_CATALOG, CAPACITY_DATA, StrategyType, StrategyInstance, fmt, RISK_COLOR, RISK_DIM, GHOST_CURVE } from "../../../context";
 import { allocatorApi } from "../../../api";
 import EquityCurveSvg from "../../../equity-curve";
@@ -247,6 +247,7 @@ function CalendarHeatmap({
 export default function MarketplaceDetailPage() {
   const params = useParams();
   const router = useRouter();
+  const searchParams = useSearchParams();
   const id = typeof params.id === "string" ? params.id : "alpha-mid";
   const cat = STRATEGY_CATALOG[id as StrategyType];
   const { instances, addInstance, updateInstance, removeInstance, refresh } = useTrader();
@@ -267,6 +268,20 @@ export default function MarketplaceDetailPage() {
   const [confirmRemove, setConfirmRemove] = useState(false);
   const [addedHover, setAddedHover] = useState(false);
   const sentinelRef = useRef<HTMLDivElement>(null);
+
+  // Resume-from-banner flow. The OnboardingNudge "Finish setup" CTA
+  // appends ?resume=true to the deep link. On mount we capture that
+  // signal in component state (locked once via lazy useState init —
+  // surviving the URL strip below), auto-open the wizard, and clean
+  // the URL so a refresh doesn't re-fire and the address bar isn't
+  // littered with a one-shot param.
+  //
+  // The captured `resumeAttempted` also drives a fallback callout
+  // (rendered above the KPI grid) that points the user at SYNC
+  // CAPITAL if for any reason the wizard didn't open. Auto-dismisses
+  // the moment wizardOpen flips true.
+  const [resumeAttempted] = useState(() => searchParams.get("resume") === "true");
+  const resumeHandledRef = useRef(false);
 
   // Real daily equity + returns for this strategy. Populated by the
   // /returns endpoint (backed by audit.equity_curves, refreshed nightly).
@@ -306,6 +321,28 @@ export default function MarketplaceDetailPage() {
     });
     return () => { cancelled = true; };
   }, [cat?.strategyVersionId]);
+
+  // Auto-open the SYNC CAPITAL wizard when arriving via ?resume=true
+  // from the OnboardingNudge "Finish setup" banner. Mount-only — guarded
+  // by a ref so React StrictMode's double-mount in dev (or any future
+  // re-fire) doesn't create a duplicate instance.
+  //
+  // Strips the ?resume=true param via router.replace either way (a
+  // refresh shouldn't re-trigger). When an unlinked instance already
+  // exists for this strategy, the wizard auto-opens via the existing
+  // useState(!!unlinkedInstance) initializer above and we just strip
+  // the URL — no need to call handleAdd again. handleAdd is a stable
+  // closure over context state; depending on it would loop the effect.
+  useEffect(() => {
+    if (!resumeAttempted) return;
+    if (resumeHandledRef.current) return;
+    resumeHandledRef.current = true;
+    if (cat && !hasInstance && !wizardOpen) {
+      handleAdd();
+    }
+    router.replace(window.location.pathname);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   function handleAdd() {
     const newId = `${id}-${Date.now()}`;
@@ -557,6 +594,34 @@ export default function MarketplaceDetailPage() {
             </div>
           );
         })()}
+
+        {/* Resume-flow fallback callout — only renders when the user
+            arrived via the "Finish setup" banner (resume=true on mount)
+            AND the wizard never opened (so handleAdd presumably failed,
+            or hasLiveOrPausedInstance pre-empted it). Visually points
+            the user at the SYNC CAPITAL button in the sticky header
+            so they're not stuck wondering what to do next. */}
+        {resumeAttempted && !wizardOpen && !hasLiveOrPausedInstance && (
+          <div style={{
+            background: "var(--allocator-soft)",
+            border: "1px solid var(--allocator)",
+            borderLeft: "3px solid var(--allocator)",
+            borderRadius: 2,
+            padding: "10px 14px",
+            marginBottom: 16,
+            color: "var(--t0)",
+            fontSize: 11,
+            lineHeight: 1.5,
+            display: "flex",
+            alignItems: "center",
+            gap: 8,
+          }}>
+            <span style={{ color: "var(--allocator)", fontSize: 14, lineHeight: 1 }}>↑</span>
+            <span>
+              <span style={{ color: "var(--allocator)", fontWeight: 700 }}>Click SYNC CAPITAL</span> in the header to finish setup.
+            </span>
+          </div>
+        )}
 
         {/* Stats strip — 6 cards */}
         <div style={{ display: "grid", gridTemplateColumns: "repeat(6, 1fr)", gap: 8, marginBottom: 20 }}>

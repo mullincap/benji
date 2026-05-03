@@ -187,8 +187,13 @@ function FinishSetupBanner({ state, onDismiss }: { state: OnboardingState; onDis
     // URL path. Fall back to the catalog if slug is null/missing
     // (legacy data, race between mutation + state read) so the user is
     // never stuck — better catalog landing than a 404.
+    //
+    // ?resume=true tells the detail page to auto-open the SYNC CAPITAL
+    // wizard on mount, picking up exactly where the user left off when
+    // they cancelled mid-flow. The detail page strips the param after
+    // handling so a refresh doesn't re-trigger.
     if (state.selected_strategy_slug) {
-      router.push(`/trader/strategies/${state.selected_strategy_slug}`);
+      router.push(`/trader/strategies/${state.selected_strategy_slug}?resume=true`);
     } else {
       router.push("/trader/strategies");
     }
