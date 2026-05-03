@@ -1,12 +1,12 @@
 "use client";
 
 import { useState, useEffect, useRef } from "react";
-import { useParams, useRouter } from "next/navigation";
+import { useParams, useRouter, useSearchParams } from "next/navigation";
 import { useTrader, STRATEGY_CATALOG, CAPACITY_DATA, StrategyType, StrategyInstance, fmt, RISK_COLOR, RISK_DIM, GHOST_CURVE } from "../../../context";
 import { allocatorApi } from "../../../api";
 import EquityCurveSvg from "../../../equity-curve";
 import SetupWizard from "../../../components/SetupWizard";
-import { selectStrategy } from "../../../_lib/onboarding";
+import { selectStrategy, useOnboardingState } from "../../../_lib/onboarding";
 
 // ─── Metric card ─────────────────────────────────────────────────────────────
 
@@ -247,9 +247,11 @@ function CalendarHeatmap({
 export default function MarketplaceDetailPage() {
   const params = useParams();
   const router = useRouter();
+  const searchParams = useSearchParams();
   const id = typeof params.id === "string" ? params.id : "alpha-mid";
   const cat = STRATEGY_CATALOG[id as StrategyType];
   const { instances, addInstance, updateInstance, removeInstance, refresh } = useTrader();
+  const { state: onboardingState, status: onboardingStatus } = useOnboardingState();
 
   // All hooks must run before the `if (!cat) return` short-circuit
   // below — React's rules-of-hooks require a stable hook order across
@@ -267,6 +269,34 @@ export default function MarketplaceDetailPage() {
   const [confirmRemove, setConfirmRemove] = useState(false);
   const [addedHover, setAddedHover] = useState(false);
   const sentinelRef = useRef<HTMLDivElement>(null);
+
+  // ─── Resume-from-banner flow ──────────────────────────────────────────────
+  // The OnboardingNudge "Finish setup" CTA deep-links here with
+  // ?resume=true. We capture the param at mount via lazy useState init
+  // so the value survives the URL strip below; once the wizard opens
+  // (or we decide not to open it), the param is dropped via
+  // router.replace so a refresh doesn't re-fire and the address bar
+  // stays clean.
+  //
+  // Sanity check: we ONLY auto-open the wizard if the user's current
+  // selected_strategy_slug from /api/onboarding/state matches this
+  // page's slug. Protects against URL tampering, stale deep links,
+  // and the case where the user dismissed/cleared their selection
+  // between the banner click and the page mount.
+  //
+  // Two refs/states gate the behavior:
+  //   - resumeHandledRef: ensures the mount effect fires once even
+  //     across React StrictMode dev double-mount or onboarding-state
+  //     dep churn.
+  //   - resumeWizardWasOpened: latches true once the auto-open fires.
+  //     Suppresses the inline fallback callout on subsequent dismissals
+  //     (close wizard → callout would otherwise re-render and loop the
+  //     user back into the same flow they just left).
+  const [resumeAttempted] = useState(() => searchParams.get("resume") === "true");
+  const resumeHandledRef = useRef(false);
+  const [resumeWizardWasOpened, setResumeWizardWasOpened] = useState(false);
+  const onboardingReady = onboardingStatus === "ready";
+  const onboardingSlugMatches = onboardingState?.selected_strategy_slug === id;
 
   // Real daily equity + returns for this strategy. Populated by the
   // /returns endpoint (backed by audit.equity_curves, refreshed nightly).
@@ -306,6 +336,35 @@ export default function MarketplaceDetailPage() {
     });
     return () => { cancelled = true; };
   }, [cat?.strategyVersionId]);
+
+  // Auto-open the SYNC CAPITAL wizard when the user arrives via the
+  // OnboardingNudge "Finish setup" CTA (?resume=true).
+  //
+  // Effect waits until onboardingStatus === "ready" before deciding —
+  // the API resolves after first render, so we can't decide on mount.
+  // Once ready, the slug-match check determines whether to open the
+  // wizard or just clean the URL silently.
+  //
+  // The deps array is intentionally narrow ([resumeAttempted,
+  // onboardingReady, onboardingSlugMatches]) — a ref guard prevents
+  // re-fires, and the other values (cat, hasInstance, wizardOpen,
+  // handleAdd) are read at fire time. Including handleAdd in deps
+  // would loop the effect since it's redeclared on every render.
+  useEffect(() => {
+    if (resumeHandledRef.current) return;
+    if (!resumeAttempted) return;
+    if (!onboardingReady) return;
+    resumeHandledRef.current = true;
+    // Strip ?resume=true regardless of what we do next — refresh
+    // shouldn't re-trigger, and a stale param shouldn't linger in
+    // the address bar after we've decided.
+    router.replace(window.location.pathname);
+    if (!onboardingSlugMatches) return;
+    if (!cat || hasInstance || wizardOpen) return;
+    handleAdd();
+    setResumeWizardWasOpened(true);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [resumeAttempted, onboardingReady, onboardingSlugMatches]);
 
   function handleAdd() {
     const newId = `${id}-${Date.now()}`;
@@ -557,6 +616,44 @@ export default function MarketplaceDetailPage() {
             </div>
           );
         })()}
+
+        {/* Resume-flow fallback callout — only renders when the user
+            arrived via the OnboardingNudge "Finish setup" CTA AND the
+            sanity check (selected_strategy_slug matches this page)
+            passes AND the wizard hasn't already been opened-and-
+            -dismissed in this session. Belt-and-suspenders for the
+            primary auto-open path: if for any reason handleAdd didn't
+            actually open the wizard (slow API, race, future refactor
+            breaking the synchronous open assumption), the user still
+            sees a clear "click SYNC CAPITAL" signal.
+            Auto-dismisses the moment the wizard opens or the user
+            navigates past this strategy. */}
+        {resumeAttempted
+          && onboardingReady
+          && onboardingSlugMatches
+          && !wizardOpen
+          && !resumeWizardWasOpened
+          && !hasLiveOrPausedInstance && (
+          <div style={{
+            background: "var(--allocator-soft)",
+            border: "1px solid var(--allocator)",
+            borderLeft: "3px solid var(--allocator)",
+            borderRadius: 2,
+            padding: "10px 14px",
+            marginBottom: 16,
+            color: "var(--t0)",
+            fontSize: 11,
+            lineHeight: 1.5,
+            display: "flex",
+            alignItems: "center",
+            gap: 8,
+          }}>
+            <span style={{ color: "var(--allocator)", fontSize: 14, lineHeight: 1 }}>↑</span>
+            <span>
+              <span style={{ color: "var(--allocator)", fontWeight: 700 }}>Click SYNC CAPITAL</span> in the header to finish setup.
+            </span>
+          </div>
+        )}
 
         {/* Stats strip — 6 cards */}
         <div style={{ display: "grid", gridTemplateColumns: "repeat(6, 1fr)", gap: 8, marginBottom: 20 }}>
