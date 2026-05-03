@@ -1,3 +1,7 @@
+import type { Metadata } from "next";
+
+export const metadata: Metadata = { title: "Simulator" };
+
 export default function DashboardLayout({
   children,
 }: {

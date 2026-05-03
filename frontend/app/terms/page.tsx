@@ -1,7 +1,8 @@
 import { LegalShell, LegalSection } from '../components/LegalShell';
 
 export const metadata = {
-  title: 'Terms of Service — 3M',
+  // Bare title — root layout's template formats this as "3M — Terms of Service".
+  title: 'Terms of Service',
   description: 'Terms governing access to and use of the 3M platform.',
 };
 
