@@ -181,22 +181,8 @@ function ManagerSidebar({
         </button>
       </div>
 
-      {collapsed && (
-        <div
-          style={{
-            flex: 1,
-            display: "flex",
-            alignItems: "flex-end",
-            justifyContent: "center",
-            paddingBottom: 8,
-            pointerEvents: "none",
-          }}
-        >
-          <div style={{ fontSize: 8, color: "var(--t3)", transform: "rotate(-90deg)", whiteSpace: "nowrap", letterSpacing: "0.08em" }}>
-            SIDEBAR
-          </div>
-        </div>
-      )}
+      {/* Collapsed state intentionally empty — rotated label cut off
+          by the 38px rail; collapse button itself signals state. */}
 
       {!collapsed && (
       <>

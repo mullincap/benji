@@ -2,7 +2,7 @@
 
 import { useState, useEffect } from "react";
 import { useRouter } from "next/navigation";
-import { useTrader, Position, Exchange, StrategyInstance, StrategyType, fmt, GHOST_CURVE, RISK_COLOR, RISK_DIM } from "../../context";
+import { useTrader, Position, Exchange, StrategyInstance, StrategyType, fmt, GHOST_CURVE, RISK_COLOR, RISK_DIM, RISK_LABEL } from "../../context";
 import { useOnboardingState } from "../../_lib/onboarding";
 import EquityCurveSvg from "../../equity-curve";
 import PerformanceChart from "../../performance-chart";
@@ -458,7 +458,7 @@ export default function OverviewPage() {
                         {/* Top: name + risk badge */}
                         <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
                           <span style={{ fontSize: 9, fontWeight: 700, textTransform: "uppercase", color: isLive ? "var(--green)" : "var(--t2)", letterSpacing: "0.06em", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{inst.strategyName}</span>
-                          <span style={{ fontSize: 8, fontWeight: 700, letterSpacing: "0.08em", textTransform: "uppercase", padding: "1px 5px", borderRadius: 2, background: RISK_DIM[inst.risk], color: RISK_COLOR[inst.risk], flexShrink: 0 }}>{inst.risk}</span>
+                          <span style={{ fontSize: 8, fontWeight: 700, letterSpacing: "0.08em", textTransform: "uppercase", padding: "1px 5px", borderRadius: 2, background: RISK_DIM[inst.risk], color: RISK_COLOR[inst.risk], flexShrink: 0 }}>{RISK_LABEL[inst.risk]}</span>
                         </div>
                         {/* Bottom: allocation + pct + P&L */}
                         <div>

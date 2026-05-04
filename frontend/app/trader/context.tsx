@@ -415,6 +415,39 @@ export const RISK_COLOR: Record<RiskLevel, string> = { low: "var(--green)", medi
 export const RISK_DIM: Record<RiskLevel, string> = { low: "var(--green-dim)", medium: "var(--green-dim)", high: "var(--red-dim)" };
 export const RISK_MID: Record<RiskLevel, string> = { low: "var(--green-mid)", medium: "var(--green-dim)", high: "var(--red-dim)" };
 
+// Display labels for the risk pill. Bare "MEDIUM" reads as ambiguous
+// (capacity? difficulty?); the trailing "RISK" makes the meaning
+// self-explanatory without a tooltip. Keep the words compact so the
+// pill stays small in catalog-card and overview-list contexts.
+export const RISK_LABEL: Record<RiskLevel, string> = {
+  low: "Low risk",
+  medium: "Med risk",
+  high: "High risk",
+};
+
+// Annotate a strategy description like "Lev set to 1.5x." with a
+// risk-style descriptor so non-crypto-native users can read it: e.g.
+// "Lev set to 1.5x." → "Balanced · 1.5x leverage."
+//
+// Pattern is leading "Lev set to {N}x." optionally followed by more
+// prose. If the description doesn't match the pattern, we return it
+// unchanged — never crash on unexpected shapes (some strategies will
+// have richer descriptions when J writes them later).
+export function annotateDescription(description: string): string {
+  if (!description) return description;
+  const match = description.match(/^Lev set to (\d+(?:\.\d+)?)x\.?\s*(.*)$/i);
+  if (!match) return description;
+  const lev = parseFloat(match[1]);
+  const rest = match[2].trim();
+  let descriptor = "High leverage";
+  if (lev <= 1) descriptor = "Conservative";
+  else if (lev < 1.5) descriptor = "Balanced";
+  else if (lev < 2) descriptor = "Moderate";
+  else if (lev <= 3) descriptor = "Aggressive";
+  const head = `${descriptor} · ${lev}x leverage.`;
+  return rest ? `${head} ${rest}` : head;
+}
+
 // ─── Equity curve mock data (used as ghost/fallback) ────────────────────────
 
 export const GHOST_CURVE = [

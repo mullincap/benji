@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useRef } from "react";
 import { useParams, useRouter, useSearchParams } from "next/navigation";
-import { useTrader, STRATEGY_CATALOG, CAPACITY_DATA, StrategyType, StrategyInstance, fmt, RISK_COLOR, RISK_DIM, GHOST_CURVE } from "../../../context";
+import { useTrader, STRATEGY_CATALOG, CAPACITY_DATA, StrategyType, StrategyInstance, fmt, RISK_COLOR, RISK_DIM, RISK_LABEL, GHOST_CURVE, annotateDescription } from "../../../context";
 import { allocatorApi } from "../../../api";
 import EquityCurveSvg from "../../../equity-curve";
 import SetupWizard from "../../../components/SetupWizard";
@@ -516,7 +516,7 @@ export default function MarketplaceDetailPage() {
               <span style={{
                 fontSize: 9, fontWeight: 700, letterSpacing: "0.12em", textTransform: "uppercase",
                 color: RISK_COLOR[cat.risk], background: RISK_DIM[cat.risk], borderRadius: 3, padding: "3px 8px",
-              }}>{cat.risk}</span>
+              }}>{RISK_LABEL[cat.risk]}</span>
               {hasLiveInstance && (
                 <div style={{ display: "flex", alignItems: "center", gap: 5 }}>
                   <span style={{ width: 5, height: 5, borderRadius: "50%", background: "var(--green)" }} />
@@ -663,10 +663,13 @@ export default function MarketplaceDetailPage() {
           );
           if (!showCallout) return null;
           // Resume arm copy frames the existing setup as something to
-          // finish; organic arm frames it as something to start.
+          // finish; organic arm frames it as something to start. "above"
+          // points to the action button just above this callout — more
+          // precise than the prior "in the header" which read as
+          // ambiguous between page header and action header.
           const trailingCopy = resumeArm
-            ? "in the header to finish setup."
-            : "in the header to start.";
+            ? "above to finish setup."
+            : "above to start.";
           return (
             <div style={{
               background: "var(--allocator-soft)",
@@ -761,7 +764,7 @@ export default function MarketplaceDetailPage() {
           {/* HOW IT WORKS */}
           <div style={{ background: "var(--bg2)", border: "1px solid var(--line)", borderRadius: 5, padding: "16px 18px", marginBottom: 20 }}>
             <div style={{ fontSize: 9, color: "var(--t3)", letterSpacing: "0.12em", fontWeight: 700, textTransform: "uppercase", marginBottom: 10 }}>HOW IT WORKS</div>
-            <p style={{ fontSize: 11, color: "var(--t2)", margin: 0, lineHeight: 1.8 }}>{cat.description}</p>
+            <p style={{ fontSize: 11, color: "var(--t2)", margin: 0, lineHeight: 1.8 }}>{annotateDescription(cat.description)}</p>
           </div>
 
           {/* Second stats row — non-duplicate metrics complementing the
