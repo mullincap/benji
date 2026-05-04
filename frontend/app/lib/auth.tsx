@@ -12,7 +12,11 @@
  * - `user` is null when unauthenticated or while loading.
  * - `loading` is true on initial mount until the first /me response.
  * - `refetch()` re-fetches /me on demand (e.g. after profile edit).
- * - `signout()` POSTs /logout, clears local state, redirects to /auth/signin.
+ * - `signout()` POSTs /logout, clears local state, redirects to / (the
+ *   public landing). User-initiated leave goes to the front door, not
+ *   the sign-in form. Session-expiry redirects (handled in api-fetch.ts
+ *   on 401) still go to /auth/signin?next=<path> — the right destination
+ *   when the user got kicked out involuntarily.
  *
  * SSR note: this is "use client" so the provider hydrates with
  * { user: null, loading: true }. Consumers must handle the loading state.
@@ -97,7 +101,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       sessionStorage.removeItem("onboarding_nudge_dismissed:deploy");
     }
     setUser(null);
-    router.replace("/auth/signin");
+    // User-initiated sign-out → land on the public marketing root, not
+    // the sign-in form. The 401 path in api-fetch.ts still routes to
+    // /auth/signin?next=<path> for session-expiry — different intent,
+    // different destination.
+    router.replace("/");
   }, [router]);
 
   useEffect(() => {
