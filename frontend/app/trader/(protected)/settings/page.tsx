@@ -9,6 +9,7 @@ import {
   type ApiPnl,
 } from "../../api";
 import { ExchangeLinkWizard } from "../../components/ExchangeLinkWizard";
+import { useConfirm } from "../../../components/ConfirmDialog";
 
 // ─── Shared form styling — also used by the extracted ExchangeLinkWizard
 //     component (which keeps its own duplicate, see file header of
@@ -76,80 +77,9 @@ function StatusPill({ status, size = "md" }: { status: Exchange["status"]; size?
   );
 }
 
-function ConfirmRemoveModal({
-  exchangeName, submitting, onCancel, onConfirm,
-}: {
-  exchangeName: string;
-  submitting: boolean;
-  onCancel: () => void;
-  onConfirm: () => void;
-}) {
-  return (
-    <div
-      role="dialog"
-      aria-modal="true"
-      onClick={() => { if (!submitting) onCancel(); }}
-      style={{
-        position: "fixed", inset: 0, background: "rgba(0,0,0,0.7)",
-        display: "flex", alignItems: "center", justifyContent: "center",
-        zIndex: 1000,
-      }}
-    >
-      <div
-        onClick={e => e.stopPropagation()}
-        style={{
-          background: "var(--bg2)", border: "1px solid var(--line2)",
-          borderRadius: 6, padding: "20px 24px",
-          width: 480, maxWidth: "92vw",
-          fontFamily: "var(--font-space-mono), Space Mono, monospace",
-        }}
-      >
-        <div style={{
-          fontSize: 9, fontWeight: 700, letterSpacing: "0.12em",
-          color: "var(--t3)", textTransform: "uppercase", marginBottom: 10,
-        }}>
-          Remove linked exchange?
-        </div>
-        <div style={{ fontSize: 11, color: "var(--t1)", lineHeight: 1.6, marginBottom: 16 }}>
-          Remove the linked <span style={{ color: "var(--t0)" }}>{exchangeName}</span> exchange?
-          Any traders using this connection will stop.
-        </div>
-        <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
-          <button
-            type="button"
-            disabled={submitting}
-            onClick={onCancel}
-            style={{
-              background: "transparent", border: "1px solid var(--line2)",
-              borderRadius: 4, padding: "8px 16px",
-              fontSize: 9, fontWeight: 700, letterSpacing: "0.12em",
-              textTransform: "uppercase", color: "var(--t2)",
-              cursor: submitting ? "not-allowed" : "pointer",
-              fontFamily: "var(--font-space-mono), Space Mono, monospace",
-            }}
-          >
-            Cancel
-          </button>
-          <button
-            type="button"
-            disabled={submitting}
-            onClick={onConfirm}
-            style={{
-              background: "var(--red-dim)", border: "1px solid var(--red)",
-              borderRadius: 4, padding: "8px 16px",
-              fontSize: 9, fontWeight: 700, letterSpacing: "0.12em",
-              textTransform: "uppercase", color: "var(--red)",
-              cursor: submitting ? "not-allowed" : "pointer",
-              fontFamily: "var(--font-space-mono), Space Mono, monospace",
-            }}
-          >
-            Remove
-          </button>
-        </div>
-      </div>
-    </div>
-  );
-}
+// ConfirmRemoveModal removed in phase-1c/final-polish-bundle —
+// migrated to the shared ConfirmDialog primitive (PR #45) via
+// useConfirm() in the row's onClick handler.
 
 // ─── Capital Events section ─────────────────────────────────────────────────
 //
@@ -1459,12 +1389,11 @@ export default function SettingsPage() {
       : null;
   const [showWizard, setShowWizard] = useState(initialExchange !== null);
   const [removingId, setRemovingId] = useState<string | null>(null);
-  const [confirmRemove, setConfirmRemove] = useState<string | null>(null);
   const [blockedRemove, setBlockedRemove] = useState<string | null>(null);
+  const confirm = useConfirm();
 
   async function handleWizardComplete() {
     setShowWizard(false);
-    setConfirmRemove(null);
     // Trigger a refresh so the new connection appears in the list with status=active.
     // Snapshot was already fetched inline by the backend; the next /snapshots call picks it up.
     try { await allocatorApi.refreshSnapshots(); } catch { /* non-fatal */ }
@@ -1511,13 +1440,32 @@ export default function SettingsPage() {
                       const liveOnExchange = instances.filter(i => i.exchangeId === ex.id && i.status === "live");
                       if (liveOnExchange.length > 0) {
                         setBlockedRemove(ex.id);
-                        setConfirmRemove(null);
                         return;
                       }
                       if (ex.status === "active") {
                         // Non-destructive but in-use — require confirmation modal.
-                        setConfirmRemove(ex.id);
+                        // Migrated from a bespoke ConfirmRemoveModal (deleted)
+                        // to the shared ConfirmDialog primitive so every
+                        // confirmation in the app uses one pattern.
+                        const ok = await confirm({
+                          eyebrow: "Settings · Confirm",
+                          title: `Remove ${ex.name || ex.exchange} connection?`,
+                          description: "This will revoke access to this exchange. Any traders using this connection will stop. You can re-link anytime.",
+                          confirmLabel: "Remove",
+                          destructive: true,
+                        });
+                        if (!ok) return;
                         setBlockedRemove(null);
+                        setRemovingId(ex.id);
+                        try {
+                          await allocatorApi.removeExchange(ex.id);
+                        } catch (err) {
+                          console.error("removeExchange failed:", err);
+                        } finally {
+                          setRemovingId(null);
+                        }
+                        removeExchange(ex.id);
+                        refresh();
                         return;
                       }
                       // Non-active row (errored / invalid / pending_validation) — single click, no confirm.
@@ -1710,30 +1658,6 @@ export default function SettingsPage() {
         {!showWizard && <CapitalEventsSection />}
       </div>
 
-      {confirmRemove && (() => {
-        const target = exchanges.find(e => e.id === confirmRemove);
-        if (!target) return null;
-        return (
-          <ConfirmRemoveModal
-            exchangeName={target.name || target.exchange}
-            submitting={removingId === target.id}
-            onCancel={() => setConfirmRemove(null)}
-            onConfirm={async () => {
-              setRemovingId(target.id);
-              try {
-                await allocatorApi.removeExchange(target.id);
-              } catch (err) {
-                console.error("removeExchange failed:", err);
-              } finally {
-                setRemovingId(null);
-                setConfirmRemove(null);
-              }
-              removeExchange(target.id);
-              refresh();
-            }}
-          />
-        );
-      })()}
     </div>
   );
 }

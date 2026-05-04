@@ -133,6 +133,14 @@ function AdminSubNav() {
     <nav
       aria-label="Admin sections"
       style={{
+        // Sticky directly below the topbar (PR #46 made the topbar sticky
+        // at top:0; topbar height = 46px). z-40 sits below the topbar's
+        // z-50 so the topbar always wins on overlap, and above page
+        // content's default stacking. Background must be opaque so page
+        // content scrolling underneath doesn't bleed through.
+        position: "sticky",
+        top: 46,
+        zIndex: 40,
         display: "flex",
         gap: 0,
         padding: "0 32px",

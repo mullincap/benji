@@ -159,11 +159,24 @@ interface SetupWizardProps {
 // Pick a sensible starting allocation given an available balance.
 // Returns a whole-dollar amount, capped at availableBalance, with a
 // minimum of $1 so the slider isn't initialized to 0 on a non-empty
-// account. 25% of available is conservative enough for a first-time
-// allocator without making them pull the slider hard right.
+// account.
+//
+// Tiered default by balance size:
+//   < $100      → 80% (test accounts get aggressive default — the
+//                       allocator wants to deploy quickly, the dollar
+//                       amounts are small so risk exposure is bounded)
+//   $100–$10K   → 50% (small allocators take a moderate first step)
+//   ≥ $10K      → 25% (larger accounts default to conservative — a
+//                       first-time allocator probably wants to dip a
+//                       toe before committing $12K+)
+// User can drag the slider freely after; this is just where it starts.
 function suggestedAllocation(availableBalance: number): number {
   if (availableBalance <= 0) return 0;
-  return Math.max(1, Math.min(availableBalance, Math.round(availableBalance * 0.25)));
+  let pct: number;
+  if (availableBalance < 100) pct = 0.80;
+  else if (availableBalance < 10_000) pct = 0.50;
+  else pct = 0.25;
+  return Math.max(1, Math.min(availableBalance, Math.round(availableBalance * pct)));
 }
 
 export default function SetupWizard({ strategyName, onActivate, onCancel }: SetupWizardProps) {
