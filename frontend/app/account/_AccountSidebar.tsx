@@ -45,7 +45,7 @@ export default function AccountSidebar({
   return (
     <aside
       style={{
-        width: collapsed ? 38 : 220,
+        width: collapsed ? 38 : 288,
         borderRight: "1px solid var(--line)",
         background: "var(--bg0)",
         // Sticky below the sticky topbar so the nav stays anchored on
