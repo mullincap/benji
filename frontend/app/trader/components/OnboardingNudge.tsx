@@ -167,19 +167,18 @@ export default function OnboardingNudge() {
 
 function PickStrategyBanner({ onDismiss }: { onDismiss: () => void }) {
   const router = useRouter();
-  // Trimmed copy: the prior third sentence ("Audited tear sheets show
-  // Sharpe, drawdown, walk-forward stability.") was marketing filler —
-  // the user is past the pitch and the View catalog CTA describes what
-  // they'll find on the next page. Directive without verbose.
+  // User-facing copy uses "fund" terminology (Phase 1c rebrand). The
+  // component name + BannerKind value "pick" stay engineering-named —
+  // the rename is at the rendering boundary only.
   return (
     <BannerShell tone="allocator">
       <BannerText>
         <Accent tone="green">✓ Exchange connected.</Accent>{" "}
-        <Accent tone="allocator">Pick a strategy to deploy your capital.</Accent>
+        <Accent tone="allocator">Pick a fund to deploy your capital.</Accent>
       </BannerText>
       <BannerActions>
         <PrimaryButton onClick={() => router.push("/trader/strategies")}>
-          View catalog →
+          View funds →
         </PrimaryButton>
         <GhostButton onClick={onDismiss}>Dismiss</GhostButton>
       </BannerActions>
@@ -189,7 +188,10 @@ function PickStrategyBanner({ onDismiss }: { onDismiss: () => void }) {
 
 function FinishSetupBanner({ state, onDismiss }: { state: OnboardingState; onDismiss: () => void }) {
   const router = useRouter();
-  const name = state.selected_strategy_name ?? "Strategy";
+  // User-facing label fallback uses "fund" terminology (Phase 1c
+  // rebrand). The state field name selected_strategy_name stays
+  // engineering-named — it's the API response key.
+  const name = state.selected_strategy_name ?? "Fund";
   const version = state.selected_strategy_version ?? "";
   const versionText = version ? ` ${version}` : "";
 

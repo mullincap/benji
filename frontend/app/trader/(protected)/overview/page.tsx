@@ -392,7 +392,7 @@ export default function OverviewPage() {
                   cursor: "pointer",
                 }}
               >
-                SELECT A STRATEGY
+                SELECT A FUND
               </button>
             </div>
           )}
