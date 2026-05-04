@@ -4,6 +4,29 @@ Items surfaced during normal work that aren't in scope for the current track but
 
 ---
 
+## UI polish: consolidate three in-app confirmation patterns to ConfirmDialog
+
+**Surfaced:** 2026-05-04 during PR #45 review (native `window.confirm()` → `ConfirmDialog` migration).
+
+**Context:** PR #45 introduced [`frontend/app/components/ConfirmDialog.tsx`](../frontend/app/components/ConfirmDialog.tsx) — a `useConfirm()` hook + provider wired at the app root. Every `window.confirm()` call site was migrated. Three other in-app confirmation patterns coexist alongside it:
+
+1. **Settings exchange-remove inline card** — `frontend/app/trader/(protected)/settings/page.tsx` uses a `blockedRemove` state-driven inline confirmation card embedded in the row (not a modal). Search for `blockedRemove` in that file.
+2. **Admin strategy rename / publish / unpublish modals** — `frontend/app/trader/(protected)/strategies/page.tsx` renders bespoke `role="dialog"` overlays per action with their own state machines (the rename flow has a duplicate-confirmation second state).
+3. **Admin user-detail action modals** (e.g. `ResetPasswordModal` in `frontend/app/admin/_components/`) — bespoke modal components per action.
+
+All three do the same job ConfirmDialog now does (block + confirm + cancel), with their own copy patterns + button styling. Visual consistency would benefit from one canonical confirmation path.
+
+**Why it's deferred:** PR #45 was scoped to native-dialog migration. The bespoke modals are already in-app and look fine — the polish ROI is "design-system consistency," not "fix something broken."
+
+**To act on:**
+- Easy wins: replace `blockedRemove` inline card with `useConfirm({ destructive: true })`. Replace `ResetPasswordModal` if its body is just a confirm + a button (verify first; if it has form fields, it's out of scope for ConfirmDialog and should stay bespoke).
+- Harder: the rename modal has a two-step flow (initial → duplicate-detected confirmation). ConfirmDialog as-shipped is single-step; either extend it to support a chained-confirmation API, or leave the rename modal bespoke.
+- Audit pass: grep for `role="dialog"` in `app/` to find any others.
+
+**Out of scope:** modals with form inputs (e.g. `IssueInviteModal`, `SetupWizard`) stay bespoke — `ConfirmDialog` is intentionally confirm-only.
+
+---
+
 ## Phase 1b polish: onboarding gate not pathname-reactive (within-group nav)
 
 **Surfaced:** 2026-05-03 during PR #25 review (the hotfix scoping PR #24's onboarding gate to `/trader/overview` only).
