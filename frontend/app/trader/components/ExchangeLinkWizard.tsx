@@ -752,9 +752,23 @@ export function ExchangeLinkWizard({
 
       {step === 4 && verify.kind === "ok" && (() => {
         const exchangeName = EXCHANGE_DISPLAY[verify.result.exchange] ?? verify.result.exchange;
+        // Build the permissions string from the actual verified flags
+        // rather than hardcoding it. Live futures trading on Binance
+        // requires the enableFutures permission; the prior hardcoded
+        // "Read · Spot · Margin" omitted Futures, which was misleading
+        // (a user could read it as "Spot/Margin trading is what's used"
+        // when in fact the live trader operates on USDT-M perpetuals).
+        const perms = verify.result.permissions;
+        const permParts: string[] = [];
+        if (perms?.read) permParts.push("Read");
+        if (perms?.futures_trade) permParts.push("Futures");
+        if (perms?.spot_trade) permParts.push("Spot");
+        const permissionsValue = permParts.length > 0
+          ? permParts.join(" · ")
+          : (verify.result.exchange === "blofin" ? "Read · Trade" : "Read");
         const detailRows: { label: string; value: string; mono?: boolean; tone?: "green" }[] = [
           { label: "Connection ID", value: truncateConnectionId(verify.result.connection_id), mono: true },
-          { label: "Permissions",   value: verify.result.exchange === "blofin" ? "Read · Trade" : "Read · Spot · Margin" },
+          { label: "Permissions",   value: permissionsValue },
           { label: "Withdrawals",   value: "Disabled", tone: "green" },
           { label: "Encryption",    value: "Fernet · at-rest" },
         ];

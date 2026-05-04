@@ -452,7 +452,12 @@ export default function MarketplaceDetailPage() {
     setTimeout(() => {
       const fadeOut = (window as any).__celebrationFadeOut;
       if (fadeOut) { fadeOut(); delete (window as any).__celebrationFadeOut; }
-      setTimeout(() => router.push(`/trader/traders/${realAllocationId}`), 200);
+      // Land on /trader/overview so the user immediately sees the
+      // "You're live" celebration banner (which only renders on the
+      // overview page). The trader detail page is one click away via
+      // the Traders sidebar — losing the direct deep-link is worth the
+      // celebration moment for the activation flow.
+      setTimeout(() => router.push("/trader/overview"), 200);
     }, 1800);
   }
 
