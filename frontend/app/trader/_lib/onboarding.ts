@@ -63,6 +63,19 @@ export function clearOnboardingSkipped(): void {
 
 // ─── Mutations ──────────────────────────────────────────────────────────────
 
+// Window event used as a tiny pub/sub so every mounted useOnboardingState()
+// instance refetches after a mutation. Without this, the OnboardingNudge
+// (mounted in the trader layout) and the strategy detail page each have
+// their own useState — the detail page can refetch but the banner stays
+// stale until pathname changes. The event bus is broadcast at mutation
+// site (selectStrategy) and listened to inside the hook.
+export const ONBOARDING_REFETCH_EVENT = "onboarding-state:refetch";
+
+function broadcastOnboardingRefetch(): void {
+  if (typeof window === "undefined") return;
+  window.dispatchEvent(new CustomEvent(ONBOARDING_REFETCH_EVENT));
+}
+
 export async function selectStrategy(strategyVersionId: string): Promise<void> {
   const res = await apiFetch("/api/onboarding/select-strategy", {
     method: "POST",
@@ -73,6 +86,7 @@ export async function selectStrategy(strategyVersionId: string): Promise<void> {
     const detail = await res.text().catch(() => "");
     throw new Error(`select-strategy failed (HTTP ${res.status}): ${detail || res.statusText}`);
   }
+  broadcastOnboardingRefetch();
 }
 
 type Status = "loading" | "ready" | "error";
@@ -116,6 +130,19 @@ export function useOnboardingState() {
     // refetch in app/lib/auth.tsx.
     // eslint-disable-next-line react-hooks/set-state-in-effect
     refetch();
+  }, [refetch]);
+
+  // Subscribe to mutation broadcasts so every hook instance refetches
+  // when selectStrategy (or any future mutation that calls
+  // broadcastOnboardingRefetch) lands. Without this, clicking ALLOCATE
+  // on the strategy detail page mutates `selected_strategy_id` but the
+  // OnboardingNudge banner — whose own useState is independent — stays
+  // on the previous "Pick a fund" copy until the user navigates away.
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const handler = () => { void refetch(); };
+    window.addEventListener(ONBOARDING_REFETCH_EVENT, handler);
+    return () => window.removeEventListener(ONBOARDING_REFETCH_EVENT, handler);
   }, [refetch]);
 
   return { state, status, error, refetch };

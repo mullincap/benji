@@ -76,24 +76,23 @@ def get_onboarding_state(
     )
     has_active_allocation = bool(cur.fetchone()["has_active_allocation"])
 
-    # selected_strategy + denormalized slug/name + sharpe extracted from
-    # current_metrics jsonb. NULL-safe so a user with no selection just
-    # gets nulls back.
+    # selected_strategy + denormalized slug/display_name + sharpe extracted
+    # from current_metrics jsonb. NULL-safe so a user with no selection
+    # just gets nulls back.
     #
-    # `audit.strategies.name` doubles as both the catalog slug (e.g.
-    # "alts_main") and the human-readable name shown in the banner copy.
-    # We project it once and surface it under two API field names so the
-    # frontend can use the URL-routing path explicitly:
-    #   - selected_strategy_slug → /trader/strategies/<slug> deep links
-    #   - selected_strategy_name → banner copy text
-    # If a future schema split introduces a separate display_name field,
-    # the slug consumer is already on its dedicated key and won't drift.
+    # `audit.strategies.name` is the catalog slug (e.g. "alts_main") used
+    # for /trader/strategies/<slug> deep links. `audit.strategies.display_name`
+    # is the human-readable name (e.g. "ALTS MAIN") for banner copy.
+    # Surfacing both under dedicated API field names keeps slug/display
+    # responsibilities cleanly separated and matches what the catalog
+    # cards already use elsewhere.
     cur.execute(
         """
         SELECT
             u.selected_strategy_id,
             sv.version_label,
             s.name AS strategy_slug,
+            s.display_name AS strategy_display_name,
             (sv.current_metrics->>'sharpe')::numeric AS sharpe
         FROM user_mgmt.users u
         LEFT JOIN audit.strategy_versions sv
@@ -108,6 +107,7 @@ def get_onboarding_state(
     selected_strategy_id = str(sel["selected_strategy_id"]) if sel and sel["selected_strategy_id"] else None
     has_selected_strategy = selected_strategy_id is not None
     strategy_slug = sel["strategy_slug"] if sel else None
+    strategy_display_name = (sel["strategy_display_name"] if sel else None) or strategy_slug
 
     # When the user has an active allocation, fetch its strategy name for
     # the "you're live" banner copy. Distinct from selected_strategy_*
@@ -122,7 +122,8 @@ def get_onboarding_state(
     if has_active_allocation:
         cur.execute(
             """
-            SELECT s.name AS strategy_name
+            SELECT s.display_name AS strategy_display_name,
+                   s.name         AS strategy_slug
               FROM user_mgmt.allocations a
               JOIN audit.strategy_versions sv ON sv.strategy_version_id = a.strategy_version_id
               JOIN audit.strategies s ON s.strategy_id = sv.strategy_id
@@ -133,14 +134,18 @@ def get_onboarding_state(
             (user_id,),
         )
         row = cur.fetchone()
-        active_strategy_name = row["strategy_name"] if row else None
+        # Prefer display_name (human-readable like "ALTS MAIN"); fall back
+        # to slug if display_name is null on legacy rows so the banner
+        # still has something meaningful to show.
+        if row:
+            active_strategy_name = row["strategy_display_name"] or row["strategy_slug"]
 
     return {
         "has_exchange": has_exchange,
         "has_selected_strategy": has_selected_strategy,
         "selected_strategy_id": selected_strategy_id,
         "selected_strategy_slug": strategy_slug,
-        "selected_strategy_name": strategy_slug,
+        "selected_strategy_name": strategy_display_name,
         "selected_strategy_version": sel["version_label"] if sel else None,
         "selected_strategy_sharpe": float(sel["sharpe"]) if sel and sel["sharpe"] is not None else None,
         "has_active_allocation": has_active_allocation,

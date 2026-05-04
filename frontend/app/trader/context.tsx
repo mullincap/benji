@@ -80,13 +80,20 @@ export interface StrategyCatalogEntry {
   worstMonth: number;
   ytd: number;
   cagr: number;
-  profitFactor: number;
+  // profitFactor is null when the strategy promotion pipeline hasn't
+  // computed it yet (verified on prod for all three published strategies
+  // at the time of this writing). Render sites must show "—" for null
+  // so the user doesn't see "0.00x" and read it as a real-but-broken
+  // metric. Same contract as winRate / avg1m above.
+  profitFactor: number | null;
   avg1m: number | null;
   activeDays: number;
-  vol: number;
-  simpleReturn: number;
-  compoundedReturn: number;
-  avgWinLoss: number;
+  // Sortino + bestMonth are exposed on the API and currently null in
+  // current_metrics for every published strategy — they'll populate
+  // when the promotion pipeline is extended. Carrying them as nullable
+  // so the bottom KPI panel layout stays stable while it waits.
+  sortino: number | null;
+  bestMonth: number | null;
   // Backend references
   strategyId: number;
   strategyVersionId: string;
@@ -127,13 +134,13 @@ function mapApiStrategyToCatalog(s: ApiStrategy): StrategyCatalogEntry {
     worstMonth: Math.abs(m.worst_month_pct ?? 0),
     ytd: m.total_return_pct ?? 0,
     cagr: m.cagr_pct ?? 0,
-    profitFactor: m.profit_factor ?? 0,
+    // Preserve null for not-yet-computed metrics (see field comments
+    // on StrategyCatalogEntry).
+    profitFactor: m.profit_factor ?? null,
     avg1m: m.avg_daily_ret_pct == null ? null : m.avg_daily_ret_pct * 21,
     activeDays: m.active_days ?? 0,
-    vol: 0, // not directly available from this query
-    simpleReturn: m.total_return_pct ?? 0,
-    compoundedReturn: m.cagr_pct ?? 0,
-    avgWinLoss: m.profit_factor ?? 0,
+    sortino: m.sortino ?? null,
+    bestMonth: m.best_month_pct ?? null,
     strategyId: s.strategy_id,
     strategyVersionId: s.strategy_version_id,
     capitalCapUsd: s.capital_cap_usd,
@@ -149,24 +156,24 @@ const FALLBACK_CATALOG: Record<string, StrategyCatalogEntry> = {
     name: "Alpha Low", risk: "low",
     description: "Conservative capital preservation strategy with tight drawdown controls and reduced position sizing.",
     sharpe: 1.84, maxDd: 8.2, winRate: 61, worstMonth: 4.5, ytd: 14.2, cagr: 18.7,
-    profitFactor: 1.88, avg1m: 1.2, activeDays: 312, vol: 6.4,
-    simpleReturn: 14.2, compoundedReturn: 18.7, avgWinLoss: 1.42,
+    profitFactor: 1.88, avg1m: 1.2, activeDays: 312,
+    sortino: 2.41, bestMonth: 8.6,
     strategyId: 0, strategyVersionId: "", capitalCapUsd: null, isPublished: true, isCanonical: false,
   },
   "alpha-mid": {
     name: "Alpha Mid", risk: "medium",
     description: "Balanced trend-following approach with dynamic position sizing that scales with conviction.",
     sharpe: 2.63, maxDd: 14.6, winRate: 63, worstMonth: 8.1, ytd: 38.2, cagr: 42.1,
-    profitFactor: 2.25, avg1m: 2.4, activeDays: 342, vol: 11.8,
-    simpleReturn: 38.2, compoundedReturn: 42.1, avgWinLoss: 1.71,
+    profitFactor: 2.25, avg1m: 2.4, activeDays: 342,
+    sortino: 3.15, bestMonth: 14.2,
     strategyId: 0, strategyVersionId: "", capitalCapUsd: null, isPublished: true, isCanonical: false,
   },
   "alpha-high": {
     name: "Alpha High", risk: "high",
     description: "Aggressive momentum capture across top-20 pairs with concentrated position sizing.",
     sharpe: 3.90, maxDd: 19.9, winRate: 67, worstMonth: 12.4, ytd: 91.4, cagr: 187.3,
-    profitFactor: 3.09, avg1m: 3.2, activeDays: 358, vol: 18.2,
-    simpleReturn: 91.4, compoundedReturn: 187.3, avgWinLoss: 2.34,
+    profitFactor: 3.09, avg1m: 3.2, activeDays: 358,
+    sortino: 4.62, bestMonth: 22.8,
     strategyId: 0, strategyVersionId: "", capitalCapUsd: null, isPublished: true, isCanonical: false,
   },
 };

@@ -696,7 +696,10 @@ export default function MarketplaceDetailPage() {
           <MetricCard label="YTD RETURN" value={`+${fmt(cat.ytd, 1)}%`} color="var(--green)" />
           <MetricCard label="CAGR" value={`${fmt(cat.cagr, 1)}%`} color="var(--green)" />
           <MetricCard label="SHARPE" value={fmt(cat.sharpe, 2)} />
-          <MetricCard label="PROFIT FACTOR" value={`${fmt(cat.profitFactor, 2)}x`} />
+          <MetricCard
+            label="PROFIT FACTOR"
+            value={cat.profitFactor != null ? `${fmt(cat.profitFactor, 2)}x` : "—"}
+          />
           <MetricCard label="WORST MONTH" value={`-${fmt(cat.worstMonth, 1)}%`} color="var(--red)" />
           <MetricCard label="MAX DD" value={`-${fmt(cat.maxDd, 1)}%`} color="var(--red)" />
         </div>
@@ -734,7 +737,11 @@ export default function MarketplaceDetailPage() {
                 <span style={{ color: "var(--t2)" }}> YTD &middot; </span>
                 <span style={{ color: "var(--t2)" }}>Sharpe </span><span style={{ color: "var(--green)" }}>{fmt(cat.sharpe, 2)}</span>
                 <span style={{ color: "var(--t2)" }}> &middot; Max DD </span><span style={{ color: "var(--red)" }}>-{fmt(cat.maxDd, 1)}%</span>
-                <span style={{ color: "var(--t2)" }}> &middot; Vol </span><span style={{ color: "var(--t1)" }}>{fmt(cat.vol, 1)}%</span>
+                {/* Volatility isn't surfaced via current_metrics today —
+                    the tile read 0 from a hardcoded fallback before this
+                    PR. Dropping the row entirely until the promotion
+                    pipeline starts populating a vol field; can re-add
+                    a fourth pair once it exists. */}
               </span>
             </div>
             <div style={{ padding: "8px 0", height: 250 }}>
@@ -757,11 +764,25 @@ export default function MarketplaceDetailPage() {
             <p style={{ fontSize: 11, color: "var(--t2)", margin: 0, lineHeight: 1.8 }}>{cat.description}</p>
           </div>
 
-          {/* Second stats row */}
+          {/* Second stats row — non-duplicate metrics complementing the
+              top KPI grid. Sortino / Best Month / Win Rate are exposed
+              via the API but currently null in current_metrics for
+              every published strategy; render "—" so the layout stays
+              stable until the promotion pipeline backfills them. */}
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr", gap: 10 }}>
-            <MetricCard label="SIMPLE RETURN" value={`+${fmt(cat.simpleReturn, 1)}%`} color="var(--green)" />
-            <MetricCard label="COMPOUNDED RETURN" value={`+${fmt(cat.compoundedReturn, 1)}%`} color="var(--green)" />
-            <MetricCard label="AVG WIN/LOSS" value={`${fmt(cat.avgWinLoss, 2)}x`} />
+            <MetricCard
+              label="SORTINO"
+              value={cat.sortino != null ? fmt(cat.sortino, 2) : "—"}
+            />
+            <MetricCard
+              label="BEST MONTH"
+              value={cat.bestMonth != null ? `+${fmt(cat.bestMonth, 1)}%` : "—"}
+              color={cat.bestMonth != null ? "var(--green)" : undefined}
+            />
+            <MetricCard
+              label="WIN RATE"
+              value={cat.winRate != null ? `${fmt(cat.winRate, 0)}%` : "—"}
+            />
             <MetricCard label="ACTIVE DAYS" value={`${cat.activeDays}`} />
           </div>
         </div>
