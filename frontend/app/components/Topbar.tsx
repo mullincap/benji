@@ -4,6 +4,7 @@ import { useEffect, useRef, useState, useCallback } from 'react';
 import { useRouter, usePathname } from 'next/navigation';
 
 import { useAuth } from '../lib/auth';
+import { useConfirm } from './ConfirmDialog';
 
 // ─── Theme definitions ───────────────────────────────────────────────────────
 
@@ -197,6 +198,7 @@ export default function Topbar() {
   const router = useRouter();
   const pathname = usePathname();
   const { user, signout } = useAuth();
+  const confirm = useConfirm();
 
   const activeModule = getActiveModule(pathname);
   const theme = THEMES[themeId] ?? THEMES.spectrum;
@@ -834,7 +836,16 @@ export default function Topbar() {
                   <button
                     type="button"
                     role="menuitem"
-                    onClick={() => { setUserMenuOpen(false); void signout(); }}
+                    onClick={async () => {
+                      setUserMenuOpen(false);
+                      const ok = await confirm({
+                        eyebrow: "Session · Confirm",
+                        title: "Sign out?",
+                        description: "You'll need to sign back in to access your account.",
+                        confirmLabel: "Sign out",
+                      });
+                      if (ok) void signout();
+                    }}
                     onMouseEnter={(e) => { e.currentTarget.style.background = 'var(--bg2)'; e.currentTarget.style.color = 'var(--red)'; }}
                     onMouseLeave={(e) => { e.currentTarget.style.background = 'transparent'; e.currentTarget.style.color = 'var(--t3)'; }}
                     style={{

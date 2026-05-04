@@ -3,6 +3,7 @@
 import { useState, useEffect, useMemo, useRef } from 'react';
 import { useRouter } from 'next/navigation';
 import Topbar from '../components/Topbar';
+import { useConfirm } from '../components/ConfirmDialog';
 import ParamForm from '../components/LeftPanel/ParamForm';
 import RunningParams from '../components/LeftPanel/RunningParams';
 import ResultsSummary from '../components/LeftPanel/ResultsSummary';
@@ -354,6 +355,7 @@ function PromoteBar({
 
 export default function Home() {
   const router = useRouter();
+  const confirm = useConfirm();
   const [appState, setAppState] = useState<'idle' | 'running' | 'results' | 'failed'>('idle');
   const [jobId, setJobId] = useState<string | null>(null);
   const [jobData, setJobData] = useState<Record<string, unknown> | null>(null);
@@ -499,7 +501,13 @@ export default function Home() {
   }, [auditHistory]);
 
   async function handleDeleteAudit(job: AuditHistoryItem) {
-    const ok = window.confirm(`Delete audit ${job.id.slice(0, 8)}? This cannot be undone.`);
+    const ok = await confirm({
+      eyebrow: "Audit · Confirm",
+      title: "Delete audit?",
+      description: `Audit ${job.id.slice(0, 8)} will be permanently deleted. This cannot be undone.`,
+      confirmLabel: "Delete audit",
+      destructive: true,
+    });
     if (!ok) return;
     setDeletingJobId(job.id);
     try {
@@ -518,7 +526,14 @@ export default function Home() {
 
   async function handleCancelAudit() {
     if (!jobId || cancellingAudit) return;
-    const ok = window.confirm('Cancel the currently running audit?');
+    const ok = await confirm({
+      eyebrow: "Audit · Confirm",
+      title: "Cancel running audit?",
+      description: "The current audit run will be aborted. Partial results will not be saved.",
+      confirmLabel: "Cancel audit",
+      cancelLabel: "Keep running",
+      destructive: true,
+    });
     if (!ok) return;
     setCancellingAudit(true);
     try {
