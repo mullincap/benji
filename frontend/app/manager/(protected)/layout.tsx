@@ -209,6 +209,12 @@ function ManagerSidebar({
       />
 
       <NavItem
+        label="Live"
+        href="/manager/live"
+        active={pathname === "/manager/live"}
+      />
+
+      <NavItem
         label="Positions"
         href="/manager/positions"
         active={pathname === "/manager/positions"}
