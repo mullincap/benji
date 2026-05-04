@@ -874,7 +874,7 @@ export default function StrategiesPage() {
         {/* Header row: label + view toggle */}
         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 16 }}>
           <div style={{ fontSize: 9, fontWeight: 700, letterSpacing: "0.12em", color: "var(--t3)", textTransform: "uppercase" }}>
-            STRATEGIES
+            FUNDS
           </div>
           <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
             {isAdmin && (
@@ -1026,7 +1026,7 @@ export default function StrategiesPage() {
                             transition: trans,
                           }}
                         >
-                          VIEW STRATEGY
+                          VIEW FUND
                         </button>
                       )}
                     </div>
@@ -1153,7 +1153,7 @@ export default function StrategiesPage() {
                       transition: trans,
                     }}
                   >
-                    VIEW STRATEGY
+                    VIEW FUND
                   </button>
                 )}
               </div>

@@ -836,7 +836,7 @@ export default function SetupWizard({ strategyName, onActivate, onCancel }: Setu
         <div>
           <div style={{ background: "var(--bg2)", border: "1px solid var(--line)", borderRadius: 5, padding: "14px 16px", marginBottom: 14 }}>
             {[
-              { label: "Strategy", value: strategyName },
+              { label: "Fund", value: strategyName },
               { label: "Exchange", value: resolvedExchange?.name ?? selectedExchangeName ?? "\u2014" },
               { label: "Allocation", value: `$${parseInt(allocation).toLocaleString()}` },
             ].map(row => (

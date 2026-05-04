@@ -25,7 +25,7 @@ export default function TradersPage() {
           }}>
             <div style={{ fontSize: 10, color: "var(--t2)" }}>
               No active traders &mdash; browse the{" "}
-              <span onClick={() => router.push("/trader/strategies")} style={{ color: "var(--green)", cursor: "pointer" }}>Strategies</span>
+              <span onClick={() => router.push("/trader/strategies")} style={{ color: "var(--green)", cursor: "pointer" }}>Funds</span>
               {" "}to get started
             </div>
           </div>

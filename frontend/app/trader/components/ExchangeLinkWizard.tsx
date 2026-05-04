@@ -829,7 +829,7 @@ export function ExchangeLinkWizard({
               marginBottom: 20,
               letterSpacing: "0.04em",
             }}>
-              Next: pick a strategy to deploy your capital.
+              Next: pick a fund to deploy your capital.
             </div>
 
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>

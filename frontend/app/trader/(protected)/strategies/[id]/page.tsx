@@ -478,7 +478,7 @@ export default function MarketplaceDetailPage() {
   // (handleAdd / handleRemove) reference cat.* fields but are only
   // invoked from JSX that never mounts when we return early here.
   if (!cat) {
-    return <div style={{ background: "var(--bg0)", padding: 28, minHeight: "100%", color: "var(--t2)", fontSize: 10 }}>Strategy not found.</div>;
+    return <div style={{ background: "var(--bg0)", padding: 28, minHeight: "100%", color: "var(--t2)", fontSize: 10 }}>Fund not found.</div>;
   }
 
   return (
@@ -504,7 +504,7 @@ export default function MarketplaceDetailPage() {
               style={{ color: "var(--t2)", cursor: "pointer", transition: "color 0.15s ease", textDecoration: "none" }}
               onMouseEnter={e => { e.currentTarget.style.color = "var(--t0)"; e.currentTarget.style.textDecoration = "underline"; }}
               onMouseLeave={e => { e.currentTarget.style.color = "var(--t2)"; e.currentTarget.style.textDecoration = "none"; }}
-            >Strategies</span>
+            >Funds</span>
             <span style={{ color: "var(--t3)" }}>{"\u203A"}</span>
             <span style={{ color: "var(--t3)" }}>{cat.name}</span>
           </div>
@@ -582,7 +582,9 @@ export default function MarketplaceDetailPage() {
                 )}
               </div>
             ) : (
-              /* No instance — SYNC CAPITAL */
+              /* No instance — ALLOCATE (renamed from SYNC CAPITAL in
+                 the Phase 1c rebrand; handler name kept for engineering
+                 continuity). */
               <button onClick={handleAdd} style={{
                 background: "var(--green)", color: "var(--bg0)",
                 border: "none", borderRadius: 3,
@@ -590,7 +592,7 @@ export default function MarketplaceDetailPage() {
                 letterSpacing: "0.12em", textTransform: "uppercase",
                 cursor: "pointer", whiteSpace: "nowrap",
               }}>
-                SYNC CAPITAL
+                ALLOCATE
               </button>
             )}
           </div>
@@ -683,7 +685,7 @@ export default function MarketplaceDetailPage() {
               <span style={{ color: "var(--allocator)", fontSize: 14, lineHeight: 1 }}>↑</span>
               <span>
                 {!resumeArm && <>Ready to allocate? </>}
-                <span style={{ color: "var(--allocator)", fontWeight: 700 }}>Click SYNC CAPITAL</span> {trailingCopy}
+                <span style={{ color: "var(--allocator)", fontWeight: 700 }}>Click ALLOCATE</span> {trailingCopy}
               </span>
             </div>
           );

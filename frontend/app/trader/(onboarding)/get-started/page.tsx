@@ -129,9 +129,9 @@ export default function GetStartedPage() {
             lineHeight: 1.6,
             marginBottom: 28,
           }}>
-            3M deploys audited quantitative strategies against your own exchange account.
+            3M deploys audited quantitative funds against your own exchange account.
             We never custody your capital — your funds stay on the exchange. Once linked,
-            the platform will guide you to a strategy and your first allocation.
+            the platform will guide you to a fund and your first allocation.
           </p>
 
           {/* exchange options */}

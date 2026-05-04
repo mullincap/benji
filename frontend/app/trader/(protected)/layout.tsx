@@ -285,7 +285,7 @@ function Sidebar() {
             const active = pathname.startsWith("/trader/strategies");
             return (
               <NavItem
-                label="Strategies"
+                label="Funds"
                 href="/trader/strategies"
                 active={active}
                 icon={<IconStrategies color={active ? "var(--t0)" : "var(--t2)"} />}

@@ -190,7 +190,7 @@ function UnlinkedMode({ instanceId }: { instanceId: string }) {
 
         {/* Reference stats */}
         <div style={{ fontSize: 9, color: "var(--t3)", letterSpacing: "0.12em", fontWeight: 700, textTransform: "uppercase", marginBottom: 8 }}>
-          STRATEGY REFERENCE STATS
+          FUND REFERENCE STATS
         </div>
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr", gap: 10, marginBottom: 24 }}>
           <MetricCard label="YTD RETURN" value={cat ? `+${fmt(cat.ytd, 1)}%` : "\u2014"} color="var(--green)" />
@@ -869,7 +869,7 @@ function LiveMode({ instanceId }: { instanceId: string }) {
                 }
               />
               <SettingsRow
-                label="STRATEGY"
+                label="FUND"
                 readOnly
                 control={
                   <span style={{ fontSize: 11, color: "var(--t1)" }}>{inst.strategyName}</span>
@@ -917,7 +917,7 @@ export default function StrategyDashboardPage() {
   const inst = instances.find(i => i.id === id);
 
   if (!inst) {
-    return <div style={{ background: "var(--bg0)", padding: 28, minHeight: "100%", color: "var(--t2)", fontSize: 10 }}>Strategy not found.</div>;
+    return <div style={{ background: "var(--bg0)", padding: 28, minHeight: "100%", color: "var(--t2)", fontSize: 10 }}>Fund not found.</div>;
   }
 
   if (inst.status === "unlinked") {
