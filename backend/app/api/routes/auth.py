@@ -553,6 +553,7 @@ def welcome_complete(
 @router.post("/change-password")
 def change_password(
     body: ChangePasswordRequest,
+    request: Request,
     user_id: str = Depends(get_current_user),
     cur=Depends(get_cursor),
 ) -> dict[str, Any]:
@@ -566,9 +567,12 @@ def change_password(
 
     On success: hash + UPDATE, clear password_is_temporary, set
     password_set_at = now(), null out password_changed_by (self-change).
+    Writes a password_changed_self audit row.
     Other devices' sessions are NOT revoked — distinct from
     admin-reset behavior, since the user themselves is opting in.
     """
+    from ...services.admin_audit import _client_ip, log_admin_action
+
     cur.execute(
         """
         SELECT password_hash, password_is_temporary
@@ -588,6 +592,18 @@ def change_password(
 
     _validate_password_or_400(body.new_password)
 
+    # Reject same-as-current — bcrypt.checkpw is the source of truth since
+    # bcrypt.hashpw with a fresh salt produces a different ciphertext for
+    # the same plaintext, so a string-equality check on the hash wouldn't
+    # work. Skipped on the temporary-password path: the temp is admin-issued
+    # and the user has no canonical "current" they're trying to keep.
+    if not row["password_is_temporary"]:
+        if _verify_password(body.new_password, row["password_hash"]):
+            raise HTTPException(
+                status_code=400,
+                detail="New password must be different from current password",
+            )
+
     new_hash = _hash_password(body.new_password)
     cur.execute(
         """
@@ -601,6 +617,15 @@ def change_password(
          WHERE user_id = %s::uuid
         """,
         (new_hash, user_id),
+    )
+
+    log_admin_action(
+        cur,
+        admin_user_id=user_id,
+        action_type="password_changed_self",
+        subject_user_id=user_id,
+        metadata={"was_temporary": bool(row["password_is_temporary"])},
+        ip=_client_ip(request),
     )
 
     log.info("User %s changed their own password", user_id)
