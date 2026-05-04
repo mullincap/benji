@@ -38,6 +38,7 @@ log = logging.getLogger(__name__)
 ACTION_TYPES = frozenset({
     "password_reset_admin",
     "password_changed_self",
+    "profile_updated_self",
     "invitation_issued",
     "invitation_revoked",
     "sessions_revoked",
