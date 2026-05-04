@@ -21,6 +21,7 @@ import { useEffect, useState, use } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
 
+import { useConfirm } from "../../../components/ConfirmDialog";
 import { AdminCard, AdminTable, Avatar, StatusPill, TerminalStatusBar } from "../../_components";
 import { type Column } from "../../_components/AdminTable";
 import { deriveInitials } from "../../_components/Avatar";
@@ -65,6 +66,7 @@ export default function UserDetailPage({
   // Next.js 16: page params are a Promise. `use()` unwraps in client components.
   const { user_id } = use(params);
   const router = useRouter();
+  const confirm = useConfirm();
 
   const [user, setUser] = useState<UserDetail | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -84,7 +86,14 @@ export default function UserDetailPage({
 
   async function handleRevokeSessions() {
     if (actionInflight || !user) return;
-    if (!window.confirm(`Revoke all active sessions for ${user.email}? They will be signed out immediately on every device.`)) return;
+    const ok = await confirm({
+      eyebrow: "Admin · Confirm",
+      title: "Revoke all sessions?",
+      description: `${user.email} will be signed out immediately on every device. They can sign back in with their existing password.`,
+      confirmLabel: "Revoke sessions",
+      destructive: true,
+    });
+    if (!ok) return;
     setActionInflight("revoke");
     try {
       const r = await adminRevokeSessions(user.user_id);
@@ -105,7 +114,16 @@ export default function UserDetailPage({
     if (actionInflight || !user) return;
     const isCurrentlyLocked = user.locked_until != null && new Date(user.locked_until) > new Date();
     const verb = isCurrentlyLocked ? "Unlock" : "Lock";
-    if (!window.confirm(`${verb} ${user.email}?${isCurrentlyLocked ? "" : " They will not be able to sign in for 24 hours."}`)) return;
+    const ok = await confirm({
+      eyebrow: "Admin · Confirm",
+      title: `${verb} ${user.email}?`,
+      description: isCurrentlyLocked
+        ? "They'll be able to sign in immediately."
+        : "They will not be able to sign in for 24 hours.",
+      confirmLabel: verb,
+      destructive: !isCurrentlyLocked,
+    });
+    if (!ok) return;
     setActionInflight("lock");
     try {
       if (isCurrentlyLocked) {

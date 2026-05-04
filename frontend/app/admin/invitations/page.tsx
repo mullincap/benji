@@ -16,6 +16,7 @@
 
 import { useEffect, useState } from "react";
 
+import { useConfirm } from "../../components/ConfirmDialog";
 import {
   AdminTable,
   Avatar,
@@ -41,6 +42,7 @@ const STATUS_FILTERS: Array<{ key: InvitationStatus | "all"; label: string }> = 
 ];
 
 export default function InvitationsPage() {
+  const confirm = useConfirm();
   const [statusFilter, setStatusFilter] = useState<InvitationStatus | "all">("all");
   const [invitations, setInvitations] = useState<Invitation[] | null>(null);
   const [stats, setStats] = useState<{
@@ -92,7 +94,14 @@ export default function InvitationsPage() {
 
   async function handleRevoke(inv: Invitation) {
     if (actionInflight) return;
-    if (!window.confirm(`Revoke the pending invitation for ${inv.invited_email}?`)) return;
+    const ok = await confirm({
+      eyebrow: "Admin · Confirm",
+      title: "Revoke invitation?",
+      description: `${inv.invited_email} will not be able to use this invitation link. You can issue a new one anytime.`,
+      confirmLabel: "Revoke invitation",
+      destructive: true,
+    });
+    if (!ok) return;
     setActionInflight(inv.invitation_id);
     try {
       await revokeInvitation(inv.invitation_id);

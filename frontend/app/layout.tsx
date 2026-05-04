@@ -3,6 +3,7 @@ import "@fontsource/space-mono/400.css";
 import "@fontsource/space-mono/700.css";
 import "./globals.css";
 import { AuthProvider } from "./lib/auth";
+import { ConfirmProvider } from "./components/ConfirmDialog";
 import TempPasswordBanner from "./components/TempPasswordBanner";
 
 export const metadata: Metadata = {
@@ -25,8 +26,10 @@ export default function RootLayout({
     <html lang="en" className="h-full">
       <body className="h-full">
         <AuthProvider>
-          <TempPasswordBanner />
-          {children}
+          <ConfirmProvider>
+            <TempPasswordBanner />
+            {children}
+          </ConfirmProvider>
         </AuthProvider>
       </body>
     </html>
