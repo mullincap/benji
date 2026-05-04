@@ -124,6 +124,53 @@ const SECTION_STYLE: React.CSSProperties = {
   borderTop: '1px solid var(--line)',
 };
 
+// Persistent hide toggle. Set when the user clicks × on the section
+// header; cleared via the small "Show governance" link that replaces
+// the card when hidden. localStorage scope is per-browser per-user.
+const HIDDEN_KEY = 'simulator.governance.hidden';
+
+// Tolerance for metrics-equality detection. Audit metrics are stored
+// at full float precision in the DB but the canonical-reference
+// endpoint and the per-audit row may be persisted from different
+// computation paths (e.g. JSON serialization rounding). 0.001 is below
+// any meaningful Sharpe / CAGR delta that would trigger governance
+// while staying tight enough that a true candidate replica gets caught.
+const METRICS_EPSILON = 0.001;
+
+function approxEqual(a: number | null, b: number | null): boolean {
+  if (a === null || b === null) return false;
+  return Math.abs(a - b) <= METRICS_EPSILON;
+}
+
+function HeaderRow({ label, onHide }: { label: string; onHide: () => void }) {
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+      <div style={LABEL_STYLE}>{label}</div>
+      <button
+        type="button"
+        onClick={onHide}
+        title="Hide governance section"
+        aria-label="Hide governance section"
+        style={{
+          background: 'transparent',
+          border: 'none',
+          color: 'var(--t3)',
+          fontSize: 11,
+          cursor: 'pointer',
+          padding: '0 4px',
+          lineHeight: 1,
+          fontFamily: 'inherit',
+          transition: 'color 0.12s ease',
+        }}
+        onMouseEnter={(e) => (e.currentTarget.style.color = 'var(--t1)')}
+        onMouseLeave={(e) => (e.currentTarget.style.color = 'var(--t3)')}
+      >
+        ×
+      </button>
+    </div>
+  );
+}
+
 function Row({
   label, candidate, canonical, delta, ok,
 }: {
@@ -161,6 +208,27 @@ export default function CanonicalCompareCard({ results, params }: CanonicalCompa
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [canonical, setCanonical] = useState<CanonicalReference | null>(null);
+  const [hidden, setHiddenState] = useState(false);
+
+  // Hydrate persisted hide state on mount. SSR-safe: useState defaults
+  // to false, the effect runs only client-side.
+  useEffect(() => {
+    try {
+      if (window.localStorage.getItem(HIDDEN_KEY) === '1') setHiddenState(true);
+    } catch {
+      /* storage unavailable */
+    }
+  }, []);
+
+  const setHidden = (v: boolean) => {
+    setHiddenState(v);
+    try {
+      if (v) window.localStorage.setItem(HIDDEN_KEY, '1');
+      else window.localStorage.removeItem(HIDDEN_KEY);
+    } catch {
+      /* storage unavailable */
+    }
+  };
 
   const fetchCanonical = async () => {
     setError(null);
@@ -187,6 +255,9 @@ export default function CanonicalCompareCard({ results, params }: CanonicalCompa
   // re-runs with different params, we keep the same canonical reference
   // (canonical is per-strategy-version, not per-candidate-run), so no
   // refetch is needed on `results` change.
+  // Note: this runs before the `hidden` early return so the rules-of-
+  // hooks ordering stays consistent across renders. Wasted fetch when
+  // hidden is fine — it's cheap and the user can re-show at any time.
   useEffect(() => {
     if (!canonical && !loading && !error) {
       fetchCanonical();
@@ -194,12 +265,43 @@ export default function CanonicalCompareCard({ results, params }: CanonicalCompa
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // Hidden state — render a slim "Show governance" link in place of
+  // the full card. Sits in the same sidebar slot so the user always
+  // has a way back without remembering "where was that toggle".
+  if (hidden) {
+    return (
+      <div style={SECTION_STYLE}>
+        <button
+          type="button"
+          onClick={() => setHidden(false)}
+          style={{
+            background: 'transparent',
+            border: 'none',
+            padding: 0,
+            color: 'var(--t3)',
+            fontSize: 9,
+            fontWeight: 700,
+            letterSpacing: '0.12em',
+            textTransform: 'uppercase',
+            cursor: 'pointer',
+            fontFamily: 'inherit',
+            transition: 'color 0.12s ease',
+          }}
+          onMouseEnter={(e) => (e.currentTarget.style.color = 'var(--t1)')}
+          onMouseLeave={(e) => (e.currentTarget.style.color = 'var(--t3)')}
+        >
+          Show governance
+        </button>
+      </div>
+    );
+  }
+
   // ── Initial render (pre-click) ─────────────────────────────────────────
   if (!canonical && !loading && !error) {
     // Auto-fetch is about to fire on mount; render a slim placeholder.
     return (
       <div style={SECTION_STYLE}>
-        <div style={LABEL_STYLE}>GOVERNANCE</div>
+        <HeaderRow label="GOVERNANCE" onHide={() => setHidden(true)} />
         <div style={{ fontSize: 10, color: 'var(--t2)', marginTop: 8 }}>
           Preparing comparison...
         </div>
@@ -211,7 +313,7 @@ export default function CanonicalCompareCard({ results, params }: CanonicalCompa
   if (loading) {
     return (
       <div style={SECTION_STYLE}>
-        <div style={LABEL_STYLE}>GOVERNANCE</div>
+        <HeaderRow label="GOVERNANCE" onHide={() => setHidden(true)} />
         <div style={{ fontSize: 10, color: 'var(--t2)', marginTop: 8 }}>
           Fetching canonical reference...
         </div>
@@ -223,7 +325,7 @@ export default function CanonicalCompareCard({ results, params }: CanonicalCompa
   if (error) {
     return (
       <div style={SECTION_STYLE}>
-        <div style={LABEL_STYLE}>GOVERNANCE — ERROR</div>
+        <HeaderRow label="GOVERNANCE — ERROR" onHide={() => setHidden(true)} />
         <div
           style={{
             fontSize: 10, color: 'var(--red)',
@@ -258,7 +360,7 @@ export default function CanonicalCompareCard({ results, params }: CanonicalCompa
   if (identical) {
     return (
       <div style={SECTION_STYLE}>
-        <div style={LABEL_STYLE}>GOVERNANCE</div>
+        <HeaderRow label="GOVERNANCE" onHide={() => setHidden(true)} />
         <div
           style={{
             fontSize: 10, color: 'var(--t1)',
@@ -284,7 +386,7 @@ export default function CanonicalCompareCard({ results, params }: CanonicalCompa
   if (!filterRow) {
     return (
       <div style={SECTION_STYLE}>
-        <div style={LABEL_STYLE}>GOVERNANCE</div>
+        <HeaderRow label="GOVERNANCE" onHide={() => setHidden(true)} />
         <div
           style={{
             fontSize: 10, color: 'var(--amber)',
@@ -311,6 +413,43 @@ export default function CanonicalCompareCard({ results, params }: CanonicalCompa
   const canCagr   = asNum(m.cagr_pct);
   const canMaxDD  = asNum(m.max_dd_pct);
   const canTotRet = asNum(m.total_return_pct);
+
+  // Metrics-equality short-circuit. The earlier paramsMatchCanonical
+  // check fires when the candidate's input params match canonical's
+  // stored config — but historical audit rows can have minor param-shape
+  // drift (default-value differences, missing keys) that fails the
+  // strict comparison even when the audit IS the canonical. Falling
+  // back to "do all four metrics match within epsilon?" catches the
+  // canonical-viewing-itself case and renders the same advisory text
+  // instead of the bogus "DOES NOT QUALIFY" red box on zero deltas.
+  const metricsMatch =
+    approxEqual(candSharpe, canSharpe) &&
+    approxEqual(candCagr, canCagr) &&
+    approxEqual(candMaxDD, canMaxDD) &&
+    approxEqual(candTotRet, canTotRet);
+  if (metricsMatch) {
+    return (
+      <div style={SECTION_STYLE}>
+        <HeaderRow label="GOVERNANCE" onHide={() => setHidden(true)} />
+        <div
+          style={{
+            fontSize: 10, color: 'var(--t1)',
+            background: 'var(--bg3)', border: '1px solid var(--line2)',
+            borderRadius: 3, padding: '10px 12px', marginTop: 8, lineHeight: 1.6,
+          }}
+        >
+          Candidate metrics match canonical on Sharpe, CAGR, Max DD, and
+          Total Return. This candidate IS canonical (or an exact replica) —
+          nothing to compare.
+        </div>
+        <div style={{ fontSize: 9, color: 'var(--t3)', marginTop: 8 }}>
+          Canonical: {canonical.strategy_name} {canonical.version_label}
+          {canonical.metrics_data_through
+            ? ` (through ${canonical.metrics_data_through})` : ''}
+        </div>
+      </div>
+    );
+  }
 
   // Governance rule (spec § 5)
   const sharpeOK =
@@ -344,7 +483,10 @@ export default function CanonicalCompareCard({ results, params }: CanonicalCompa
 
   return (
     <div style={SECTION_STYLE}>
-      <div style={LABEL_STYLE}>GOVERNANCE — vs {canonical.strategy_name}</div>
+      <HeaderRow
+        label={`GOVERNANCE — vs ${canonical.strategy_name}`}
+        onHide={() => setHidden(true)}
+      />
 
       {/* Column header */}
       <div
