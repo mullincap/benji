@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useRef } from "react";
 import { useParams, useRouter } from "next/navigation";
-import { useTrader, STRATEGY_CATALOG, StrategyType, Position, fmt, RISK_COLOR, RISK_DIM } from "../../../context";
+import { useTrader, STRATEGY_CATALOG, StrategyType, Position, fmt, RISK_COLOR, RISK_DIM, RISK_LABEL } from "../../../context";
 import { allocatorApi, ApiPnl, ApiPosition } from "../../../api";
 import PerformanceChart from "../../../performance-chart";
 import SetupWizard from "../../../components/SetupWizard";
@@ -185,7 +185,7 @@ function UnlinkedMode({ instanceId }: { instanceId: string }) {
           <span style={{
             fontSize: 9, fontWeight: 700, letterSpacing: "0.12em", textTransform: "uppercase",
             color: RISK_COLOR[inst.risk], background: RISK_DIM[inst.risk], borderRadius: 3, padding: "3px 8px",
-          }}>{inst.risk}</span>
+          }}>{RISK_LABEL[inst.risk]}</span>
         </div>
 
         {/* Reference stats */}

@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
-import { useTrader, STRATEGY_CATALOG, CAPACITY_DATA, StrategyType, StrategyCatalogEntry, fmt, RISK_COLOR, RISK_DIM } from "../../context";
+import { useTrader, STRATEGY_CATALOG, CAPACITY_DATA, StrategyType, StrategyCatalogEntry, fmt, RISK_COLOR, RISK_DIM, RISK_LABEL, annotateDescription } from "../../context";
 import { allocatorApi } from "../../api";
 import { useAuth } from "../../../lib/auth";
 import { useOnboardingState } from "../../_lib/onboarding";
@@ -982,7 +982,7 @@ export default function StrategiesPage() {
                           fontSize: 9, fontWeight: 700, letterSpacing: "0.12em", textTransform: "uppercase",
                           color: RISK_COLOR[cat.risk], background: RISK_DIM[cat.risk],
                           borderRadius: 3, padding: "3px 8px",
-                        }}>{cat.risk}</span>
+                        }}>{RISK_LABEL[cat.risk]}</span>
                         {cat.isCanonical && (isAdmin ? <CanonicalPill /> : isRecommended ? <RecommendedBadge /> : null)}
                         {!effectivePublished && <RetiredPill />}
                       </div>
@@ -992,7 +992,7 @@ export default function StrategiesPage() {
                         </div>
                       )}
                       <p style={{ fontSize: 10, color: dominant ? "var(--t1)" : "var(--t3)", margin: 0, lineHeight: 1.5, maxWidth: 560, transition: trans }}>
-                        {cat.description}
+                        {annotateDescription(cat.description)}
                       </p>
                       {showRecommendedNote && (
                         <div style={{ fontSize: 10, color: "var(--allocator)", marginTop: 6, letterSpacing: "0.02em" }}>
@@ -1090,7 +1090,7 @@ export default function StrategiesPage() {
                     fontSize: 9, fontWeight: 700, letterSpacing: "0.12em", textTransform: "uppercase",
                     color: RISK_COLOR[cat.risk], background: RISK_DIM[cat.risk],
                     borderRadius: 3, padding: "3px 8px",
-                  }}>{cat.risk}</span>
+                  }}>{RISK_LABEL[cat.risk]}</span>
                   {cat.isCanonical && <CanonicalPill />}
                   {!effectivePublished && <RetiredPill />}
                 </div>
@@ -1102,7 +1102,7 @@ export default function StrategiesPage() {
 
                 {/* Description */}
                 <p style={{ fontSize: 10, color: dominant ? "var(--t1)" : "var(--t3)", margin: "0 0 14px", lineHeight: 1.5, flex: 1, transition: trans }}>
-                  {cat.description}
+                  {annotateDescription(cat.description)}
                 </p>
                 {showRecommendedNote && (
                   <div style={{ fontSize: 10, color: "var(--allocator)", marginTop: -8, marginBottom: 14, letterSpacing: "0.02em" }}>

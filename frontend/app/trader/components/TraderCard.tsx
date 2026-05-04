@@ -1,7 +1,7 @@
 "use client";
 
 import { useRouter } from "next/navigation";
-import { useTrader, StrategyInstance, fmt, RISK_COLOR, RISK_DIM } from "../context";
+import { useTrader, StrategyInstance, fmt, RISK_COLOR, RISK_DIM, RISK_LABEL } from "../context";
 import { allocatorApi } from "../api";
 
 // ─── Toggle ──────────────────────────────────────────────────────────────────
@@ -51,7 +51,7 @@ function UnlinkedCard({ inst }: { inst: StrategyInstance }) {
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 12 }}>
         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
           <span style={{ fontSize: 14, fontWeight: 700, color: "var(--t0)" }}>{inst.strategyName}</span>
-          <span style={{ fontSize: 9, fontWeight: 700, letterSpacing: "0.08em", textTransform: "uppercase", padding: "2px 6px", borderRadius: 2, background: RISK_DIM[inst.risk], color: RISK_COLOR[inst.risk] }}>{inst.risk}</span>
+          <span style={{ fontSize: 9, fontWeight: 700, letterSpacing: "0.08em", textTransform: "uppercase", padding: "2px 6px", borderRadius: 2, background: RISK_DIM[inst.risk], color: RISK_COLOR[inst.risk] }}>{RISK_LABEL[inst.risk]}</span>
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: 5 }}>
           <span style={{ width: 5, height: 5, borderRadius: "50%", background: "transparent", border: "1px solid var(--green)" }} />
@@ -102,7 +102,7 @@ function LiveCard({ inst }: { inst: StrategyInstance }) {
           {inst.exchangeName && (
             <span style={{ fontSize: 9, padding: "2px 6px", borderRadius: 2, background: "var(--bg3)", color: "var(--t1)", border: "1px solid var(--line)" }}>{inst.exchangeName}</span>
           )}
-          <span style={{ fontSize: 9, fontWeight: 700, letterSpacing: "0.08em", textTransform: "uppercase", padding: "2px 6px", borderRadius: 2, background: RISK_DIM[inst.risk], color: RISK_COLOR[inst.risk] }}>{inst.risk}</span>
+          <span style={{ fontSize: 9, fontWeight: 700, letterSpacing: "0.08em", textTransform: "uppercase", padding: "2px 6px", borderRadius: 2, background: RISK_DIM[inst.risk], color: RISK_COLOR[inst.risk] }}>{RISK_LABEL[inst.risk]}</span>
         </div>
         <Toggle
           on={isLive}

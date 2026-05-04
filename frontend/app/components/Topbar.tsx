@@ -835,6 +835,7 @@ export default function Topbar() {
                     style={{
                       display: 'flex',
                       alignItems: 'center',
+                      gap: 8,
                       width: '100%',
                       padding: '9px 16px',
                       border: 0,
@@ -849,6 +850,7 @@ export default function Topbar() {
                       transition: 'all 0.1s ease',
                     }}
                   >
+                    <span aria-hidden="true" style={{ fontSize: 11, lineHeight: 1, width: 12, display: 'inline-flex', justifyContent: 'center' }}>{'○'}</span>
                     Account
                   </button>
                   <div style={{ height: 1, background: 'var(--line)', margin: '4px 0' }} />
@@ -870,6 +872,7 @@ export default function Topbar() {
                     style={{
                       display: 'flex',
                       alignItems: 'center',
+                      gap: 8,
                       width: '100%',
                       padding: '9px 16px',
                       border: 0,
@@ -884,6 +887,7 @@ export default function Topbar() {
                       transition: 'all 0.1s ease',
                     }}
                   >
+                    <span aria-hidden="true" style={{ fontSize: 11, lineHeight: 1, width: 12, display: 'inline-flex', justifyContent: 'center' }}>{'⤴'}</span>
                     Sign out
                   </button>
                 </div>

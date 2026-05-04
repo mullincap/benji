@@ -184,26 +184,10 @@ export default function AccountSidebar({
         </>
       )}
 
-      {collapsed && (
-        <div
-          style={{
-            flex: 1,
-            display: "flex",
-            alignItems: "flex-end",
-            justifyContent: "center",
-            paddingBottom: 8,
-            pointerEvents: "none",
-          }}
-        >
-          <div style={{
-            fontSize: 8, color: "var(--t3)",
-            transform: "rotate(-90deg)", whiteSpace: "nowrap",
-            letterSpacing: "0.08em",
-          }}>
-            ACCOUNT
-          </div>
-        </div>
-      )}
+      {/* Collapsed state intentionally renders no rotated label — the
+          collapse button itself is sufficient signal. Earlier rotated
+          "SIDEBAR" / "ACCOUNT" text overflowed the 38px-wide container
+          and read as cut off. */}
     </aside>
   );
 }
