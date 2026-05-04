@@ -741,37 +741,44 @@ export default function Topbar() {
               aria-haspopup="menu"
               aria-expanded={userMenuOpen}
               style={{
-                // Match active-module-tab treatment: colored text +
-                // colored border + transparent bg by default, with a
-                // soft-tinted bg when open as the "menu is open" signal.
-                // Removes the prior solid-filled initials block that
-                // stood out against the rest of the topbar's text-and-
-                // thin-border visual language.
+                // Quiet by default — matches the inactive-module-tab
+                // visual language (text-muted, thin neutral border, no
+                // background). Role color (allocator-purple / amber)
+                // appears only when the menu is open, where it doubles
+                // as the "menu is open" signal. Identity is already
+                // displayed inside the dropdown panel header, so the
+                // closed trigger doesn't need to broadcast role.
                 display: 'inline-flex',
                 alignItems: 'center',
                 gap: 6,
                 padding: '4px 9px',
                 height: 26,
-                border: `1px solid ${user.is_admin ? 'var(--amber)' : '#A78BFF'}`,
+                border: `1px solid ${
+                  userMenuOpen
+                    ? (user.is_admin ? 'var(--amber)' : '#A78BFF')
+                    : 'var(--line2)'
+                }`,
                 borderRadius: 3,
                 background: userMenuOpen
-                  ? (user.is_admin ? 'rgba(240, 165, 0, 0.12)' : 'rgba(167, 139, 255, 0.12)')
+                  ? (user.is_admin ? 'rgba(240, 165, 0, 0.08)' : 'rgba(167, 139, 255, 0.08)')
                   : 'transparent',
-                color: user.is_admin ? 'var(--amber)' : '#A78BFF',
+                color: userMenuOpen
+                  ? (user.is_admin ? 'var(--amber)' : '#A78BFF')
+                  : 'var(--t1)',
                 cursor: 'pointer',
                 fontFamily: 'var(--font-space-mono), Space Mono, monospace',
-                transition: 'background-color 0.15s ease',
+                transition: 'background-color 0.15s ease, border-color 0.15s ease, color 0.15s ease',
               }}
               onMouseEnter={(e) => {
                 if (!userMenuOpen) {
-                  e.currentTarget.style.background = user.is_admin
-                    ? 'rgba(240, 165, 0, 0.08)'
-                    : 'rgba(167, 139, 255, 0.08)';
+                  e.currentTarget.style.color = 'var(--t0)';
+                  e.currentTarget.style.borderColor = 'var(--t2)';
                 }
               }}
               onMouseLeave={(e) => {
                 if (!userMenuOpen) {
-                  e.currentTarget.style.background = 'transparent';
+                  e.currentTarget.style.color = 'var(--t1)';
+                  e.currentTarget.style.borderColor = 'var(--line2)';
                 }
               }}
             >
@@ -788,7 +795,8 @@ export default function Topbar() {
               </span>
               <span style={{
                 fontSize: 8,
-                transition: 'transform 0.15s ease',
+                color: userMenuOpen ? 'inherit' : 'var(--t3)',
+                transition: 'transform 0.15s ease, color 0.15s ease',
                 transform: userMenuOpen ? 'rotate(180deg)' : 'rotate(0deg)',
               }}>
                 {'▾'}
