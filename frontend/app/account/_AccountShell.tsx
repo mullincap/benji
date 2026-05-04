@@ -16,8 +16,19 @@ export default function AccountShell({ children }: { children: React.ReactNode }
   }, [loading, user, router]);
 
   if (loading || !user) {
+    // Loading branch: keep the dot-grid backdrop so the post-auth handoff
+    // doesn't briefly flash a flat solid bg before the post-auth shell
+    // mounts. Same gradient values as the post-auth render below.
     return (
-      <div style={{ background: "var(--bg0)", minHeight: "100vh" }} />
+      <div
+        style={{
+          background: "var(--bg0)",
+          backgroundImage:
+            "radial-gradient(circle, rgba(36, 36, 40, 0.5) 1px, transparent 1px)",
+          backgroundSize: "24px 24px",
+          minHeight: "100vh",
+        }}
+      />
     );
   }
 
@@ -25,11 +36,11 @@ export default function AccountShell({ children }: { children: React.ReactNode }
     <div
       style={{
         background: "var(--bg0)",
-        // Subtle radial dot grid — same pattern auth pages use via the
-        // .auth-shell class. Applied here too because the account page
-        // is wide + sparse on large screens; flat solid bg felt empty.
-        // Inline (not a shared class) so the trader/admin data-dashboard
-        // surfaces stay solid — they want a flat backdrop for charts.
+        // Subtle radial dot grid — matches the .auth-shell pattern in
+        // globals.css. Sidebar overrides this with an opaque var(--bg0)
+        // background so the dotted body shows only behind the main
+        // content area where the sparse layout would otherwise feel
+        // empty on wide viewports.
         backgroundImage:
           "radial-gradient(circle, rgba(36, 36, 40, 0.5) 1px, transparent 1px)",
         backgroundSize: "24px 24px",
