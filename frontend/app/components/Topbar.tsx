@@ -342,6 +342,15 @@ export default function Topbar() {
     <div
       className={navClass}
       style={{
+        // Sticky so the cockpit stays anchored on long pages (trader
+        // overview, strategy detail, etc.). z-index 50 sits below modals
+        // (ConfirmDialog at 1000, IssueInviteModal/SetupWizard at 1000+)
+        // and above all page content. Topbar's own descendants (modules
+        // dropdown, theme picker, user menu) carry z-index 60 within
+        // this stacking context so they overlay the bar correctly.
+        position: 'sticky',
+        top: 0,
+        zIndex: 50,
         height: 46,
         background: 'var(--bg1)',
         borderBottom: '1px solid var(--line)',
