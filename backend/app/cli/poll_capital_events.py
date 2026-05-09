@@ -71,8 +71,9 @@ _DEFAULT_LOOKBACK_DAYS = 7
 
 # Backfill lookback caps per exchange (per their API retention).
 _BACKFILL_DAYS = {
-    "blofin":  90,
-    "binance": 365,
+    "blofin":          90,
+    "binance":         365,
+    "binance_futures": 365,
 }
 
 

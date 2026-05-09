@@ -52,7 +52,7 @@ import {
 } from "../api";
 import { resolveExchangeInfo } from "../_lib/exchange-info";
 
-const SUPPORTED_EXCHANGES: ExchangeSlug[] = ["binance", "blofin"];
+const SUPPORTED_EXCHANGES: ExchangeSlug[] = ["binance_futures", "blofin"];
 const VERIFY_STEP_LOG_LINES = [
   "> Connecting to exchange API...",
   "> Verifying key ownership...",
@@ -60,10 +60,10 @@ const VERIFY_STEP_LOG_LINES = [
 ];
 
 // Display-cased names for the success step. Backend stores slugs lowercased
-// ("blofin", "binance") which read as scrappy on the celebration screen.
+// ("blofin", "binance_futures") which read as scrappy on the celebration screen.
 const EXCHANGE_DISPLAY: Record<string, string> = {
   blofin: "BloFin",
-  binance: "Binance",
+  binance_futures: "Binance Futures",
 };
 
 // Truncate a UUID-shaped connection id for the receipt: first 8 + last 4
@@ -161,17 +161,18 @@ type RoleName = "required" | "allowed" | "rejected" | "inferred";
 type RowSpec = {
   key: keyof ExchangePermissions;
   label: string;
-  binance: Exclude<RoleName, "inferred">;
-  blofin:  RoleName;
+  binance_futures: Exclude<RoleName, "inferred">;
+  blofin:          RoleName;
 };
 
 const PERMISSION_ROWS: RowSpec[] = [
-  { key: "read",          label: "Read account info",     binance: "required", blofin: "required" },
+  { key: "read",          label: "Read account info", binance_futures: "required", blofin: "required" },
   // Our BloFin parser encodes readOnly=0 as spot_trade=true + futures_trade=true.
   // By policy we require trading on BloFin, so render these as ACTIVE when the
-  // backend confirms trade capability.
-  { key: "spot_trade",    label: "Spot & margin trading", binance: "required", blofin: "required" },
-  { key: "futures_trade", label: "Futures trading",       binance: "allowed",  blofin: "required" },
+  // backend confirms trade capability. Binance Futures has no spot/margin
+  // requirement — futures_trade is the one that matters for our trader.
+  { key: "spot_trade",    label: "Spot trading",      binance_futures: "allowed",  blofin: "required" },
+  { key: "futures_trade", label: "Futures trading",   binance_futures: "required", blofin: "required" },
   // Withdrawals row intentionally omitted — backend still enforces withdrawals=false
   // via validate_permissions, and the UI guidance text on step 1 already tells
   // users to leave it disabled. Rendering it here added noise (amber "UNCLEAR"
@@ -198,7 +199,7 @@ function PermissionsStep({
       </div>
       <div style={{ display: "flex", flexDirection: "column", gap: 5, marginBottom: 14 }}>
         {PERMISSION_ROWS.map(row => {
-          const role: RoleName = exchange === "blofin" ? row.blofin : row.binance;
+          const role: RoleName = exchange === "blofin" ? row.blofin : row.binance_futures;
           const value = permissions?.[row.key] ?? null;
           // Resolve pill + row bg by role × value.
           let pillColor: string, pillBg: string, pillBorder: string;
@@ -435,7 +436,7 @@ export function ExchangeLinkWizard({
               repeating it inside Step 1 was redundant. The guidance still
               appears in settings's fresh-select path because that surface
               has no upstream context. */}
-          {!initialExchange && exchange === "binance" && (
+          {!initialExchange && exchange === "binance_futures" && (
             <div style={{
               fontSize: 10, color: "var(--t2)", lineHeight: 1.6,
               background: "var(--bg2)", border: "1px solid var(--line)",
@@ -445,8 +446,8 @@ export function ExchangeLinkWizard({
                 Create a Binance API key with:
               </div>
               <div>&middot; <span style={{ color: "var(--t1)" }}>Enable Reading</span></div>
-              <div>&middot; <span style={{ color: "var(--t1)" }}>Enable Spot &amp; Margin Trading</span></div>
-              <div>&middot; Do not enable <span style={{ color: "var(--t1)" }}>Withdrawals</span></div>
+              <div>&middot; <span style={{ color: "var(--t1)" }}>Enable Futures</span></div>
+              <div>&middot; <span style={{ color: "var(--t1)" }}>Enable Withdrawals</span></div>
             </div>
           )}
           {!initialExchange && exchange === "blofin" && (
@@ -766,10 +767,20 @@ export function ExchangeLinkWizard({
         const permissionsValue = permParts.length > 0
           ? permParts.join(" · ")
           : (verify.result.exchange === "blofin" ? "Read · Trade" : "Read");
+        // Withdrawals: BloFin and the legacy binance margin slug still
+        // enforce withdrawals=false in the backend validator. Binance
+        // Futures permits withdrawals (operator-required for the planned
+        // auto-pull-profits feature), so we surface the actual permission
+        // state instead of a hardcoded "Disabled" claim.
+        const withdrawalsEnabled = perms?.withdrawals === true;
+        const withdrawalsRow: { label: string; value: string; tone?: "green" } =
+          withdrawalsEnabled
+            ? { label: "Withdrawals", value: "Enabled" }
+            : { label: "Withdrawals", value: "Disabled", tone: "green" };
         const detailRows: { label: string; value: string; mono?: boolean; tone?: "green" }[] = [
           { label: "Connection ID", value: truncateConnectionId(verify.result.connection_id), mono: true },
           { label: "Permissions",   value: permissionsValue },
-          { label: "Withdrawals",   value: "Disabled", tone: "green" },
+          withdrawalsRow,
           { label: "Encryption",    value: "Fernet · at-rest" },
         ];
         return (

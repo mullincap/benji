@@ -141,16 +141,16 @@ export default function GetStartedPage() {
             gap: 12,
             marginBottom: 24,
           }}>
-            {/* Binance is the only exchange we promote in user-facing
+            {/* Binance Futures is the only exchange we promote in user-facing
                 onboarding right now. BloFin's card stays rendered but
                 visually-disabled — looks unavailable to demo users
                 (e.g. Juan), still clickable for J's internal testing
                 via the same wizard flow. Flip BloFin's
                 visuallyDisabled to false to re-promote when ready. */}
             <ExchangeCard
-              name="Binance"
+              name="Binance Futures"
               meta="USDT-M perpetuals · institutional"
-              onClick={() => setLinkingExchange("binance")}
+              onClick={() => setLinkingExchange("binance_futures")}
             />
             <ExchangeCard
               name="BloFin"

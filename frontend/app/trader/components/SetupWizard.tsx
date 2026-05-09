@@ -17,15 +17,15 @@ import { resolveExchangeInfo } from "../_lib/exchange-info";
 // Only backend-supported exchanges. Bybit/OKX were previously listed but
 // would 400 on submit — removed until backend support is added.
 const EXCHANGE_OPTIONS: { name: string; slug: ExchangeSlug; badge: string; markets: string }[] = [
-  { name: "Binance", slug: "binance", badge: "BN", markets: "Spot · Futures · Margin" },
-  { name: "BloFin",  slug: "blofin",  badge: "BF", markets: "Futures" },
+  { name: "Binance Futures", slug: "binance_futures", badge: "BN", markets: "USDⓈ-M Futures" },
+  { name: "BloFin",          slug: "blofin",          badge: "BF", markets: "Futures" },
 ];
 
 const EXCHANGE_KEY_STEPS: Record<string, string[]> = {
-  Binance: [
+  "Binance Futures": [
     "Log into Binance \u2192 profile icon \u2192 API Management",
     "Click Create API \u2192 label \u2192 verify",
-    "Enable Reading + Spot & Margin Trading \u2014 do NOT enable Withdrawals",
+    "Enable Reading + Enable Futures + Enable Withdrawals",
     "Copy API Key and Secret Key and paste below",
   ],
   BloFin: [
@@ -575,7 +575,7 @@ export default function SetupWizard({ strategyName, onActivate, onCancel }: Setu
 
       {/* Step 2: Keys */}
       {step === 2 && (() => {
-        const guideSteps = EXCHANGE_KEY_STEPS[selectedExchangeName ?? ""] ?? EXCHANGE_KEY_STEPS.Binance;
+        const guideSteps = EXCHANGE_KEY_STEPS[selectedExchangeName ?? ""] ?? EXCHANGE_KEY_STEPS["Binance Futures"];
         const badge = EXCHANGE_OPTIONS.find(o => o.name === selectedExchangeName)?.badge ?? "??";
 
         const inputsBlock = (

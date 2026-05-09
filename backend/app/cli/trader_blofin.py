@@ -5476,10 +5476,11 @@ def run_session_for_allocation(
             )
             return
 
-        if creds.exchange not in ("blofin", "binance"):
+        if creds.exchange not in ("blofin", "binance", "binance_futures"):
             log.warning(
                 f"Allocation {allocation_id} uses {creds.exchange!r} — only "
-                "blofin + binance are supported in this release. Skipping."
+                "blofin, binance_futures, and (legacy) binance are supported "
+                "in this release. Skipping."
             )
             _mark_runtime_state(
                 allocation_id,

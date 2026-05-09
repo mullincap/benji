@@ -8,8 +8,9 @@ engine for all supported exchanges. This module provides the ABC that lets
 it dispatch exchange-specific RPC through a common interface.
 
 Concrete adapters:
-  - BloFinAdapter        -- wraps the existing BlofinREST client (futures/perps)
-  - BinanceMarginAdapter -- cross-margin trading via python-binance
+  - BloFinAdapter         -- wraps the existing BlofinREST client (futures/perps)
+  - BinanceFuturesAdapter -- USDⓈ-M perpetuals via stdlib BinanceClient
+  - BinanceMarginAdapter  -- cross-margin trading via python-binance (dormant)
 
 Design principles:
   1. Inst IDs in BloFin form (e.g., "BTC-USDT") everywhere the trader code
@@ -105,8 +106,8 @@ class CapitalEventInfo:
 # -- Adapter ABC ---------------------------------------------------------
 
 class ExchangeAdapter(ABC):
-    exchange_name:       str        # "blofin" / "binance"
-    native_sl_supported: bool       # BloFin: True. Binance margin: False.
+    exchange_name:       str        # "blofin" / "binance_futures" / "binance"
+    native_sl_supported: bool       # BloFin: True. Binance futures: True. Binance margin: False.
 
     # -- Account -------------------------------------------------------
     @abstractmethod
@@ -270,7 +271,15 @@ def adapter_for(creds: ExchangeCredentials) -> ExchangeAdapter:
             api_secret=creds.api_secret,
             passphrase=creds.passphrase,
         )
+    if exchange == "binance_futures":
+        from app.services.exchanges.binance_futures_adapter import BinanceFuturesAdapter
+        return BinanceFuturesAdapter(
+            api_key=creds.api_key,
+            api_secret=creds.api_secret,
+        )
     if exchange == "binance":
+        # Legacy cross-margin slug — kept for any pre-existing rows. Not
+        # surfaced in the UI; new connections all use binance_futures.
         from app.services.exchanges.binance_margin_adapter import BinanceMarginAdapter
         return BinanceMarginAdapter(
             api_key=creds.api_key,

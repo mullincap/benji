@@ -10,7 +10,17 @@ enforces the read-only MVP policy.
 Policy (2026-04-18 reversal): keys must be trade-capable because the allocator
 executes strategies. Withdrawals remain the security boundary.
 
-  • Binance: requires read + spot/margin trading, rejects withdrawals.
+  • Binance Futures (slug "binance_futures"): requires read + futures trading.
+             Withdrawals permission is ALLOWED (operator-required, 2026-05-08)
+             for a planned auto-pull-profits feature — the system will call
+             Binance's withdrawal endpoint to move realized profits to a
+             whitelisted external address. The trader itself does not call
+             any withdrawal endpoint today; the permission is enabled so the
+             keys are ready when the profit-pull worker ships.
+             Spot/margin permissions are not required (and not used).
+  • Binance (legacy slug "binance"): cross-margin spot. Dormant — no UI surface
+             today. Keeps validating as before for any pre-existing rows
+             (still rejects withdrawals).
   • BloFin:  requires trade-capable (readOnly=0). Cannot distinguish TRADE from
              TRANSFER via query-apikey — we accept and rely on UI guidance.
 
@@ -159,7 +169,11 @@ def fetch_permissions(
     if not api_key or not api_secret:
         raise PermissionAuthError("Stored credentials could not be decrypted")
 
-    if exchange == "binance":
+    # Both binance_futures (futures perps) and the legacy binance (cross-margin)
+    # slug probe the SAME endpoint — /sapi/v1/account/apiRestrictions returns
+    # all permission flags regardless of which one the user intends to use.
+    # validate_permissions() below applies the slug-specific policy.
+    if exchange in ("binance_futures", "binance"):
         client = BinanceClient(api_key=api_key, api_secret=api_secret, testnet=testnet)
         try:
             raw = client.get_permissions()
@@ -216,12 +230,31 @@ def validate_permissions(
     Validate that an exchange key has the permissions required to execute
     strategies (trade-capable, no withdrawals).
 
-    Binance: requires read + spot/margin trading, rejects withdrawals.
+    Binance Futures: requires read + futures trading, rejects withdrawals.
+    Binance (legacy margin): requires read + spot/margin trading, rejects
+             withdrawals. Dormant slug, kept for any pre-existing rows.
     BloFin:  requires trade-capable (readOnly=0). BloFin's query-apikey does
              not break out TRADE vs TRANSFER — we accept any non-read-only key
              and steer users via UI guidance to enable only Trade.
     """
     exchange = (exchange or "").lower()
+
+    if exchange == "binance_futures":
+        if perms.read is not True:
+            return False, (
+                "Key is missing read permission. Enable 'Enable Reading' in your "
+                "Binance API key settings."
+            )
+        if perms.futures_trade is not True:
+            return False, (
+                "Key is missing futures trading permission. Enable 'Enable Futures' "
+                "in your Binance API key settings — required to execute strategies "
+                "on USDⓈ-M perpetuals."
+            )
+        # Withdrawals permission is permitted on binance_futures keys (2026-05-08
+        # operator decision). The trader never calls any withdrawal endpoint
+        # — this is purely about not blocking keys that carry the permission.
+        return True, None
 
     if exchange == "binance":
         if perms.read is not True:

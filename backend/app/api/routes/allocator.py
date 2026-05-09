@@ -669,7 +669,13 @@ def refresh_snapshots(cur, *, user_id: str | None = None) -> None:
                 data = _fetch_live_blofin(
                     api_key=api_key, api_secret=api_secret, passphrase=passphrase,
                 )
-            elif exchange == "binance":
+            elif exchange in ("binance_futures", "binance"):
+                # Both slugs use the same /fapi-primary fetch path — futures
+                # positionRisk has authoritative entry prices for binance_futures
+                # connections, while the legacy binance (cross-margin) slug
+                # falls through to the margin-account fallback inside
+                # _fetch_live_binance and gets entry prices stitched in from
+                # runtime_state below.
                 api_key = decrypt_key(conn["api_key_enc"]) if conn["api_key_enc"] else None
                 api_secret = decrypt_key(conn["api_secret_enc"]) if conn["api_secret_enc"] else None
                 if not api_key or not api_secret:
@@ -679,11 +685,10 @@ def refresh_snapshots(cur, *, user_id: str | None = None) -> None:
                 data = _fetch_live_binance(
                     api_key=api_key, api_secret=api_secret,
                 )
-                # Binance cross-margin has no per-symbol entry price, and keys
-                # with trade-only perms can't hit /fapi/v2/positionRisk either.
-                # The trader's runtime_state persists fill_entry_price from the
-                # order confirm — use that as the authoritative source for
-                # positions owned by this account's active allocations.
+                # Margin-only fallback path lacks per-symbol entry prices, so
+                # we stitch them from runtime_state for the legacy binance slug.
+                # binance_futures gets real entries from positionRisk and the
+                # call is a no-op (already-populated entry_price wins).
                 data["positions"] = _enrich_positions_from_runtime_state(
                     cur, str(cid), data["positions"],
                 )
@@ -1269,7 +1274,11 @@ def _extract_public_permissions(last_permissions: Any, exchange: str) -> dict | 
     # single source of truth (the parser) and survives parser upgrades.
     from ...services.exchanges.permissions import _parse_binance, _parse_blofin
     try:
-        if exchange == "binance":
+        # Both binance_futures (futures perps) and the legacy binance
+        # (cross-margin) slug parse the same /sapi/v1/account/apiRestrictions
+        # payload — the difference is in policy (validate_permissions), not
+        # in the parser.
+        if exchange in ("binance_futures", "binance"):
             ps = _parse_binance(last_permissions)
         elif exchange == "blofin":
             ps = _parse_blofin(last_permissions)
@@ -1338,7 +1347,7 @@ def get_exchanges(user_id: str = Depends(get_current_user), cur=Depends(get_curs
     return {"exchanges": exchanges}
 
 
-SUPPORTED_EXCHANGES = {"binance", "blofin"}
+SUPPORTED_EXCHANGES = {"binance_futures", "binance", "blofin"}
 
 
 class ExchangeKeysRequest(BaseModel):
@@ -1430,7 +1439,12 @@ def store_exchange_keys(
         (user_id, exchange, api_key_hash),
     )
     if cur.fetchone():
-        exchange_display = exchange.capitalize() if exchange == "binance" else "BloFin"
+        if exchange == "binance_futures":
+            exchange_display = "Binance Futures"
+        elif exchange == "binance":
+            exchange_display = "Binance"
+        else:
+            exchange_display = "BloFin"
         raise HTTPException(
             status_code=409,
             detail=(
@@ -1506,6 +1520,46 @@ def store_exchange_keys(
             last_permissions=perms.raw,
         )
         raise HTTPException(status_code=400, detail=reason)
+
+    # ── Step 5b: binance_futures — probe one-way / hedge mode ────────────
+    # The trader assumes one-way positions; hedge-mode accounts mis-route
+    # orders. The adapter enforces this at construction (trader spawn time)
+    # but a "green" connection that crashes the trader on first allocation
+    # is a bad UX — surface the failure here while the user is still on
+    # the connect surface and can fix it before walking away.
+    #
+    # Network failure on this probe is non-fatal: the adapter's check at
+    # trader spawn is the backstop. We accept a small risk of a transient
+    # failure letting a hedge-mode key through to step 6 active rather
+    # than blocking the connect on every Binance hiccup.
+    if exchange == "binance_futures":
+        try:
+            _probe_client = BinanceClient(
+                api_key=body.api_key, api_secret=body.api_secret, testnet=False,
+            )
+            mode_resp = _probe_client.get_futures_position_side_dual()
+            if bool(mode_resp.get("dualSidePosition", False)):
+                hedge_msg = (
+                    "Binance Futures account is in Hedge mode. This trader "
+                    "requires One-way mode. Close all open futures positions, "
+                    "then in Binance: Futures → Preferences → Position Mode "
+                    "→ One-way Mode. Then re-link the key."
+                )
+                _update_connection_status(
+                    cur, connection_id,
+                    status="invalid",
+                    error_msg=hedge_msg,
+                    last_permissions=perms.raw,
+                )
+                raise HTTPException(status_code=400, detail=hedge_msg)
+        except HTTPException:
+            raise
+        except Exception as e:
+            log.warning(
+                "binance_futures hedge-mode probe failed for %s: %s "
+                "(continuing — adapter will recheck at trader spawn)",
+                connection_id, e,
+            )
 
     # ── Step 6: mark active ──────────────────────────────────────────────
     _update_connection_status(

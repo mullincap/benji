@@ -100,7 +100,7 @@ export interface ApiStrategy {
   };
 }
 
-export type ExchangeSlug = "binance" | "blofin";
+export type ExchangeSlug = "binance_futures" | "blofin";
 
 export type ExchangeStatus =
   | "active"

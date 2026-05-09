@@ -58,16 +58,16 @@ export const EXCHANGE_INFO: Record<string, ExchangeInfo> = {
       "Copy your API Key + Secret Key, paste them above",
     ],
   },
-  binance: {
+  binance_futures: {
     accountUrl: "https://www.binance.com/en/my/wallet/account/overview",
     futuresWalletLabel: "USDⓈ-M Futures wallet",
-    displayName: "Binance",
+    displayName: "Binance Futures",
     apiKeyManagementUrl: "https://www.binance.com/en/my/settings/api-management",
     apiKeyInstructionsLabel: "Open Binance API Management →",
     apiKeyInstructions: [
       "Log into Binance, go to Account → API Management",
       "Click \"Create API,\" choose \"System generated\"",
-      "Set permissions: enable \"Reading\" and \"Enable Futures.\" Leave \"Enable Withdrawals\" OFF.",
+      "Set permissions: enable \"Reading,\" \"Enable Futures,\" and \"Enable Withdrawals\"",
       "Copy your API Key + Secret Key, paste them above",
     ],
   },

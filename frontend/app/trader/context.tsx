@@ -10,7 +10,7 @@ import {
 
 export interface Exchange {
   id: string;                    // connection_id from backend
-  exchange: string;              // canonical slug: "binance" | "blofin"
+  exchange: string;              // canonical slug: "binance_futures" | "blofin" (legacy "binance" still tolerated)
   name: string;                  // display label (falls back to exchange if null)
   maskedKey: string;
   lastSynced: string;

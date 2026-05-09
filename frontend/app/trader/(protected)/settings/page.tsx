@@ -1384,7 +1384,7 @@ export default function SettingsPage() {
   // wizard and no longer routes here.
   const openLinkParam = searchParams.get("openLink");
   const initialExchange =
-    openLinkParam === "blofin" || openLinkParam === "binance"
+    openLinkParam === "blofin" || openLinkParam === "binance_futures"
       ? openLinkParam
       : null;
   const [showWizard, setShowWizard] = useState(initialExchange !== null);
