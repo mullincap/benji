@@ -76,6 +76,17 @@ def _env_metl(env: dict) -> dict:
     return env
 
 
+def _cmd_binetl(params: dict) -> list[str]:
+    """binetl.py --start <yesterday>. Direct-Binance ETL — drop-in for metl."""
+    start = params.get("start") or _yesterday_iso()
+    return [
+        _PIPELINE_PYTHON,
+        str(_PIPELINE_DIR / "compiler" / "binetl.py"),
+        "--start", start,
+        "--triggered-by", "ui",
+    ]
+
+
 def _cmd_coingecko(params: dict) -> list[str]:
     return [
         _PIPELINE_PYTHON,
@@ -116,6 +127,12 @@ SCRIPT_REGISTRY: dict[str, dict] = {
         "label":  "Amberdata ETL (metl.py)",
         "cmd_fn": _cmd_metl,
         "env_fn": _env_metl,
+    },
+    "binetl": {
+        "module": "compiler",
+        "label":  "Direct-Binance ETL (binetl.py)",
+        "cmd_fn": _cmd_binetl,
+        "env_fn": _env_passthrough,
     },
     "coingecko_marketcap": {
         "module": "compiler",

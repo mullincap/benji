@@ -602,10 +602,15 @@ def _ensure_today_in_db(
         rows_today = 0
 
     if rows_today == 0:
-        _emit(f"futures_1m has 0 rows for {today_str}; running metl…")
-        metl_script = pipeline_dir / "compiler" / "metl.py"
-        metl_cmd = [
-            _PIPELINE_PYTHON, str(metl_script),
+        # ETL_BACKEND switches between Amberdata (metl.py) and direct
+        # Binance (binetl.py). Both expose identical CLI: --start, --end,
+        # --triggered-by, --run-tag. Default stays "metl" so unset env =
+        # legacy behavior; cutover sets ETL_BACKEND=binetl.
+        etl_backend = os.environ.get("ETL_BACKEND", "metl")
+        _emit(f"futures_1m has 0 rows for {today_str}; running {etl_backend}…")
+        etl_script = pipeline_dir / "compiler" / f"{etl_backend}.py"
+        etl_cmd = [
+            _PIPELINE_PYTHON, str(etl_script),
             "--start", today_str,
             "--end", today_str,
             "--triggered-by", "cli",
@@ -613,19 +618,19 @@ def _ensure_today_in_db(
         ]
         try:
             subprocess.run(
-                metl_cmd, cwd=str(pipeline_dir), env=pipeline_env,
+                etl_cmd, cwd=str(pipeline_dir), env=pipeline_env,
                 capture_output=True, timeout=1200,  # 20 min
             )
             status["metl"] = "ran"
-            _emit("metl complete")
+            _emit(f"{etl_backend} complete")
         except subprocess.TimeoutExpired:
             status["metl"] = "timeout"
-            status["errors"].append("metl exceeded 20-min timeout")
-            _emit("⚠ metl timed out; proceeding (overlap may still pick up partial data)")
+            status["errors"].append(f"{etl_backend} exceeded 20-min timeout")
+            _emit(f"⚠ {etl_backend} timed out; proceeding (overlap may still pick up partial data)")
         except Exception as e:
             status["metl"] = "failed"
-            status["errors"].append(f"metl: {e}")
-            _emit(f"⚠ metl failed: {e}")
+            status["errors"].append(f"{etl_backend}: {e}")
+            _emit(f"⚠ {etl_backend} failed: {e}")
     else:
         status["metl"] = "skipped"
         _emit(f"futures_1m already has {rows_today} rows for {today_str}; skipping metl")
