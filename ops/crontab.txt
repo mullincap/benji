@@ -22,19 +22,37 @@
 # the account_anchor_writer entry added during this session — no outside
 # drift. Going forward this file is canonical; the procedure above is
 # enforced for every change, not verified after the fact.
+#
+# Reconciled 2026-05-09: post-cutover drift cleanup. The ops/binetl-emergency-
+# cutover merge (a830ff4) flipped the host's 00:15 ETL line metl.py → binetl.py
+# but missed step 5 of the procedure above (this repo file). Same session
+# also moves the 00:15 ETL + 01:00 indexer crons onto
+# `app.cli.nightly_etl_catchup`, a self-healing wrapper that scans the last
+# N days and fills any gap instead of unconditionally running for "yesterday."
+# After a cutover, transient fetch failure, or operator-forgot-to-top-up-today
+# the next nightly run now catches up automatically.
 # =============================================================================
 
 SHELL=/bin/bash
 PATH=/usr/local/sbin:/usr/local/bin:/sbin:/bin:/usr/sbin:/usr/bin
 
-# ── Amberdata ETL — 00:15 UTC ─────────────────────────────────────────────────
-15 0 * * * . /mnt/quant-data/credentials/secrets.env && /root/benji/pipeline/.venv/bin/python /root/benji/pipeline/compiler/metl.py --start $(date -d "yesterday" +\%Y-\%m-\%d) >> /mnt/quant-data/logs/amberdata/cron.log 2>&1
+# ── Compiler ETL catchup — 00:15 UTC ──────────────────────────────────────────
+# Self-healing wrapper: scans last 7 days, runs the active ETL backend
+# (ETL_BACKEND env in docker-compose; binetl in prod since 2026-05-09) for
+# any partial day plus yesterday-if-missing. Replaces the old single-day
+# `--start $(date -d "yesterday")` invocation that left holes after the
+# cutover (see docs/ops_runbook.md → "Cutover-day playbook").
+15 0 * * * cd /root/benji && docker compose -f /root/benji/docker-compose.yml exec -T celery python -m app.cli.nightly_etl_catchup --module compiler --lookback-days 7 >> /mnt/quant-data/logs/amberdata/cron.log 2>&1
 
 # ── CoinGecko daily snapshot — 00:30 UTC ──────────────────────────────────────
 30 0 * * * . /mnt/quant-data/credentials/secrets.env && /root/benji/pipeline/.venv/bin/python /root/benji/pipeline/compiler/coingecko_marketcap.py --api-key $COINGECKO_API_KEY --mode daily --output-dir /mnt/quant-data/raw/coingecko/ >> /mnt/quant-data/logs/coingecko/cron.log 2>&1
 
-# ── Indexer — 01:00 UTC (rebuild leaderboard from DB for yesterday) ────────
-0 1 * * * . /mnt/quant-data/credentials/secrets.env && /root/benji/pipeline/.venv/bin/python /root/benji/pipeline/indexer/build_intraday_leaderboard.py --metric price --source db --start $(date -d "yesterday" +\%Y-\%m-\%d) --end $(date -d "yesterday" +\%Y-\%m-\%d) --triggered-by scheduler --run-tag nightly >> /mnt/quant-data/logs/indexer/cron.log 2>&1 && /root/benji/pipeline/.venv/bin/python /root/benji/pipeline/indexer/build_intraday_leaderboard.py --metric open_interest --source db --start $(date -d "yesterday" +\%Y-\%m-\%d) --end $(date -d "yesterday" +\%Y-\%m-\%d) --triggered-by scheduler --run-tag nightly >> /mnt/quant-data/logs/indexer/cron.log 2>&1 && /root/benji/pipeline/.venv/bin/python /root/benji/pipeline/indexer/build_intraday_leaderboard.py --metric volume --source db --start $(date -d "yesterday" +\%Y-\%m-\%d) --end $(date -d "yesterday" +\%Y-\%m-\%d) --triggered-by scheduler --run-tag nightly >> /mnt/quant-data/logs/indexer/cron.log 2>&1
+# ── Indexer catchup — 01:00 UTC (rebuild leaderboards from DB) ───────────────
+# Self-healing wrapper: scans last 7 days for any (date, metric) gap below
+# the indexer's own 95% complete threshold and rebuilds it. Mirrors the
+# 00:15 compiler entry. The indexer's own date_already_in_db guard makes
+# every (date, metric) call idempotent.
+0 1 * * * cd /root/benji && docker compose -f /root/benji/docker-compose.yml exec -T celery python -m app.cli.nightly_etl_catchup --module indexer --lookback-days 7 >> /mnt/quant-data/logs/indexer/cron.log 2>&1
 
 # ── Refresh leaderboard cagg — 01:15 UTC (after indexer finishes) ────────────
 15 1 * * * . /mnt/quant-data/credentials/secrets.env && PGPASSWORD=$DB_PASSWORD psql -h $DB_HOST -U $DB_USER -d $DB_NAME -c "CALL refresh_continuous_aggregate('market.leaderboards_daily_count', NOW() - INTERVAL '2 days', NOW());" >> /mnt/quant-data/logs/indexer/cron.log 2>&1
