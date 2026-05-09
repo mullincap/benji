@@ -38,6 +38,59 @@ ssh mcap "ls -la /root/crontab_backup_*.bak"   # find the backup
 ssh mcap "crontab /root/crontab_backup_<TS>.bak"
 ```
 
+## ETL cutover-day playbook
+
+The 00:15 UTC compiler cron always runs for **yesterday**. On the day you
+flip the ETL backend (e.g. `metl` → `binetl`, 2026-05-09), "today" never
+gets touched by cron — so unless you fill it explicitly, you go to bed
+with one partial day on the dashboard and the operator wakes up to a
+"missing day" question.
+
+The 2026-05-09 cutover hit exactly this: the 00:15 cron ran old-ETL for
+May 8 fine, the cron flip landed at ~03:07 UTC, and the cutover step's
+`binetl --start 2026-05-09` only captured the ~150 minutes of May 9 that
+existed when it ran. Hours 02:30–23:59 of May 9 were left for tomorrow's
+cron to backfill. The self-healing nightly wrapper (`app.cli.
+nightly_etl_catchup`) covers this automatically going forward, but the
+cutover-day checklist still applies because the wrapper only fires at
+00:15 UTC.
+
+### Steps when flipping ETL_BACKEND mid-day
+
+1. **Update docker-compose** (`ETL_BACKEND=<new>`) so on-demand audit
+   reruns and the celery `fill_missing_compiler` worker pick up the new
+   backend immediately.
+2. **Flip the host crontab** to point at the new ETL script. Diff the
+   .bak afterwards (procedure above).
+3. **Update [ops/crontab.txt](../ops/crontab.txt)** to match (step 5 of the procedure at the
+   top of that file — easy to forget under cutover pressure).
+4. **Backfill mid-day data**: run the new ETL once for `--start <today>
+   --end <today>`. With the wrapper script in place this is also the
+   command you'd run manually:
+
+   ```bash
+   ssh mcap "docker compose -f /root/benji/docker-compose.yml exec -T \
+     celery python -m app.cli.nightly_etl_catchup --module compiler \
+     --lookback-days 2"
+   ```
+
+   The wrapper also picks up "yesterday if missing" so it doubles as
+   confirmation that the cron-driven path is wired correctly.
+
+5. **Verify on /compiler/coverage**: today should still show as
+   "partial" (in-progress), but yesterday and earlier days should all
+   read as "complete". A non-today partial == cutover got dropped.
+
+### Verifying the wrapper after deploy
+
+```bash
+# Detection only (read-only) — should print 0 gaps in steady state
+ssh mcap "docker compose -f /root/benji/docker-compose.yml exec -T celery \
+  python -c 'from app.cli.nightly_etl_catchup import _detect_compiler_gaps, \
+  _detect_indexer_gaps; print(\"compiler:\", _detect_compiler_gaps(7, 1)); \
+  print(\"indexer:\", _detect_indexer_gaps(7))'"
+```
+
 ## Signal generator
 
 **Current**: `daily_signal_v2.py` (LIVE since 2026-04-23 05:58 UTC). Writes

@@ -1,11 +1,17 @@
 #!/usr/bin/env python3
 """fill_missing_compiler.py — background worker that fixes incomplete days
-in market.futures_1m by deleting + re-running metl, then refreshing the
-relevant continuous aggregates.
+in market.futures_1m by re-running the active ETL backend, then refreshing
+the relevant continuous aggregates.
 
 Spawned by POST /api/compiler/coverage/fill-missing as a detached
 subprocess. Writes progress to a JSON status file so the FastAPI status
 endpoint (and the frontend's polling loop) can show live progress.
+
+ETL backend selection mirrors backend/app/services/audit/pipeline_runner.py
+and run_jobs_worker.py: the ETL_BACKEND env var picks between
+`compiler/metl.py` (Amberdata, default for legacy environments) and
+`compiler/binetl.py` (direct-Binance, prod default since 2026-05-09).
+Both expose the same CLI surface so the worker stays backend-agnostic.
 
 Usage:
     python -m app.cli.fill_missing_compiler \\
@@ -31,31 +37,44 @@ _HERE = Path(__file__).resolve()
 sys.path.insert(0, "/app")
 
 PIPELINE_DIR = Path(os.environ.get("PIPELINE_DIR", "/app/pipeline"))
-METL_SCRIPT = PIPELINE_DIR / "compiler" / "metl.py"
+
+# ETL_BACKEND chooses metl (Amberdata, legacy) vs binetl (direct-Binance,
+# prod since 2026-05-09). Default 'metl' preserves legacy behavior when
+# the env is unset; prod sets ETL_BACKEND=binetl in docker-compose.
+_ETL_BACKEND = os.environ.get("ETL_BACKEND", "metl").lower()
+if _ETL_BACKEND not in ("metl", "binetl"):
+    _ETL_BACKEND = "metl"
+ETL_SCRIPT = PIPELINE_DIR / "compiler" / f"{_ETL_BACKEND}.py"
+# Back-compat alias — older logs and external callers reference METL_SCRIPT.
+METL_SCRIPT = ETL_SCRIPT
 
 CAGG_NAMES = [
     "market.futures_1m_daily_symbol_count",
     "market.symbol_day_counts",
 ]
 
-# metl's CSV cache locations. metl's AUTO_RESUME mode skips fetch when a
-# CSV exists — so to actually re-fetch a partial day from Amberdata we
-# need to remove the stale CSV first. Two paths because metl falls back
-# to a Mac-style path when CSV_BACKUP_DIR isn't exported. We don't pre-
-# DELETE DB rows (that was the 2026-04-29 data-loss vector); ON CONFLICT
-# DO NOTHING in metl's loader tops up missing rows safely. Net effect:
-# CSV cache busted → metl re-fetches → new rows insert; existing rows
-# stay if fetch fails partway through.
+# CSV cache locations. metl's AUTO_RESUME mode skips fetch when a CSV
+# exists, so to actually re-fetch a partial day we wipe the stale CSV
+# first. binetl applies the same pattern (its idempotent re-run branch
+# at binetl.py:608 short-circuits to a DB sync when the CSV exists, so
+# clearing the CSV forces a fresh fetch). Two paths because metl falls
+# back to a Mac-style path when CSV_BACKUP_DIR isn't exported. We don't
+# pre-DELETE DB rows (that was the 2026-04-29 data-loss vector);
+# ON CONFLICT DO NOTHING in the shared loader tops up missing rows
+# safely. Net effect: CSV cache busted → ETL re-fetches → new rows
+# insert; existing rows stay if fetch fails partway through.
 _CSV_BACKUP_DIRS = [
     Path(os.environ.get("CSV_BACKUP_DIR", "/mnt/quant-data/raw/amberdata/csv/")),
+    Path("/mnt/quant-data/raw/binance/csv/"),
     Path("/Users/johnmullin/Desktop/desk/import/oi_logger/ob-backfills/"),
 ]
 
 
 def _delete_cached_csvs(date_str: str) -> list[str]:
-    """Wipe the day's CSV from both candidate locations so metl falls
-    out of AUTO_RESUME and re-fetches from Amberdata. Silent on missing
-    files. Returns paths that were actually removed."""
+    """Wipe the day's CSV from each candidate location so the ETL falls
+    out of its idempotent-rerun branch and re-fetches from the upstream
+    source. Silent on missing files. Returns paths that were actually
+    removed."""
     deleted: list[str] = []
     fname = f"oi_{date_str.replace('-', '')}.csv"
     for d in _CSV_BACKUP_DIRS:
@@ -82,9 +101,9 @@ def _write_status(status_file: Path, status: dict) -> None:
     os.replace(tmp, status_file)
 
 
-def _run_metl(date_str: str, log_path: Path) -> int:
-    """Run metl --start date --end date, append output to log_path. Returns
-    the subprocess exit code.
+def _run_etl(date_str: str, log_path: Path) -> int:
+    """Run the active ETL backend (metl or binetl) for `date_str`, append
+    output to log_path. Returns the subprocess exit code.
 
     Forces unbuffered stdout (`-u` / PYTHONUNBUFFERED=1) so every
     `✅ XYZUSDT done → ...` line lands in the log file immediately
@@ -94,7 +113,7 @@ def _run_metl(date_str: str, log_path: Path) -> int:
     left wondering whether anything is happening.
     """
     cmd = [
-        sys.executable, "-u", str(METL_SCRIPT),
+        sys.executable, "-u", str(ETL_SCRIPT),
         "--start", date_str, "--end", date_str,
         "--triggered-by", "cli",
         "--run-tag", "fill_missing",
@@ -102,13 +121,21 @@ def _run_metl(date_str: str, log_path: Path) -> int:
     env = os.environ.copy()
     env["PYTHONUNBUFFERED"] = "1"
     with open(log_path, "a") as logf:
-        logf.write(f"\n\n=== metl {date_str} starting at {datetime.now(timezone.utc).isoformat()} ===\n")
+        logf.write(
+            f"\n\n=== {_ETL_BACKEND} {date_str} starting at "
+            f"{datetime.now(timezone.utc).isoformat()} ===\n"
+        )
         logf.flush()
         proc = subprocess.run(
             cmd, cwd=str(PIPELINE_DIR), stdout=logf, stderr=subprocess.STDOUT,
             check=False, env=env,
         )
     return proc.returncode
+
+
+# Back-compat alias — older callers (and inline references in this file's
+# main loop history) imported _run_metl directly.
+_run_metl = _run_etl
 
 
 def _refresh_caggs(log_path: Path) -> list[str]:
@@ -188,20 +215,21 @@ def main() -> int:
             csvs = _delete_cached_csvs(d)
             with open(log_path, "a") as logf:
                 if csvs:
-                    logf.write(f"\n[{d}] cleared cached CSV(s) so metl re-fetches: {csvs}\n")
+                    logf.write(f"\n[{d}] cleared cached CSV(s) so {_ETL_BACKEND} re-fetches: {csvs}\n")
                 else:
-                    logf.write(f"\n[{d}] no cached CSV present; metl will fetch fresh\n")
+                    logf.write(f"\n[{d}] no cached CSV present; {_ETL_BACKEND} will fetch fresh\n")
 
-            # Step 2: run metl. fetching = network-bound Amberdata
-            # download + DB load.
+            # Step 2: run the active ETL backend. fetching = network-bound
+            # upstream download (Amberdata for metl, public Binance REST
+            # for binetl) + DB load.
             status["dates"][i]["state"] = "fetching"
             status["current_state"] = "fetching"
             status["elapsed_seconds"] = int(_now() - started)
             _write_status(status_file, status)
 
-            rc = _run_metl(d, log_path)
+            rc = _run_etl(d, log_path)
             if rc != 0:
-                status["errors"].append(f"{d}: metl exited rc={rc}")
+                status["errors"].append(f"{d}: {_ETL_BACKEND} exited rc={rc}")
                 status["dates"][i]["state"] = "failed"
                 status["dates_failed"] += 1
             else:

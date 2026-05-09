@@ -180,10 +180,20 @@ def coverage(
             WHERE mcd.date >= (NOW() - %s::interval)::date
             GROUP BY fdc.day::date
         ),
-        -- Ground truth for how many symbols metl.py actually tried to fetch
-        -- on each day. DISTINCT ON picks the most recent successful run per
-        -- date_from (cron + backfill scripts always invoke metl.py with a
-        -- single-day range, so date_from uniquely identifies the day).
+        -- Ground truth for how many symbols the ETL actually tried to
+        -- fetch on each day. DISTINCT ON keys on date_from since the cron
+        -- + backfill scripts always invoke the ETL with a single-day range.
+        --
+        -- Tie-break: prefer the LARGEST symbols_total (the canonical
+        -- full-universe run) over the most recent completed_at. The
+        -- 2026-05-09 binetl cutover surfaced this: that day, metl ran
+        -- first at 00:15 UTC for May 8 with 636 syms, then binetl re-ran
+        -- twice with smaller universes (603, then 573 syms) during
+        -- validation. The old "MAX completed_at" rule picked 573 as the
+        -- denominator while the cagg still held 603 syms_with_data, so
+        -- the UI rendered May 8 as 105.2% complete. Picking max
+        -- symbols_total keeps the denominator pinned to the canonical
+        -- run regardless of how many smaller retries land afterward.
         job_totals AS (
             SELECT DISTINCT ON (date_from::date)
                 date_from::date AS day,
@@ -194,7 +204,7 @@ def coverage(
               AND symbols_total IS NOT NULL
               AND symbols_total > 0
               AND date_from = date_to
-            ORDER BY date_from::date, completed_at DESC NULLS LAST
+            ORDER BY date_from::date, symbols_total DESC, completed_at DESC NULLS LAST
         )
         SELECT
             d.day,
@@ -392,6 +402,10 @@ def _detect_partial_dates_compiler(lookback_days: int = 30,
                 GROUP BY day
             ),
             job_totals AS (
+                -- Tie-break on max symbols_total to stay consistent with
+                -- coverage(): pick the canonical full-universe run rather
+                -- than the latest small retry. See coverage() for the
+                -- 2026-05-09 cutover incident that motivated this.
                 SELECT DISTINCT ON (date_from::date)
                     date_from::date AS day,
                     symbols_total
@@ -401,7 +415,7 @@ def _detect_partial_dates_compiler(lookback_days: int = 30,
                   AND symbols_total IS NOT NULL
                   AND symbols_total > 0
                   AND date_from = date_to
-                ORDER BY date_from::date, completed_at DESC NULLS LAST
+                ORDER BY date_from::date, symbols_total DESC, completed_at DESC NULLS LAST
             )
             SELECT d.day::text
               FROM day_stats d
