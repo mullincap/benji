@@ -186,14 +186,16 @@ def coverage(
         --
         -- Tie-break: prefer the LARGEST symbols_total (the canonical
         -- full-universe run) over the most recent completed_at. The
-        -- 2026-05-09 binetl cutover surfaced this: that day, metl ran
-        -- first at 00:15 UTC for May 8 with 636 syms, then binetl re-ran
-        -- twice with smaller universes (603, then 573 syms) during
-        -- validation. The old "MAX completed_at" rule picked 573 as the
-        -- denominator while the cagg still held 603 syms_with_data, so
-        -- the UI rendered May 8 as 105.2% complete. Picking max
-        -- symbols_total keeps the denominator pinned to the canonical
-        -- run regardless of how many smaller retries land afterward.
+        -- 2026-05-09 binetl cutover surfaced this: metl ran first at
+        -- 00:15 UTC for May 8 with 636 syms, then binetl re-ran twice
+        -- with smaller universes (603, then 573 syms) during validation.
+        -- The old "MAX completed_at" rule picked 573 as the denominator
+        -- while the cagg still held 603 syms_with_data, so the UI
+        -- rendered May 8 over 100 (a literal pct sign here would
+        -- collide with psycopg2 parameter substitution; see git blame).
+        -- Picking max symbols_total keeps the denominator pinned to the
+        -- canonical run regardless of how many smaller retries land
+        -- afterward.
         job_totals AS (
             SELECT DISTINCT ON (date_from::date)
                 date_from::date AS day,
