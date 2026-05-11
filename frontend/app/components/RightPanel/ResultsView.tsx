@@ -19,6 +19,20 @@ import FilterTable from '../ui/FilterTable';
 import BasketDetailModal from './BasketDetailModal';
 import AttributionPanel from './AttributionPanel';
 import { asNum, fmtPercent2, metricColor, normalizeFilterLabel, normalizeFilterLabelCore } from '@/app/lib/format';
+import {
+  usePlayback,
+  progressToSliceLen,
+  slicePoints,
+  liveSharpe,
+  liveDailyVolPct,
+  liveMaxDDPct,
+  liveTotalReturnPct,
+  liveCagrPct,
+  liveProfitFactor,
+  liveAvgWinLoss,
+  liveLongestUnderwaterStreak,
+  liveAvg1MReturnPct,
+} from './usePlayback';
 
 interface ResultsViewProps {
   results: Record<string, unknown> | null;
@@ -13329,6 +13343,13 @@ export default function ResultsView({ results, jobId, startingCapital, params }:
   const selectedEquityCurve = ((selectedRow?.equity_curve as Point[] | undefined) ?? equityCurve) as Point[] | null | undefined;
   const selectedDrawdownCurve = ((selectedRow?.drawdown_curve as Point[] | undefined) ?? drawdownCurve) as Point[] | null | undefined;
   const selectedTotalDays = selectedEquityCurve?.length ?? 0;
+
+  // Summary-tab playback: animates the equity curve + drawdown + overlays
+  // day-by-day and recomputes derived metric tiles on each frame. See
+  // usePlayback.ts for the pacing logic (50ms/day capped at 10s total).
+  const playback = usePlayback(selectedTotalDays);
+  const playbackSliceLen = progressToSliceLen(playback.progress, selectedTotalDays);
+  const isPlayingActive = playback.progress !== null;
   const selectedActiveDays = asNum(selectedRow?.active);
   const scorecard = useMemo(
     () => ((results?.scorecard ?? []) as Array<{ label?: string; status?: string; value?: unknown }>),
@@ -14058,11 +14079,60 @@ export default function ResultsView({ results, jobId, startingCapital, params }:
     return html;
   }, [tearTemplate, equityCurveDollars, selectedFeesTableRows, selectedRow, selectedDrawdownCurve, m, scorecard, selectedFilter, runStartingCapital, jobId, auditOutput, params]);
 
-  const metricCards: Array<{ label: string; key: string; value: string; colorValue: unknown; secondary?: string; unit?: string; unitColor?: string }> = selectedRow
+  // ── Playback-aware displayed curves ──────────────────────────────────
+  // When playback is active, slice the equity / drawdown / overlay series
+  // to `playbackSliceLen` so all three advance in lockstep. When stopped,
+  // pass through the canonical full-length curves. Only the Summary-tab
+  // CurveCards read these; other tabs always see the full curves.
+  const displayedEquity = isPlayingActive
+    ? slicePoints(equityCurveDollars, playbackSliceLen)
+    : equityCurveDollars;
+  const displayedDrawdown = isPlayingActive
+    ? slicePoints(selectedDrawdownCurve, playbackSliceLen)
+    : selectedDrawdownCurve;
+  const displayedOverlays = isPlayingActive
+    ? activeOverlays.map((ov) => ({
+        ...ov,
+        data: slicePoints(ov.data, playbackSliceLen) ?? [],
+      }))
+    : activeOverlays;
+
+  // ── Live recomputed metrics (only while playback active) ─────────────
+  // Slice-derived values for the metric tiles + stats bar so they tick
+  // alongside the curve. Cross-fold / universe-level metrics (DSR, WF-CV,
+  // Active Days) don't decompose by day — those stay on selectedRow's
+  // static values and we dim them via `nonProgressiveOpacity` below so
+  // the eye doesn't track them as "live".
+  const liveMetrics = isPlayingActive ? {
+    sharpe: liveSharpe(displayedEquity),
+    cagr: liveCagrPct(displayedEquity),
+    maxDD: liveMaxDDPct(displayedEquity),
+    totalReturnPct: liveTotalReturnPct(displayedEquity),
+    dailyVolPct: liveDailyVolPct(displayedEquity),
+    profitFactor: liveProfitFactor(displayedEquity),
+    avgWinLoss: liveAvgWinLoss(displayedEquity),
+    uwStreak: liveLongestUnderwaterStreak(displayedEquity),
+    avg1M: liveAvg1MReturnPct(displayedEquity),
+  } : null;
+  const nonProgressiveOpacity = isPlayingActive ? 0.4 : 1;
+
+  const metricCards: Array<{ label: string; key: string; value: string; colorValue: unknown; secondary?: string; unit?: string; unitColor?: string; opacity?: number }> = selectedRow
     ? [
-      { label: 'Sharpe', key: 'sharpe', value: fmtMetric(selectedRow.sharpe), colorValue: selectedRow.sharpe },
-      { label: 'CAGR %', key: 'cagr', value: fmtCagr(selectedRow.cagr), colorValue: selectedRow.cagr },
-      { label: 'Max DD %', key: 'max_dd', value: fmtPercent2(selectedRow.max_dd), colorValue: selectedRow.max_dd },
+      {
+        label: 'Sharpe', key: 'sharpe',
+        value: fmtMetric(liveMetrics?.sharpe ?? selectedRow.sharpe),
+        colorValue: liveMetrics?.sharpe ?? selectedRow.sharpe,
+      },
+      {
+        label: 'CAGR %', key: 'cagr',
+        value: fmtCagr(liveMetrics?.cagr ?? selectedRow.cagr),
+        colorValue: liveMetrics?.cagr ?? selectedRow.cagr,
+      },
+      {
+        label: 'Max DD %', key: 'max_dd',
+        value: fmtPercent2(liveMetrics?.maxDD ?? selectedRow.max_dd),
+        colorValue: liveMetrics?.maxDD ?? selectedRow.max_dd,
+      },
       {
         label: 'Active Days',
         key: 'active',
@@ -14071,41 +14141,65 @@ export default function ResultsView({ results, jobId, startingCapital, params }:
         unitColor: 'var(--t1)',
         secondary: selectedActivePct !== null ? `(${selectedActivePct.toFixed(2)}%)` : undefined,
         colorValue: selectedRow.active,
+        opacity: nonProgressiveOpacity,
       },
-      { label: 'WF-CV', key: 'cv', value: fmtMetric((selectedRow.wf_cv ?? selectedRow.cv) as unknown), colorValue: (selectedRow.wf_cv ?? selectedRow.cv) },
-      { label: 'DSR %', key: 'dsr_pct', value: fmtPercent2(selectedRow.dsr_pct), colorValue: selectedRow.dsr_pct },
-      { label: 'Simple Return %', key: 'tot_ret', value: fmtSummaryReturn(selectedRow.tot_ret), colorValue: selectedRow.tot_ret },
+      {
+        label: 'WF-CV', key: 'cv',
+        value: fmtMetric((selectedRow.wf_cv ?? selectedRow.cv) as unknown),
+        colorValue: (selectedRow.wf_cv ?? selectedRow.cv),
+        opacity: nonProgressiveOpacity,
+      },
+      {
+        label: 'DSR %', key: 'dsr_pct',
+        value: fmtPercent2(selectedRow.dsr_pct),
+        colorValue: selectedRow.dsr_pct,
+        opacity: nonProgressiveOpacity,
+      },
+      {
+        label: 'Simple Return %', key: 'tot_ret',
+        value: fmtSummaryReturn(liveMetrics?.totalReturnPct ?? selectedRow.tot_ret),
+        colorValue: liveMetrics?.totalReturnPct ?? selectedRow.tot_ret,
+      },
       {
         label: 'Compounded Return %',
         key: 'compounded_ret',
         value: feesKeyValues.netReturnPct !== null ? fmtSummaryReturn(feesKeyValues.netReturnPct) : 'N/A',
         colorValue: feesKeyValues.netReturnPct,
+        // Fees are per-day rows, not derivable from the equity slice
+        // alone — leave static and dim during playback.
+        opacity: nonProgressiveOpacity,
       },
       {
         label: 'Avg Win / Avg Loss',
         key: 'avg_win_loss',
-        value: derivedSummaryStats.avgWinLoss !== null ? `${derivedSummaryStats.avgWinLoss.toFixed(2)}x` : 'N/A',
-        colorValue: derivedSummaryStats.avgWinLoss,
+        value: (liveMetrics?.avgWinLoss ?? derivedSummaryStats.avgWinLoss) !== null
+          ? `${((liveMetrics?.avgWinLoss ?? derivedSummaryStats.avgWinLoss) as number).toFixed(2)}x`
+          : 'N/A',
+        colorValue: liveMetrics?.avgWinLoss ?? derivedSummaryStats.avgWinLoss,
       },
       {
         label: 'Profit Factor',
         key: 'profit_factor',
-        value: derivedSummaryStats.profitFactor !== null ? derivedSummaryStats.profitFactor.toFixed(2) : 'N/A',
-        colorValue: derivedSummaryStats.profitFactor,
+        value: (liveMetrics?.profitFactor ?? derivedSummaryStats.profitFactor) !== null
+          ? ((liveMetrics?.profitFactor ?? derivedSummaryStats.profitFactor) as number).toFixed(2)
+          : 'N/A',
+        colorValue: liveMetrics?.profitFactor ?? derivedSummaryStats.profitFactor,
       },
       {
         label: 'Longest UW Streak',
         key: 'uw_streak',
-        value: String(derivedSummaryStats.longestUnderwaterStreak),
+        value: String(liveMetrics?.uwStreak ?? derivedSummaryStats.longestUnderwaterStreak),
         unit: 'days',
         unitColor: 'var(--t1)',
-        colorValue: derivedSummaryStats.longestUnderwaterStreak,
+        colorValue: liveMetrics?.uwStreak ?? derivedSummaryStats.longestUnderwaterStreak,
       },
       {
         label: 'Avg 1M Return %',
         key: 'avg_1m',
-        value: derivedSummaryStats.avg1M !== null ? fmtPercent2(derivedSummaryStats.avg1M) : 'N/A',
-        colorValue: derivedSummaryStats.avg1M,
+        value: (liveMetrics?.avg1M ?? derivedSummaryStats.avg1M) !== null
+          ? fmtPercent2(liveMetrics?.avg1M ?? derivedSummaryStats.avg1M)
+          : 'N/A',
+        colorValue: liveMetrics?.avg1M ?? derivedSummaryStats.avg1M,
       },
     ]
     : [
@@ -14118,30 +14212,24 @@ export default function ResultsView({ results, jobId, startingCapital, params }:
       { label: 'WF-CV', key: 'cv', value: fmtMetric(m.cv), colorValue: m.cv },
       { label: 'Flat Days', key: 'flat_days', value: fmtMetric(m.flat_days, true), colorValue: m.flat_days },
     ];
-  const equityStatsBar = selectedRow ? [
-    {
-      label: 'Total Return %',
-      value: fmtPercent2(asNum(selectedRow.tot_ret) ?? 0),
-      color: metricColor('tot_ret', selectedRow.tot_ret),
-    },
-    {
-      label: 'Sharpe',
-      value: fmtMetric(selectedRow.sharpe),
-      color: metricColor('sharpe', selectedRow.sharpe),
-    },
-    {
-      label: 'Max DD',
-      value: fmtPercent2(asNum(selectedRow.max_dd) ?? 0),
-      color: metricColor('max_dd', selectedRow.max_dd),
-    },
-    {
-      label: 'Volatility',
-      value: dailyVolatilityPct !== null ? fmtPercent2(dailyVolatilityPct) : 'N/A',
-      color: dailyVolatilityPct !== null
-        ? (dailyVolatilityPct <= 4 ? 'var(--green)' : dailyVolatilityPct <= 8 ? 'var(--amber)' : 'var(--red)')
-        : 'var(--t2)',
-    },
-  ] : null;
+  const equityStatsBar = selectedRow ? (() => {
+    const tot = liveMetrics?.totalReturnPct ?? asNum(selectedRow.tot_ret) ?? 0;
+    const shp = liveMetrics?.sharpe ?? selectedRow.sharpe;
+    const dd  = liveMetrics?.maxDD ?? asNum(selectedRow.max_dd) ?? 0;
+    const vol = liveMetrics?.dailyVolPct ?? dailyVolatilityPct;
+    return [
+      { label: 'Total Return %', value: fmtPercent2(tot), color: metricColor('tot_ret', tot) },
+      { label: 'Sharpe',         value: fmtMetric(shp),   color: metricColor('sharpe', shp) },
+      { label: 'Max DD',         value: fmtPercent2(dd),  color: metricColor('max_dd', dd) },
+      {
+        label: 'Volatility',
+        value: vol !== null ? fmtPercent2(vol) : 'N/A',
+        color: vol !== null
+          ? (vol <= 4 ? 'var(--green)' : vol <= 8 ? 'var(--amber)' : 'var(--red)')
+          : 'var(--t2)',
+      },
+    ];
+  })() : null;
   if (!results) {
     return (
       <div style={{ padding: 16, color: 'var(--t3)', fontSize: 10 }}>
@@ -14287,16 +14375,23 @@ export default function ResultsView({ results, jobId, startingCapital, params }:
               gap: 8,
             }}
           >
-            {metricCards.map(({ label, key, value, colorValue, secondary, unit, unitColor }) => (
-              <MetricCard
+            {metricCards.map(({ label, key, value, colorValue, secondary, unit, unitColor, opacity }) => (
+              <div
                 key={key}
-                label={label}
-                value={value}
-                unit={unit}
-                unitColor={unitColor}
-                secondary={secondary}
-                color={metricColor(key, colorValue)}
-              />
+                style={{
+                  opacity: opacity ?? 1,
+                  transition: 'opacity 200ms ease-out',
+                }}
+              >
+                <MetricCard
+                  label={label}
+                  value={value}
+                  unit={unit}
+                  unitColor={unitColor}
+                  secondary={secondary}
+                  color={metricColor(key, colorValue)}
+                />
+              </div>
             ))}
           </div>
 
@@ -14314,6 +14409,33 @@ export default function ResultsView({ results, jobId, startingCapital, params }:
                     ))}
                   </span>
                 )}
+                <button
+                  onClick={(e) => {
+                    e.preventDefault();
+                    if (playback.isPlaying) playback.stop();
+                    else playback.play();
+                  }}
+                  disabled={selectedTotalDays < 2}
+                  title={
+                    playback.isPlaying ? 'Stop playback'
+                    : playback.hasPlayed ? 'Replay simulation day-by-day'
+                    : 'Play simulation day-by-day'
+                  }
+                  style={{
+                    background: 'none',
+                    border: `1px solid ${playback.isPlaying ? 'var(--green)' : 'var(--line2)'}`,
+                    borderRadius: 2,
+                    padding: '1px 6px', cursor: selectedTotalDays < 2 ? 'not-allowed' : 'pointer',
+                    fontSize: 8,
+                    fontFamily: 'var(--font-space-mono), Space Mono, monospace',
+                    letterSpacing: '0.08em', textTransform: 'uppercase',
+                    color: playback.isPlaying ? 'var(--green)' : 'var(--t3)',
+                    opacity: selectedTotalDays < 2 ? 0.4 : 1,
+                    marginRight: 4,
+                  }}
+                >
+                  {playback.isPlaying ? '■ Stop' : playback.hasPlayed ? '↻ Replay' : '▶ Play'}
+                </button>
                 <button
                   onClick={(e) => { e.preventDefault(); setEquityLogScale((v) => !v); }}
                   style={{
@@ -14421,7 +14543,7 @@ export default function ResultsView({ results, jobId, startingCapital, params }:
                 )}
                 <CurveCard
                   title="Equity Curve ($)"
-                  data={equityCurveDollars}
+                  data={displayedEquity}
                   color="#00c896"
                   gradientId="equity-gradient"
                   backgroundColor="var(--bg0)"
@@ -14436,11 +14558,11 @@ export default function ResultsView({ results, jobId, startingCapital, params }:
                   valueFormatter={fmtCurrency}
                   showTitle={false}
                   logScale={equityLogScale}
-                  overlays={activeOverlays}
+                  overlays={displayedOverlays}
                 />
                 <CurveCard
                   title="Drawdown Curve"
-                  data={selectedDrawdownCurve}
+                  data={displayedDrawdown}
                   color="#ff4d4d"
                   gradientId="drawdown-gradient"
                   showBorder={false}
